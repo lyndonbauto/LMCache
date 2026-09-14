@@ -125,6 +125,7 @@ class AerospikeStorageBackend(StorageBackendProfile):
             # above must keep working on a host without libibverbs.
             sources.append("csrc/storage_backends/aerospike/rdma_context.cpp")
             sources.append("csrc/storage_backends/aerospike/kv_sink_client.cpp")
+            sources.append("csrc/storage_backends/aerospike/kv_sink_fanout.cpp")
             libraries.append("ibverbs")
             macros.append(("LMCACHE_AEROSPIKE_RDMA", "1"))
             rdma_include = os.environ.get("RDMA_CORE_INCLUDE_DIR", "")
