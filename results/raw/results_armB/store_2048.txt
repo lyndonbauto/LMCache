@@ -1,0 +1,60 @@
+[32;20m[2026-09-14 22:08:47,586] LMCache INFO:[0m torch_dev=StubCPUDevice(device_type=cpu), torch_device_type=cpu [3m(_device_detect.py:312:lmcache.v1.platform._device_detect)[0m
+
+ _     __  __    ____           _          
+| |   |  \/  |  / ___|__ _  ___| |__   ___      LMCache vunknown
+| |   | |\/| | | |   / _` |/ __| '_ \ / _ \     Website:  https://lmcache.ai/
+| |___| |  | | | |__| (_| | (__| | | |  __/     Recipes:  https://docs.lmcache.ai/recipes
+|_____|_|  |_|  \____\__,_|\___|_| |_|\___|     LinkedIn: https://www.linkedin.com/company/lmcache-lab
+Set LMCACHE_DISABLE_BANNER=1 to hide this banner.
+
+[32;20m[2026-09-14 22:08:48,722] LMCache INFO:[0m multi_layer_block_kv_transfer mode: tensor [3m(base.py:95:lmcache.v1.multiprocess.transfer_context.base)[0m
+[32;20m[2026-09-14 22:08:51,560] LMCache INFO:[0m Created Aerospike L2 adapter: hosts=10.240.1.10:3000,10.240.1.11:3000,10.240.1.12:3000,10.240.1.13:3000,10.240.1.14:3000 namespace=lmcache set=kv_armB (workers=8) [3m(aerospike_l2_adapter.py:218:lmcache.v1.distributed.l2_adapters.aerospike_l2_adapter)[0m
+
+[Init] Creating adapter...
+[Init] Adapter created successfully (NativeConnectorL2Adapter).
+
+[Store] Running 2 warmup + 10 measurement rounds...
+  [Store] Round 1: 25.78 ms, success_keys=4/4
+  [Store] Round 2: 12.03 ms, success_keys=4/4
+  [Store] Round 3: 13.03 ms, success_keys=4/4
+  [Store] Round 4: 10.37 ms, success_keys=4/4
+  [Store] Round 5: 5.60 ms, success_keys=4/4
+  [Store] Round 6: 9.47 ms, success_keys=4/4
+  [Store] Round 7: 12.64 ms, success_keys=4/4
+  [Store] Round 8: 7.03 ms, success_keys=4/4
+  [Store] Round 9: 7.26 ms, success_keys=4/4
+  [Store] Round 10: 11.55 ms, success_keys=4/4
+  [Store] Round 11: 6.93 ms, success_keys=4/4
+  [Store] Round 12: 6.22 ms, success_keys=4/4
+
+================= L2 Adapter Benchmark Result ==================
+------------------------ Configuration -------------------------
+L2 adapter JSON: {"type":"aerospike","hosts":"10.240.1.10:3000,10.240.1.11:3000,10.240.1.12:3000,10.240.1.13:3000,10.240.1.14:3000","namespace":"lmcache","set_name":"kv_armB","num_workers":8,"read_timeout_ms":120000,"write_timeout_ms":120000,"target_segment_bytes":0,"max_record_bytes":0}
+Keys / submit:                                                 4
+In-flight / round:                                             1
+Keys / round:                                                  4
+Data size / key (KB):                                       2048
+Data / round (MB):                                          8.00
+Measurement rounds:                                           10
+Warmup rounds:                                                 2
+---------------------------- Store -----------------------------
+Operation:                                                 Store
+Rounds:                                                       10
+Rounds timed out:                                              0
+Keys / round:                                                  4
+Total keys:                                                   40
+Total success:                                                40
+Duration avg (ms):                                          9.01
+Duration min (ms):                                          5.60
+Duration max (ms):                                         13.03
+Duration p50 (ms):                                          7.26
+Duration p99 (ms):                                         13.03
+Duration std (ms):                                          2.76
+Throughput avg (MB/s):                                    966.36
+Throughput min (MB/s):                                    614.09
+Throughput max (MB/s):                                   1429.15
+Avg ops/s:                                                483.18
+Avg latency / key (ms):                                     2.25
+================================================================
+[Cleanup] Closing adapter...
+[Cleanup] Done.

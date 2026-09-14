@@ -1,0 +1,65 @@
+########## fi_info -p efa ##########
+===== aerospike-lmcache-bench-server-0 (i-04563f8934653b784) =====
+Success	provider: efa
+    fabric: efa-direct
+    domain: rdmap0s23-rdm
+    version: 206.0
+    type: FI_EP_RDM
+    protocol: FI_PROTO_EFA
+provider: efa
+    fabric: efa
+    domain: rdmap0s23-rdm
+    version: 206.0
+    type: FI_EP_RDM
+    protocol: FI_PROTO_EFA
+provider: efa
+    fabric: efa
+    domain: rdmap0s23-dgrm
+    version: 206.0
+    type: FI_EP_DGRAM
+    protocol: FI_PROTO_EFA
+	
+
+
+########## ibv_devinfo ##########
+===== aerospike-lmcache-bench-server-0 (i-04563f8934653b784) =====
+Success	hca_id:	rdmap0s23
+	transport:			unspecified (4)
+	fw_ver:				0.0.0.0
+	node_guid:			0000:0000:0000:0000
+	sys_image_guid:			0000:0000:0000:0000
+	vendor_id:			0x1d0f
+	vendor_part_id:			61344
+	hw_ver:				0xEFA0
+	phys_port_cnt:			1
+		port:	1
+			state:			PORT_ACTIVE (4)
+			max_mtu:		4096 (5)
+			active_mtu:		4096 (5)
+			sm_lid:			0
+			port_lid:		0
+			port_lmc:		0x01
+			link_layer:		Unspecified
+
+	
+
+
+########## EFA loopback (fi_pingpong, server-0) ##########
+===== aerospike-lmcache-bench-server-0 (i-04563f8934653b784) =====
+Success	bytes   #sent   #ack     total       time     MB/sec    usec/xfer   Mxfers/sec
+64      10      =10      1.2k        0.00s      1.03      62.05       0.02
+256     10      =10      5k          0.00s     10.02      25.55       0.04
+1k      10      =10      20k         0.00s     56.57      18.10       0.06
+4k      10      =10      80k         0.00s    222.61      18.40       0.05
+	
+
+
+########## EFA NODE-TO-NODE (server-1 -> server-0 @ 10.240.1.10) ##########
+===== aerospike-lmcache-bench-server-1 (i-06d5be357345b40d9) =====
+Success	bytes   #sent   #ack     total       time     MB/sec    usec/xfer   Mxfers/sec
+64      10      =10      1.2k        0.00s      0.55     116.50       0.01
+256     10      =10      5k          0.00s      6.68      38.30       0.03
+1k      10      =10      20k         0.00s     53.06      19.30       0.05
+4k      10      =10      80k         0.00s    191.85      21.35       0.05
+	
+

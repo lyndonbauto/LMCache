@@ -1,0 +1,22 @@
+===== FLASH-RESIDENT (lmcache, 60000 keys x 960KiB = 56250 MiB) =====
+2026-09-14 22:26:25.369 INFO write(tps=12468 (hit=12468 miss=0) timeouts=0 errors=0) total(tps=12468 (hit=12468 miss=0) timeouts=0 errors=0)
+2026-09-14 22:26:26.369 INFO write(tps=12466 (hit=12466 miss=0) timeouts=0 errors=0) total(tps=12466 (hit=12466 miss=0) timeouts=0 errors=0)
+2026-09-14 22:26:27.369 INFO write(tps=10639 (hit=10639 miss=0) timeouts=0 errors=0) total(tps=10639 (hit=10639 miss=0) timeouts=0 errors=0)
+--- read ---
+2026-09-14 22:27:58.402 INFO read(tps=12444 (hit=12444 miss=0) timeouts=2 errors=0) total(tps=12444 (hit=12444 miss=0) timeouts=2 errors=0)
+2026-09-14 22:27:59.402 INFO read(tps=12464 (hit=12464 miss=0) timeouts=2 errors=0) total(tps=12464 (hit=12464 miss=0) timeouts=2 errors=0)
+2026-09-14 22:28:00.402 INFO read(tps=12457 (hit=12457 miss=0) timeouts=0 errors=0) total(tps=12457 (hit=12457 miss=0) timeouts=0 errors=0)
+2026-09-14 22:28:01.402 INFO read(tps=12464 (hit=12464 miss=0) timeouts=4 errors=0) total(tps=12464 (hit=12464 miss=0) timeouts=4 errors=0)
+2026-09-14 22:28:02.402 INFO read(tps=12448 (hit=12448 miss=0) timeouts=1 errors=0) total(tps=12448 (hit=12448 miss=0) timeouts=1 errors=0)
+2026-09-14 22:28:02.510 INFO read(tps=12344 (hit=12344 miss=0) timeouts=0 errors=0) total(tps=12344 (hit=12344 miss=0) timeouts=0 errors=0)
+===== DRAM-RESIDENT (lmcache_mem, 20000 keys x 960KiB = 18750 MiB) =====
+2026-09-14 22:28:03.010 WARN --keys is not divisible by (--batch-write-size * --threads) so more than --keys records will be written
+2026-09-14 22:28:04.002 INFO write(tps=11254 (hit=11254 miss=0) timeouts=0 errors=0) total(tps=11254 (hit=11254 miss=0) timeouts=0 errors=0)
+2026-09-14 22:28:05.002 INFO write(tps=8744 (hit=8744 miss=0) timeouts=0 errors=0) total(tps=8744 (hit=8744 miss=0) timeouts=0 errors=0)
+--- read ---
+2026-09-14 22:29:39.038 INFO read(tps=12452 (hit=12452 miss=0) timeouts=3 errors=0) total(tps=12452 (hit=12452 miss=0) timeouts=3 errors=0)
+2026-09-14 22:29:40.038 INFO read(tps=12468 (hit=12468 miss=0) timeouts=1 errors=0) total(tps=12468 (hit=12468 miss=0) timeouts=1 errors=0)
+2026-09-14 22:29:41.038 INFO read(tps=12460 (hit=12460 miss=0) timeouts=0 errors=0) total(tps=12460 (hit=12460 miss=0) timeouts=0 errors=0)
+2026-09-14 22:29:42.038 INFO read(tps=12477 (hit=12477 miss=0) timeouts=2 errors=0) total(tps=12477 (hit=12477 miss=0) timeouts=2 errors=0)
+2026-09-14 22:29:43.038 INFO read(tps=12457 (hit=12457 miss=0) timeouts=1 errors=0) total(tps=12457 (hit=12457 miss=0) timeouts=1 errors=0)
+2026-09-14 22:29:43.131 INFO read(tps=12387 (hit=12387 miss=0) timeouts=0 errors=0) total(tps=12387 (hit=12387 miss=0) timeouts=0 errors=0)

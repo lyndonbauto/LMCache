@@ -1,0 +1,162 @@
+########## Aerospike Enterprise version / edition (all 5 nodes) ##########
+===== aerospike-lmcache-bench-server-0 (i-04563f8934653b784) =====
+Success	ip-10-240-1-10.ec2.internal: aerospike-server-enterprise-8.1.2.5-20.amzn2023.x86_64 | Aerospike Enterprise Edition | build=8.1.2.5
+	
+
+===== aerospike-lmcache-bench-server-4 (i-01b81ad68bbeb3aed) =====
+Success	ip-10-240-1-14.ec2.internal: aerospike-server-enterprise-8.1.2.5-20.amzn2023.x86_64 | Aerospike Enterprise Edition | build=8.1.2.5
+	
+
+===== aerospike-lmcache-bench-server-3 (i-0ac7faf4a4838cf2f) =====
+Success	ip-10-240-1-13.ec2.internal: aerospike-server-enterprise-8.1.2.5-20.amzn2023.x86_64 | Aerospike Enterprise Edition | build=8.1.2.5
+	
+
+===== aerospike-lmcache-bench-server-1 (i-06d5be357345b40d9) =====
+Success	ip-10-240-1-11.ec2.internal: aerospike-server-enterprise-8.1.2.5-20.amzn2023.x86_64 | Aerospike Enterprise Edition | build=8.1.2.5
+	
+
+===== aerospike-lmcache-bench-server-2 (i-0be7a9a95c823509a) =====
+Success	ip-10-240-1-12.ec2.internal: aerospike-server-enterprise-8.1.2.5-20.amzn2023.x86_64 | Aerospike Enterprise Edition | build=8.1.2.5
+	
+
+
+########## Cluster formation ##########
+===== aerospike-lmcache-bench-server-0 (i-04563f8934653b784) =====
+Success	cluster_size=5
+cluster_key=C986D732A2F4
+	
+
+===== aerospike-lmcache-bench-server-4 (i-01b81ad68bbeb3aed) =====
+Success	cluster_size=5
+cluster_key=C986D732A2F4
+	
+
+===== aerospike-lmcache-bench-server-3 (i-0ac7faf4a4838cf2f) =====
+Success	cluster_size=5
+cluster_key=C986D732A2F4
+	
+
+===== aerospike-lmcache-bench-client-0 (i-0ae3bd1739652ba8e) =====
+Success	cluster_size=NA(aerospike-down)
+	
+
+===== aerospike-lmcache-bench-server-1 (i-06d5be357345b40d9) =====
+Success	cluster_size=5
+cluster_key=C986D732A2F4
+	
+
+===== aerospike-lmcache-bench-server-2 (i-0be7a9a95c823509a) =====
+Success	cluster_size=5
+cluster_key=C986D732A2F4
+	
+---------------------------------------------
+PASS: every node reports cluster_size=5
+
+########## asinfo namespace (live record cap, RF, capacity) ##########
+===== aerospike-lmcache-bench-server-0 (i-04563f8934653b784) =====
+Failed	effective_replication_factor=1
+data_total_bytes=17592186044416
+max-record-size=1048576
+replication-factor=1
+storage-engine=device
+--- write-block-size present at all? ---
+0
+	failed to run commands: exit status 1
+
+
+########## Device identification (all nodes) ##########
+===== aerospike-lmcache-bench-server-0 (i-04563f8934653b784) =====
+Success	host=ip-10-240-1-10.ec2.internal root=/dev/nvme0n1p1
+NAME          MODEL                             SIZE TYPE MOUNTPOINT
+nvme0n1       Amazon Elastic Block Store        100G disk 
+├─nvme0n1p1                                     100G part /
+├─nvme0n1p127                                     1M part 
+└─nvme0n1p128                                    10M part /boot/efi
+nvme1n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme3n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme5n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme4n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme8n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme2n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme7n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme6n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+selected:
+/dev/nvme1n1 /dev/nvme2n1 /dev/nvme3n1 /dev/nvme4n1 /dev/nvme5n1 /dev/nvme6n1 /dev/nvme7n1 /dev/nvme8n1 
+	
+
+===== aerospike-lmcache-bench-server-4 (i-01b81ad68bbeb3aed) =====
+Success	host=ip-10-240-1-14.ec2.internal root=/dev/nvme0n1p1
+NAME          MODEL                             SIZE TYPE MOUNTPOINT
+nvme0n1       Amazon Elastic Block Store        100G disk 
+├─nvme0n1p1                                     100G part /
+├─nvme0n1p127                                     1M part 
+└─nvme0n1p128                                    10M part /boot/efi
+nvme1n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme2n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme8n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme4n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme6n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme3n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme5n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme7n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+selected:
+/dev/nvme1n1 /dev/nvme2n1 /dev/nvme3n1 /dev/nvme4n1 /dev/nvme5n1 /dev/nvme6n1 /dev/nvme7n1 /dev/nvme8n1 
+	
+
+===== aerospike-lmcache-bench-server-3 (i-0ac7faf4a4838cf2f) =====
+Success	host=ip-10-240-1-13.ec2.internal root=/dev/nvme0n1p1
+NAME          MODEL                             SIZE TYPE MOUNTPOINT
+nvme0n1       Amazon Elastic Block Store        100G disk 
+├─nvme0n1p1                                     100G part /
+├─nvme0n1p127                                     1M part 
+└─nvme0n1p128                                    10M part /boot/efi
+nvme1n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme3n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme8n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme6n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme4n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme7n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme2n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme5n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+selected:
+/dev/nvme1n1 /dev/nvme2n1 /dev/nvme3n1 /dev/nvme4n1 /dev/nvme5n1 /dev/nvme6n1 /dev/nvme7n1 /dev/nvme8n1 
+	
+
+===== aerospike-lmcache-bench-server-1 (i-06d5be357345b40d9) =====
+Success	host=ip-10-240-1-11.ec2.internal root=/dev/nvme4n1p1
+NAME          MODEL                             SIZE TYPE MOUNTPOINT
+nvme4n1       Amazon Elastic Block Store        100G disk 
+├─nvme4n1p1                                     100G part /
+├─nvme4n1p127                                     1M part 
+└─nvme4n1p128                                    10M part /boot/efi
+nvme1n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme3n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme0n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme8n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme7n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme6n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme2n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme5n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+selected:
+/dev/nvme0n1 /dev/nvme1n1 /dev/nvme2n1 /dev/nvme3n1 /dev/nvme5n1 /dev/nvme6n1 /dev/nvme7n1 /dev/nvme8n1 
+	
+
+===== aerospike-lmcache-bench-server-2 (i-0be7a9a95c823509a) =====
+Success	host=ip-10-240-1-12.ec2.internal root=/dev/nvme0n1p1
+NAME          MODEL                             SIZE TYPE MOUNTPOINT
+nvme0n1       Amazon Elastic Block Store        100G disk 
+├─nvme0n1p1                                     100G part /
+├─nvme0n1p127                                     1M part 
+└─nvme0n1p128                                    10M part /boot/efi
+nvme1n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme3n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme8n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme6n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme4n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme2n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme7n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+nvme5n1       Amazon EC2 NVMe Instance Storage  6.8T disk 
+selected:
+/dev/nvme1n1 /dev/nvme2n1 /dev/nvme3n1 /dev/nvme4n1 /dev/nvme5n1 /dev/nvme6n1 /dev/nvme7n1 /dev/nvme8n1 
+	
+

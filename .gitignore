@@ -13,7 +13,10 @@ terraform.tfvars
 *.tfplan
 
 # Benchmark output.
-results/
+#
+# results/ is deliberately NOT ignored: these are small text artifacts pulled
+# off instances that no longer exist, and they are the deliverable. Losing them
+# to a wildcard would mean re-renting a $58/hr cluster to regenerate them.
 *.svg
 
 # Aerospike Enterprise license file -- never commit.

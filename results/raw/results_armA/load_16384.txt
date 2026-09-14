@@ -1,0 +1,60 @@
+[32;20m[2026-09-14 22:18:14,302] LMCache INFO:[0m torch_dev=StubCPUDevice(device_type=cpu), torch_device_type=cpu [3m(_device_detect.py:312:lmcache.v1.platform._device_detect)[0m
+
+ _     __  __    ____           _          
+| |   |  \/  |  / ___|__ _  ___| |__   ___      LMCache vunknown
+| |   | |\/| | | |   / _` |/ __| '_ \ / _ \     Website:  https://lmcache.ai/
+| |___| |  | | | |__| (_| | (__| | | |  __/     Recipes:  https://docs.lmcache.ai/recipes
+|_____|_|  |_|  \____\__,_|\___|_| |_|\___|     LinkedIn: https://www.linkedin.com/company/lmcache-lab
+Set LMCACHE_DISABLE_BANNER=1 to hide this banner.
+
+[32;20m[2026-09-14 22:18:15,468] LMCache INFO:[0m multi_layer_block_kv_transfer mode: tensor [3m(base.py:95:lmcache.v1.multiprocess.transfer_context.base)[0m
+[32;20m[2026-09-14 22:18:18,291] LMCache INFO:[0m Created Aerospike L2 adapter: hosts=10.240.1.10:3000,10.240.1.11:3000,10.240.1.12:3000,10.240.1.13:3000,10.240.1.14:3000 namespace=lmcache set=kv_armA (workers=8) [3m(aerospike_l2_adapter.py:218:lmcache.v1.distributed.l2_adapters.aerospike_l2_adapter)[0m
+
+[Init] Creating adapter...
+[Init] Adapter created successfully (NativeConnectorL2Adapter).
+
+[Load] Running 2 warmup + 10 measurement rounds...
+  [Load] Round 1: 58.61 ms, loaded=4/4
+  [Load] Round 2: 49.36 ms, loaded=4/4
+  [Load] Round 3: 42.29 ms, loaded=4/4
+  [Load] Round 4: 42.89 ms, loaded=4/4
+  [Load] Round 5: 38.78 ms, loaded=4/4
+  [Load] Round 6: 36.55 ms, loaded=4/4
+  [Load] Round 7: 35.34 ms, loaded=4/4
+  [Load] Round 8: 36.04 ms, loaded=4/4
+  [Load] Round 9: 33.80 ms, loaded=4/4
+  [Load] Round 10: 33.48 ms, loaded=4/4
+  [Load] Round 11: 31.65 ms, loaded=4/4
+  [Load] Round 12: 27.77 ms, loaded=4/4
+
+================= L2 Adapter Benchmark Result ==================
+------------------------ Configuration -------------------------
+L2 adapter JSON: {"type":"aerospike","hosts":"10.240.1.10:3000,10.240.1.11:3000,10.240.1.12:3000,10.240.1.13:3000,10.240.1.14:3000","namespace":"lmcache","set_name":"kv_armA","num_workers":8,"read_timeout_ms":120000,"write_timeout_ms":120000,"target_segment_bytes":0,"max_record_bytes":0}
+Keys / submit:                                                 4
+In-flight / round:                                             1
+Keys / round:                                                  4
+Data size / key (KB):                                      16384
+Data / round (MB):                                         64.00
+Measurement rounds:                                           10
+Warmup rounds:                                                 2
+----------------------------- Load -----------------------------
+Operation:                                                  Load
+Rounds:                                                       10
+Rounds timed out:                                              0
+Keys / round:                                                  4
+Total keys:                                                   40
+Total success:                                                40
+Duration avg (ms):                                         35.86
+Duration min (ms):                                         27.77
+Duration max (ms):                                         42.89
+Duration p50 (ms):                                         35.34
+Duration p99 (ms):                                         42.89
+Duration std (ms):                                          4.63
+Throughput avg (MB/s):                                   1812.60
+Throughput min (MB/s):                                   1492.12
+Throughput max (MB/s):                                   2304.48
+Avg ops/s:                                                113.29
+Avg latency / key (ms):                                     8.96
+================================================================
+[Cleanup] Closing adapter...
+[Cleanup] Done.
