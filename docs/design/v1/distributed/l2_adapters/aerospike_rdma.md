@@ -1,8 +1,10 @@
 # Aerospike RDMA reception into L1
 
-Status: **prototype**. The verbs foundation, the build profile, and the adapter
-plumbing are implemented. The end-to-end data path has **not** been executed
-against real hardware; see [What is not proven yet](#what-is-not-proven-yet).
+Status: **prototype**. The verbs foundation, the build profile, the adapter
+plumbing, the per-node registration fanout, the mock RDMA writer, and the
+byte-equivalence harness are all implemented and compiling. The data path has
+**not** yet been executed, because no RDMA device is available; see
+[What is not proven yet](#what-is-not-proven-yet).
 
 This document covers the `kv-sink` wire protocol, the handshake ordering, the
 opt-in build profile, the registration-scope decision, and how to reproduce a
@@ -126,6 +128,51 @@ Either way, registration happens **exactly once, at initialization**.
 so `register_l1()` refuses a second call rather than silently re-registering
 and invalidating rkeys already published to nodes.
 
+## The write-lock TTL invariant (enforced at startup)
+
+**An RDMA fetch is only safe because the destination L1 object is write-locked
+for the whole round trip.** From `lmcache/v1/distributed/l1_manager.py`:
+
+1. The load path creates the `L1ObjectState` and immediately calls
+   `write_lock.lock()` — the object is write-locked from the moment it exists.
+2. While write-locked it **cannot be read**: `available_for_read()` is
+   `not write_lock.is_locked()`, so readers get `L1Error.KEY_NOT_READABLE`.
+3. While write-locked it **cannot be evicted**: `delete` returns
+   `L1Error.KEY_IS_LOCKED` unless `force`, and the bulk clear loop skips
+   locked entries.
+4. Release happens only after the L2 load returns, in
+   `storage_controllers/prefetch_controller.py` — `finish_write` for
+   `PrefetchMode.WARM`, otherwise
+   `finish_write_and_reserve_read(read_locks=...)`.
+
+So the whole Aerospike round trip, DMA included, already sits inside the
+write-locked window. No new lock and no separate window lifetime are needed for
+the non-pipelined path. Sriram holding the *record* lock across the DMA is the
+mirror of the same guarantee at the other end.
+
+**But `write_lock` is a `TTLLock`, not a plain lock.** It is constructed as
+`TTLLock(self._write_ttl_seconds)`, and `write_ttl_seconds` defaults to **600s**
+(`lmcache/v1/distributed/config.py`), operator-settable via
+`--l1-write-ttl-seconds`. If a fetch outlives that TTL the write lock expires
+**silently** and the buffer becomes readable and evictable while a remote node
+may still be writing into it. L1Manager only warns — *"potential inconsistent
+data might be read"* / *"potential inconsistent data might be written"*.
+
+Hence the invariant:
+
+> **The RDMA fetch timeout must be strictly less than `write_ttl_seconds`, and a
+> window lease must be released or generation-bumped no later than write-lock
+> expiry.**
+
+This is checked **at startup**, not per fetch, by
+`validate_fetch_timeout_against_write_ttl` in `rdma_registration.py`, called
+from `StorageManager._build_l2_adapter` — the one place where both the adapter
+config and `L1ManagerConfig` are in scope. It raises `ValueError` naming both
+knobs and both values. Two config values in two different files having to agree
+is exactly the kind of footgun that should fail loudly on boot.
+
+`rdma.fetch_timeout_seconds` defaults to 30s, comfortably under the 600s TTL.
+
 ### Allocator constraint
 
 A slab that grows or moves after `ibv_reg_mr` leaves the remote writer holding
@@ -197,12 +244,42 @@ RDMA is off unless the adapter config asks for it:
         "gid_index": 0,
         "window_count": 8,      # max concurrent RDMA fetches
         "window_bytes": 8388608,
+        "fetch_timeout_seconds": 30.0,  # must be < --l1-write-ttl-seconds
     },
 }
 ```
 
 `RC` is the portable transport and is the only one Soft-RoCE supports. `SRD`
-exists only on AWS EFA.
+exists only on AWS EFA. `fetch_timeout_seconds` is checked against the L1
+write-lock TTL at startup.
+
+## Per-node registration fanout
+
+`register_all_nodes` in `kv_sink_fanout.{h,cpp}` sends the register command to
+every node with `aerospike_info_foreach` and records each node's own `region`
+handle in a `NodeRegistry`. The command text is identical for every node — it
+describes *our* endpoint — but each reply carries that node's own region id,
+peer GID, and peer QPN.
+
+It is a separate translation unit from `kv_sink_client.{h,cpp}` so the codec
+stays free of any Aerospike SDK dependency and remains trivially unit-testable;
+only the fanout needs `libaerospike`.
+
+Two things `aerospike_info_foreach` forces, both easy to get wrong:
+
+- **The reply string must not be freed.** The SDK documents that for
+  `aerospike_info_foreach` "the caller should not free this string", which is
+  the *opposite* of `aerospike_info_node()` / `aerospike_info_any()`, whose
+  responses the caller does free — as `discover_record_cap()` does. Copying the
+  existing idiom verbatim would have introduced a double free.
+- **The callback crosses a C boundary**, so no exception may escape it. The
+  callback catches everything and reports failures through its `udata`.
+
+Partial success is a real state and is reported rather than thrown: a single
+unreachable node should not disable RDMA cluster-wide, so
+`ClusterRegistrationResult` carries a per-node failure list and the caller
+decides. A cluster-wide failure (for example, a disconnected client) still
+throws.
 
 ## Reproducing the Soft-RoCE test setup
 
@@ -247,12 +324,46 @@ Then build with RDMA enabled and point the adapter at `device_name: "rxe0"`,
 
 The deliverable that matters is that a payload delivered by RDMA write into L1
 is **byte-identical** to the same payload fetched through the normal non-RDMA
-Aerospike path. Because the Aerospike server side is not generally available, a
-mock RDMA writer stands in for it: a local process that accepts the same
-`kv-sink-register` / `kv-sink-fetch` command strings, performs real
-`ibv_post_send` RDMA writes into the registered windows at the requested
-offsets, fences on its own send CQ, and replies in the same `key=value;`
-format.
+Aerospike path.
+
+The harness lives at `tests/v1/distributed/rdma/`. `KvSinkMockWriter` stands in
+for the Aerospike server: it accepts the same `kv-sink-register` /
+`kv-sink-fetch` command strings, performs real `ibv_post_send` RDMA writes into
+the registered windows at the requested offsets, fences on its own send CQ
+before replying, and replies in the same `key=value;` format.
+
+The sink side uses the **production** `RdmaContext` and the production codec
+(`build_register_command`, `parse_register_reply`, `parse_fetch_reply`) rather
+than reimplementing them, so a regression in either fails this test. Only the
+Aerospike info-command control plane is faked; the data path is a genuine RDMA
+write across the fabric.
+
+Once a device exists, it is one command:
+
+```bash
+make -C tests/v1/distributed/rdma test          # or RDMA_DEVICE=rxe0
+```
+
+or through pytest, which builds it for you:
+
+```bash
+pytest -xvs tests/v1/distributed/rdma/test_rdma_equivalence.py
+```
+
+Both skip cleanly with no device — the binary exits 77 (the automake "skip"
+convention) and the wrapper turns that into a pytest skip. If your rdma-core
+lives outside the default prefix, set `RDMA_CORE_INCLUDE_DIR` and
+`RDMA_CORE_LIBRARY_DIR`.
+
+The harness asserts five things, not just the memcmp:
+
+1. both chunks landed byte-identical to the source payload,
+2. the fetch reply reports every chunk ok, with the expected byte count,
+3. **nothing landed outside the requested offsets** (the rest of the slab is
+   still zero),
+4. a sink targeting an offset past the registered window is **refused** rather
+   than written, which is the bounded-window guarantee actually being exercised,
+5. the region handle is held per node, via `NodeRegistry`.
 
 ## What is not proven yet
 
@@ -260,37 +371,47 @@ Being precise about this, because the gap matters:
 
 | Piece | State |
 |---|---|
-| Build profile, default-off | **Verified.** Default build compiles with no libibverbs. |
-| `rdma_context.{h,cpp}` | **Compiles and links** cleanly (`-Wall -Wextra`, RC and EFA paths), against real `libibverbs`. Never executed. |
+| Build profile, default-off | **Verified.** Default native build compiles and links with no libibverbs. |
+| `rdma_context.{h,cpp}` | **Compiles and links** cleanly (`-Wall -Wextra`, RC and EFA paths) against real `libibverbs`. Data path never executed. |
+| `kv_sink_client.{h,cpp}` codec | **Compiles**; exercised by the harness up to the point of the first verbs call. |
+| Per-node `kv-sink-register` fanout | **Implemented and compiling** via `aerospike_info_foreach`. Never run against a cluster. |
 | Adapter plumbing, descriptor, window plan | **Implemented and unit-tested.** |
-| Per-node `kv-sink-register` fanout | **Not implemented.** Shape is designed; see below. |
-| Mock RDMA writer | **Not implemented.** |
-| Real RDMA write landing in L1 | **Not achieved.** |
-| Byte-equivalence vs. the normal path | **Not achieved.** |
+| Write-lock TTL invariant | **Implemented and unit-tested** (startup check). |
+| Mock RDMA writer | **Authored, compiles and links, runs.** Reaches the device check and skips. |
+| Byte-equivalence harness | **Authored, builds, runs, skips cleanly.** One command away from executing. |
+| Real RDMA write landing in L1 | **Not achieved — needs a device.** |
+| Byte-equivalence assertion actually passing | **Not achieved — needs a device.** |
 
-The blocker for everything in the bottom half of that table is environmental:
-creating a Soft-RoCE device requires `root` (`modprobe rdma_rxe` and
-`rdma link add` both return `Operation not permitted` without it), and no RDMA
-device of any kind is present. The verbs code was therefore verified by
-compilation and linkage only.
+The blocker for the last two rows is environmental and narrow: creating a
+Soft-RoCE device requires `root` (`modprobe rdma_rxe` and `rdma link add` both
+return `Operation not permitted` without it), and no RDMA device of any kind is
+present. Everything above those two rows is verified as far as compilation,
+linkage, and execution-up-to-the-device-check can verify it. The harness has
+been run and exits 77 with the setup instructions, so the remaining step is
+genuinely one privileged command plus one test invocation.
 
 ## Open questions
 
-Two things are genuinely ambiguous and should be settled before this goes
-further:
+### Resolved: L1 locking across the DMA
 
-1. **L1 locking across the DMA.** The info reply is the completion, so the
-   destination window must stay valid and unread for the whole server-side
-   round trip. It is not yet clear which existing L1 lock, if any, already
-   provides that for a prefetch-into-L1, or whether the window lease needs its
-   own lifetime independent of the L1 object lock. The engineer's own PoC gap
-   list notes the server holds the *record* lock across the DMA, which is the
-   mirror image of this question.
-2. **Registration lifecycle on node restart.** `region` is per-node and
-   connection-lifetime. Detecting a node restart and re-registering means
-   re-publishing rkeys while fetches may be in flight against the old region.
-   The safe ordering, and whether in-flight fetches must be drained first, is
-   not specified by the protocol.
+The existing write lock already provides the needed guarantee — no new lock,
+and no separate window lifetime for the non-pipelined path. See
+[The write-lock TTL invariant](#the-write-lock-ttl-invariant-enforced-at-startup)
+for the mechanism, the TTL hazard it creates, and the startup check that now
+enforces it.
+
+### Still open: registration lifecycle on node restart
+
+`region` is per-node and connection-lifetime. Detecting a node restart and
+re-registering means re-publishing rkeys while fetches may be in flight against
+the old region.
+
+**This is intentionally left conservative**: `register_l1()` refuses a second
+call and `NodeRegistry::invalidate_all()` drops every handle at once. Proper
+drain-then-reregister semantics need the Aerospike side to specify whether
+in-flight fetches against a stale `region` are **dropped or completed**, and
+that is not knowable from the LMCache side. **Blocked on a protocol answer from
+Aerospike**; no policy has been invented here.
 
 ## Where the protocol and LMCache fight each other
 
