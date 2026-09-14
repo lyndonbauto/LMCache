@@ -1,0 +1,31 @@
+# Shared EFA bootstrap, inlined into each node's user-data.
+# Installs the pinned aws-efa-installer and leaves a marker file so the runbook
+# can tell "EFA not installed yet" apart from "EFA installed but not working".
+
+set -euxo pipefail
+
+dnf -y update
+dnf -y install gcc gcc-c++ make cmake git pciutils tar wget jq python3-pip
+
+EFA_VERSION="${efa_installer_version}"
+cd /opt
+curl -fsSL -o aws-efa-installer.tar.gz \
+  "https://efa-installer.amazonaws.com/aws-efa-installer-$${EFA_VERSION}.tar.gz"
+
+# Verify the tarball against AWS's published GPG key before running it as root.
+curl -fsSL -o aws-efa-installer.key https://efa-installer.amazonaws.com/aws-efa-installer.key
+curl -fsSL -o aws-efa-installer.tar.gz.sig \
+  "https://efa-installer.amazonaws.com/aws-efa-installer-$${EFA_VERSION}.tar.gz.sig" || true
+if [ -s aws-efa-installer.tar.gz.sig ]; then
+  gpg --import aws-efa-installer.key
+  gpg --verify aws-efa-installer.tar.gz.sig aws-efa-installer.tar.gz
+fi
+
+tar -xf aws-efa-installer.tar.gz
+cd aws-efa-installer
+# -y unattended, -g installs the GDRCopy/libfabric stack.
+# NOT passing --minimal: we want fi_info, fi_pingpong and the ibverbs tooling
+# present, because the runbook's EFA verification depends on them.
+./efa_installer.sh -y
+
+echo "$${EFA_VERSION}" > /var/log/efa-installed-version

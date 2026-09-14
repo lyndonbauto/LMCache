@@ -1,0 +1,145 @@
+# Aerospike server configuration -- LMCache KV-cache benchmark (AIE-86)
+#
+# Rendered by Terraform. The one line substituted at boot is the device list
+# (see DEVICE_LIST_PLACEHOLDER below), because NVMe device naming on Nitro is
+# not guaranteed stable enough to hardcode safely.
+#
+# The full reasoning behind write-block-size, max-record-size and
+# replication-factor is in docs/aerospike-tuning.md. Summary inline below.
+
+service {
+    cluster-name lmcache-bench
+    # One service thread per core; these nodes exist only to serve this workload.
+    proto-fd-max 30000
+}
+
+logging {
+    file /var/log/aerospike/aerospike.log {
+        context any info
+    }
+}
+
+network {
+    service {
+        address any
+        port 3000
+        # access-address is set per-node at boot to that node's private IP so
+        # the client's cluster-discovery hands out reachable addresses rather
+        # than 0.0.0.0.
+    }
+
+    heartbeat {
+        # Mesh, not multicast. Multicast is not delivered inside a VPC at all,
+        # so a multicast config produces five single-node clusters that each
+        # think they are healthy -- a failure mode that looks like a working
+        # cluster until you check `asadm -e info`.
+        mode mesh
+        port 3002
+%{ for peer in mesh_peers ~}
+        mesh-seed-address-port ${peer} 3002
+%{ endfor ~}
+        # Listing every peer (including self, which Aerospike ignores) means the
+        # config is identical on all five nodes and cluster formation does not
+        # depend on boot order.
+        interval 150
+        timeout 10
+    }
+
+    fabric {
+        port 3001
+    }
+
+    info {
+        # Port 3003 is the info port. LMCache's native connector reaches the
+        # info subsystem via the client (aerospike_info_any) to run
+        # `namespace/${namespace}` and parse the record cap out of the reply --
+        # see discover_record_cap() in connector.cpp. If info is unreachable the
+        # connector silently falls back to a 1 MiB assumed cap.
+        port 3003
+    }
+}
+
+namespace ${namespace} {
+    # -----------------------------------------------------------------------
+    # replication-factor 1
+    #
+    # Deliberate, and correct for THIS benchmark, for three reasons:
+    #  1. Correctness is never at stake. A KV cache entry is regenerable -- a
+    #     miss costs a prefill recompute, it does not lose data. Durability
+    #     buys nothing here that it does not also buy in production.
+    #  2. RF=2 would corrupt the number we are trying to measure. The headline
+    #     output of Half A is the *read* ceiling against NIC line rate. RF=2
+    #     puts replica write traffic on the same fabric, so we would be
+    #     measuring a replication-limited number and reporting it as a storage
+    #     ceiling.
+    #  3. RF=2 halves usable capacity, which matters when the whole point of
+    #     the flash-resident test is a working set far larger than RAM.
+    #
+    # Cost: losing one node loses 1/5 of the cache. For a benchmark cluster
+    # that is a re-run, not an incident.
+    #
+    # Recommended follow-up: one confirmation run at RF=2 to get a
+    # production-representative *write* path number. Do not use RF=2 for the
+    # ceiling measurement.
+    # -----------------------------------------------------------------------
+    replication-factor 1
+
+    # -----------------------------------------------------------------------
+    # max-record-size 8M   <-- THE NUMBER LMCACHE ACTUALLY READS
+    #
+    # LMCache's connector calls info `namespace/<ns>` and scans the reply for
+    # "max-record-size=" FIRST, then "write-block-size=", taking the first
+    # value greater than zero (connector.cpp discover_record_cap()). It then
+    # subtracts a 64 KiB safety margin and uses the result as both the segment
+    # target and the single-record threshold.
+    #
+    # So the effective segment size is (cap - 64 KiB), and the number of
+    # records one KV-cache chunk becomes is ceil(payload / (cap - 64 KiB)).
+    # Reading a chunk costs 1 meta-record round trip plus one round trip per
+    # segment, and those segment reads are issued SEQUENTIALLY on a single
+    # worker, so segment count is a dependent chain, not a parallel fan-out.
+    #
+    # At the default 1 MiB cap, an 80 MiB chunk becomes 86 segments = 87
+    # sequential round trips. At an 8 MiB cap it becomes 11 segments = 12
+    # round trips. Same bytes, ~7x shorter dependent chain. That is why this
+    # value is set to the maximum the server allows.
+    #
+    # !! max-record-size MUST be raised together with write-block-size. If
+    # write-block-size is raised to 8M but max-record-size is left at its 1 MiB
+    # default, LMCache reads max-record-size first, caps at 1 MiB, and shards
+    # into 960 KiB segments anyway -- the tuning is silently discarded. Verify
+    # with the asinfo command in the runbook rather than assuming.
+    # -----------------------------------------------------------------------
+    max-record-size 8M
+
+    # TTL matches the LMCache Aerospike adapter's default_ttl_seconds (86400).
+    default-ttl 86400
+    nsup-period 120
+
+    storage-engine device {
+        # DEVICE_LIST_PLACEHOLDER
+        # Replaced at boot with one `device /dev/nvmeXn1` line per local NVMe
+        # instance-store device. Raw devices, no filesystem: Aerospike's flash
+        # engine does its own block management and a filesystem underneath only
+        # adds a second allocator and a page-cache layer we are trying to
+        # measure past.
+
+        # See the max-record-size note above. 8 MiB is the maximum Aerospike
+        # accepts. The cost of a large write block is defrag write
+        # amplification and more DRAM held in per-device write buffers; for a
+        # workload whose records are multi-megabyte KV-cache segments that
+        # trade is clearly worth it, because the alternative is paying it in
+        # round trips on every read.
+        write-block-size 8M
+
+        # Keep the post-write cache small. It is a DRAM read cache in front of
+        # the device, and a large one would let the "flash-resident" test
+        # quietly serve from memory -- which would produce an optimistic
+        # ceiling and invalidate the entire finding. The DRAM-resident case is
+        # measured separately with a small working set.
+        post-write-cache 64
+
+        # Do not let the OS page cache do the same thing.
+        read-page-cache false
+    }
+}

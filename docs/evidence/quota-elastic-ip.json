@@ -1,0 +1,15 @@
+{
+    "Quota": {
+        "ServiceCode": "ec2",
+        "ServiceName": "Amazon Elastic Compute Cloud (Amazon EC2)",
+        "QuotaArn": "arn:aws:servicequotas:us-east-1:236318833413:ec2/L-0263D0A3",
+        "QuotaCode": "L-0263D0A3",
+        "QuotaName": "EC2-VPC Elastic IPs",
+        "Value": 5.0,
+        "Unit": "None",
+        "Adjustable": true,
+        "GlobalQuota": false,
+        "QuotaAppliedAtLevel": "ACCOUNT",
+        "Description": "The maximum number of Elastic IP addresses that you can allocate for EC2-VPC in this Region."
+    }
+}

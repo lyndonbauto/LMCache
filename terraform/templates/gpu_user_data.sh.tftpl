@@ -1,0 +1,26 @@
+#!/bin/bash
+# Half B GPU node bootstrap: vLLM + LMCache in multiprocess (MP) mode.
+# Only runs when gpu_count > 0, which is NOT the default.
+
+${efa_bootstrap}
+
+# NVIDIA driver + CUDA. AL2023 needs the driver from NVIDIA's el9 repo.
+dnf -y install kernel-devel-$(uname -r) kernel-headers-$(uname -r) dkms
+dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel9/x86_64/cuda-rhel9.repo
+dnf -y module install nvidia-driver:latest-dkms || dnf -y install nvidia-driver cuda-toolkit
+
+cat > /etc/profile.d/lmcache-bench.sh <<'PROFILE_EOF'
+export LMCACHE_AEROSPIKE_HOSTS="${join(",", [for ip in server_ips : "${ip}:3000"])}"
+export LMCACHE_AEROSPIKE_NAMESPACE="${namespace}"
+export LMCACHE_AEROSPIKE_SET="kv_chunks"
+
+# MP (multiprocess) mode is the supported path for the TTFT breakdown: it is
+# what emits the MP_LOOKUP_PREFETCH and MP_RETRIEVE observability spans that
+# Half B attributes TTFT against.
+#
+# Do NOT set LMCACHE_USE_LAYERWISE. That selects the deprecated in-process
+# mode, which does not produce the MP spans -- the benchmark would run and
+# report nothing useful.
+PROFILE_EOF
+
+echo "gpu bootstrap complete -- install vLLM + LMCache per docs/half-b-ttft.md" > /var/log/bench-bootstrap-done

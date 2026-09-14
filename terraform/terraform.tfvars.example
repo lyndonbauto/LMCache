@@ -1,0 +1,24 @@
+# Copy to terraform.tfvars and edit. terraform.tfvars is gitignored.
+
+# Your public IP as a /32. Do not use 0.0.0.0/0.
+# Find it with: curl -s https://checkip.amazonaws.com
+# Note: nodes have no public addresses, so this rule only matters if you add a
+# bastion or a VPN path. Primary access is SSM Session Manager.
+operator_cidr = "1.2.3.4/32"
+
+# An existing EC2 key pair in us-east-1.
+# List them with: aws ec2 describe-key-pairs --query 'KeyPairs[].KeyName'
+key_name = "lyndon-cloud"
+
+# --- Everything below is optional; defaults are the reviewed configuration. ---
+
+# region               = "us-east-1"
+# availability_zone    = "us-east-1d"   # only AZ offering every candidate type
+# server_count         = 5
+# server_instance_type = "i3en.24xlarge"
+# client_count         = 1
+# client_instance_type = "c5n.18xlarge"
+
+# HALF B -- EXPENSIVE. Leave at 0 until Half A is complete and reported.
+# gpu_count         = 0
+# gpu_instance_type = "g6e.12xlarge"

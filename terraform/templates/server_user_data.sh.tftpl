@@ -1,0 +1,76 @@
+#!/bin/bash
+# Aerospike server node bootstrap.
+# Progress is greppable in /var/log/cloud-init-output.log.
+
+${efa_bootstrap}
+
+# ---------------------------------------------------------------------------
+# Aerospike
+# ---------------------------------------------------------------------------
+dnf -y install https://download.aerospike.com/artifacts/aerospike-server-community/8.0.0.7/aerospike-server-community_8.0.0.7_tools-11.2.2_el9_x86_64.tgz 2>/dev/null || {
+  # Fall back to the tarball flow if the direct rpm URL moved.
+  cd /opt
+  curl -fsSL -o aerospike.tgz "https://download.aerospike.com/artifacts/aerospike-server-community/8.0.0.7/aerospike-server-community_8.0.0.7_tools-11.2.2_el9_x86_64.tgz"
+  tar -xf aerospike.tgz
+  cd aerospike-server-community_*
+  ./asinstall
+}
+
+mkdir -p /etc/aerospike /var/log/aerospike
+cat > /etc/aerospike/aerospike.conf <<'AEROSPIKE_CONF_EOF'
+${aerospike_conf}
+AEROSPIKE_CONF_EOF
+
+# ---------------------------------------------------------------------------
+# Discover the local NVMe instance-store devices.
+#
+# Nitro does not guarantee that instance-store volumes land on a fixed
+# /dev/nvmeXn1 index, so the device list is discovered rather than hardcoded.
+# Instance store reports the model string "Amazon EC2 NVMe Instance Storage";
+# the EBS root reports "Amazon Elastic Block Store". Matching on the model is
+# the only reliable discriminator -- matching on size or index will eventually
+# put Aerospike's raw-device engine on top of the root volume and destroy it.
+# ---------------------------------------------------------------------------
+DEVICE_LINES=""
+for dev in /dev/nvme*n1; do
+  [ -b "$dev" ] || continue
+  model=$(nvme id-ctrl "$dev" 2>/dev/null | awk -F: '/^mn /{print $2}' | xargs || true)
+  case "$model" in
+    *"Instance Storage"*)
+      DEVICE_LINES="$DEVICE_LINES        device $dev\n"
+      # Wipe any stale Aerospike header so the namespace comes up empty and the
+      # benchmark is not reading a previous run's data.
+      blkdiscard -f "$dev" 2>/dev/null || dd if=/dev/zero of="$dev" bs=1M count=8 oflag=direct
+      ;;
+  esac
+done
+
+if [ -z "$DEVICE_LINES" ]; then
+  echo "FATAL: no local NVMe instance-store devices found. The chosen instance type" >&2
+  echo "must have local NVMe for the flash-resident ceiling measurement to mean anything." >&2
+  exit 1
+fi
+
+python3 - "$DEVICE_LINES" <<'PY'
+import sys
+lines = sys.argv[1].replace("\\n", "\n").rstrip("\n")
+path = "/etc/aerospike/aerospike.conf"
+with open(path) as fh:
+    conf = fh.read()
+conf = conf.replace("        # DEVICE_LIST_PLACEHOLDER", lines)
+with open(path, "w") as fh:
+    fh.write(conf)
+PY
+
+# Advertise this node's own private IP so client-side cluster discovery returns
+# a routable address instead of 0.0.0.0.
+TOKEN=$(curl -fsS -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+PRIVATE_IP=$(curl -fsS -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
+sed -i "s|^        port 3000$|        port 3000\n        access-address $PRIVATE_IP|" /etc/aerospike/aerospike.conf
+
+chown -R aerospike:aerospike /var/log/aerospike /etc/aerospike || true
+
+systemctl enable aerospike
+systemctl start aerospike
+
+echo "server bootstrap complete: node ${node_id}, namespace ${namespace}" > /var/log/bench-bootstrap-done

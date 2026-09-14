@@ -1,0 +1,877 @@
+[
+    {
+        "T": "g6e.8xlarge",
+        "Mfr": "AMD",
+        "Net": "25 Gigabit",
+        "vCPU": 32,
+        "NVMeGB": 900
+    },
+    {
+        "T": "g6.24xlarge",
+        "Mfr": "AMD",
+        "Net": "50 Gigabit",
+        "vCPU": 96,
+        "NVMeGB": 3760
+    },
+    {
+        "T": "m8gd.metal-48xl",
+        "Mfr": "AWS",
+        "Net": "50 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 11400
+    },
+    {
+        "T": "c8gd.48xlarge",
+        "Mfr": "AWS",
+        "Net": "50 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 11400
+    },
+    {
+        "T": "i3en.24xlarge",
+        "Mfr": "Intel",
+        "Net": "100 Gigabit",
+        "vCPU": 96,
+        "NVMeGB": 60000
+    },
+    {
+        "T": "r8id.96xlarge",
+        "Mfr": "Intel",
+        "Net": "100 Gigabit",
+        "vCPU": 384,
+        "NVMeGB": 22800
+    },
+    {
+        "T": "m8id.96xlarge",
+        "Mfr": "Intel",
+        "Net": "100 Gigabit",
+        "vCPU": 384,
+        "NVMeGB": 22800
+    },
+    {
+        "T": "m7gd.16xlarge",
+        "Mfr": "AWS",
+        "Net": "30 Gigabit",
+        "vCPU": 64,
+        "NVMeGB": 3800
+    },
+    {
+        "T": "m8idn.metal-48xl",
+        "Mfr": "Intel",
+        "Net": "300 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 11400
+    },
+    {
+        "T": "trn1.32xlarge",
+        "Mfr": "Intel",
+        "Net": "8x 100 Gigabit",
+        "vCPU": 128,
+        "NVMeGB": 7600
+    },
+    {
+        "T": "c8id.96xlarge",
+        "Mfr": "Intel",
+        "Net": "100 Gigabit",
+        "vCPU": 384,
+        "NVMeGB": 22800
+    },
+    {
+        "T": "i8g.metal-48xl",
+        "Mfr": "AWS",
+        "Net": "Up to 100 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 45000
+    },
+    {
+        "T": "trn1n.32xlarge",
+        "Mfr": "Intel",
+        "Net": "16x 100 Gigabit",
+        "vCPU": 128,
+        "NVMeGB": 7600
+    },
+    {
+        "T": "r8id.48xlarge",
+        "Mfr": "Intel",
+        "Net": "75 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 11400
+    },
+    {
+        "T": "i3en.12xlarge",
+        "Mfr": "Intel",
+        "Net": "50 Gigabit",
+        "vCPU": 48,
+        "NVMeGB": 30000
+    },
+    {
+        "T": "g6e.48xlarge",
+        "Mfr": "AMD",
+        "Net": "400 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 7600
+    },
+    {
+        "T": "g7e.8xlarge",
+        "Mfr": "Intel",
+        "Net": "100 Gigabit",
+        "vCPU": 32,
+        "NVMeGB": 1900
+    },
+    {
+        "T": "m8idb.metal-48xl",
+        "Mfr": "Intel",
+        "Net": "200 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 11400
+    },
+    {
+        "T": "m8id.48xlarge",
+        "Mfr": "Intel",
+        "Net": "75 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 11400
+    },
+    {
+        "T": "g7e.48xlarge",
+        "Mfr": "Intel",
+        "Net": "1600 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 15200
+    },
+    {
+        "T": "i4i.metal",
+        "Mfr": "Intel",
+        "Net": "75 Gigabit",
+        "vCPU": 128,
+        "NVMeGB": 30000
+    },
+    {
+        "T": "g6.8xlarge",
+        "Mfr": "AMD",
+        "Net": "25 Gigabit",
+        "vCPU": 32,
+        "NVMeGB": 900
+    },
+    {
+        "T": "g4dn.metal",
+        "Mfr": "Intel",
+        "Net": "100 Gigabit",
+        "vCPU": 96,
+        "NVMeGB": 1800
+    },
+    {
+        "T": "m6id.32xlarge",
+        "Mfr": "Intel",
+        "Net": "50 Gigabit",
+        "vCPU": 128,
+        "NVMeGB": 7600
+    },
+    {
+        "T": "c8gd.24xlarge",
+        "Mfr": "AWS",
+        "Net": "40 Gigabit",
+        "vCPU": 96,
+        "NVMeGB": 5700
+    },
+    {
+        "T": "m8idn.96xlarge",
+        "Mfr": "Intel",
+        "Net": "600 Gigabit",
+        "vCPU": 384,
+        "NVMeGB": 22800
+    },
+    {
+        "T": "r8idb.48xlarge",
+        "Mfr": "Intel",
+        "Net": "200 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 11400
+    },
+    {
+        "T": "r7gd.16xlarge",
+        "Mfr": "AWS",
+        "Net": "30 Gigabit",
+        "vCPU": 64,
+        "NVMeGB": 3800
+    },
+    {
+        "T": "c8gd.metal-24xl",
+        "Mfr": "AWS",
+        "Net": "40 Gigabit",
+        "vCPU": 96,
+        "NVMeGB": 5700
+    },
+    {
+        "T": "c8gd.metal-48xl",
+        "Mfr": "AWS",
+        "Net": "50 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 11400
+    },
+    {
+        "T": "i7ie.metal-48xl",
+        "Mfr": "Intel",
+        "Net": "200 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 120000
+    },
+    {
+        "T": "c7gd.16xlarge",
+        "Mfr": "AWS",
+        "Net": "30 Gigabit",
+        "vCPU": 64,
+        "NVMeGB": 3800
+    },
+    {
+        "T": "p4de.24xlarge",
+        "Mfr": "Intel",
+        "Net": "4x 100 Gigabit",
+        "vCPU": 96,
+        "NVMeGB": 8000
+    },
+    {
+        "T": "r8id.metal-96xl",
+        "Mfr": "Intel",
+        "Net": "100 Gigabit",
+        "vCPU": 384,
+        "NVMeGB": 22800
+    },
+    {
+        "T": "x2iedn.metal",
+        "Mfr": "Intel",
+        "Net": "100 Gigabit",
+        "vCPU": 128,
+        "NVMeGB": 3800
+    },
+    {
+        "T": "c9gd.48xlarge",
+        "Mfr": "AWS",
+        "Net": "100 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 11400
+    },
+    {
+        "T": "g6.48xlarge",
+        "Mfr": "AMD",
+        "Net": "100 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 7520
+    },
+    {
+        "T": "g5.24xlarge",
+        "Mfr": "AMD",
+        "Net": "50 Gigabit",
+        "vCPU": 96,
+        "NVMeGB": 3800
+    },
+    {
+        "T": "g7e.12xlarge",
+        "Mfr": "Intel",
+        "Net": "400 Gigabit",
+        "vCPU": 48,
+        "NVMeGB": 3800
+    },
+    {
+        "T": "i8ge.48xlarge",
+        "Mfr": "AWS",
+        "Net": "300 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 120000
+    },
+    {
+        "T": "g4dn.12xlarge",
+        "Mfr": "Intel",
+        "Net": "50 Gigabit",
+        "vCPU": 48,
+        "NVMeGB": 900
+    },
+    {
+        "T": "g6e.16xlarge",
+        "Mfr": "AMD",
+        "Net": "35 Gigabit",
+        "vCPU": 64,
+        "NVMeGB": 1900
+    },
+    {
+        "T": "m8idb.48xlarge",
+        "Mfr": "Intel",
+        "Net": "200 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 11400
+    },
+    {
+        "T": "g6e.12xlarge",
+        "Mfr": "AMD",
+        "Net": "100 Gigabit",
+        "vCPU": 48,
+        "NVMeGB": 3800
+    },
+    {
+        "T": "r8idb.96xlarge",
+        "Mfr": "Intel",
+        "Net": "400 Gigabit",
+        "vCPU": 384,
+        "NVMeGB": 22800
+    },
+    {
+        "T": "r6id.32xlarge",
+        "Mfr": "Intel",
+        "Net": "50 Gigabit",
+        "vCPU": 128,
+        "NVMeGB": 7600
+    },
+    {
+        "T": "m6idn.32xlarge",
+        "Mfr": "Intel",
+        "Net": "200 Gigabit",
+        "vCPU": 128,
+        "NVMeGB": 7600
+    },
+    {
+        "T": "i7ie.48xlarge",
+        "Mfr": "Intel",
+        "Net": "200 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 120000
+    },
+    {
+        "T": "m8id.metal-96xl",
+        "Mfr": "Intel",
+        "Net": "100 Gigabit",
+        "vCPU": 384,
+        "NVMeGB": 22800
+    },
+    {
+        "T": "r5dn.metal",
+        "Mfr": "Intel",
+        "Net": "100 Gigabit",
+        "vCPU": 96,
+        "NVMeGB": 3600
+    },
+    {
+        "T": "p6-b200.48xlarge",
+        "Mfr": "Intel",
+        "Net": "3200 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 30400
+    },
+    {
+        "T": "m7gd.metal",
+        "Mfr": "AWS",
+        "Net": "30 Gigabit",
+        "vCPU": 64,
+        "NVMeGB": 3800
+    },
+    {
+        "T": "p4d.24xlarge",
+        "Mfr": "Intel",
+        "Net": "4x 100 Gigabit",
+        "vCPU": 96,
+        "NVMeGB": 8000
+    },
+    {
+        "T": "r8idb.metal-48xl",
+        "Mfr": "Intel",
+        "Net": "200 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 11400
+    },
+    {
+        "T": "g5.12xlarge",
+        "Mfr": "AMD",
+        "Net": "40 Gigabit",
+        "vCPU": 48,
+        "NVMeGB": 3800
+    },
+    {
+        "T": "c9gd.metal-48xl",
+        "Mfr": "AWS",
+        "Net": "100 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 11400
+    },
+    {
+        "T": "c8id.48xlarge",
+        "Mfr": "Intel",
+        "Net": "75 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 11400
+    },
+    {
+        "T": "i4g.16xlarge",
+        "Mfr": "AWS",
+        "Net": "37.5 Gigabit",
+        "vCPU": 64,
+        "NVMeGB": 15000
+    },
+    {
+        "T": "c6id.32xlarge",
+        "Mfr": "Intel",
+        "Net": "50 Gigabit",
+        "vCPU": 128,
+        "NVMeGB": 7600
+    },
+    {
+        "T": "r8gd.metal-24xl",
+        "Mfr": "AWS",
+        "Net": "40 Gigabit",
+        "vCPU": 96,
+        "NVMeGB": 5700
+    },
+    {
+        "T": "m9gd.metal-48xl",
+        "Mfr": "AWS",
+        "Net": "100 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 11400
+    },
+    {
+        "T": "x2idn.metal",
+        "Mfr": "Intel",
+        "Net": "100 Gigabit",
+        "vCPU": 128,
+        "NVMeGB": 3800
+    },
+    {
+        "T": "r9gd.metal-48xl",
+        "Mfr": "AWS",
+        "Net": "100 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 11400
+    },
+    {
+        "T": "p5.48xlarge",
+        "Mfr": "AMD",
+        "Net": "3200 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 30400
+    },
+    {
+        "T": "m8idn.metal-96xl",
+        "Mfr": "Intel",
+        "Net": "600 Gigabit",
+        "vCPU": 384,
+        "NVMeGB": 22800
+    },
+    {
+        "T": "m8idn.48xlarge",
+        "Mfr": "Intel",
+        "Net": "300 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 11400
+    },
+    {
+        "T": "r8gd.24xlarge",
+        "Mfr": "AWS",
+        "Net": "40 Gigabit",
+        "vCPU": 96,
+        "NVMeGB": 5700
+    },
+    {
+        "T": "g7.48xlarge",
+        "Mfr": "Intel",
+        "Net": "700 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 7600
+    },
+    {
+        "T": "m5dn.metal",
+        "Mfr": "Intel",
+        "Net": "100 Gigabit",
+        "vCPU": 96,
+        "NVMeGB": 3600
+    },
+    {
+        "T": "m6id.metal",
+        "Mfr": "Intel",
+        "Net": "50 Gigabit",
+        "vCPU": 128,
+        "NVMeGB": 7600
+    },
+    {
+        "T": "m8gd.24xlarge",
+        "Mfr": "AWS",
+        "Net": "40 Gigabit",
+        "vCPU": 96,
+        "NVMeGB": 5700
+    },
+    {
+        "T": "m8gd.48xlarge",
+        "Mfr": "AWS",
+        "Net": "50 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 11400
+    },
+    {
+        "T": "r8idn.metal-48xl",
+        "Mfr": "Intel",
+        "Net": "300 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 11400
+    },
+    {
+        "T": "g5.16xlarge",
+        "Mfr": "AMD",
+        "Net": "25 Gigabit",
+        "vCPU": 64,
+        "NVMeGB": 1900
+    },
+    {
+        "T": "g7.12xlarge",
+        "Mfr": "Intel",
+        "Net": "175 Gigabit",
+        "vCPU": 48,
+        "NVMeGB": 1900
+    },
+    {
+        "T": "r7gd.metal",
+        "Mfr": "AWS",
+        "Net": "30 Gigabit",
+        "vCPU": 64,
+        "NVMeGB": 3800
+    },
+    {
+        "T": "p5.4xlarge",
+        "Mfr": "AMD",
+        "Net": "100 Gigabit",
+        "vCPU": 16,
+        "NVMeGB": 3800
+    },
+    {
+        "T": "c6id.metal",
+        "Mfr": "Intel",
+        "Net": "50 Gigabit",
+        "vCPU": 128,
+        "NVMeGB": 7600
+    },
+    {
+        "T": "i8g.48xlarge",
+        "Mfr": "AWS",
+        "Net": "Up to 100 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 45000
+    },
+    {
+        "T": "i7i.metal-48xl",
+        "Mfr": "Intel",
+        "Net": "Up to 100 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 45000
+    },
+    {
+        "T": "g6.16xlarge",
+        "Mfr": "AMD",
+        "Net": "25 Gigabit",
+        "vCPU": 64,
+        "NVMeGB": 1880
+    },
+    {
+        "T": "r8idn.96xlarge",
+        "Mfr": "Intel",
+        "Net": "600 Gigabit",
+        "vCPU": 384,
+        "NVMeGB": 22800
+    },
+    {
+        "T": "m8idb.96xlarge",
+        "Mfr": "Intel",
+        "Net": "400 Gigabit",
+        "vCPU": 384,
+        "NVMeGB": 22800
+    },
+    {
+        "T": "r8gd.metal-48xl",
+        "Mfr": "AWS",
+        "Net": "50 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 11400
+    },
+    {
+        "T": "i8ge.metal-48xl",
+        "Mfr": "AWS",
+        "Net": "300 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 120000
+    },
+    {
+        "T": "x2idn.32xlarge",
+        "Mfr": "Intel",
+        "Net": "100 Gigabit",
+        "vCPU": 128,
+        "NVMeGB": 3800
+    },
+    {
+        "T": "p5en.48xlarge",
+        "Mfr": "Intel",
+        "Net": "3200 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 30400
+    },
+    {
+        "T": "r9gd.48xlarge",
+        "Mfr": "AWS",
+        "Net": "100 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 11400
+    },
+    {
+        "T": "r6id.metal",
+        "Mfr": "Intel",
+        "Net": "50 Gigabit",
+        "vCPU": 128,
+        "NVMeGB": 7600
+    },
+    {
+        "T": "m6idn.metal",
+        "Mfr": "Intel",
+        "Net": "200 Gigabit",
+        "vCPU": 128,
+        "NVMeGB": 7600
+    },
+    {
+        "T": "r6idn.metal",
+        "Mfr": "Intel",
+        "Net": "200 Gigabit",
+        "vCPU": 128,
+        "NVMeGB": 7600
+    },
+    {
+        "T": "g6.12xlarge",
+        "Mfr": "AMD",
+        "Net": "40 Gigabit",
+        "vCPU": 48,
+        "NVMeGB": 3760
+    },
+    {
+        "T": "r8id.metal-48xl",
+        "Mfr": "Intel",
+        "Net": "75 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 11400
+    },
+    {
+        "T": "f2.48xlarge",
+        "Mfr": "AMD",
+        "Net": "100 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 7520
+    },
+    {
+        "T": "r6idn.32xlarge",
+        "Mfr": "Intel",
+        "Net": "200 Gigabit",
+        "vCPU": 128,
+        "NVMeGB": 7600
+    },
+    {
+        "T": "c7gd.metal",
+        "Mfr": "AWS",
+        "Net": "30 Gigabit",
+        "vCPU": 64,
+        "NVMeGB": 3800
+    },
+    {
+        "T": "m8gd.metal-24xl",
+        "Mfr": "AWS",
+        "Net": "40 Gigabit",
+        "vCPU": 96,
+        "NVMeGB": 5700
+    },
+    {
+        "T": "m8id.metal-48xl",
+        "Mfr": "Intel",
+        "Net": "75 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 11400
+    },
+    {
+        "T": "m5dn.24xlarge",
+        "Mfr": "Intel",
+        "Net": "100 Gigabit",
+        "vCPU": 96,
+        "NVMeGB": 3600
+    },
+    {
+        "T": "g4dn.16xlarge",
+        "Mfr": "Intel",
+        "Net": "50 Gigabit",
+        "vCPU": 64,
+        "NVMeGB": 900
+    },
+    {
+        "T": "gr6.8xlarge",
+        "Mfr": "AMD",
+        "Net": "25 Gigabit",
+        "vCPU": 32,
+        "NVMeGB": 900
+    },
+    {
+        "T": "m9gd.48xlarge",
+        "Mfr": "AWS",
+        "Net": "100 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 11400
+    },
+    {
+        "T": "c8id.metal-48xl",
+        "Mfr": "Intel",
+        "Net": "75 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 11400
+    },
+    {
+        "T": "r8idn.48xlarge",
+        "Mfr": "Intel",
+        "Net": "300 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 11400
+    },
+    {
+        "T": "g5.8xlarge",
+        "Mfr": "AMD",
+        "Net": "25 Gigabit",
+        "vCPU": 32,
+        "NVMeGB": 900
+    },
+    {
+        "T": "i4i.32xlarge",
+        "Mfr": "Intel",
+        "Net": "75 Gigabit",
+        "vCPU": 128,
+        "NVMeGB": 30000
+    },
+    {
+        "T": "r8idb.metal-96xl",
+        "Mfr": "Intel",
+        "Net": "400 Gigabit",
+        "vCPU": 384,
+        "NVMeGB": 22800
+    },
+    {
+        "T": "im4gn.16xlarge",
+        "Mfr": "AWS",
+        "Net": "100 Gigabit",
+        "vCPU": 64,
+        "NVMeGB": 30000
+    },
+    {
+        "T": "i7i.24xlarge",
+        "Mfr": "Intel",
+        "Net": "Up to 56.25 Gigabit",
+        "vCPU": 96,
+        "NVMeGB": 22500
+    },
+    {
+        "T": "p3dn.24xlarge",
+        "Mfr": "Intel",
+        "Net": "100 Gigabit",
+        "vCPU": 96,
+        "NVMeGB": 1800
+    },
+    {
+        "T": "g7e.24xlarge",
+        "Mfr": "Intel",
+        "Net": "800 Gigabit",
+        "vCPU": 96,
+        "NVMeGB": 7600
+    },
+    {
+        "T": "r8idn.metal-96xl",
+        "Mfr": "Intel",
+        "Net": "600 Gigabit",
+        "vCPU": 384,
+        "NVMeGB": 22800
+    },
+    {
+        "T": "i7i.48xlarge",
+        "Mfr": "Intel",
+        "Net": "Up to 100 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 45000
+    },
+    {
+        "T": "m8idb.metal-96xl",
+        "Mfr": "Intel",
+        "Net": "400 Gigabit",
+        "vCPU": 384,
+        "NVMeGB": 22800
+    },
+    {
+        "T": "g5.48xlarge",
+        "Mfr": "AMD",
+        "Net": "100 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 7600
+    },
+    {
+        "T": "g6e.24xlarge",
+        "Mfr": "AMD",
+        "Net": "200 Gigabit",
+        "vCPU": 96,
+        "NVMeGB": 3800
+    },
+    {
+        "T": "x2iedn.32xlarge",
+        "Mfr": "Intel",
+        "Net": "100 Gigabit",
+        "vCPU": 128,
+        "NVMeGB": 3800
+    },
+    {
+        "T": "c8id.metal-96xl",
+        "Mfr": "Intel",
+        "Net": "100 Gigabit",
+        "vCPU": 384,
+        "NVMeGB": 22800
+    },
+    {
+        "T": "p6-b300.48xlarge",
+        "Mfr": "Intel",
+        "Net": "6400 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 30400
+    },
+    {
+        "T": "r5dn.24xlarge",
+        "Mfr": "Intel",
+        "Net": "100 Gigabit",
+        "vCPU": 96,
+        "NVMeGB": 3600
+    },
+    {
+        "T": "g4dn.8xlarge",
+        "Mfr": "Intel",
+        "Net": "50 Gigabit",
+        "vCPU": 32,
+        "NVMeGB": 900
+    },
+    {
+        "T": "r8gd.48xlarge",
+        "Mfr": "AWS",
+        "Net": "50 Gigabit",
+        "vCPU": 192,
+        "NVMeGB": 11400
+    },
+    {
+        "T": "i3en.metal",
+        "Mfr": "Intel",
+        "Net": "100 Gigabit",
+        "vCPU": 96,
+        "NVMeGB": 60000
+    },
+    {
+        "T": "g7.8xlarge",
+        "Mfr": "Intel",
+        "Net": "100 Gigabit",
+        "vCPU": 32,
+        "NVMeGB": 930
+    },
+    {
+        "T": "g7.24xlarge",
+        "Mfr": "Intel",
+        "Net": "350 Gigabit",
+        "vCPU": 96,
+        "NVMeGB": 3800
+    }
+]

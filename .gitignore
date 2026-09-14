@@ -1,0 +1,17 @@
+# Terraform state may contain sensitive values and is environment-specific.
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+crash.log
+
+# Real variable values, including the operator's IP.
+terraform.tfvars
+*.auto.tfvars
+
+# Saved plans.
+*.tfplan
+
+# Benchmark output.
+results/
+*.svg

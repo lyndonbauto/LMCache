@@ -1,0 +1,30 @@
+#!/bin/bash
+# Half A load-generator bootstrap: Aerospike tools + LMCache (CPU build).
+# No GPU, no vLLM, no torch CUDA wheels -- this node exists to measure the
+# storage ceiling and run the L2 adapter size sweep.
+
+${efa_bootstrap}
+
+# Aerospike client tooling: asadm / asinfo for cluster verification, and
+# asbench for the raw storage ceiling measurement that is independent of
+# anything LMCache does.
+cd /opt
+curl -fsSL -o aerospike-tools.tgz "https://download.aerospike.com/artifacts/aerospike-tools/11.2.2/aerospike-tools_11.2.2_el9_x86_64.tgz"
+tar -xf aerospike-tools.tgz
+cd aerospike-tools_* && ./asinstall || true
+
+# Aerospike C client, needed to build LMCache's native Aerospike connector.
+dnf -y install openssl-devel libuuid-devel zlib-devel lua-devel
+cd /opt
+curl -fsSL -o aerospike-client-c.tgz "https://download.aerospike.com/artifacts/aerospike-client-c/6.6.0/aerospike-client-c-6.6.0.el9.x86_64.tgz"
+tar -xf aerospike-client-c.tgz || true
+
+# Record the cluster seed list so the benchmark scripts do not have to
+# rediscover it.
+cat > /etc/profile.d/lmcache-bench.sh <<'PROFILE_EOF'
+export LMCACHE_AEROSPIKE_HOSTS="${join(",", [for ip in server_ips : "${ip}:3000"])}"
+export LMCACHE_AEROSPIKE_NAMESPACE="${namespace}"
+export LMCACHE_AEROSPIKE_SET="kv_chunks"
+PROFILE_EOF
+
+echo "client bootstrap complete" > /var/log/bench-bootstrap-done
