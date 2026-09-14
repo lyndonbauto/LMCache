@@ -195,7 +195,54 @@ how much they distort the measurement:
 AMD GPUs are not offered on EC2 in `us-east-1`, so Half B will be NVIDIA
 regardless, and should be labelled as such.
 
-## 6. Incident: an unrelated apply destroyed the cluster
+## 6. Raw data
+
+Everything below was pulled off the instances before teardown. The summary
+tables above are derived from these files; nothing in this document depends on
+infrastructure that no longer exists.
+
+| Path | Contents |
+|---|---|
+| `results/armA_sweep.csv`, `results/armB_sweep.csv` | Per-size summary, both arms |
+| `results/raw/results_armA/`, `results/raw/results_armB/` | 26 full `lmcache bench l2` reports per arm (store + load at each of 13 sizes), including avg/min/max/p50/p99/std and per-round counts |
+| `results/raw/ceil.log` | `asbench` storage-ceiling run, flash and DRAM, full per-second tps output |
+| `results/raw/armA.log` | Arm A sweep driver log, including the gate output |
+| `results/raw/verification/cluster_and_devices.txt` | Enterprise version + edition on all 5 nodes, `cluster_size=5` proof, `asinfo` namespace fields, and full `lsblk` + selected-device list per node |
+| `results/raw/verification/efa.txt` | `fi_info -p efa`, `ibv_devinfo`, and `fi_pingpong` loopback **and** node-to-node transfers |
+| `results/raw/verification/aerospike.conf.as-run` | The exact config the cluster ran |
+| `results/raw/run_arm.sh`, `results/raw/ceiling.sh` | The measurement scripts as executed on the client |
+
+The Arm B sweep driver log is not included: that unit's `rm -f` deleted its own
+append target before systemd wrote to it. The Arm B *data* is unaffected and
+complete -- the per-size reports and CSV were written by the benchmark itself,
+not by the driver log.
+
+## 7. Rebuilding Half A
+
+Pinned facts needed for a faithful rebuild:
+
+- **Server package**: `aerospike-server-enterprise_8.1.2.5_tools-13.0.3_amzn2023_x86_64.tgz`.
+  Not `el9` (ABI-incompatible with AL2023) and not `8.0.0.7` (crashes against
+  AL2023's OpenSSL 3.5.7). Publicly downloadable; no credentials.
+- **Feature key**: read from `$FEATURES_CONF`, default
+  `/home/lyndon/Downloads/features.conf`. Never committed.
+- **Device selection**: positive `lsblk` MODEL match with a hard count
+  assertion, in `bin/provision-enterprise.sh`.
+- **Arm definitions**: `bin/set-arm.sh A|B`.
+
+```bash
+cd terraform && terraform apply                      # ~6 min (GPU: add -var gpu_count=1)
+cd .. && ./bin/provision-enterprise.sh               # ~2 min, Enterprise + key + devices
+./bin/verify-cluster.sh                              # expect cluster_size=5
+./bin/set-arm.sh A                                   # or B; wipes + restarts
+```
+
+Expect **~15 minutes** wall clock from `apply` to a gated, measurable cluster:
+~6 min for instance create plus cloud-init, ~2 min for Enterprise provisioning,
+~1 min to verify, and a couple of minutes of slack. A full two-arm sweep plus
+the storage ceiling adds roughly 25 minutes.
+
+## 8. Incident: an unrelated apply destroyed the cluster
 
 Adding the GPU node with `terraform apply` **destroyed and recreated all five
 storage nodes and the client**, losing the ephemeral NVMe dataset and about an
