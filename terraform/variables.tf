@@ -154,3 +154,50 @@ variable "nat_subnet_cidr" {
   type        = string
   default     = "10.240.0.0/28"
 }
+
+# ---------------------------------------------------------------------------
+# Cost guards
+# ---------------------------------------------------------------------------
+
+variable "auto_teardown_hours" {
+  description = <<-EOT
+    Hours from `terraform apply` until the auto-teardown Lambda terminates the
+    cluster. 12 is deliberately generous against an 8-hour working day: the
+    guard must not fire mid-benchmark, because a teardown during a measurement
+    costs more (a wasted run plus a rebuild) than a few extra idle hours.
+
+    Extending is a single explicit command, NOT a `terraform apply`:
+        ./bin/extend-teardown.sh <hours>
+  EOT
+  type        = number
+  default     = 12
+}
+
+variable "budget_ceiling_usd" {
+  description = "Approved spend ceiling. Alerts fire at the percentages below."
+  type        = number
+  default     = 2500
+}
+
+variable "budget_alert_thresholds_pct" {
+  description = "Percentages of the ceiling at which to send ACTUAL-spend alerts."
+  type        = list(number)
+  default     = [50, 80, 100]
+}
+
+variable "alert_email" {
+  description = "Address receiving budget and auto-teardown alerts."
+  type        = string
+  default     = "lbauto@aerospike.com"
+}
+
+variable "lmcache_commit" {
+  description = <<-EOT
+    LMCache commit measured as the baseline. Pinned to a SHA, and cloned from
+    upstream rather than copied from the operator's working tree, because a
+    parallel agent is developing RDMA changes in that tree -- a baseline taken
+    against uncommitted work is not a baseline.
+  EOT
+  type        = string
+  default     = "68b7e5f5"
+}

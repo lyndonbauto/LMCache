@@ -1,27 +1,79 @@
 #!/bin/bash
-# Half A load-generator bootstrap: Aerospike tools + LMCache (CPU build).
-# No GPU, no vLLM, no torch CUDA wheels -- this node exists to measure the
-# storage ceiling and run the L2 adapter size sweep.
+# Half A load-generator bootstrap: Aerospike tools + LMCache with the native
+# Aerospike connector, CPU-only. No GPU, no vLLM, no CUDA wheels -- this node
+# measures the storage ceiling and runs the L2 adapter size sweep.
+#
+# Progress and failures are in /var/log/cloud-init-output.log. The marker file
+# /var/log/bench-bootstrap-done is written only on full success, so its absence
+# means something failed rather than "still running" (check the log to tell
+# them apart).
 
 ${efa_bootstrap}
 
-# Aerospike client tooling: asadm / asinfo for cluster verification, and
-# asbench for the raw storage ceiling measurement that is independent of
-# anything LMCache does.
+set -euxo pipefail
+
+# ---------------------------------------------------------------------------
+# Aerospike tools: asadm / asinfo for cluster verification, asbench for the raw
+# storage ceiling measurement that does not involve LMCache at all.
+# ---------------------------------------------------------------------------
 cd /opt
 curl -fsSL -o aerospike-tools.tgz "https://download.aerospike.com/artifacts/aerospike-tools/11.2.2/aerospike-tools_11.2.2_el9_x86_64.tgz"
 tar -xf aerospike-tools.tgz
-cd aerospike-tools_* && ./asinstall || true
+cd aerospike-tools_*/
+./asinstall
 
-# Aerospike C client, needed to build LMCache's native Aerospike connector.
-dnf -y install openssl-devel libuuid-devel zlib-devel lua-devel
+# ---------------------------------------------------------------------------
+# Aerospike C client (devel headers + libaerospike), which the LMCache native
+# connector links against.
+# ---------------------------------------------------------------------------
+dnf -y install openssl-devel libuuid-devel zlib-devel lua-devel libuv-devel libyaml-devel
+
 cd /opt
-curl -fsSL -o aerospike-client-c.tgz "https://download.aerospike.com/artifacts/aerospike-client-c/6.6.0/aerospike-client-c-6.6.0.el9.x86_64.tgz"
-tar -xf aerospike-client-c.tgz || true
+curl -fsSL -o aerospike-client-c.tgz "https://download.aerospike.com/artifacts/aerospike-client-c/6.6.0/aerospike-client-c_6.6.0_el9_x86_64.tgz"
+tar -xf aerospike-client-c.tgz
+# The tarball ships RPMs; install the devel package, which provides
+# /usr/include/aerospike/*.h and /usr/lib64/libaerospike.so.
+find /opt -name 'aerospike-client-c*devel*.rpm' -exec dnf -y install {} \; || \
+  find /opt -name 'aerospike-client-c*.rpm' -exec dnf -y install {} \;
 
-# Record the cluster seed list so the benchmark scripts do not have to
-# rediscover it.
+# ---------------------------------------------------------------------------
+# Python 3.12 + torch (CPU). The connector is a torch CppExtension, so torch
+# must be present before LMCache is built.
+# ---------------------------------------------------------------------------
+dnf -y install python3.12 python3.12-devel python3.12-pip git cmake
+
+python3.12 -m venv /opt/lmcache-venv
+# shellcheck disable=SC1091
+source /opt/lmcache-venv/bin/activate
+pip install --upgrade pip setuptools wheel
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+# ---------------------------------------------------------------------------
+# LMCache, pinned to the exact baseline commit.
+#
+# Cloned from upstream at a pinned SHA rather than copied from the operator's
+# working tree: a parallel agent is actively developing RDMA changes in that
+# tree, and a baseline measured against uncommitted work is not a baseline.
+# ---------------------------------------------------------------------------
+cd /opt
+git clone https://github.com/LMCache/LMCache.git lmcache
+cd lmcache
+git checkout ${lmcache_commit}
+
+export BUILD_WITH_AEROSPIKE=1
+export AEROSPIKE_INCLUDE_DIR=/usr/include
+export AEROSPIKE_LIBRARY_DIR=/usr/lib64
+export AEROSPIKE_EVENT_LIB=libuv
+export NO_GPU_EXT=1
+pip install -e . --no-build-isolation
+
+python -c "import lmcache.lmcache_aerospike; print('aerospike connector OK')"
+
+# ---------------------------------------------------------------------------
+# Environment for the benchmark scripts.
+# ---------------------------------------------------------------------------
 cat > /etc/profile.d/lmcache-bench.sh <<'PROFILE_EOF'
+source /opt/lmcache-venv/bin/activate
 export LMCACHE_AEROSPIKE_HOSTS="${join(",", [for ip in server_ips : "${ip}:3000"])}"
 export LMCACHE_AEROSPIKE_NAMESPACE="${namespace}"
 export LMCACHE_AEROSPIKE_SET="kv_chunks"

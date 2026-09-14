@@ -23,4 +23,6 @@ export LMCACHE_AEROSPIKE_SET="kv_chunks"
 # report nothing useful.
 PROFILE_EOF
 
+echo "lmcache_commit=${lmcache_commit}" > /var/log/lmcache-commit
+
 echo "gpu bootstrap complete -- install vLLM + LMCache per docs/half-b-ttft.md" > /var/log/bench-bootstrap-done

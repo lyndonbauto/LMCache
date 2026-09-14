@@ -15,3 +15,7 @@ terraform.tfvars
 # Benchmark output.
 results/
 *.svg
+
+# Aerospike Enterprise license file -- never commit.
+features.conf
+*.features.conf

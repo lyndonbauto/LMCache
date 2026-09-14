@@ -101,3 +101,31 @@ locals {
     "g6e.48xlarge"  = 30.1312
   }
 }
+
+# ---------------------------------------------------------------------------
+# Cost guards
+# ---------------------------------------------------------------------------
+
+output "auto_teardown_deadline_utc" {
+  description = <<-EOT
+    When the auto-teardown Lambda will terminate the cluster. Set once at create
+    time; a later `terraform apply` will NOT move it. Extend with
+    ./bin/extend-teardown.sh <hours>.
+  EOT
+  value       = aws_scheduler_schedule.teardown.schedule_expression
+}
+
+output "extend_teardown_command" {
+  description = "The single command that extends the deadline."
+  value       = "./bin/extend-teardown.sh <hours-from-now>"
+}
+
+output "alert_topic_arn" {
+  description = "SNS topic receiving budget and auto-teardown notifications."
+  value       = aws_sns_topic.alerts.arn
+}
+
+output "budget_name" {
+  description = "AWS Budget enforcing the approved spend ceiling."
+  value       = aws_budgets_budget.ceiling.name
+}

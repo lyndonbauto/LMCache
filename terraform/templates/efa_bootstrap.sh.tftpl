@@ -5,6 +5,9 @@
 set -euxo pipefail
 
 dnf -y update
+# Do NOT add gnupg2 here: it conflicts with the preinstalled gnupg2-minimal on
+# Amazon Linux 2023 and fails the whole transaction. The missing gpg-agent is
+# handled at the import call instead (see below).
 dnf -y install gcc gcc-c++ make cmake git pciutils tar wget jq python3-pip
 
 EFA_VERSION="${efa_installer_version}"
@@ -13,12 +16,27 @@ curl -fsSL -o aws-efa-installer.tar.gz \
   "https://efa-installer.amazonaws.com/aws-efa-installer-$${EFA_VERSION}.tar.gz"
 
 # Verify the tarball against AWS's published GPG key before running it as root.
+#
+# --batch --no-tty and a scratch GNUPGHOME are mandatory here, not hygiene:
+# cloud-init runs with no controlling terminal and no writable default
+# ~/.gnupg, so a plain `gpg --import` fails with "cannot open '/dev/tty'" and,
+# under `set -e`, aborts the entire bootstrap before anything is installed.
+export GNUPGHOME
+GNUPGHOME=$(mktemp -d)
 curl -fsSL -o aws-efa-installer.key https://efa-installer.amazonaws.com/aws-efa-installer.key
 curl -fsSL -o aws-efa-installer.tar.gz.sig \
   "https://efa-installer.amazonaws.com/aws-efa-installer-$${EFA_VERSION}.tar.gz.sig" || true
 if [ -s aws-efa-installer.tar.gz.sig ]; then
-  gpg --import aws-efa-installer.key
-  gpg --verify aws-efa-installer.tar.gz.sig aws-efa-installer.tar.gz
+  # `|| true` on the import ONLY. Amazon Linux 2023 ships gpg without
+  # gpg-agent, so --import returns exit 2 even though the key imports
+  # correctly ("imported: 1" in the log). Under `set -e` that aborts the whole
+  # bootstrap at a point where the log looks like success.
+  #
+  # The security property is preserved: --verify does not need the agent, it
+  # works, and it is deliberately NOT suffixed with `|| true` -- a bad or
+  # missing signature still aborts the bootstrap.
+  gpg --batch --no-tty --import aws-efa-installer.key || true
+  gpg --batch --no-tty --verify aws-efa-installer.tar.gz.sig aws-efa-installer.tar.gz
 fi
 
 tar -xf aws-efa-installer.tar.gz

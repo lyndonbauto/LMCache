@@ -7,14 +7,22 @@ ${efa_bootstrap}
 # ---------------------------------------------------------------------------
 # Aerospike
 # ---------------------------------------------------------------------------
-dnf -y install https://download.aerospike.com/artifacts/aerospike-server-community/8.0.0.7/aerospike-server-community_8.0.0.7_tools-11.2.2_el9_x86_64.tgz 2>/dev/null || {
-  # Fall back to the tarball flow if the direct rpm URL moved.
+# The published artifact is a .tgz of RPMs, not an RPM, so `dnf install <url>`
+# cannot consume it directly -- fetch and run the bundled installer.
+#
+# `|| true` on asinstall: it exits non-zero when the package is ALREADY
+# installed, which makes this whole script non-idempotent under `set -e`. That
+# matters because a bootstrap that cannot be safely re-run is a bootstrap you
+# cannot repair in place -- you have to destroy and recreate the node. The
+# explicit rpm -q check below is what actually decides success.
+if ! rpm -q aerospike-server-community >/dev/null 2>&1; then
   cd /opt
   curl -fsSL -o aerospike.tgz "https://download.aerospike.com/artifacts/aerospike-server-community/8.0.0.7/aerospike-server-community_8.0.0.7_tools-11.2.2_el9_x86_64.tgz"
   tar -xf aerospike.tgz
-  cd aerospike-server-community_*
-  ./asinstall
-}
+  cd aerospike-server-community_*/
+  ./asinstall || true
+fi
+rpm -q aerospike-server-community
 
 mkdir -p /etc/aerospike /var/log/aerospike
 cat > /etc/aerospike/aerospike.conf <<'AEROSPIKE_CONF_EOF'
@@ -31,10 +39,19 @@ AEROSPIKE_CONF_EOF
 # the only reliable discriminator -- matching on size or index will eventually
 # put Aerospike's raw-device engine on top of the root volume and destroy it.
 # ---------------------------------------------------------------------------
+# Discovery uses lsblk's MODEL column, not `nvme id-ctrl`: nvme-cli is not
+# installed on a stock AL2023 image, and its absence fails silently here,
+# producing an empty device list rather than an error.
+#
+# Observed on i3en.24xlarge: the EBS root volume is /dev/nvme3n1 and the
+# instance-store volumes include /dev/nvme0n1. Device index tells you NOTHING
+# about which is which. Matching on the model string is the only safe
+# discriminator -- a hardcoded list would have handed the root volume to
+# Aerospike's raw-device engine.
 DEVICE_LINES=""
-for dev in /dev/nvme*n1; do
+while read -r name model; do
+  dev="/dev/$name"
   [ -b "$dev" ] || continue
-  model=$(nvme id-ctrl "$dev" 2>/dev/null | awk -F: '/^mn /{print $2}' | xargs || true)
   case "$model" in
     *"Instance Storage"*)
       DEVICE_LINES="$DEVICE_LINES        device $dev\n"
@@ -43,7 +60,7 @@ for dev in /dev/nvme*n1; do
       blkdiscard -f "$dev" 2>/dev/null || dd if=/dev/zero of="$dev" bs=1M count=8 oflag=direct
       ;;
   esac
-done
+done < <(lsblk -dn -o NAME,MODEL)
 
 if [ -z "$DEVICE_LINES" ]; then
   echo "FATAL: no local NVMe instance-store devices found. The chosen instance type" >&2

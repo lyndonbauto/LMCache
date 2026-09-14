@@ -114,6 +114,46 @@ resource "aws_instance" "server" {
     namespace      = var.aerospike_namespace
   })
 
+
+  # The cost guards must exist BEFORE any billable instance does. Terraform
+  # would otherwise be free to create these in parallel with the schedule and
+  # the budget, leaving a window -- however short -- in which a $68/hr cluster
+  # is running with no deadline and no spend alarm. If the guards fail to
+  # create, nothing billable gets created either.
+  depends_on = [
+    aws_scheduler_schedule.teardown,
+    aws_budgets_budget.ceiling,
+  ]
+
+
+  # user_data only ever executes on first boot. Changing it on a running
+  # instance therefore changes nothing functional -- but EC2 requires the
+  # instance to be STOPPED to modify the attribute, so Terraform would stop and
+  # start the node to apply a no-op. On i3en that destroys the ephemeral NVMe
+  # and with it the entire benchmark dataset.
+  #
+  # Ignoring it means a corrected template still applies to freshly created
+  # nodes (ignore_changes does not affect creation) while never disturbing a
+  # running cluster. Bootstrap fixes for a live node are pushed via
+  # ./bin/ssm-run.sh instead.
+  lifecycle {
+    # ami is ignored for the same reason as user_data, and it is the more
+    # dangerous of the two.
+    #
+    # data.aws_ssm_parameter.al2023 resolves the LATEST Amazon Linux 2023 image
+    # at every plan. AWS republishes that image regularly -- it changed once
+    # during this very session -- and a changed AMI FORCES REPLACEMENT. The
+    # result is that an apply intended to add a single GPU node silently
+    # destroyed and recreated all five storage nodes and the client, losing the
+    # ephemeral NVMe dataset and about an hour of cluster setup.
+    #
+    # Ignoring ami means existing nodes keep the image they booted with, while
+    # newly created nodes still get the current one (ignore_changes does not
+    # affect creation). To deliberately roll the fleet onto a new image, taint
+    # or destroy the nodes explicitly.
+    ignore_changes = [ami, user_data]
+  }
+
   tags = {
     Name = "${var.project_name}-server-${count.index}"
     Role = "aerospike-server"
@@ -145,10 +185,51 @@ resource "aws_instance" "client" {
   }
 
   user_data = templatefile("${path.module}/templates/client_user_data.sh.tftpl", {
-    efa_bootstrap = local.efa_bootstrap
-    server_ips    = local.server_ips
-    namespace     = var.aerospike_namespace
+    efa_bootstrap  = local.efa_bootstrap
+    server_ips     = local.server_ips
+    namespace      = var.aerospike_namespace
+    lmcache_commit = var.lmcache_commit
   })
+
+
+  # The cost guards must exist BEFORE any billable instance does. Terraform
+  # would otherwise be free to create these in parallel with the schedule and
+  # the budget, leaving a window -- however short -- in which a $68/hr cluster
+  # is running with no deadline and no spend alarm. If the guards fail to
+  # create, nothing billable gets created either.
+  depends_on = [
+    aws_scheduler_schedule.teardown,
+    aws_budgets_budget.ceiling,
+  ]
+
+
+  # user_data only ever executes on first boot. Changing it on a running
+  # instance therefore changes nothing functional -- but EC2 requires the
+  # instance to be STOPPED to modify the attribute, so Terraform would stop and
+  # start the node to apply a no-op. On i3en that destroys the ephemeral NVMe
+  # and with it the entire benchmark dataset.
+  #
+  # Ignoring it means a corrected template still applies to freshly created
+  # nodes (ignore_changes does not affect creation) while never disturbing a
+  # running cluster. Bootstrap fixes for a live node are pushed via
+  # ./bin/ssm-run.sh instead.
+  lifecycle {
+    # ami is ignored for the same reason as user_data, and it is the more
+    # dangerous of the two.
+    #
+    # data.aws_ssm_parameter.al2023 resolves the LATEST Amazon Linux 2023 image
+    # at every plan. AWS republishes that image regularly -- it changed once
+    # during this very session -- and a changed AMI FORCES REPLACEMENT. The
+    # result is that an apply intended to add a single GPU node silently
+    # destroyed and recreated all five storage nodes and the client, losing the
+    # ephemeral NVMe dataset and about an hour of cluster setup.
+    #
+    # Ignoring ami means existing nodes keep the image they booted with, while
+    # newly created nodes still get the current one (ignore_changes does not
+    # affect creation). To deliberately roll the fleet onto a new image, taint
+    # or destroy the nodes explicitly.
+    ignore_changes = [ami, user_data]
+  }
 
   tags = {
     Name = "${var.project_name}-client-${count.index}"
@@ -182,10 +263,51 @@ resource "aws_instance" "gpu" {
   }
 
   user_data = templatefile("${path.module}/templates/gpu_user_data.sh.tftpl", {
-    efa_bootstrap = local.efa_bootstrap
-    server_ips    = local.server_ips
-    namespace     = var.aerospike_namespace
+    efa_bootstrap  = local.efa_bootstrap
+    server_ips     = local.server_ips
+    namespace      = var.aerospike_namespace
+    lmcache_commit = var.lmcache_commit
   })
+
+
+  # The cost guards must exist BEFORE any billable instance does. Terraform
+  # would otherwise be free to create these in parallel with the schedule and
+  # the budget, leaving a window -- however short -- in which a $68/hr cluster
+  # is running with no deadline and no spend alarm. If the guards fail to
+  # create, nothing billable gets created either.
+  depends_on = [
+    aws_scheduler_schedule.teardown,
+    aws_budgets_budget.ceiling,
+  ]
+
+
+  # user_data only ever executes on first boot. Changing it on a running
+  # instance therefore changes nothing functional -- but EC2 requires the
+  # instance to be STOPPED to modify the attribute, so Terraform would stop and
+  # start the node to apply a no-op. On i3en that destroys the ephemeral NVMe
+  # and with it the entire benchmark dataset.
+  #
+  # Ignoring it means a corrected template still applies to freshly created
+  # nodes (ignore_changes does not affect creation) while never disturbing a
+  # running cluster. Bootstrap fixes for a live node are pushed via
+  # ./bin/ssm-run.sh instead.
+  lifecycle {
+    # ami is ignored for the same reason as user_data, and it is the more
+    # dangerous of the two.
+    #
+    # data.aws_ssm_parameter.al2023 resolves the LATEST Amazon Linux 2023 image
+    # at every plan. AWS republishes that image regularly -- it changed once
+    # during this very session -- and a changed AMI FORCES REPLACEMENT. The
+    # result is that an apply intended to add a single GPU node silently
+    # destroyed and recreated all five storage nodes and the client, losing the
+    # ephemeral NVMe dataset and about an hour of cluster setup.
+    #
+    # Ignoring ami means existing nodes keep the image they booted with, while
+    # newly created nodes still get the current one (ignore_changes does not
+    # affect creation). To deliberately roll the fleet onto a new image, taint
+    # or destroy the nodes explicitly.
+    ignore_changes = [ami, user_data]
+  }
 
   tags = {
     Name = "${var.project_name}-gpu-${count.index}"
