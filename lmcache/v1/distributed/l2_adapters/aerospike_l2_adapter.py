@@ -14,6 +14,9 @@ from typing import TYPE_CHECKING, Optional
 import os
 
 if TYPE_CHECKING:
+    from lmcache.lmcache_aerospike import (
+        L1RdmaRegistration as NativeL1RdmaRegistration,
+    )
     from lmcache.v1.distributed.internal_api import L1MemoryDesc
 
 # First Party
@@ -24,8 +27,72 @@ from lmcache.v1.distributed.l2_adapters.config import (
     register_l2_adapter_type,
 )
 from lmcache.v1.distributed.l2_adapters.factory import register_l2_adapter_factory
+from lmcache.v1.distributed.l2_adapters.rdma_registration import (
+    DISABLED_L1_RDMA,
+    L1RdmaConfig,
+)
 
 logger = init_logger(__name__)
+
+
+# HELPER FUNCTIONS
+def _build_native_rdma_registration(
+    rdma: L1RdmaConfig,
+    l1_memory_desc: "Optional[L1MemoryDesc]",
+) -> "NativeL1RdmaRegistration":
+    """Translate an ``L1RdmaConfig`` into the native registration struct.
+
+    Mirrors ``_create_mooncake_store_l2_adapter``'s handling of
+    ``L1RegistrationConfig`` so the two adapters stay comparable. When RDMA is
+    disabled this returns a default-constructed (disabled) struct without
+    touching ``l1_memory_desc``.
+
+    Args:
+        rdma: Validated RDMA settings from the adapter config.
+        l1_memory_desc: Descriptor for LMCache's pinned L1 slab, or ``None``
+            when the caller has no L1 slab to offer.
+
+    Returns:
+        A native ``L1RdmaRegistration`` ready to pass to the native client.
+
+    Raises:
+        RuntimeError: If RDMA is requested but the native extension was built
+            without RDMA support.
+        ValueError: If RDMA is enabled but ``l1_memory_desc`` is missing, or
+            the window plan cannot be registered against the slab.
+    """
+    # First Party
+    from lmcache.lmcache_aerospike import L1RdmaRegistration
+
+    registration = L1RdmaRegistration()
+    if not rdma.is_enabled():
+        return registration
+
+    if not hasattr(registration, "transport"):
+        raise RuntimeError(
+            "Aerospike RDMA reception was requested, but the native extension "
+            "was built without RDMA support. Rebuild with "
+            "BUILD_WITH_AEROSPIKE_RDMA=1 and libibverbs development headers "
+            "installed (package rdma-core / libibverbs-dev)."
+        )
+
+    if l1_memory_desc is None:
+        raise ValueError(
+            "Aerospike RDMA reception is enabled, but no L1 memory descriptor "
+            "was provided; the native connector cannot register a destination "
+            "for the Aerospike server to write into."
+        )
+
+    rdma.window_plan.validate_against(l1_memory_desc)
+
+    registration.transport = rdma.transport.name
+    registration.device_name = rdma.device_name
+    registration.gid_index = rdma.gid_index
+    registration.base = l1_memory_desc.ptr
+    registration.size = l1_memory_desc.size
+    registration.window_count = rdma.window_plan.window_count
+    registration.window_bytes = rdma.window_plan.window_bytes
+    return registration
 
 
 class AerospikeL2AdapterConfig(L2AdapterConfigBase):
@@ -43,6 +110,7 @@ class AerospikeL2AdapterConfig(L2AdapterConfigBase):
     - max_record_bytes: override server record cap (0 = discover)
     - username / password: optional EE auth
     - max_capacity_gb: L2 capacity tracking (0 = disabled)
+    - rdma: optional RDMA reception settings (see ``L1RdmaConfig.help()``)
     """
 
     def __init__(
@@ -59,8 +127,10 @@ class AerospikeL2AdapterConfig(L2AdapterConfigBase):
         username: str = "",
         password: str = "",
         max_capacity_gb: float = 0,
+        rdma: L1RdmaConfig = DISABLED_L1_RDMA,
     ) -> None:
         super().__init__()
+        self.rdma = rdma
         self.hosts = hosts
         self.namespace = namespace
         self.set_name = set_name
@@ -130,6 +200,11 @@ class AerospikeL2AdapterConfig(L2AdapterConfigBase):
         if not isinstance(max_capacity_gb, (int, float)) or max_capacity_gb < 0:
             raise ValueError("max_capacity_gb must be a non-negative number")
 
+        raw_rdma = d.get("rdma", {})
+        if not isinstance(raw_rdma, dict):
+            raise ValueError("rdma must be a mapping of RDMA settings")
+        rdma = L1RdmaConfig.from_dict(raw_rdma)
+
         return cls(
             hosts=hosts,
             namespace=str(namespace),
@@ -143,6 +218,7 @@ class AerospikeL2AdapterConfig(L2AdapterConfigBase):
             username=str(username),
             password=str(password),
             max_capacity_gb=float(max_capacity_gb),
+            rdma=rdma,
         )
 
     @classmethod
@@ -159,13 +235,14 @@ class AerospikeL2AdapterConfig(L2AdapterConfigBase):
             "- target_segment_bytes (int): shard target, 0 = auto (default 0)\n"
             "- max_record_bytes (int): cap override, 0 = discover (default 0)\n"
             "- username / password (str): optional auth\n"
-            "- max_capacity_gb (float): L2 capacity for eviction (default 0)\n\n"
+            "- max_capacity_gb (float): L2 capacity for eviction (default 0)\n"
+            "- rdma (dict): optional RDMA settings; see below\n\n"
             "Environment variable defaults (when config value is empty):\n"
             "- LMCACHE_AEROSPIKE_HOSTS\n"
             "- LMCACHE_AEROSPIKE_NAMESPACE\n"
             "- LMCACHE_AEROSPIKE_SET\n"
             "- LMCACHE_AEROSPIKE_USERNAME\n"
-            "- LMCACHE_AEROSPIKE_PASSWORD"
+            "- LMCACHE_AEROSPIKE_PASSWORD\n\n" + L1RdmaConfig.help()
         )
 
 
@@ -173,8 +250,30 @@ def _create_aerospike_l2_adapter(
     config: L2AdapterConfigBase,
     l1_memory_desc: "Optional[L1MemoryDesc]" = None,
 ) -> L2AdapterInterface:
-    """Create a NativeConnectorL2Adapter backed by the C++ Aerospike connector."""
-    del l1_memory_desc
+    """Create a NativeConnectorL2Adapter backed by the C++ Aerospike connector.
+
+    When ``config.rdma`` selects a transport other than ``DISABLED``, the L1
+    slab described by ``l1_memory_desc`` is handed to the native connector so it
+    can pre-register a pool of bounded RDMA windows and publish their rkeys to
+    each Aerospike node. With RDMA disabled the descriptor is not used and the
+    adapter behaves exactly as it did before.
+
+    Args:
+        config: An ``AerospikeL2AdapterConfig``.
+        l1_memory_desc: Descriptor for LMCache's pinned L1 slab. Required only
+            when RDMA is enabled.
+
+    Returns:
+        A ``NativeConnectorL2Adapter`` wrapping the native Aerospike client.
+
+    Raises:
+        RuntimeError: If the native C++ Aerospike extension is unavailable, or
+            if RDMA is requested but the extension was built without RDMA
+            support.
+        ValueError: If ``config`` is not an ``AerospikeL2AdapterConfig``, if
+            ``hosts`` is empty, or if RDMA is enabled but ``l1_memory_desc`` is
+            missing, null, or backed by a growth-capable L1 allocator.
+    """
     try:
         # First Party
         from lmcache.lmcache_aerospike import LMCacheAerospikeClient
@@ -189,7 +288,8 @@ def _create_aerospike_l2_adapter(
         NativeConnectorL2Adapter,
     )
 
-    assert isinstance(config, AerospikeL2AdapterConfig)
+    if not isinstance(config, AerospikeL2AdapterConfig):
+        raise ValueError(f"Expected AerospikeL2AdapterConfig, got {type(config)}")
 
     hosts = config.hosts or os.environ.get("LMCACHE_AEROSPIKE_HOSTS", "")
     namespace = config.namespace or os.environ.get(
@@ -201,6 +301,8 @@ def _create_aerospike_l2_adapter(
 
     if not hosts:
         raise ValueError("hosts must be a non-empty string")
+
+    rdma_registration = _build_native_rdma_registration(config.rdma, l1_memory_desc)
 
     native_client = LMCacheAerospikeClient(
         hosts,
@@ -214,13 +316,16 @@ def _create_aerospike_l2_adapter(
         config.max_record_bytes,
         username,
         password,
+        rdma_registration,
     )
     logger.info(
-        "Created Aerospike L2 adapter: hosts=%s namespace=%s set=%s (workers=%d)",
+        "Created Aerospike L2 adapter: hosts=%s namespace=%s set=%s "
+        "(workers=%d, rdma=%s)",
         hosts,
         namespace,
         set_name,
         config.num_workers,
+        config.rdma.transport.name,
     )
     return NativeConnectorL2Adapter(
         native_client,
@@ -231,6 +336,7 @@ def _create_aerospike_l2_adapter(
             "namespace": namespace,
             "set_name": set_name,
             "num_workers": config.num_workers,
+            "rdma_transport": config.rdma.transport.name,
         },
     )
 
