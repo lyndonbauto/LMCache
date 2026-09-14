@@ -17,7 +17,11 @@ from lmcache.v1.distributed.l2_adapters.rdma_registration import (
     L1RdmaConfig,
     RdmaTransport,
     RdmaWindowPlan,
+    validate_fetch_timeout_against_write_ttl,
 )
+
+# The L1 write-lock TTL default, from L1ManagerConfig.write_ttl_seconds.
+_WRITE_TTL_DEFAULT = 600
 
 _SLAB_BYTES = 1 << 20
 _ALIGN = 4096
@@ -188,3 +192,83 @@ class TestL1RdmaConfig:
         text = L1RdmaConfig.help()
         assert "MixedMemoryAllocator" in text
         assert "Soft-RoCE" in text
+
+    def test_help_documents_the_write_ttl_invariant(self) -> None:
+        text = L1RdmaConfig.help()
+        assert "l1-write-ttl-seconds" in text
+
+    def test_fetch_timeout_defaults_below_the_write_ttl_default(self) -> None:
+        assert L1RdmaConfig().fetch_timeout_seconds < _WRITE_TTL_DEFAULT
+
+    def test_fetch_timeout_is_parsed(self) -> None:
+        config = L1RdmaConfig.from_dict(
+            {"transport": "RC", "fetch_timeout_seconds": 2.5}
+        )
+        assert config.fetch_timeout_seconds == 2.5
+
+    @pytest.mark.parametrize("bad", [0, -1, "5", True, None])
+    def test_invalid_fetch_timeout_is_rejected(self, bad: object) -> None:
+        with pytest.raises(ValueError, match="fetch_timeout_seconds"):
+            L1RdmaConfig.from_dict({"transport": "RC", "fetch_timeout_seconds": bad})
+
+
+class _AdapterConfigWithRdma:
+    """Minimal stand-in for an L2 adapter config carrying an RDMA block."""
+
+    def __init__(self, rdma: L1RdmaConfig) -> None:
+        self.rdma = rdma
+
+
+class _AdapterConfigWithoutRdma:
+    """Minimal stand-in for an L2 adapter config with no RDMA block."""
+
+
+class TestFetchTimeoutAgainstWriteTtl:
+    """The startup invariant tying the fetch deadline to the L1 write lock.
+
+    An RDMA fetch is only safe while the destination L1 object stays
+    write-locked, and that lock is a TTLLock that expires on a timer. A fetch
+    that outlives it leaves the buffer readable and evictable while a remote
+    node may still be writing.
+    """
+
+    def test_enabled_rdma_within_the_ttl_is_accepted(self) -> None:
+        config = _AdapterConfigWithRdma(
+            L1RdmaConfig(transport=RdmaTransport.RC, fetch_timeout_seconds=30.0)
+        )
+        validate_fetch_timeout_against_write_ttl(config, _WRITE_TTL_DEFAULT)
+
+    @pytest.mark.parametrize("timeout", [600.0, 601.0, 10_000.0])
+    def test_timeout_at_or_beyond_the_ttl_is_rejected(self, timeout: float) -> None:
+        config = _AdapterConfigWithRdma(
+            L1RdmaConfig(transport=RdmaTransport.RC, fetch_timeout_seconds=timeout)
+        )
+        with pytest.raises(ValueError) as excinfo:
+            validate_fetch_timeout_against_write_ttl(config, _WRITE_TTL_DEFAULT)
+        message = str(excinfo.value)
+        # The message must name both knobs and both values, since they live in
+        # different config objects.
+        assert "fetch_timeout_seconds" in message
+        assert "write_ttl_seconds" in message
+        assert str(_WRITE_TTL_DEFAULT) in message
+        assert "l1-write-ttl-seconds" in message
+
+    def test_non_positive_write_ttl_is_rejected_when_rdma_is_on(self) -> None:
+        config = _AdapterConfigWithRdma(L1RdmaConfig(transport=RdmaTransport.RC))
+        with pytest.raises(ValueError, match="positive L1 write-lock TTL"):
+            validate_fetch_timeout_against_write_ttl(config, 0)
+
+    def test_disabled_rdma_is_never_constrained(self) -> None:
+        config = _AdapterConfigWithRdma(DISABLED_L1_RDMA)
+        # A zero TTL and an absurd timeout are both fine while RDMA is off.
+        validate_fetch_timeout_against_write_ttl(config, 0)
+
+    def test_config_without_an_rdma_block_is_ignored(self) -> None:
+        validate_fetch_timeout_against_write_ttl(_AdapterConfigWithoutRdma(), 0)
+
+    def test_unrelated_rdma_attribute_is_ignored(self) -> None:
+        # A config whose `rdma` is not an L1RdmaConfig must not be inspected.
+        validate_fetch_timeout_against_write_ttl(
+            _AdapterConfigWithRdma(rdma="yes"),  # type: ignore[arg-type]
+            0,
+        )

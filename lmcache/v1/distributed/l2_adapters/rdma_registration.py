@@ -24,6 +24,7 @@ from lmcache.v1.distributed.internal_api import L1MemoryDesc, MemoryGrowthPolicy
 
 _DEFAULT_WINDOW_COUNT = 8
 _DEFAULT_WINDOW_BYTES = 8 << 20
+_DEFAULT_FETCH_TIMEOUT_SECONDS = 30.0
 
 
 def _require_positive_int(raw: object, name: str) -> int:
@@ -176,12 +177,16 @@ class L1RdmaConfig:
         gid_index: Port GID index passed to ``ibv_query_gid``. Index 0 is the
             link-local GID, which is what Soft-RoCE exposes.
         window_plan: The bounded registration windows to pre-register at init.
+        fetch_timeout_seconds: Deadline for one ``kv-sink-fetch`` round trip,
+            DMA included. Must stay strictly below the L1 write-lock TTL; see
+            :func:`validate_fetch_timeout_against_write_ttl`.
     """
 
     transport: RdmaTransport = RdmaTransport.DISABLED
     device_name: str = ""
     gid_index: int = 0
     window_plan: RdmaWindowPlan = DEFAULT_RDMA_WINDOW_PLAN
+    fetch_timeout_seconds: float = _DEFAULT_FETCH_TIMEOUT_SECONDS
 
     def is_enabled(self) -> bool:
         """Report whether RDMA reception is turned on.
@@ -223,6 +228,16 @@ class L1RdmaConfig:
         if gid_index < 0:
             raise ValueError(f"gid_index must be non-negative, got {gid_index}")
 
+        timeout = raw.get("fetch_timeout_seconds", _DEFAULT_FETCH_TIMEOUT_SECONDS)
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
+            raise ValueError(
+                f"fetch_timeout_seconds must be a positive number, got {timeout!r}"
+            )
+        if timeout <= 0:
+            raise ValueError(
+                f"fetch_timeout_seconds must be a positive number, got {timeout}"
+            )
+
         return cls(
             transport=transport,
             device_name=str(raw.get("device_name", "")),
@@ -235,6 +250,7 @@ class L1RdmaConfig:
                     raw.get("window_bytes", _DEFAULT_WINDOW_BYTES), "window_bytes"
                 ),
             ),
+            fetch_timeout_seconds=float(timeout),
         )
 
     @classmethod
@@ -254,7 +270,11 @@ class L1RdmaConfig:
             "- window_count (int): pre-registered windows / max in-flight "
             f"RDMA fetches (default {_DEFAULT_WINDOW_COUNT})\n"
             "- window_bytes (int): bytes per window; must hold the largest "
-            f"single fetch (default {_DEFAULT_WINDOW_BYTES})\n\n"
+            f"single fetch (default {_DEFAULT_WINDOW_BYTES})\n"
+            "- fetch_timeout_seconds (float): deadline for one fetch round "
+            f"trip (default {_DEFAULT_FETCH_TIMEOUT_SECONDS}). Must be "
+            "strictly less than the L1 write-lock TTL "
+            "(--l1-write-ttl-seconds), which is checked at startup.\n\n"
             "RDMA requires a fixed-size L1 slab (MixedMemoryAllocator). "
             "Enabling it with a growth-capable allocator raises ValueError."
         )
@@ -262,3 +282,61 @@ class L1RdmaConfig:
 
 DISABLED_L1_RDMA = L1RdmaConfig()
 """Shared default: RDMA reception turned off."""
+
+
+def validate_fetch_timeout_against_write_ttl(
+    adapter_config: object,
+    write_ttl_seconds: int,
+) -> None:
+    """Enforce that an RDMA fetch cannot outlive the L1 write lock.
+
+    An RDMA fetch is safe only because the destination L1 object is
+    write-locked for the whole round trip: a write-locked object is neither
+    readable (``L1ObjectState.available_for_read`` is false) nor evictable
+    (``delete`` returns ``KEY_IS_LOCKED``). That lock is a ``TTLLock``, so it
+    expires on a timer rather than being held indefinitely. If a fetch outlives
+    the TTL the lock lapses **silently** and the buffer becomes readable and
+    evictable while a remote node may still be writing into it; L1Manager only
+    logs "potential inconsistent data might be read".
+
+    So the fetch deadline must be strictly below the write-lock TTL. The two
+    knobs live in different config objects, which is exactly the kind of
+    agreement that should fail loudly at startup rather than produce corrupt KV
+    under load.
+
+    Does nothing when ``adapter_config`` carries no RDMA block or RDMA is
+    disabled, so non-RDMA adapters are unaffected.
+
+    Args:
+        adapter_config: An L2 adapter config, which may carry an ``rdma``
+            attribute holding an :class:`L1RdmaConfig`.
+        write_ttl_seconds: ``L1ManagerConfig.write_ttl_seconds``, the L1
+            write-lock TTL, settable via ``--l1-write-ttl-seconds``.
+
+    Raises:
+        ValueError: If RDMA is enabled and the fetch timeout is greater than or
+            equal to the write-lock TTL, or if the TTL is not positive.
+    """
+    rdma = getattr(adapter_config, "rdma", None)
+    if not isinstance(rdma, L1RdmaConfig) or not rdma.is_enabled():
+        return
+
+    if write_ttl_seconds <= 0:
+        raise ValueError(
+            "RDMA reception requires a positive L1 write-lock TTL, but "
+            f"write_ttl_seconds={write_ttl_seconds}. Without it the write lock "
+            "cannot protect the destination buffer for the duration of the "
+            "RDMA write. Set --l1-write-ttl-seconds, or disable RDMA."
+        )
+
+    if rdma.fetch_timeout_seconds >= write_ttl_seconds:
+        raise ValueError(
+            "RDMA fetch timeout must be strictly less than the L1 write-lock "
+            f"TTL, but fetch_timeout_seconds={rdma.fetch_timeout_seconds} and "
+            f"write_ttl_seconds={write_ttl_seconds}. A fetch that outlives the "
+            "TTL lets the write lock expire silently, so the destination "
+            "buffer becomes readable and evictable while an Aerospike node may "
+            "still be writing into it, which corrupts KV without any error. "
+            "Lower the adapter's rdma.fetch_timeout_seconds or raise "
+            "--l1-write-ttl-seconds."
+        )

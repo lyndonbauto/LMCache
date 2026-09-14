@@ -32,6 +32,11 @@ struct L1RdmaRegistration {
   // maximum number of concurrently outstanding RDMA fetches.
   uint32_t window_count = 0;
   size_t window_bytes = 0;
+  // Deadline for one kv-sink-fetch round trip, DMA included. Validated at
+  // startup to be strictly below the L1 write-lock TTL, because a fetch that
+  // outlives the lock lets the destination buffer become readable and
+  // evictable while a node may still be writing into it.
+  uint32_t fetch_timeout_ms = 0;
 
   // Report whether RDMA reception is enabled for this registration.
   bool is_enabled() const { return transport != "DISABLED"; }

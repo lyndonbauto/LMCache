@@ -92,6 +92,7 @@ def _build_native_rdma_registration(
     registration.size = l1_memory_desc.size
     registration.window_count = rdma.window_plan.window_count
     registration.window_bytes = rdma.window_plan.window_bytes
+    registration.fetch_timeout_ms = int(rdma.fetch_timeout_seconds * 1000)
     return registration
 
 

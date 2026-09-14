@@ -31,6 +31,8 @@ PYBIND11_MODULE(lmcache_aerospike, m) {
                      &lmcache::connector::L1RdmaRegistration::window_count)
       .def_readwrite("window_bytes",
                      &lmcache::connector::L1RdmaRegistration::window_bytes)
+      .def_readwrite("fetch_timeout_ms",
+                     &lmcache::connector::L1RdmaRegistration::fetch_timeout_ms)
       .def("is_enabled", &lmcache::connector::L1RdmaRegistration::is_enabled);
 #endif
 

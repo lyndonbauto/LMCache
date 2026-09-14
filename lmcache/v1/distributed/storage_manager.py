@@ -36,6 +36,9 @@ from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.config import L2AdapterConfigBase
+from lmcache.v1.distributed.l2_adapters.rdma_registration import (
+    validate_fetch_timeout_against_write_ttl,
+)
 from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2ReconfigurableAdapter,
     L2ReconfigureError,
@@ -1204,6 +1207,13 @@ class StorageManager:
             the freshly allocated stable id, ``adapter`` is the new adapter
             instance, and ``descriptor`` is its descriptor carrying that id.
         """
+        # The RDMA fetch deadline and the L1 write-lock TTL live in different
+        # config objects, and this is the only place both are in scope. Check
+        # here so a mismatch fails on boot rather than silently corrupting KV.
+        validate_fetch_timeout_against_write_ttl(
+            config, self._l1_config.write_ttl_seconds
+        )
+
         adapter_id = self._next_adapter_id
         self._next_adapter_id += 1
         adapter: L2AdapterInterface = create_l2_adapter(config, self._l1_memory_desc)
