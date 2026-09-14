@@ -1,0 +1,2015 @@
+data.archive_file.teardown: Reading...
+data.archive_file.teardown: Read complete after 0s [id=2af7d7c1ad857118ca345d702fceacbfaf2c7776]
+data.aws_ssm_parameter.al2023: Reading...
+data.aws_iam_policy_document.lambda_assume: Reading...
+data.aws_iam_policy_document.scheduler_assume: Reading...
+data.aws_iam_policy_document.ec2_assume: Reading...
+aws_placement_group.bench: Refreshing state... [id=aerospike-lmcache-bench-pg]
+aws_vpc.bench: Refreshing state... [id=vpc-003b0cafc1148ed94]
+aws_eip.nat: Refreshing state... [id=eipalloc-04ae199fb2c751ef2]
+data.aws_iam_policy_document.ec2_assume: Read complete after 0s [id=2851119427]
+data.aws_iam_policy_document.lambda_assume: Read complete after 0s [id=2690255455]
+data.aws_iam_policy_document.scheduler_assume: Read complete after 0s [id=52247394]
+aws_iam_role.node: Refreshing state... [id=aerospike-lmcache-bench-node]
+aws_iam_role.teardown: Refreshing state... [id=aerospike-lmcache-bench-teardown]
+aws_iam_role.scheduler: Refreshing state... [id=aerospike-lmcache-bench-scheduler]
+data.aws_ssm_parameter.al2023: Read complete after 1s [id=/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64]
+aws_iam_role_policy_attachment.ssm: Refreshing state... [id=aerospike-lmcache-bench-node-20260914204613591300000001]
+aws_iam_instance_profile.node: Refreshing state... [id=aerospike-lmcache-bench-node]
+aws_iam_role_policy_attachment.teardown_logs: Refreshing state... [id=aerospike-lmcache-bench-teardown-20260914204613863300000002]
+aws_iam_role_policy.teardown: Refreshing state... [id=aerospike-lmcache-bench-teardown:aerospike-lmcache-bench-teardown]
+aws_lambda_function.teardown: Refreshing state... [id=aerospike-lmcache-bench-auto-teardown]
+aws_internet_gateway.bench: Refreshing state... [id=igw-0866a3bf326bc8af8]
+aws_subnet.nat: Refreshing state... [id=subnet-06e668aa0f56e0097]
+aws_subnet.efa: Refreshing state... [id=subnet-03d682b04dd823eaa]
+aws_security_group.efa: Refreshing state... [id=sg-0069f2f8bef35fcab]
+aws_iam_role_policy.scheduler: Refreshing state... [id=aerospike-lmcache-bench-scheduler:aerospike-lmcache-bench-scheduler]
+aws_scheduler_schedule.teardown: Refreshing state... [id=default/aerospike-lmcache-bench-auto-teardown]
+aws_route_table.public: Refreshing state... [id=rtb-0eddf3d61547ace4b]
+aws_nat_gateway.bench: Refreshing state... [id=nat-07d83290ac1be9987]
+aws_route_table.efa: Refreshing state... [id=rtb-0875b6e9c3923a808]
+aws_route_table_association.nat: Refreshing state... [id=rtbassoc-03e70a4f962b11c32]
+aws_vpc_security_group_egress_rule.self_all: Refreshing state... [id=sgr-0692c4c267c5088c1]
+aws_vpc_security_group_ingress_rule.self_all: Refreshing state... [id=sgr-0293a5326b3ffc696]
+aws_vpc_security_group_ingress_rule.ssh: Refreshing state... [id=sgr-0847afe341bf37c37]
+aws_vpc_security_group_egress_rule.internet: Refreshing state... [id=sgr-0f863bfabed3c3606]
+aws_vpc_security_group_ingress_rule.aerospike: Refreshing state... [id=sgr-0c2cdd7fcdf9948d1]
+aws_network_interface.gpu[0]: Refreshing state... [id=eni-0723f2e9e9cb196c5]
+aws_network_interface.server[2]: Refreshing state... [id=eni-02ea1944c0a1878be]
+aws_network_interface.server[0]: Refreshing state... [id=eni-095958ebe920dfe43]
+aws_network_interface.server[4]: Refreshing state... [id=eni-0e57458b0cea41a52]
+aws_network_interface.server[1]: Refreshing state... [id=eni-0af15e1ed405e8914]
+aws_network_interface.server[3]: Refreshing state... [id=eni-0dbfc1c4dc433abf0]
+aws_network_interface.client[0]: Refreshing state... [id=eni-0de278f95382fa9e7]
+aws_route_table_association.efa: Refreshing state... [id=rtbassoc-0909f2a63b623e664]
+aws_instance.server[2]: Refreshing state... [id=i-0be7a9a95c823509a]
+aws_instance.server[3]: Refreshing state... [id=i-0ac7faf4a4838cf2f]
+aws_instance.server[0]: Refreshing state... [id=i-04563f8934653b784]
+aws_instance.server[4]: Refreshing state... [id=i-01b81ad68bbeb3aed]
+aws_instance.server[1]: Refreshing state... [id=i-06d5be357345b40d9]
+aws_instance.client[0]: Refreshing state... [id=i-0ae3bd1739652ba8e]
+
+Terraform used the selected providers to generate the following execution
+plan. Resource actions are indicated with the following symbols:
+  - destroy
+
+Terraform will perform the following actions:
+
+  # aws_eip.nat will be destroyed
+  - resource "aws_eip" "nat" {
+      - allocation_id            = "eipalloc-04ae199fb2c751ef2" -> null
+      - arn                      = "arn:aws:ec2:us-east-1:236318833413:elastic-ip/eipalloc-04ae199fb2c751ef2" -> null
+      - association_id           = "eipassoc-0e36ab98f3b5b0e6c" -> null
+      - domain                   = "vpc" -> null
+      - id                       = "eipalloc-04ae199fb2c751ef2" -> null
+      - network_border_group     = "us-east-1" -> null
+      - network_interface        = "eni-04b10e8caaeef4dad" -> null
+      - private_dns              = "ip-10-240-0-9.ec2.internal" -> null
+      - private_ip               = "10.240.0.9" -> null
+      - public_dns               = "ec2-54-165-83-46.compute-1.amazonaws.com" -> null
+      - public_ip                = "54.165.83.46" -> null
+      - public_ipv4_pool         = "amazon" -> null
+      - tags                     = {
+          - "Name" = "aerospike-lmcache-bench-nat-eip"
+        } -> null
+      - tags_all                 = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Name"      = "aerospike-lmcache-bench-nat-eip"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+        } -> null
+      - vpc                      = true -> null
+        # (5 unchanged attributes hidden)
+    }
+
+  # aws_iam_instance_profile.node will be destroyed
+  - resource "aws_iam_instance_profile" "node" {
+      - arn         = "arn:aws:iam::236318833413:instance-profile/aerospike-lmcache-bench-node" -> null
+      - create_date = "2026-09-14T20:46:13Z" -> null
+      - id          = "aerospike-lmcache-bench-node" -> null
+      - name        = "aerospike-lmcache-bench-node" -> null
+      - path        = "/" -> null
+      - role        = "aerospike-lmcache-bench-node" -> null
+      - tags        = {} -> null
+      - tags_all    = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+        } -> null
+      - unique_id   = "AIPATOBNTHMC2MN7JHHP6" -> null
+        # (1 unchanged attribute hidden)
+    }
+
+  # aws_iam_role.node will be destroyed
+  - resource "aws_iam_role" "node" {
+      - arn                   = "arn:aws:iam::236318833413:role/aerospike-lmcache-bench-node" -> null
+      - assume_role_policy    = jsonencode(
+            {
+              - Statement = [
+                  - {
+                      - Action    = "sts:AssumeRole"
+                      - Effect    = "Allow"
+                      - Principal = {
+                          - Service = "ec2.amazonaws.com"
+                        }
+                    },
+                ]
+              - Version   = "2012-10-17"
+            }
+        ) -> null
+      - create_date           = "2026-09-14T20:46:12Z" -> null
+      - force_detach_policies = false -> null
+      - id                    = "aerospike-lmcache-bench-node" -> null
+      - managed_policy_arns   = [
+          - "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+        ] -> null
+      - max_session_duration  = 3600 -> null
+      - name                  = "aerospike-lmcache-bench-node" -> null
+      - path                  = "/" -> null
+      - tags                  = {
+          - "Name" = "aerospike-lmcache-bench-node"
+        } -> null
+      - tags_all              = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Name"      = "aerospike-lmcache-bench-node"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+        } -> null
+      - unique_id             = "AROATOBNTHMCZUNQFMGVG" -> null
+        # (3 unchanged attributes hidden)
+    }
+
+  # aws_iam_role.scheduler will be destroyed
+  - resource "aws_iam_role" "scheduler" {
+      - arn                   = "arn:aws:iam::236318833413:role/aerospike-lmcache-bench-scheduler" -> null
+      - assume_role_policy    = jsonencode(
+            {
+              - Statement = [
+                  - {
+                      - Action    = "sts:AssumeRole"
+                      - Effect    = "Allow"
+                      - Principal = {
+                          - Service = "scheduler.amazonaws.com"
+                        }
+                    },
+                ]
+              - Version   = "2012-10-17"
+            }
+        ) -> null
+      - create_date           = "2026-09-14T20:46:13Z" -> null
+      - force_detach_policies = false -> null
+      - id                    = "aerospike-lmcache-bench-scheduler" -> null
+      - managed_policy_arns   = [] -> null
+      - max_session_duration  = 3600 -> null
+      - name                  = "aerospike-lmcache-bench-scheduler" -> null
+      - path                  = "/" -> null
+      - tags                  = {} -> null
+      - tags_all              = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+        } -> null
+      - unique_id             = "AROATOBNTHMCRFXP4AKDW" -> null
+        # (3 unchanged attributes hidden)
+
+      - inline_policy {
+          - name   = "aerospike-lmcache-bench-scheduler" -> null
+          - policy = jsonencode(
+                {
+                  - Statement = [
+                      - {
+                          - Action   = "lambda:InvokeFunction"
+                          - Effect   = "Allow"
+                          - Resource = "arn:aws:lambda:us-east-1:236318833413:function:aerospike-lmcache-bench-auto-teardown"
+                        },
+                    ]
+                  - Version   = "2012-10-17"
+                }
+            ) -> null
+        }
+    }
+
+  # aws_iam_role.teardown will be destroyed
+  - resource "aws_iam_role" "teardown" {
+      - arn                   = "arn:aws:iam::236318833413:role/aerospike-lmcache-bench-teardown" -> null
+      - assume_role_policy    = jsonencode(
+            {
+              - Statement = [
+                  - {
+                      - Action    = "sts:AssumeRole"
+                      - Effect    = "Allow"
+                      - Principal = {
+                          - Service = "lambda.amazonaws.com"
+                        }
+                    },
+                ]
+              - Version   = "2012-10-17"
+            }
+        ) -> null
+      - create_date           = "2026-09-14T20:46:13Z" -> null
+      - force_detach_policies = false -> null
+      - id                    = "aerospike-lmcache-bench-teardown" -> null
+      - managed_policy_arns   = [
+          - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+        ] -> null
+      - max_session_duration  = 3600 -> null
+      - name                  = "aerospike-lmcache-bench-teardown" -> null
+      - path                  = "/" -> null
+      - tags                  = {} -> null
+      - tags_all              = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+        } -> null
+      - unique_id             = "AROATOBNTHMCRYI2M4L52" -> null
+        # (3 unchanged attributes hidden)
+
+      - inline_policy {
+          - name   = "aerospike-lmcache-bench-teardown" -> null
+          - policy = jsonencode(
+                {
+                  - Statement = [
+                      - {
+                          - Action   = [
+                              - "ec2:DescribeNatGateways",
+                              - "ec2:DescribeInstances",
+                            ]
+                          - Effect   = "Allow"
+                          - Resource = "*"
+                        },
+                      - {
+                          - Action    = "ec2:TerminateInstances"
+                          - Condition = {
+                              - StringEquals = {
+                                  - "ec2:ResourceTag/Project" = "aerospike-lmcache-bench"
+                                }
+                            }
+                          - Effect    = "Allow"
+                          - Resource  = "*"
+                        },
+                      - {
+                          - Action   = "ec2:DeleteNatGateway"
+                          - Effect   = "Allow"
+                          - Resource = "*"
+                        },
+                      - {
+                          - Action   = "sns:Publish"
+                          - Effect   = "Allow"
+                          - Resource = "arn:aws:sns:us-east-1:236318833413:aerospike-lmcache-bench-alerts"
+                        },
+                    ]
+                  - Version   = "2012-10-17"
+                }
+            ) -> null
+        }
+    }
+
+  # aws_iam_role_policy.scheduler will be destroyed
+  - resource "aws_iam_role_policy" "scheduler" {
+      - id          = "aerospike-lmcache-bench-scheduler:aerospike-lmcache-bench-scheduler" -> null
+      - name        = "aerospike-lmcache-bench-scheduler" -> null
+      - policy      = jsonencode(
+            {
+              - Statement = [
+                  - {
+                      - Action   = "lambda:InvokeFunction"
+                      - Effect   = "Allow"
+                      - Resource = "arn:aws:lambda:us-east-1:236318833413:function:aerospike-lmcache-bench-auto-teardown"
+                    },
+                ]
+              - Version   = "2012-10-17"
+            }
+        ) -> null
+      - role        = "aerospike-lmcache-bench-scheduler" -> null
+        # (1 unchanged attribute hidden)
+    }
+
+  # aws_iam_role_policy.teardown will be destroyed
+  - resource "aws_iam_role_policy" "teardown" {
+      - id          = "aerospike-lmcache-bench-teardown:aerospike-lmcache-bench-teardown" -> null
+      - name        = "aerospike-lmcache-bench-teardown" -> null
+      - policy      = jsonencode(
+            {
+              - Statement = [
+                  - {
+                      - Action   = [
+                          - "ec2:DescribeNatGateways",
+                          - "ec2:DescribeInstances",
+                        ]
+                      - Effect   = "Allow"
+                      - Resource = "*"
+                    },
+                  - {
+                      - Action    = "ec2:TerminateInstances"
+                      - Condition = {
+                          - StringEquals = {
+                              - "ec2:ResourceTag/Project" = "aerospike-lmcache-bench"
+                            }
+                        }
+                      - Effect    = "Allow"
+                      - Resource  = "*"
+                    },
+                  - {
+                      - Action   = "ec2:DeleteNatGateway"
+                      - Effect   = "Allow"
+                      - Resource = "*"
+                    },
+                  - {
+                      - Action   = "sns:Publish"
+                      - Effect   = "Allow"
+                      - Resource = "arn:aws:sns:us-east-1:236318833413:aerospike-lmcache-bench-alerts"
+                    },
+                ]
+              - Version   = "2012-10-17"
+            }
+        ) -> null
+      - role        = "aerospike-lmcache-bench-teardown" -> null
+        # (1 unchanged attribute hidden)
+    }
+
+  # aws_iam_role_policy_attachment.ssm will be destroyed
+  - resource "aws_iam_role_policy_attachment" "ssm" {
+      - id         = "aerospike-lmcache-bench-node-20260914204613591300000001" -> null
+      - policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore" -> null
+      - role       = "aerospike-lmcache-bench-node" -> null
+    }
+
+  # aws_iam_role_policy_attachment.teardown_logs will be destroyed
+  - resource "aws_iam_role_policy_attachment" "teardown_logs" {
+      - id         = "aerospike-lmcache-bench-teardown-20260914204613863300000002" -> null
+      - policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole" -> null
+      - role       = "aerospike-lmcache-bench-teardown" -> null
+    }
+
+  # aws_instance.client[0] will be destroyed
+  - resource "aws_instance" "client" {
+      - ami                                  = (sensitive value) -> null
+      - arn                                  = "arn:aws:ec2:us-east-1:236318833413:instance/i-0ae3bd1739652ba8e" -> null
+      - associate_public_ip_address          = false -> null
+      - availability_zone                    = "us-east-1d" -> null
+      - cpu_core_count                       = 36 -> null
+      - cpu_threads_per_core                 = 2 -> null
+      - disable_api_stop                     = false -> null
+      - disable_api_termination              = false -> null
+      - ebs_optimized                        = false -> null
+      - get_password_data                    = false -> null
+      - hibernation                          = false -> null
+      - iam_instance_profile                 = "aerospike-lmcache-bench-node" -> null
+      - id                                   = "i-0ae3bd1739652ba8e" -> null
+      - instance_initiated_shutdown_behavior = "stop" -> null
+      - instance_state                       = "running" -> null
+      - instance_type                        = "c5n.18xlarge" -> null
+      - ipv6_address_count                   = 0 -> null
+      - ipv6_addresses                       = [] -> null
+      - key_name                             = "lyndon-cloud" -> null
+      - monitoring                           = false -> null
+      - placement_group                      = "aerospike-lmcache-bench-pg" -> null
+      - placement_partition_number           = 0 -> null
+      - primary_network_interface_id         = "eni-0de278f95382fa9e7" -> null
+      - private_dns                          = "ip-10-240-1-100.ec2.internal" -> null
+      - private_ip                           = "10.240.1.100" -> null
+      - secondary_private_ips                = [] -> null
+      - security_groups                      = [] -> null
+      - source_dest_check                    = true -> null
+      - subnet_id                            = "subnet-03d682b04dd823eaa" -> null
+      - tags                                 = {
+          - "Name" = "aerospike-lmcache-bench-client-0"
+          - "Role" = "bench-client"
+        } -> null
+      - tags_all                             = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Name"      = "aerospike-lmcache-bench-client-0"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+          - "Role"      = "bench-client"
+        } -> null
+      - tenancy                              = "default" -> null
+      - user_data                            = "e228241ec4d688839e47a8bc4369a094ed60a09a" -> null
+      - user_data_replace_on_change          = false -> null
+      - vpc_security_group_ids               = [
+          - "sg-0069f2f8bef35fcab",
+        ] -> null
+        # (7 unchanged attributes hidden)
+
+      - capacity_reservation_specification {
+          - capacity_reservation_preference = "open" -> null
+        }
+
+      - cpu_options {
+          - core_count       = 36 -> null
+          - threads_per_core = 2 -> null
+            # (1 unchanged attribute hidden)
+        }
+
+      - enclave_options {
+          - enabled = false -> null
+        }
+
+      - maintenance_options {
+          - auto_recovery = "default" -> null
+        }
+
+      - metadata_options {
+          - http_endpoint               = "enabled" -> null
+          - http_protocol_ipv6          = "disabled" -> null
+          - http_put_response_hop_limit = 2 -> null
+          - http_tokens                 = "required" -> null
+          - instance_metadata_tags      = "disabled" -> null
+        }
+
+      - network_interface {
+          - delete_on_termination = false -> null
+          - device_index          = 0 -> null
+          - network_card_index    = 0 -> null
+          - network_interface_id  = "eni-0de278f95382fa9e7" -> null
+        }
+
+      - private_dns_name_options {
+          - enable_resource_name_dns_a_record    = false -> null
+          - enable_resource_name_dns_aaaa_record = false -> null
+          - hostname_type                        = "ip-name" -> null
+        }
+
+      - root_block_device {
+          - delete_on_termination = true -> null
+          - device_name           = "/dev/xvda" -> null
+          - encrypted             = true -> null
+          - iops                  = 3000 -> null
+          - kms_key_id            = "arn:aws:kms:us-east-1:236318833413:key/3e5adb0c-d5ff-4b10-8295-618f7de9ba38" -> null
+          - tags                  = {} -> null
+          - tags_all              = {
+              - "Epic"      = "AIE-85"
+              - "Jira"      = "AIE-86"
+              - "ManagedBy" = "terraform"
+              - "Owner"     = "lbauto@aerospike.com"
+              - "Project"   = "aerospike-lmcache-bench"
+            } -> null
+          - throughput            = 125 -> null
+          - volume_id             = "vol-04ef1ce129b6ac28e" -> null
+          - volume_size           = 200 -> null
+          - volume_type           = "gp3" -> null
+        }
+    }
+
+  # aws_instance.server[0] will be destroyed
+  - resource "aws_instance" "server" {
+      - ami                                  = (sensitive value) -> null
+      - arn                                  = "arn:aws:ec2:us-east-1:236318833413:instance/i-04563f8934653b784" -> null
+      - associate_public_ip_address          = false -> null
+      - availability_zone                    = "us-east-1d" -> null
+      - cpu_core_count                       = 48 -> null
+      - cpu_threads_per_core                 = 2 -> null
+      - disable_api_stop                     = false -> null
+      - disable_api_termination              = false -> null
+      - ebs_optimized                        = false -> null
+      - get_password_data                    = false -> null
+      - hibernation                          = false -> null
+      - iam_instance_profile                 = "aerospike-lmcache-bench-node" -> null
+      - id                                   = "i-04563f8934653b784" -> null
+      - instance_initiated_shutdown_behavior = "stop" -> null
+      - instance_state                       = "running" -> null
+      - instance_type                        = "i3en.24xlarge" -> null
+      - ipv6_address_count                   = 0 -> null
+      - ipv6_addresses                       = [] -> null
+      - key_name                             = "lyndon-cloud" -> null
+      - monitoring                           = false -> null
+      - placement_group                      = "aerospike-lmcache-bench-pg" -> null
+      - placement_partition_number           = 0 -> null
+      - primary_network_interface_id         = "eni-095958ebe920dfe43" -> null
+      - private_dns                          = "ip-10-240-1-10.ec2.internal" -> null
+      - private_ip                           = "10.240.1.10" -> null
+      - secondary_private_ips                = [] -> null
+      - security_groups                      = [] -> null
+      - source_dest_check                    = true -> null
+      - subnet_id                            = "subnet-03d682b04dd823eaa" -> null
+      - tags                                 = {
+          - "Name" = "aerospike-lmcache-bench-server-0"
+          - "Role" = "aerospike-server"
+        } -> null
+      - tags_all                             = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Name"      = "aerospike-lmcache-bench-server-0"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+          - "Role"      = "aerospike-server"
+        } -> null
+      - tenancy                              = "default" -> null
+      - user_data                            = "d797fb008a94985daa9e10cfbfbdc0aee533acdb" -> null
+      - user_data_replace_on_change          = false -> null
+      - vpc_security_group_ids               = [
+          - "sg-0069f2f8bef35fcab",
+        ] -> null
+        # (7 unchanged attributes hidden)
+
+      - capacity_reservation_specification {
+          - capacity_reservation_preference = "open" -> null
+        }
+
+      - cpu_options {
+          - core_count       = 48 -> null
+          - threads_per_core = 2 -> null
+            # (1 unchanged attribute hidden)
+        }
+
+      - enclave_options {
+          - enabled = false -> null
+        }
+
+      - maintenance_options {
+          - auto_recovery = "default" -> null
+        }
+
+      - metadata_options {
+          - http_endpoint               = "enabled" -> null
+          - http_protocol_ipv6          = "disabled" -> null
+          - http_put_response_hop_limit = 2 -> null
+          - http_tokens                 = "required" -> null
+          - instance_metadata_tags      = "disabled" -> null
+        }
+
+      - network_interface {
+          - delete_on_termination = false -> null
+          - device_index          = 0 -> null
+          - network_card_index    = 0 -> null
+          - network_interface_id  = "eni-095958ebe920dfe43" -> null
+        }
+
+      - private_dns_name_options {
+          - enable_resource_name_dns_a_record    = false -> null
+          - enable_resource_name_dns_aaaa_record = false -> null
+          - hostname_type                        = "ip-name" -> null
+        }
+
+      - root_block_device {
+          - delete_on_termination = true -> null
+          - device_name           = "/dev/xvda" -> null
+          - encrypted             = true -> null
+          - iops                  = 3000 -> null
+          - kms_key_id            = "arn:aws:kms:us-east-1:236318833413:key/3e5adb0c-d5ff-4b10-8295-618f7de9ba38" -> null
+          - tags                  = {} -> null
+          - tags_all              = {
+              - "Epic"      = "AIE-85"
+              - "Jira"      = "AIE-86"
+              - "ManagedBy" = "terraform"
+              - "Owner"     = "lbauto@aerospike.com"
+              - "Project"   = "aerospike-lmcache-bench"
+            } -> null
+          - throughput            = 125 -> null
+          - volume_id             = "vol-0920f73005a065848" -> null
+          - volume_size           = 100 -> null
+          - volume_type           = "gp3" -> null
+        }
+    }
+
+  # aws_instance.server[1] will be destroyed
+  - resource "aws_instance" "server" {
+      - ami                                  = (sensitive value) -> null
+      - arn                                  = "arn:aws:ec2:us-east-1:236318833413:instance/i-06d5be357345b40d9" -> null
+      - associate_public_ip_address          = false -> null
+      - availability_zone                    = "us-east-1d" -> null
+      - cpu_core_count                       = 48 -> null
+      - cpu_threads_per_core                 = 2 -> null
+      - disable_api_stop                     = false -> null
+      - disable_api_termination              = false -> null
+      - ebs_optimized                        = false -> null
+      - get_password_data                    = false -> null
+      - hibernation                          = false -> null
+      - iam_instance_profile                 = "aerospike-lmcache-bench-node" -> null
+      - id                                   = "i-06d5be357345b40d9" -> null
+      - instance_initiated_shutdown_behavior = "stop" -> null
+      - instance_state                       = "running" -> null
+      - instance_type                        = "i3en.24xlarge" -> null
+      - ipv6_address_count                   = 0 -> null
+      - ipv6_addresses                       = [] -> null
+      - key_name                             = "lyndon-cloud" -> null
+      - monitoring                           = false -> null
+      - placement_group                      = "aerospike-lmcache-bench-pg" -> null
+      - placement_partition_number           = 0 -> null
+      - primary_network_interface_id         = "eni-0af15e1ed405e8914" -> null
+      - private_dns                          = "ip-10-240-1-11.ec2.internal" -> null
+      - private_ip                           = "10.240.1.11" -> null
+      - secondary_private_ips                = [] -> null
+      - security_groups                      = [] -> null
+      - source_dest_check                    = true -> null
+      - subnet_id                            = "subnet-03d682b04dd823eaa" -> null
+      - tags                                 = {
+          - "Name" = "aerospike-lmcache-bench-server-1"
+          - "Role" = "aerospike-server"
+        } -> null
+      - tags_all                             = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Name"      = "aerospike-lmcache-bench-server-1"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+          - "Role"      = "aerospike-server"
+        } -> null
+      - tenancy                              = "default" -> null
+      - user_data                            = "e58ed44609cb17d7ed322c4a281b3b224b0568bc" -> null
+      - user_data_replace_on_change          = false -> null
+      - vpc_security_group_ids               = [
+          - "sg-0069f2f8bef35fcab",
+        ] -> null
+        # (7 unchanged attributes hidden)
+
+      - capacity_reservation_specification {
+          - capacity_reservation_preference = "open" -> null
+        }
+
+      - cpu_options {
+          - core_count       = 48 -> null
+          - threads_per_core = 2 -> null
+            # (1 unchanged attribute hidden)
+        }
+
+      - enclave_options {
+          - enabled = false -> null
+        }
+
+      - maintenance_options {
+          - auto_recovery = "default" -> null
+        }
+
+      - metadata_options {
+          - http_endpoint               = "enabled" -> null
+          - http_protocol_ipv6          = "disabled" -> null
+          - http_put_response_hop_limit = 2 -> null
+          - http_tokens                 = "required" -> null
+          - instance_metadata_tags      = "disabled" -> null
+        }
+
+      - network_interface {
+          - delete_on_termination = false -> null
+          - device_index          = 0 -> null
+          - network_card_index    = 0 -> null
+          - network_interface_id  = "eni-0af15e1ed405e8914" -> null
+        }
+
+      - private_dns_name_options {
+          - enable_resource_name_dns_a_record    = false -> null
+          - enable_resource_name_dns_aaaa_record = false -> null
+          - hostname_type                        = "ip-name" -> null
+        }
+
+      - root_block_device {
+          - delete_on_termination = true -> null
+          - device_name           = "/dev/xvda" -> null
+          - encrypted             = true -> null
+          - iops                  = 3000 -> null
+          - kms_key_id            = "arn:aws:kms:us-east-1:236318833413:key/3e5adb0c-d5ff-4b10-8295-618f7de9ba38" -> null
+          - tags                  = {} -> null
+          - tags_all              = {
+              - "Epic"      = "AIE-85"
+              - "Jira"      = "AIE-86"
+              - "ManagedBy" = "terraform"
+              - "Owner"     = "lbauto@aerospike.com"
+              - "Project"   = "aerospike-lmcache-bench"
+            } -> null
+          - throughput            = 125 -> null
+          - volume_id             = "vol-0950a565d90e76cac" -> null
+          - volume_size           = 100 -> null
+          - volume_type           = "gp3" -> null
+        }
+    }
+
+  # aws_instance.server[2] will be destroyed
+  - resource "aws_instance" "server" {
+      - ami                                  = (sensitive value) -> null
+      - arn                                  = "arn:aws:ec2:us-east-1:236318833413:instance/i-0be7a9a95c823509a" -> null
+      - associate_public_ip_address          = false -> null
+      - availability_zone                    = "us-east-1d" -> null
+      - cpu_core_count                       = 48 -> null
+      - cpu_threads_per_core                 = 2 -> null
+      - disable_api_stop                     = false -> null
+      - disable_api_termination              = false -> null
+      - ebs_optimized                        = false -> null
+      - get_password_data                    = false -> null
+      - hibernation                          = false -> null
+      - iam_instance_profile                 = "aerospike-lmcache-bench-node" -> null
+      - id                                   = "i-0be7a9a95c823509a" -> null
+      - instance_initiated_shutdown_behavior = "stop" -> null
+      - instance_state                       = "running" -> null
+      - instance_type                        = "i3en.24xlarge" -> null
+      - ipv6_address_count                   = 0 -> null
+      - ipv6_addresses                       = [] -> null
+      - key_name                             = "lyndon-cloud" -> null
+      - monitoring                           = false -> null
+      - placement_group                      = "aerospike-lmcache-bench-pg" -> null
+      - placement_partition_number           = 0 -> null
+      - primary_network_interface_id         = "eni-02ea1944c0a1878be" -> null
+      - private_dns                          = "ip-10-240-1-12.ec2.internal" -> null
+      - private_ip                           = "10.240.1.12" -> null
+      - secondary_private_ips                = [] -> null
+      - security_groups                      = [] -> null
+      - source_dest_check                    = true -> null
+      - subnet_id                            = "subnet-03d682b04dd823eaa" -> null
+      - tags                                 = {
+          - "Name" = "aerospike-lmcache-bench-server-2"
+          - "Role" = "aerospike-server"
+        } -> null
+      - tags_all                             = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Name"      = "aerospike-lmcache-bench-server-2"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+          - "Role"      = "aerospike-server"
+        } -> null
+      - tenancy                              = "default" -> null
+      - user_data                            = "81ad2fc813a45be3e0c58c4701df78a4113e0f70" -> null
+      - user_data_replace_on_change          = false -> null
+      - vpc_security_group_ids               = [
+          - "sg-0069f2f8bef35fcab",
+        ] -> null
+        # (7 unchanged attributes hidden)
+
+      - capacity_reservation_specification {
+          - capacity_reservation_preference = "open" -> null
+        }
+
+      - cpu_options {
+          - core_count       = 48 -> null
+          - threads_per_core = 2 -> null
+            # (1 unchanged attribute hidden)
+        }
+
+      - enclave_options {
+          - enabled = false -> null
+        }
+
+      - maintenance_options {
+          - auto_recovery = "default" -> null
+        }
+
+      - metadata_options {
+          - http_endpoint               = "enabled" -> null
+          - http_protocol_ipv6          = "disabled" -> null
+          - http_put_response_hop_limit = 2 -> null
+          - http_tokens                 = "required" -> null
+          - instance_metadata_tags      = "disabled" -> null
+        }
+
+      - network_interface {
+          - delete_on_termination = false -> null
+          - device_index          = 0 -> null
+          - network_card_index    = 0 -> null
+          - network_interface_id  = "eni-02ea1944c0a1878be" -> null
+        }
+
+      - private_dns_name_options {
+          - enable_resource_name_dns_a_record    = false -> null
+          - enable_resource_name_dns_aaaa_record = false -> null
+          - hostname_type                        = "ip-name" -> null
+        }
+
+      - root_block_device {
+          - delete_on_termination = true -> null
+          - device_name           = "/dev/xvda" -> null
+          - encrypted             = true -> null
+          - iops                  = 3000 -> null
+          - kms_key_id            = "arn:aws:kms:us-east-1:236318833413:key/3e5adb0c-d5ff-4b10-8295-618f7de9ba38" -> null
+          - tags                  = {} -> null
+          - tags_all              = {
+              - "Epic"      = "AIE-85"
+              - "Jira"      = "AIE-86"
+              - "ManagedBy" = "terraform"
+              - "Owner"     = "lbauto@aerospike.com"
+              - "Project"   = "aerospike-lmcache-bench"
+            } -> null
+          - throughput            = 125 -> null
+          - volume_id             = "vol-0e6bd013268c5daee" -> null
+          - volume_size           = 100 -> null
+          - volume_type           = "gp3" -> null
+        }
+    }
+
+  # aws_instance.server[3] will be destroyed
+  - resource "aws_instance" "server" {
+      - ami                                  = (sensitive value) -> null
+      - arn                                  = "arn:aws:ec2:us-east-1:236318833413:instance/i-0ac7faf4a4838cf2f" -> null
+      - associate_public_ip_address          = false -> null
+      - availability_zone                    = "us-east-1d" -> null
+      - cpu_core_count                       = 48 -> null
+      - cpu_threads_per_core                 = 2 -> null
+      - disable_api_stop                     = false -> null
+      - disable_api_termination              = false -> null
+      - ebs_optimized                        = false -> null
+      - get_password_data                    = false -> null
+      - hibernation                          = false -> null
+      - iam_instance_profile                 = "aerospike-lmcache-bench-node" -> null
+      - id                                   = "i-0ac7faf4a4838cf2f" -> null
+      - instance_initiated_shutdown_behavior = "stop" -> null
+      - instance_state                       = "running" -> null
+      - instance_type                        = "i3en.24xlarge" -> null
+      - ipv6_address_count                   = 0 -> null
+      - ipv6_addresses                       = [] -> null
+      - key_name                             = "lyndon-cloud" -> null
+      - monitoring                           = false -> null
+      - placement_group                      = "aerospike-lmcache-bench-pg" -> null
+      - placement_partition_number           = 0 -> null
+      - primary_network_interface_id         = "eni-0dbfc1c4dc433abf0" -> null
+      - private_dns                          = "ip-10-240-1-13.ec2.internal" -> null
+      - private_ip                           = "10.240.1.13" -> null
+      - secondary_private_ips                = [] -> null
+      - security_groups                      = [] -> null
+      - source_dest_check                    = true -> null
+      - subnet_id                            = "subnet-03d682b04dd823eaa" -> null
+      - tags                                 = {
+          - "Name" = "aerospike-lmcache-bench-server-3"
+          - "Role" = "aerospike-server"
+        } -> null
+      - tags_all                             = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Name"      = "aerospike-lmcache-bench-server-3"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+          - "Role"      = "aerospike-server"
+        } -> null
+      - tenancy                              = "default" -> null
+      - user_data                            = "b7dadae129c8b23832d970272c2e8468061fffad" -> null
+      - user_data_replace_on_change          = false -> null
+      - vpc_security_group_ids               = [
+          - "sg-0069f2f8bef35fcab",
+        ] -> null
+        # (7 unchanged attributes hidden)
+
+      - capacity_reservation_specification {
+          - capacity_reservation_preference = "open" -> null
+        }
+
+      - cpu_options {
+          - core_count       = 48 -> null
+          - threads_per_core = 2 -> null
+            # (1 unchanged attribute hidden)
+        }
+
+      - enclave_options {
+          - enabled = false -> null
+        }
+
+      - maintenance_options {
+          - auto_recovery = "default" -> null
+        }
+
+      - metadata_options {
+          - http_endpoint               = "enabled" -> null
+          - http_protocol_ipv6          = "disabled" -> null
+          - http_put_response_hop_limit = 2 -> null
+          - http_tokens                 = "required" -> null
+          - instance_metadata_tags      = "disabled" -> null
+        }
+
+      - network_interface {
+          - delete_on_termination = false -> null
+          - device_index          = 0 -> null
+          - network_card_index    = 0 -> null
+          - network_interface_id  = "eni-0dbfc1c4dc433abf0" -> null
+        }
+
+      - private_dns_name_options {
+          - enable_resource_name_dns_a_record    = false -> null
+          - enable_resource_name_dns_aaaa_record = false -> null
+          - hostname_type                        = "ip-name" -> null
+        }
+
+      - root_block_device {
+          - delete_on_termination = true -> null
+          - device_name           = "/dev/xvda" -> null
+          - encrypted             = true -> null
+          - iops                  = 3000 -> null
+          - kms_key_id            = "arn:aws:kms:us-east-1:236318833413:key/3e5adb0c-d5ff-4b10-8295-618f7de9ba38" -> null
+          - tags                  = {} -> null
+          - tags_all              = {
+              - "Epic"      = "AIE-85"
+              - "Jira"      = "AIE-86"
+              - "ManagedBy" = "terraform"
+              - "Owner"     = "lbauto@aerospike.com"
+              - "Project"   = "aerospike-lmcache-bench"
+            } -> null
+          - throughput            = 125 -> null
+          - volume_id             = "vol-0a50b29b384bb17a7" -> null
+          - volume_size           = 100 -> null
+          - volume_type           = "gp3" -> null
+        }
+    }
+
+  # aws_instance.server[4] will be destroyed
+  - resource "aws_instance" "server" {
+      - ami                                  = (sensitive value) -> null
+      - arn                                  = "arn:aws:ec2:us-east-1:236318833413:instance/i-01b81ad68bbeb3aed" -> null
+      - associate_public_ip_address          = false -> null
+      - availability_zone                    = "us-east-1d" -> null
+      - cpu_core_count                       = 48 -> null
+      - cpu_threads_per_core                 = 2 -> null
+      - disable_api_stop                     = false -> null
+      - disable_api_termination              = false -> null
+      - ebs_optimized                        = false -> null
+      - get_password_data                    = false -> null
+      - hibernation                          = false -> null
+      - iam_instance_profile                 = "aerospike-lmcache-bench-node" -> null
+      - id                                   = "i-01b81ad68bbeb3aed" -> null
+      - instance_initiated_shutdown_behavior = "stop" -> null
+      - instance_state                       = "running" -> null
+      - instance_type                        = "i3en.24xlarge" -> null
+      - ipv6_address_count                   = 0 -> null
+      - ipv6_addresses                       = [] -> null
+      - key_name                             = "lyndon-cloud" -> null
+      - monitoring                           = false -> null
+      - placement_group                      = "aerospike-lmcache-bench-pg" -> null
+      - placement_partition_number           = 0 -> null
+      - primary_network_interface_id         = "eni-0e57458b0cea41a52" -> null
+      - private_dns                          = "ip-10-240-1-14.ec2.internal" -> null
+      - private_ip                           = "10.240.1.14" -> null
+      - secondary_private_ips                = [] -> null
+      - security_groups                      = [] -> null
+      - source_dest_check                    = true -> null
+      - subnet_id                            = "subnet-03d682b04dd823eaa" -> null
+      - tags                                 = {
+          - "Name" = "aerospike-lmcache-bench-server-4"
+          - "Role" = "aerospike-server"
+        } -> null
+      - tags_all                             = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Name"      = "aerospike-lmcache-bench-server-4"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+          - "Role"      = "aerospike-server"
+        } -> null
+      - tenancy                              = "default" -> null
+      - user_data                            = "75f49f03c989306b380828be500e64614324a114" -> null
+      - user_data_replace_on_change          = false -> null
+      - vpc_security_group_ids               = [
+          - "sg-0069f2f8bef35fcab",
+        ] -> null
+        # (7 unchanged attributes hidden)
+
+      - capacity_reservation_specification {
+          - capacity_reservation_preference = "open" -> null
+        }
+
+      - cpu_options {
+          - core_count       = 48 -> null
+          - threads_per_core = 2 -> null
+            # (1 unchanged attribute hidden)
+        }
+
+      - enclave_options {
+          - enabled = false -> null
+        }
+
+      - maintenance_options {
+          - auto_recovery = "default" -> null
+        }
+
+      - metadata_options {
+          - http_endpoint               = "enabled" -> null
+          - http_protocol_ipv6          = "disabled" -> null
+          - http_put_response_hop_limit = 2 -> null
+          - http_tokens                 = "required" -> null
+          - instance_metadata_tags      = "disabled" -> null
+        }
+
+      - network_interface {
+          - delete_on_termination = false -> null
+          - device_index          = 0 -> null
+          - network_card_index    = 0 -> null
+          - network_interface_id  = "eni-0e57458b0cea41a52" -> null
+        }
+
+      - private_dns_name_options {
+          - enable_resource_name_dns_a_record    = false -> null
+          - enable_resource_name_dns_aaaa_record = false -> null
+          - hostname_type                        = "ip-name" -> null
+        }
+
+      - root_block_device {
+          - delete_on_termination = true -> null
+          - device_name           = "/dev/xvda" -> null
+          - encrypted             = true -> null
+          - iops                  = 3000 -> null
+          - kms_key_id            = "arn:aws:kms:us-east-1:236318833413:key/3e5adb0c-d5ff-4b10-8295-618f7de9ba38" -> null
+          - tags                  = {} -> null
+          - tags_all              = {
+              - "Epic"      = "AIE-85"
+              - "Jira"      = "AIE-86"
+              - "ManagedBy" = "terraform"
+              - "Owner"     = "lbauto@aerospike.com"
+              - "Project"   = "aerospike-lmcache-bench"
+            } -> null
+          - throughput            = 125 -> null
+          - volume_id             = "vol-046f2df37a2b8b644" -> null
+          - volume_size           = 100 -> null
+          - volume_type           = "gp3" -> null
+        }
+    }
+
+  # aws_internet_gateway.bench will be destroyed
+  - resource "aws_internet_gateway" "bench" {
+      - arn      = "arn:aws:ec2:us-east-1:236318833413:internet-gateway/igw-0866a3bf326bc8af8" -> null
+      - id       = "igw-0866a3bf326bc8af8" -> null
+      - owner_id = "236318833413" -> null
+      - tags     = {
+          - "Name" = "aerospike-lmcache-bench-igw"
+        } -> null
+      - tags_all = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Name"      = "aerospike-lmcache-bench-igw"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+        } -> null
+      - vpc_id   = "vpc-003b0cafc1148ed94" -> null
+    }
+
+  # aws_lambda_function.teardown will be destroyed
+  - resource "aws_lambda_function" "teardown" {
+      - architectures                  = [
+          - "x86_64",
+        ] -> null
+      - arn                            = "arn:aws:lambda:us-east-1:236318833413:function:aerospike-lmcache-bench-auto-teardown" -> null
+      - code_sha256                    = "OuZPiNc5MUiVvcZ9wn4FxRScIdWY52awuexUuRe3Bco=" -> null
+      - filename                       = "./.build/auto_teardown.zip" -> null
+      - function_name                  = "aerospike-lmcache-bench-auto-teardown" -> null
+      - handler                        = "auto_teardown.handler" -> null
+      - id                             = "aerospike-lmcache-bench-auto-teardown" -> null
+      - invoke_arn                     = "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:236318833413:function:aerospike-lmcache-bench-auto-teardown/invocations" -> null
+      - last_modified                  = "2026-09-14T20:46:22.690+0000" -> null
+      - layers                         = [] -> null
+      - memory_size                    = 128 -> null
+      - package_type                   = "Zip" -> null
+      - publish                        = false -> null
+      - qualified_arn                  = "arn:aws:lambda:us-east-1:236318833413:function:aerospike-lmcache-bench-auto-teardown:$LATEST" -> null
+      - qualified_invoke_arn           = "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:236318833413:function:aerospike-lmcache-bench-auto-teardown:$LATEST/invocations" -> null
+      - reserved_concurrent_executions = -1 -> null
+      - role                           = "arn:aws:iam::236318833413:role/aerospike-lmcache-bench-teardown" -> null
+      - runtime                        = "python3.12" -> null
+      - skip_destroy                   = false -> null
+      - source_code_hash               = "OuZPiNc5MUiVvcZ9wn4FxRScIdWY52awuexUuRe3Bco=" -> null
+      - source_code_size               = 1660 -> null
+      - tags                           = {
+          - "Name" = "aerospike-lmcache-bench-auto-teardown"
+        } -> null
+      - tags_all                       = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Name"      = "aerospike-lmcache-bench-auto-teardown"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+        } -> null
+      - timeout                        = 120 -> null
+      - version                        = "$LATEST" -> null
+        # (6 unchanged attributes hidden)
+
+      - environment {
+          - variables = {
+              - "PROJECT_TAG"   = "aerospike-lmcache-bench"
+              - "SNS_TOPIC_ARN" = "arn:aws:sns:us-east-1:236318833413:aerospike-lmcache-bench-alerts"
+            } -> null
+        }
+
+      - ephemeral_storage {
+          - size = 512 -> null
+        }
+
+      - logging_config {
+          - log_format            = "Text" -> null
+          - log_group             = "/aws/lambda/aerospike-lmcache-bench-auto-teardown" -> null
+            # (2 unchanged attributes hidden)
+        }
+
+      - tracing_config {
+          - mode = "PassThrough" -> null
+        }
+    }
+
+  # aws_nat_gateway.bench will be destroyed
+  - resource "aws_nat_gateway" "bench" {
+      - allocation_id                      = "eipalloc-04ae199fb2c751ef2" -> null
+      - association_id                     = "eipassoc-0e36ab98f3b5b0e6c" -> null
+      - connectivity_type                  = "public" -> null
+      - id                                 = "nat-07d83290ac1be9987" -> null
+      - network_interface_id               = "eni-04b10e8caaeef4dad" -> null
+      - private_ip                         = "10.240.0.9" -> null
+      - public_ip                          = "54.165.83.46" -> null
+      - secondary_allocation_ids           = [] -> null
+      - secondary_private_ip_address_count = 0 -> null
+      - secondary_private_ip_addresses     = [] -> null
+      - subnet_id                          = "subnet-06e668aa0f56e0097" -> null
+      - tags                               = {
+          - "Name" = "aerospike-lmcache-bench-nat"
+        } -> null
+      - tags_all                           = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Name"      = "aerospike-lmcache-bench-nat"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+        } -> null
+    }
+
+  # aws_network_interface.client[0] will be destroyed
+  - resource "aws_network_interface" "client" {
+      - arn                       = "arn:aws:ec2:us-east-1:236318833413:network-interface/eni-0de278f95382fa9e7" -> null
+      - id                        = "eni-0de278f95382fa9e7" -> null
+      - interface_type            = "efa" -> null
+      - ipv4_prefix_count         = 0 -> null
+      - ipv4_prefixes             = [] -> null
+      - ipv6_address_count        = 0 -> null
+      - ipv6_address_list         = [] -> null
+      - ipv6_address_list_enabled = false -> null
+      - ipv6_addresses            = [] -> null
+      - ipv6_prefix_count         = 0 -> null
+      - ipv6_prefixes             = [] -> null
+      - mac_address               = "12:ff:d5:84:23:7b" -> null
+      - owner_id                  = "236318833413" -> null
+      - private_dns_name          = "ip-10-240-1-100.ec2.internal" -> null
+      - private_ip                = "10.240.1.100" -> null
+      - private_ip_list           = [
+          - "10.240.1.100",
+        ] -> null
+      - private_ip_list_enabled   = false -> null
+      - private_ips               = [
+          - "10.240.1.100",
+        ] -> null
+      - private_ips_count         = 0 -> null
+      - security_groups           = [
+          - "sg-0069f2f8bef35fcab",
+        ] -> null
+      - source_dest_check         = true -> null
+      - subnet_id                 = "subnet-03d682b04dd823eaa" -> null
+      - tags                      = {
+          - "Name" = "aerospike-lmcache-bench-client-0-efa"
+        } -> null
+      - tags_all                  = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Name"      = "aerospike-lmcache-bench-client-0-efa"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+        } -> null
+        # (2 unchanged attributes hidden)
+
+      - attachment {
+          - attachment_id = "eni-attach-08b76bb06bc3d3dba" -> null
+          - device_index  = 0 -> null
+          - instance      = "i-0ae3bd1739652ba8e" -> null
+        }
+    }
+
+  # aws_network_interface.gpu[0] will be destroyed
+  - resource "aws_network_interface" "gpu" {
+      - arn                       = "arn:aws:ec2:us-east-1:236318833413:network-interface/eni-0723f2e9e9cb196c5" -> null
+      - id                        = "eni-0723f2e9e9cb196c5" -> null
+      - interface_type            = "efa" -> null
+      - ipv4_prefix_count         = 0 -> null
+      - ipv4_prefixes             = [] -> null
+      - ipv6_address_count        = 0 -> null
+      - ipv6_address_list         = [] -> null
+      - ipv6_address_list_enabled = false -> null
+      - ipv6_addresses            = [] -> null
+      - ipv6_prefix_count         = 0 -> null
+      - ipv6_prefixes             = [] -> null
+      - mac_address               = "12:ff:c6:fa:5a:25" -> null
+      - owner_id                  = "236318833413" -> null
+      - private_dns_name          = "ip-10-240-1-200.ec2.internal" -> null
+      - private_ip                = "10.240.1.200" -> null
+      - private_ip_list           = [
+          - "10.240.1.200",
+        ] -> null
+      - private_ip_list_enabled   = false -> null
+      - private_ips               = [
+          - "10.240.1.200",
+        ] -> null
+      - private_ips_count         = 0 -> null
+      - security_groups           = [
+          - "sg-0069f2f8bef35fcab",
+        ] -> null
+      - source_dest_check         = true -> null
+      - subnet_id                 = "subnet-03d682b04dd823eaa" -> null
+      - tags                      = {
+          - "Name" = "aerospike-lmcache-bench-gpu-0-efa"
+        } -> null
+      - tags_all                  = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Name"      = "aerospike-lmcache-bench-gpu-0-efa"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+        } -> null
+        # (2 unchanged attributes hidden)
+    }
+
+  # aws_network_interface.server[0] will be destroyed
+  - resource "aws_network_interface" "server" {
+      - arn                       = "arn:aws:ec2:us-east-1:236318833413:network-interface/eni-095958ebe920dfe43" -> null
+      - id                        = "eni-095958ebe920dfe43" -> null
+      - interface_type            = "efa" -> null
+      - ipv4_prefix_count         = 0 -> null
+      - ipv4_prefixes             = [] -> null
+      - ipv6_address_count        = 0 -> null
+      - ipv6_address_list         = [] -> null
+      - ipv6_address_list_enabled = false -> null
+      - ipv6_addresses            = [] -> null
+      - ipv6_prefix_count         = 0 -> null
+      - ipv6_prefixes             = [] -> null
+      - mac_address               = "12:ff:c9:cb:26:25" -> null
+      - owner_id                  = "236318833413" -> null
+      - private_dns_name          = "ip-10-240-1-10.ec2.internal" -> null
+      - private_ip                = "10.240.1.10" -> null
+      - private_ip_list           = [
+          - "10.240.1.10",
+        ] -> null
+      - private_ip_list_enabled   = false -> null
+      - private_ips               = [
+          - "10.240.1.10",
+        ] -> null
+      - private_ips_count         = 0 -> null
+      - security_groups           = [
+          - "sg-0069f2f8bef35fcab",
+        ] -> null
+      - source_dest_check         = true -> null
+      - subnet_id                 = "subnet-03d682b04dd823eaa" -> null
+      - tags                      = {
+          - "Name" = "aerospike-lmcache-bench-server-0-efa"
+        } -> null
+      - tags_all                  = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Name"      = "aerospike-lmcache-bench-server-0-efa"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+        } -> null
+        # (2 unchanged attributes hidden)
+
+      - attachment {
+          - attachment_id = "eni-attach-053cad73e9edb8daa" -> null
+          - device_index  = 0 -> null
+          - instance      = "i-04563f8934653b784" -> null
+        }
+    }
+
+  # aws_network_interface.server[1] will be destroyed
+  - resource "aws_network_interface" "server" {
+      - arn                       = "arn:aws:ec2:us-east-1:236318833413:network-interface/eni-0af15e1ed405e8914" -> null
+      - id                        = "eni-0af15e1ed405e8914" -> null
+      - interface_type            = "efa" -> null
+      - ipv4_prefix_count         = 0 -> null
+      - ipv4_prefixes             = [] -> null
+      - ipv6_address_count        = 0 -> null
+      - ipv6_address_list         = [] -> null
+      - ipv6_address_list_enabled = false -> null
+      - ipv6_addresses            = [] -> null
+      - ipv6_prefix_count         = 0 -> null
+      - ipv6_prefixes             = [] -> null
+      - mac_address               = "12:ff:d1:d7:6d:2f" -> null
+      - owner_id                  = "236318833413" -> null
+      - private_dns_name          = "ip-10-240-1-11.ec2.internal" -> null
+      - private_ip                = "10.240.1.11" -> null
+      - private_ip_list           = [
+          - "10.240.1.11",
+        ] -> null
+      - private_ip_list_enabled   = false -> null
+      - private_ips               = [
+          - "10.240.1.11",
+        ] -> null
+      - private_ips_count         = 0 -> null
+      - security_groups           = [
+          - "sg-0069f2f8bef35fcab",
+        ] -> null
+      - source_dest_check         = true -> null
+      - subnet_id                 = "subnet-03d682b04dd823eaa" -> null
+      - tags                      = {
+          - "Name" = "aerospike-lmcache-bench-server-1-efa"
+        } -> null
+      - tags_all                  = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Name"      = "aerospike-lmcache-bench-server-1-efa"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+        } -> null
+        # (2 unchanged attributes hidden)
+
+      - attachment {
+          - attachment_id = "eni-attach-057298c28ad1d7e2f" -> null
+          - device_index  = 0 -> null
+          - instance      = "i-06d5be357345b40d9" -> null
+        }
+    }
+
+  # aws_network_interface.server[2] will be destroyed
+  - resource "aws_network_interface" "server" {
+      - arn                       = "arn:aws:ec2:us-east-1:236318833413:network-interface/eni-02ea1944c0a1878be" -> null
+      - id                        = "eni-02ea1944c0a1878be" -> null
+      - interface_type            = "efa" -> null
+      - ipv4_prefix_count         = 0 -> null
+      - ipv4_prefixes             = [] -> null
+      - ipv6_address_count        = 0 -> null
+      - ipv6_address_list         = [] -> null
+      - ipv6_address_list_enabled = false -> null
+      - ipv6_addresses            = [] -> null
+      - ipv6_prefix_count         = 0 -> null
+      - ipv6_prefixes             = [] -> null
+      - mac_address               = "12:ff:c9:9a:f2:03" -> null
+      - owner_id                  = "236318833413" -> null
+      - private_dns_name          = "ip-10-240-1-12.ec2.internal" -> null
+      - private_ip                = "10.240.1.12" -> null
+      - private_ip_list           = [
+          - "10.240.1.12",
+        ] -> null
+      - private_ip_list_enabled   = false -> null
+      - private_ips               = [
+          - "10.240.1.12",
+        ] -> null
+      - private_ips_count         = 0 -> null
+      - security_groups           = [
+          - "sg-0069f2f8bef35fcab",
+        ] -> null
+      - source_dest_check         = true -> null
+      - subnet_id                 = "subnet-03d682b04dd823eaa" -> null
+      - tags                      = {
+          - "Name" = "aerospike-lmcache-bench-server-2-efa"
+        } -> null
+      - tags_all                  = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Name"      = "aerospike-lmcache-bench-server-2-efa"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+        } -> null
+        # (2 unchanged attributes hidden)
+
+      - attachment {
+          - attachment_id = "eni-attach-0f446423c6d14cffa" -> null
+          - device_index  = 0 -> null
+          - instance      = "i-0be7a9a95c823509a" -> null
+        }
+    }
+
+  # aws_network_interface.server[3] will be destroyed
+  - resource "aws_network_interface" "server" {
+      - arn                       = "arn:aws:ec2:us-east-1:236318833413:network-interface/eni-0dbfc1c4dc433abf0" -> null
+      - id                        = "eni-0dbfc1c4dc433abf0" -> null
+      - interface_type            = "efa" -> null
+      - ipv4_prefix_count         = 0 -> null
+      - ipv4_prefixes             = [] -> null
+      - ipv6_address_count        = 0 -> null
+      - ipv6_address_list         = [] -> null
+      - ipv6_address_list_enabled = false -> null
+      - ipv6_addresses            = [] -> null
+      - ipv6_prefix_count         = 0 -> null
+      - ipv6_prefixes             = [] -> null
+      - mac_address               = "12:ff:f9:1f:cb:83" -> null
+      - owner_id                  = "236318833413" -> null
+      - private_dns_name          = "ip-10-240-1-13.ec2.internal" -> null
+      - private_ip                = "10.240.1.13" -> null
+      - private_ip_list           = [
+          - "10.240.1.13",
+        ] -> null
+      - private_ip_list_enabled   = false -> null
+      - private_ips               = [
+          - "10.240.1.13",
+        ] -> null
+      - private_ips_count         = 0 -> null
+      - security_groups           = [
+          - "sg-0069f2f8bef35fcab",
+        ] -> null
+      - source_dest_check         = true -> null
+      - subnet_id                 = "subnet-03d682b04dd823eaa" -> null
+      - tags                      = {
+          - "Name" = "aerospike-lmcache-bench-server-3-efa"
+        } -> null
+      - tags_all                  = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Name"      = "aerospike-lmcache-bench-server-3-efa"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+        } -> null
+        # (2 unchanged attributes hidden)
+
+      - attachment {
+          - attachment_id = "eni-attach-0d604964593e4bbf1" -> null
+          - device_index  = 0 -> null
+          - instance      = "i-0ac7faf4a4838cf2f" -> null
+        }
+    }
+
+  # aws_network_interface.server[4] will be destroyed
+  - resource "aws_network_interface" "server" {
+      - arn                       = "arn:aws:ec2:us-east-1:236318833413:network-interface/eni-0e57458b0cea41a52" -> null
+      - id                        = "eni-0e57458b0cea41a52" -> null
+      - interface_type            = "efa" -> null
+      - ipv4_prefix_count         = 0 -> null
+      - ipv4_prefixes             = [] -> null
+      - ipv6_address_count        = 0 -> null
+      - ipv6_address_list         = [] -> null
+      - ipv6_address_list_enabled = false -> null
+      - ipv6_addresses            = [] -> null
+      - ipv6_prefix_count         = 0 -> null
+      - ipv6_prefixes             = [] -> null
+      - mac_address               = "12:ff:fc:9f:2b:c1" -> null
+      - owner_id                  = "236318833413" -> null
+      - private_dns_name          = "ip-10-240-1-14.ec2.internal" -> null
+      - private_ip                = "10.240.1.14" -> null
+      - private_ip_list           = [
+          - "10.240.1.14",
+        ] -> null
+      - private_ip_list_enabled   = false -> null
+      - private_ips               = [
+          - "10.240.1.14",
+        ] -> null
+      - private_ips_count         = 0 -> null
+      - security_groups           = [
+          - "sg-0069f2f8bef35fcab",
+        ] -> null
+      - source_dest_check         = true -> null
+      - subnet_id                 = "subnet-03d682b04dd823eaa" -> null
+      - tags                      = {
+          - "Name" = "aerospike-lmcache-bench-server-4-efa"
+        } -> null
+      - tags_all                  = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Name"      = "aerospike-lmcache-bench-server-4-efa"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+        } -> null
+        # (2 unchanged attributes hidden)
+
+      - attachment {
+          - attachment_id = "eni-attach-0e0089bbeff224340" -> null
+          - device_index  = 0 -> null
+          - instance      = "i-01b81ad68bbeb3aed" -> null
+        }
+    }
+
+  # aws_placement_group.bench will be destroyed
+  - resource "aws_placement_group" "bench" {
+      - arn                = "arn:aws:ec2:us-east-1:236318833413:placement-group/aerospike-lmcache-bench-pg" -> null
+      - id                 = "aerospike-lmcache-bench-pg" -> null
+      - name               = "aerospike-lmcache-bench-pg" -> null
+      - partition_count    = 0 -> null
+      - placement_group_id = "pg-0d25d643a032edbc6" -> null
+      - strategy           = "cluster" -> null
+      - tags               = {
+          - "Name" = "aerospike-lmcache-bench-pg"
+        } -> null
+      - tags_all           = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Name"      = "aerospike-lmcache-bench-pg"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+        } -> null
+        # (1 unchanged attribute hidden)
+    }
+
+  # aws_route_table.efa will be destroyed
+  - resource "aws_route_table" "efa" {
+      - arn              = "arn:aws:ec2:us-east-1:236318833413:route-table/rtb-0875b6e9c3923a808" -> null
+      - id               = "rtb-0875b6e9c3923a808" -> null
+      - owner_id         = "236318833413" -> null
+      - propagating_vgws = [] -> null
+      - route            = [
+          - {
+              - cidr_block                 = "0.0.0.0/0"
+              - nat_gateway_id             = "nat-07d83290ac1be9987"
+                # (11 unchanged attributes hidden)
+            },
+        ] -> null
+      - tags             = {
+          - "Name" = "aerospike-lmcache-bench-rt-efa"
+        } -> null
+      - tags_all         = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Name"      = "aerospike-lmcache-bench-rt-efa"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+        } -> null
+      - vpc_id           = "vpc-003b0cafc1148ed94" -> null
+    }
+
+  # aws_route_table.public will be destroyed
+  - resource "aws_route_table" "public" {
+      - arn              = "arn:aws:ec2:us-east-1:236318833413:route-table/rtb-0eddf3d61547ace4b" -> null
+      - id               = "rtb-0eddf3d61547ace4b" -> null
+      - owner_id         = "236318833413" -> null
+      - propagating_vgws = [] -> null
+      - route            = [
+          - {
+              - cidr_block                 = "0.0.0.0/0"
+              - gateway_id                 = "igw-0866a3bf326bc8af8"
+                # (11 unchanged attributes hidden)
+            },
+        ] -> null
+      - tags             = {
+          - "Name" = "aerospike-lmcache-bench-rt-public"
+        } -> null
+      - tags_all         = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Name"      = "aerospike-lmcache-bench-rt-public"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+        } -> null
+      - vpc_id           = "vpc-003b0cafc1148ed94" -> null
+    }
+
+  # aws_route_table_association.efa will be destroyed
+  - resource "aws_route_table_association" "efa" {
+      - id             = "rtbassoc-0909f2a63b623e664" -> null
+      - route_table_id = "rtb-0875b6e9c3923a808" -> null
+      - subnet_id      = "subnet-03d682b04dd823eaa" -> null
+        # (1 unchanged attribute hidden)
+    }
+
+  # aws_route_table_association.nat will be destroyed
+  - resource "aws_route_table_association" "nat" {
+      - id             = "rtbassoc-03e70a4f962b11c32" -> null
+      - route_table_id = "rtb-0eddf3d61547ace4b" -> null
+      - subnet_id      = "subnet-06e668aa0f56e0097" -> null
+        # (1 unchanged attribute hidden)
+    }
+
+  # aws_scheduler_schedule.teardown will be destroyed
+  - resource "aws_scheduler_schedule" "teardown" {
+      - arn                          = "arn:aws:scheduler:us-east-1:236318833413:schedule/default/aerospike-lmcache-bench-auto-teardown" -> null
+      - description                  = "AIE-86 cost guard: tears down the benchmark cluster at a deadline" -> null
+      - group_name                   = "default" -> null
+      - id                           = "default/aerospike-lmcache-bench-auto-teardown" -> null
+      - name                         = "aerospike-lmcache-bench-auto-teardown" -> null
+      - schedule_expression          = "at(2026-09-15T08:46:11)" -> null
+      - schedule_expression_timezone = "UTC" -> null
+      - state                        = "ENABLED" -> null
+        # (4 unchanged attributes hidden)
+
+      - flexible_time_window {
+          - maximum_window_in_minutes = 0 -> null
+          - mode                      = "OFF" -> null
+        }
+
+      - target {
+          - arn      = "arn:aws:lambda:us-east-1:236318833413:function:aerospike-lmcache-bench-auto-teardown" -> null
+          - role_arn = "arn:aws:iam::236318833413:role/aerospike-lmcache-bench-scheduler" -> null
+            # (1 unchanged attribute hidden)
+
+          - retry_policy {
+              - maximum_event_age_in_seconds = 86400 -> null
+              - maximum_retry_attempts       = 185 -> null
+            }
+        }
+    }
+
+  # aws_security_group.efa will be destroyed
+  - resource "aws_security_group" "efa" {
+      - arn                    = "arn:aws:ec2:us-east-1:236318833413:security-group/sg-0069f2f8bef35fcab" -> null
+      - description            = "EFA cluster SG: self-referencing all-traffic ingress AND egress" -> null
+      - egress                 = [
+          - {
+              - cidr_blocks      = [
+                  - "0.0.0.0/0",
+                ]
+              - description      = "Outbound to internet for package installation"
+              - from_port        = 0
+              - ipv6_cidr_blocks = []
+              - prefix_list_ids  = []
+              - protocol         = "-1"
+              - security_groups  = []
+              - self             = false
+              - to_port          = 0
+            },
+          - {
+              - cidr_blocks      = []
+              - description      = "EFA: ALL outbound to self (REQUIRED - omitting this breaks RDMA silently)"
+              - from_port        = 0
+              - ipv6_cidr_blocks = []
+              - prefix_list_ids  = []
+              - protocol         = "-1"
+              - security_groups  = []
+              - self             = true
+              - to_port          = 0
+            },
+        ] -> null
+      - id                     = "sg-0069f2f8bef35fcab" -> null
+      - ingress                = [
+          - {
+              - cidr_blocks      = [
+                  - "64.180.78.81/32",
+                ]
+              - description      = "SSH from operator CIDR"
+              - from_port        = 22
+              - ipv6_cidr_blocks = []
+              - prefix_list_ids  = []
+              - protocol         = "tcp"
+              - security_groups  = []
+              - self             = false
+              - to_port          = 22
+            },
+          - {
+              - cidr_blocks      = []
+              - description      = "Aerospike service/fabric/heartbeat/info within cluster"
+              - from_port        = 3000
+              - ipv6_cidr_blocks = []
+              - prefix_list_ids  = []
+              - protocol         = "tcp"
+              - security_groups  = []
+              - self             = true
+              - to_port          = 3003
+            },
+          - {
+              - cidr_blocks      = []
+              - description      = "EFA: ALL inbound from self (required, do not remove)"
+              - from_port        = 0
+              - ipv6_cidr_blocks = []
+              - prefix_list_ids  = []
+              - protocol         = "-1"
+              - security_groups  = []
+              - self             = true
+              - to_port          = 0
+            },
+        ] -> null
+      - name                   = "aerospike-lmcache-bench-efa-sg" -> null
+      - owner_id               = "236318833413" -> null
+      - revoke_rules_on_delete = false -> null
+      - tags                   = {
+          - "Name" = "aerospike-lmcache-bench-efa-sg"
+        } -> null
+      - tags_all               = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Name"      = "aerospike-lmcache-bench-efa-sg"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+        } -> null
+      - vpc_id                 = "vpc-003b0cafc1148ed94" -> null
+        # (1 unchanged attribute hidden)
+    }
+
+  # aws_subnet.efa will be destroyed
+  - resource "aws_subnet" "efa" {
+      - arn                                            = "arn:aws:ec2:us-east-1:236318833413:subnet/subnet-03d682b04dd823eaa" -> null
+      - assign_ipv6_address_on_creation                = false -> null
+      - availability_zone                              = "us-east-1d" -> null
+      - availability_zone_id                           = "use1-az2" -> null
+      - cidr_block                                     = "10.240.1.0/24" -> null
+      - enable_dns64                                   = false -> null
+      - enable_lni_at_device_index                     = 0 -> null
+      - enable_resource_name_dns_a_record_on_launch    = false -> null
+      - enable_resource_name_dns_aaaa_record_on_launch = false -> null
+      - id                                             = "subnet-03d682b04dd823eaa" -> null
+      - ipv6_native                                    = false -> null
+      - map_customer_owned_ip_on_launch                = false -> null
+      - map_public_ip_on_launch                        = false -> null
+      - owner_id                                       = "236318833413" -> null
+      - private_dns_hostname_type_on_launch            = "ip-name" -> null
+      - tags                                           = {
+          - "Name" = "aerospike-lmcache-bench-efa-subnet"
+        } -> null
+      - tags_all                                       = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Name"      = "aerospike-lmcache-bench-efa-subnet"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+        } -> null
+      - vpc_id                                         = "vpc-003b0cafc1148ed94" -> null
+        # (4 unchanged attributes hidden)
+    }
+
+  # aws_subnet.nat will be destroyed
+  - resource "aws_subnet" "nat" {
+      - arn                                            = "arn:aws:ec2:us-east-1:236318833413:subnet/subnet-06e668aa0f56e0097" -> null
+      - assign_ipv6_address_on_creation                = false -> null
+      - availability_zone                              = "us-east-1d" -> null
+      - availability_zone_id                           = "use1-az2" -> null
+      - cidr_block                                     = "10.240.0.0/28" -> null
+      - enable_dns64                                   = false -> null
+      - enable_lni_at_device_index                     = 0 -> null
+      - enable_resource_name_dns_a_record_on_launch    = false -> null
+      - enable_resource_name_dns_aaaa_record_on_launch = false -> null
+      - id                                             = "subnet-06e668aa0f56e0097" -> null
+      - ipv6_native                                    = false -> null
+      - map_customer_owned_ip_on_launch                = false -> null
+      - map_public_ip_on_launch                        = true -> null
+      - owner_id                                       = "236318833413" -> null
+      - private_dns_hostname_type_on_launch            = "ip-name" -> null
+      - tags                                           = {
+          - "Name" = "aerospike-lmcache-bench-nat-subnet"
+        } -> null
+      - tags_all                                       = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Name"      = "aerospike-lmcache-bench-nat-subnet"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+        } -> null
+      - vpc_id                                         = "vpc-003b0cafc1148ed94" -> null
+        # (4 unchanged attributes hidden)
+    }
+
+  # aws_vpc.bench will be destroyed
+  - resource "aws_vpc" "bench" {
+      - arn                                  = "arn:aws:ec2:us-east-1:236318833413:vpc/vpc-003b0cafc1148ed94" -> null
+      - assign_generated_ipv6_cidr_block     = false -> null
+      - cidr_block                           = "10.240.0.0/16" -> null
+      - default_network_acl_id               = "acl-04299b76054731aa9" -> null
+      - default_route_table_id               = "rtb-03cf7070210e80f2e" -> null
+      - default_security_group_id            = "sg-0db7fe82a5be35a05" -> null
+      - dhcp_options_id                      = "dopt-084d3ce181ede63e7" -> null
+      - enable_dns_hostnames                 = true -> null
+      - enable_dns_support                   = true -> null
+      - enable_network_address_usage_metrics = false -> null
+      - id                                   = "vpc-003b0cafc1148ed94" -> null
+      - instance_tenancy                     = "default" -> null
+      - ipv6_netmask_length                  = 0 -> null
+      - main_route_table_id                  = "rtb-03cf7070210e80f2e" -> null
+      - owner_id                             = "236318833413" -> null
+      - tags                                 = {
+          - "Name" = "aerospike-lmcache-bench-vpc"
+        } -> null
+      - tags_all                             = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Name"      = "aerospike-lmcache-bench-vpc"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+        } -> null
+        # (4 unchanged attributes hidden)
+    }
+
+  # aws_vpc_security_group_egress_rule.internet will be destroyed
+  - resource "aws_vpc_security_group_egress_rule" "internet" {
+      - arn                    = "arn:aws:ec2:us-east-1:236318833413:security-group-rule/sgr-0f863bfabed3c3606" -> null
+      - cidr_ipv4              = "0.0.0.0/0" -> null
+      - description            = "Outbound to internet for package installation" -> null
+      - id                     = "sgr-0f863bfabed3c3606" -> null
+      - ip_protocol            = "-1" -> null
+      - security_group_id      = "sg-0069f2f8bef35fcab" -> null
+      - security_group_rule_id = "sgr-0f863bfabed3c3606" -> null
+      - tags_all               = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+        } -> null
+    }
+
+  # aws_vpc_security_group_egress_rule.self_all will be destroyed
+  - resource "aws_vpc_security_group_egress_rule" "self_all" {
+      - arn                          = "arn:aws:ec2:us-east-1:236318833413:security-group-rule/sgr-0692c4c267c5088c1" -> null
+      - description                  = "EFA: ALL outbound to self (REQUIRED - omitting this breaks RDMA silently)" -> null
+      - id                           = "sgr-0692c4c267c5088c1" -> null
+      - ip_protocol                  = "-1" -> null
+      - referenced_security_group_id = "sg-0069f2f8bef35fcab" -> null
+      - security_group_id            = "sg-0069f2f8bef35fcab" -> null
+      - security_group_rule_id       = "sgr-0692c4c267c5088c1" -> null
+      - tags_all                     = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+        } -> null
+    }
+
+  # aws_vpc_security_group_ingress_rule.aerospike will be destroyed
+  - resource "aws_vpc_security_group_ingress_rule" "aerospike" {
+      - arn                          = "arn:aws:ec2:us-east-1:236318833413:security-group-rule/sgr-0c2cdd7fcdf9948d1" -> null
+      - description                  = "Aerospike service/fabric/heartbeat/info within cluster" -> null
+      - from_port                    = 3000 -> null
+      - id                           = "sgr-0c2cdd7fcdf9948d1" -> null
+      - ip_protocol                  = "tcp" -> null
+      - referenced_security_group_id = "sg-0069f2f8bef35fcab" -> null
+      - security_group_id            = "sg-0069f2f8bef35fcab" -> null
+      - security_group_rule_id       = "sgr-0c2cdd7fcdf9948d1" -> null
+      - tags_all                     = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+        } -> null
+      - to_port                      = 3003 -> null
+    }
+
+  # aws_vpc_security_group_ingress_rule.self_all will be destroyed
+  - resource "aws_vpc_security_group_ingress_rule" "self_all" {
+      - arn                          = "arn:aws:ec2:us-east-1:236318833413:security-group-rule/sgr-0293a5326b3ffc696" -> null
+      - description                  = "EFA: ALL inbound from self (required, do not remove)" -> null
+      - id                           = "sgr-0293a5326b3ffc696" -> null
+      - ip_protocol                  = "-1" -> null
+      - referenced_security_group_id = "sg-0069f2f8bef35fcab" -> null
+      - security_group_id            = "sg-0069f2f8bef35fcab" -> null
+      - security_group_rule_id       = "sgr-0293a5326b3ffc696" -> null
+      - tags_all                     = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+        } -> null
+    }
+
+  # aws_vpc_security_group_ingress_rule.ssh will be destroyed
+  - resource "aws_vpc_security_group_ingress_rule" "ssh" {
+      - arn                    = "arn:aws:ec2:us-east-1:236318833413:security-group-rule/sgr-0847afe341bf37c37" -> null
+      - cidr_ipv4              = "64.180.78.81/32" -> null
+      - description            = "SSH from operator CIDR" -> null
+      - from_port              = 22 -> null
+      - id                     = "sgr-0847afe341bf37c37" -> null
+      - ip_protocol            = "tcp" -> null
+      - security_group_id      = "sg-0069f2f8bef35fcab" -> null
+      - security_group_rule_id = "sgr-0847afe341bf37c37" -> null
+      - tags_all               = {
+          - "Epic"      = "AIE-85"
+          - "Jira"      = "AIE-86"
+          - "ManagedBy" = "terraform"
+          - "Owner"     = "lbauto@aerospike.com"
+          - "Project"   = "aerospike-lmcache-bench"
+        } -> null
+      - to_port                = 22 -> null
+    }
+
+Plan: 0 to add, 0 to change, 40 to destroy.
+
+Changes to Outputs:
+  - aerospike_seed_hosts       = "10.240.1.10:3000,10.240.1.11:3000,10.240.1.12:3000,10.240.1.13:3000,10.240.1.14:3000" -> null
+  - alert_topic_arn            = "arn:aws:sns:us-east-1:236318833413:aerospike-lmcache-bench-alerts" -> null
+  - auto_teardown_deadline_utc = "at(2026-09-15T08:46:11)" -> null
+  - availability_zone          = "us-east-1d" -> null
+  - budget_name                = "aerospike-lmcache-bench-ceiling" -> null
+  - client_private_ips         = [
+      - "10.240.1.100",
+    ] -> null
+  - client_public_ips          = [] -> null
+  - estimated_hourly_cost_usd  = "68.62 USD/hr (5 x i3en.24xlarge server + 1 x c5n.18xlarge client + 1 x g6e.12xlarge gpu)" -> null
+  - extend_teardown_command    = "./bin/extend-teardown.sh <hours-from-now>" -> null
+  - gpu_private_ips            = [
+      - "10.240.1.200",
+    ] -> null
+  - gpu_public_ips             = [] -> null
+  - nat_gateway_public_ip      = "54.165.83.46" -> null
+  - placement_group_name       = "aerospike-lmcache-bench-pg" -> null
+  - security_group_id          = "sg-0069f2f8bef35fcab" -> null
+  - server_private_ips         = [
+      - "10.240.1.10",
+      - "10.240.1.11",
+      - "10.240.1.12",
+      - "10.240.1.13",
+      - "10.240.1.14",
+    ] -> null
+  - server_public_ips          = [] -> null
+  - ssm_session_examples       = {
+      - server-0 = "aws ssm start-session --target i-04563f8934653b784"
+      - server-1 = "aws ssm start-session --target i-06d5be357345b40d9"
+      - server-2 = "aws ssm start-session --target i-0be7a9a95c823509a"
+      - server-3 = "aws ssm start-session --target i-0ac7faf4a4838cf2f"
+      - server-4 = "aws ssm start-session --target i-01b81ad68bbeb3aed"
+    } -> null
+aws_iam_role_policy.teardown: Destroying... [id=aerospike-lmcache-bench-teardown:aerospike-lmcache-bench-teardown]
+aws_iam_role_policy.scheduler: Destroying... [id=aerospike-lmcache-bench-scheduler:aerospike-lmcache-bench-scheduler]
+aws_route_table_association.efa: Destroying... [id=rtbassoc-0909f2a63b623e664]
+aws_vpc_security_group_ingress_rule.ssh: Destroying... [id=sgr-0847afe341bf37c37]
+aws_vpc_security_group_ingress_rule.self_all: Destroying... [id=sgr-0293a5326b3ffc696]
+aws_vpc_security_group_egress_rule.self_all: Destroying... [id=sgr-0692c4c267c5088c1]
+aws_network_interface.gpu[0]: Destroying... [id=eni-0723f2e9e9cb196c5]
+aws_instance.server[2]: Destroying... [id=i-0be7a9a95c823509a]
+aws_instance.server[4]: Destroying... [id=i-01b81ad68bbeb3aed]
+aws_instance.server[1]: Destroying... [id=i-06d5be357345b40d9]
+aws_iam_role_policy.scheduler: Destruction complete after 1s
+aws_vpc_security_group_ingress_rule.aerospike: Destroying... [id=sgr-0c2cdd7fcdf9948d1]
+aws_iam_role_policy.teardown: Destruction complete after 1s
+aws_vpc_security_group_egress_rule.internet: Destroying... [id=sgr-0f863bfabed3c3606]
+aws_vpc_security_group_ingress_rule.self_all: Destruction complete after 1s
+aws_iam_role_policy_attachment.ssm: Destroying... [id=aerospike-lmcache-bench-node-20260914204613591300000001]
+aws_vpc_security_group_egress_rule.self_all: Destruction complete after 1s
+aws_instance.client[0]: Destroying... [id=i-0ae3bd1739652ba8e]
+aws_vpc_security_group_ingress_rule.ssh: Destruction complete after 1s
+aws_route_table_association.efa: Destruction complete after 1s
+aws_instance.server[3]: Destroying... [id=i-0ac7faf4a4838cf2f]
+aws_instance.server[0]: Destroying... [id=i-04563f8934653b784]
+aws_network_interface.gpu[0]: Destruction complete after 1s
+aws_iam_role_policy_attachment.teardown_logs: Destroying... [id=aerospike-lmcache-bench-teardown-20260914204613863300000002]
+aws_iam_role_policy_attachment.ssm: Destruction complete after 0s
+aws_route_table_association.nat: Destroying... [id=rtbassoc-03e70a4f962b11c32]
+aws_vpc_security_group_ingress_rule.aerospike: Destruction complete after 0s
+aws_iam_role_policy_attachment.teardown_logs: Destruction complete after 0s
+aws_route_table.efa: Destroying... [id=rtb-0875b6e9c3923a808]
+aws_vpc_security_group_egress_rule.internet: Destruction complete after 0s
+aws_route_table_association.nat: Destruction complete after 1s
+aws_route_table.public: Destroying... [id=rtb-0eddf3d61547ace4b]
+aws_route_table.efa: Destruction complete after 1s
+aws_nat_gateway.bench: Destroying... [id=nat-07d83290ac1be9987]
+aws_route_table.public: Destruction complete after 0s
+aws_instance.server[1]: Still destroying... [id=i-06d5be357345b40d9, 00m10s elapsed]
+aws_instance.server[2]: Still destroying... [id=i-0be7a9a95c823509a, 00m10s elapsed]
+aws_instance.server[4]: Still destroying... [id=i-01b81ad68bbeb3aed, 00m10s elapsed]
+aws_instance.client[0]: Still destroying... [id=i-0ae3bd1739652ba8e, 00m10s elapsed]
+aws_instance.server[3]: Still destroying... [id=i-0ac7faf4a4838cf2f, 00m10s elapsed]
+aws_instance.server[0]: Still destroying... [id=i-04563f8934653b784, 00m10s elapsed]
+aws_nat_gateway.bench: Still destroying... [id=nat-07d83290ac1be9987, 00m10s elapsed]
+aws_instance.server[2]: Still destroying... [id=i-0be7a9a95c823509a, 00m20s elapsed]
+aws_instance.server[1]: Still destroying... [id=i-06d5be357345b40d9, 00m20s elapsed]
+aws_instance.server[4]: Still destroying... [id=i-01b81ad68bbeb3aed, 00m20s elapsed]
+aws_instance.client[0]: Still destroying... [id=i-0ae3bd1739652ba8e, 00m20s elapsed]
+aws_instance.server[0]: Still destroying... [id=i-04563f8934653b784, 00m20s elapsed]
+aws_instance.server[3]: Still destroying... [id=i-0ac7faf4a4838cf2f, 00m20s elapsed]
+aws_nat_gateway.bench: Still destroying... [id=nat-07d83290ac1be9987, 00m20s elapsed]
+aws_instance.server[2]: Still destroying... [id=i-0be7a9a95c823509a, 00m30s elapsed]
+aws_instance.server[1]: Still destroying... [id=i-06d5be357345b40d9, 00m30s elapsed]
+aws_instance.server[4]: Still destroying... [id=i-01b81ad68bbeb3aed, 00m30s elapsed]
+aws_instance.client[0]: Still destroying... [id=i-0ae3bd1739652ba8e, 00m30s elapsed]
+aws_instance.server[3]: Still destroying... [id=i-0ac7faf4a4838cf2f, 00m30s elapsed]
+aws_instance.server[0]: Still destroying... [id=i-04563f8934653b784, 00m30s elapsed]
+aws_instance.server[1]: Destruction complete after 31s
+aws_instance.server[4]: Destruction complete after 31s
+aws_instance.server[0]: Destruction complete after 31s
+aws_instance.client[0]: Destruction complete after 31s
+aws_network_interface.client[0]: Destroying... [id=eni-0de278f95382fa9e7]
+aws_nat_gateway.bench: Still destroying... [id=nat-07d83290ac1be9987, 00m30s elapsed]
+aws_network_interface.client[0]: Destruction complete after 0s
+aws_instance.server[2]: Still destroying... [id=i-0be7a9a95c823509a, 00m40s elapsed]
+aws_instance.server[3]: Still destroying... [id=i-0ac7faf4a4838cf2f, 00m40s elapsed]
+aws_instance.server[2]: Destruction complete after 42s
+aws_instance.server[3]: Destruction complete after 41s
+aws_iam_instance_profile.node: Destroying... [id=aerospike-lmcache-bench-node]
+aws_network_interface.server[3]: Destroying... [id=eni-0dbfc1c4dc433abf0]
+aws_network_interface.server[2]: Destroying... [id=eni-02ea1944c0a1878be]
+aws_scheduler_schedule.teardown: Destroying... [id=default/aerospike-lmcache-bench-auto-teardown]
+aws_placement_group.bench: Destroying... [id=aerospike-lmcache-bench-pg]
+aws_network_interface.server[0]: Destroying... [id=eni-095958ebe920dfe43]
+aws_network_interface.server[4]: Destroying... [id=eni-0e57458b0cea41a52]
+aws_network_interface.server[1]: Destroying... [id=eni-0af15e1ed405e8914]
+aws_nat_gateway.bench: Still destroying... [id=nat-07d83290ac1be9987, 00m40s elapsed]
+aws_iam_instance_profile.node: Destruction complete after 0s
+aws_iam_role.node: Destroying... [id=aerospike-lmcache-bench-node]
+aws_scheduler_schedule.teardown: Destruction complete after 0s
+aws_iam_role.scheduler: Destroying... [id=aerospike-lmcache-bench-scheduler]
+aws_lambda_function.teardown: Destroying... [id=aerospike-lmcache-bench-auto-teardown]
+aws_placement_group.bench: Destruction complete after 0s
+aws_iam_role.node: Destruction complete after 1s
+aws_network_interface.server[3]: Destruction complete after 1s
+aws_iam_role.scheduler: Destruction complete after 1s
+aws_lambda_function.teardown: Destruction complete after 1s
+aws_iam_role.teardown: Destroying... [id=aerospike-lmcache-bench-teardown]
+aws_network_interface.server[0]: Destruction complete after 1s
+aws_network_interface.server[4]: Destruction complete after 1s
+aws_network_interface.server[1]: Destruction complete after 1s
+aws_network_interface.server[2]: Destruction complete after 1s
+aws_subnet.efa: Destroying... [id=subnet-03d682b04dd823eaa]
+aws_security_group.efa: Destroying... [id=sg-0069f2f8bef35fcab]
+aws_iam_role.teardown: Destruction complete after 0s
+aws_subnet.efa: Destruction complete after 1s
+aws_security_group.efa: Destruction complete after 1s
+aws_nat_gateway.bench: Still destroying... [id=nat-07d83290ac1be9987, 00m50s elapsed]
+aws_nat_gateway.bench: Destruction complete after 51s
+aws_internet_gateway.bench: Destroying... [id=igw-0866a3bf326bc8af8]
+aws_eip.nat: Destroying... [id=eipalloc-04ae199fb2c751ef2]
+aws_subnet.nat: Destroying... [id=subnet-06e668aa0f56e0097]
+aws_internet_gateway.bench: Destruction complete after 1s
+aws_subnet.nat: Destruction complete after 1s
+aws_vpc.bench: Destroying... [id=vpc-003b0cafc1148ed94]
+aws_eip.nat: Destruction complete after 1s
+aws_vpc.bench: Destruction complete after 0s
+
+Destroy complete! Resources: 40 destroyed.
