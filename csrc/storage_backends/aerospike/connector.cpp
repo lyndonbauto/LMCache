@@ -70,14 +70,16 @@ AerospikeNativeConnector::AerospikeNativeConnector(
     std::string hosts, std::string ns, std::string set_name, int num_workers,
     uint32_t read_timeout_ms, uint32_t write_timeout_ms,
     uint32_t default_ttl_seconds, size_t target_segment_bytes,
-    size_t max_record_bytes, std::string username, std::string password)
+    size_t max_record_bytes, std::string username, std::string password,
+    L1RdmaRegistration l1_rdma_registration)
     : ConnectorBase(num_workers),
       hosts_(std::move(hosts)),
       ns_(std::move(ns)),
       set_name_(std::move(set_name)),
       read_timeout_ms_(read_timeout_ms),
       write_timeout_ms_(write_timeout_ms),
-      default_ttl_seconds_(default_ttl_seconds) {
+      default_ttl_seconds_(default_ttl_seconds),
+      l1_rdma_registration_(std::move(l1_rdma_registration)) {
   as_config config;
   as_config_init(&config);
   config.thread_pool_size = static_cast<uint32_t>(std::max(num_workers, 1));

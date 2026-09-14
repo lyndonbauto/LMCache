@@ -2,6 +2,7 @@
 #pragma once
 
 #include "../connector_base.h"
+#include "l1_rdma_registration.h"
 
 #include <aerospike/aerospike.h>
 #include <aerospike/as_policy.h>
@@ -44,7 +45,8 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
       uint32_t read_timeout_ms = 1000, uint32_t write_timeout_ms = 2000,
       uint32_t default_ttl_seconds = 86400, size_t target_segment_bytes = 0,
       size_t max_record_bytes = 0, std::string username = "",
-      std::string password = "");
+      std::string password = "",
+      L1RdmaRegistration l1_rdma_registration = L1RdmaRegistration());
   ~AerospikeNativeConnector() override;
 
   void close() override;
@@ -92,6 +94,11 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
   size_t target_segment_bytes_;
   size_t max_record_bytes_;
   size_t single_record_threshold_bytes_;
+
+  // Description of the L1 slab and window pool to register for RDMA
+  // reception. Default-constructed (and therefore inert) unless the L2
+  // adapter factory enabled RDMA.
+  L1RdmaRegistration l1_rdma_registration_;
 
   aerospike as_;
   std::mutex close_mu_;
