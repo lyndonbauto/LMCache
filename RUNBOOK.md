@@ -167,6 +167,35 @@ the first time.
 6. Run Half B: TTFT breakdown, MP mode.
 7. Tear down and verify no orphans.
 
+### Rebuild quickstart (~15 min to a verified cluster)
+
+```bash
+cd terraform && terraform apply          # ~6 min   (add -var gpu_count=1 for Half B)
+cd .. && ./bin/provision-enterprise.sh   # ~2 min   Enterprise 8.1.2.5 + feature key + devices
+./bin/verify-cluster.sh                  #          expect cluster_size=5
+./bin/set-arm.sh A                       #          or B; wipes, restarts, gates on live cap
+```
+
+Add ~25 min for a full two-arm sweep plus the storage ceiling. The feature key is
+read from `$FEATURES_CONF`, defaulting to the local `~/Downloads` path.
+
+**Session 1 actual spend: ~$113** (9.60 `i3en.24xlarge` hours + 1.92 `c5n.18xlarge`
+hours across two builds, plus ~$1.60 NAT/EBS/logging) — 4.5% of the $2,500 ceiling.
+Budget accordingly: a clean single-build run of both halves should come in lower.
+
+### Rebuild trap: the guards are no longer all Terraform-managed
+
+Teardown removed the **budget alarm and its SNS topic from Terraform state** before
+destroying, so `destroy` could not take them. They still exist in AWS but are
+**no longer Terraform-managed**, so a fresh `apply` will try to create them again
+and conflict on the existing names. Either `terraform import` them first or delete
+them in AWS before applying.
+
+The **auto-teardown Lambda and EventBridge schedule were destroyed** along with the
+stack (an armed schedule pointing at a deleted function would error on every
+invocation). `guards.tf` will recreate them on apply — **verify that it did**, per
+§0.4, before the fleet exists. The budget is the only standing guard right now.
+
 ---
 
 ## 4. Traps that silently produce meaningless numbers
@@ -192,6 +221,26 @@ the first time.
   Report per-object p50/p99 **and round-trips-per-read**.
 - **Aerospike holds the record lock across the DMA** in the RDMA PoC. If tail
   latency looks odd under mixed store/load traffic, suspect that before LMCache.
+
+### And one that silently destroys the numbers entirely
+
+**Before you destroy anything, prove the results read back *out* of git.** In
+session 1 the first "commit everything" reported success and committed **nothing**:
+`.gitignore` carried a `results/` wildcard written before any results existed, so
+all 63 raw files were silently excluded. `git add` succeeded, the commit succeeded,
+and the data was not in it. Destroying at that point would have thrown away the
+entire $113 of measurement with the instances.
+
+Check the content, not the exit code:
+
+```bash
+git ls-files results/ | wc -l                 # expect ~65
+git show HEAD:results/armA_sweep.csv | head   # must print real rows
+git status --porcelain --ignored results/     # must be empty
+```
+
+`.gitignore` now carries a comment explaining why `results/` is deliberately not
+ignored. Do not re-add a wildcard there.
 
 ---
 
