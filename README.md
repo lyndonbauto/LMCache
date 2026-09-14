@@ -4,11 +4,18 @@ Infrastructure and runbook for **AIE-86** — baseline measurement of the LMCach
 TTFT breakdown and the Aerospike storage ceiling, ahead of the RDMA server-push
 work in epic AIE-85.
 
-> ## NOTHING HAS BEEN APPLIED
+> ## → Re-running this experiment? Start with [`RUNBOOK.md`](RUNBOOK.md), not here.
 >
-> This repository contains a validated Terraform configuration and a successful
-> `terraform plan` **only**. No AWS resources have been created. No billable
-> action has been taken. See [Approval required](#approval-required).
+> `RUNBOOK.md` is the ordered one-shot guide: the pre-flight gates, the pinned
+> versions, the traps that silently produce meaningless numbers, and what has
+> already been measured so you do not pay to measure it twice. This file is the
+> reference for individual operations (teardown, verification commands, applying).
+>
+> **Status as of session 1 (2026-09-14):** applied, Half A measured, Half B lost to
+> GPU capacity, infrastructure torn down. ~$110 spent. Results in
+> [`docs/findings.md`](docs/findings.md). The earlier "nothing has been applied"
+> notice no longer holds — **check live AWS state before assuming anything is or
+> is not running.**
 
 ---
 

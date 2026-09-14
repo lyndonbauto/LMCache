@@ -3,6 +3,20 @@
 The rendered config is `terraform/templates/aerospike.conf.tftpl`. This document
 is the reasoning.
 
+> **SUPERSEDED IN PART — read `findings.md` §1 before applying "Chosen values" below.**
+>
+> This document was written before the sweep ran and recommends `max-record-size`
+> / `write-block-size` at 8M/8M on the theory that fewer round trips is strictly
+> better. **The measurement disproved that.** The two arms cross over at ~8 MiB:
+> above the cap, the 1 MiB default is *faster* (80 MiB: 173 ms / 1880 MB/s at
+> 1 MiB vs 190 ms / 1659 MB/s at 8 MiB), because a larger record coarsens the
+> unit of concurrency and reduces device fanout.
+>
+> The correct rule is **match the cap to the chunk-size distribution you actually
+> serve** — raising it helps objects below the new cap and hurts objects above it.
+> Do not set it to the maximum by reflex. Everything else in this document
+> (the sharding logic, the both-values trap, RF, mesh, storage engine) still holds.
+
 ## How LMCache actually decides how to shard
 
 Read these two functions before changing any number here:
