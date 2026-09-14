@@ -4,6 +4,17 @@
 Builds the ``lmcache.lmcache_aerospike`` extension against a libaerospike
 development install.  Enabled via ``BUILD_WITH_AEROSPIKE=1`` (or the legacy
 ``BUILD_AEROSPIKE=1``), or auto-detected through ``AEROSPIKE_INCLUDE_DIR``.
+
+RDMA reception (the Aerospike server writing KV payloads straight into
+LMCache's pinned L1 slab) is a second, independent opt-in on top of that:
+
+* ``BUILD_WITH_AEROSPIKE_RDMA=1`` links ``libibverbs`` and compiles the
+  Reliable Connected path, which is portable and works on Soft-RoCE.
+* ``BUILD_WITH_AEROSPIKE_EFA=1`` additionally compiles the EFA/SRD path,
+  which needs ``libefa`` and only exists on AWS EFA hardware.
+
+Both default to off.  A machine with no RDMA hardware and no ``rdma-core``
+development headers builds exactly as it did before.
 """
 
 # Standard
@@ -20,6 +31,36 @@ from setup_extensions.storage_backend_profiles import StorageBackendProfile
 
 # Repo root: setup_extensions/storage_backend_profiles/aerospike.py -> parents[2]
 ROOT_DIR = Path(__file__).resolve().parents[2]
+
+# Opt-in gates for the RDMA reception path. Strictly default-off: a normal
+# build on a machine with no RDMA hardware must be unaffected.
+RDMA_ENV_VAR = "BUILD_WITH_AEROSPIKE_RDMA"
+EFA_ENV_VAR = "BUILD_WITH_AEROSPIKE_EFA"
+
+
+def is_rdma_requested() -> bool:
+    """Return True when the RDMA reception path was explicitly requested.
+
+    Enabling EFA/SRD implies RDMA, since the SRD path is a variant of the
+    same verbs foundation.
+
+    Returns:
+        True if either ``BUILD_WITH_AEROSPIKE_RDMA`` or
+        ``BUILD_WITH_AEROSPIKE_EFA`` is set to ``1``.
+    """
+    return (
+        os.environ.get(RDMA_ENV_VAR, "0") == "1"
+        or os.environ.get(EFA_ENV_VAR, "0") == "1"
+    )
+
+
+def is_efa_requested() -> bool:
+    """Return True when the EFA/SRD queue-pair path was requested.
+
+    Returns:
+        True if ``BUILD_WITH_AEROSPIKE_EFA`` is set to ``1``.
+    """
+    return os.environ.get(EFA_ENV_VAR, "0") == "1"
 
 
 class AerospikeStorageBackend(StorageBackendProfile):
@@ -73,18 +114,39 @@ class AerospikeStorageBackend(StorageBackendProfile):
         if os.environ.get("AEROSPIKE_EVENT_LIB", "libuv") == "libuv":
             libraries.append("uv")
 
+        sources = [
+            "csrc/storage_backends/aerospike/pybind.cpp",
+            "csrc/storage_backends/aerospike/connector.cpp",
+        ]
+        macros: list[tuple[str, str]] = []
+
+        if is_rdma_requested():
+            # Only now do we take a hard dependency on rdma-core. Everything
+            # above must keep working on a host without libibverbs.
+            sources.append("csrc/storage_backends/aerospike/rdma_context.cpp")
+            sources.append("csrc/storage_backends/aerospike/kv_sink_client.cpp")
+            libraries.append("ibverbs")
+            macros.append(("LMCACHE_AEROSPIKE_RDMA", "1"))
+            rdma_include = os.environ.get("RDMA_CORE_INCLUDE_DIR", "")
+            if rdma_include:
+                include_dirs.extend(rdma_include.split(";"))
+            rdma_lib = os.environ.get("RDMA_CORE_LIBRARY_DIR", "")
+            if rdma_lib:
+                library_dirs.extend(rdma_lib.split(";"))
+            if is_efa_requested():
+                libraries.append("efa")
+                macros.append(("LMCACHE_AEROSPIKE_EFA", "1"))
+
         runtime_library_dirs = list(library_dirs)
 
         return [
             cpp_extension.CppExtension(
                 "lmcache.lmcache_aerospike",
-                sources=[
-                    "csrc/storage_backends/aerospike/pybind.cpp",
-                    "csrc/storage_backends/aerospike/connector.cpp",
-                ],
+                sources=sources,
                 include_dirs=include_dirs,
                 library_dirs=library_dirs,
                 libraries=libraries,
+                define_macros=macros,
                 extra_objects=extra_objects,
                 runtime_library_dirs=runtime_library_dirs,
                 extra_compile_args={
