@@ -7,6 +7,13 @@ readiness. This is the missing half of the pipelining prototype:
 but it moves synthetic layers with fabricated offsets. This document defines
 the mapping from actual LMCache layout to those slots.
 
+> **Interactive walkthrough:**
+> [`layerwise-transfer-data-model.html`](layerwise-transfer-data-model.html) steps
+> through the same material in plain language, drawing the shape at each stage.
+> Open it in a browser. Steps are deep-linkable, e.g.
+> `#step=6&hybrid=1&layer=5` lands on the non-contiguity problem for a
+> sliding-window layer.
+
 **Scope.** This changes no keys, no object model, and no L2 interface. It is
 derivation only: everything here is computed from structures LMCache already
 builds. That is deliberate — the moment layout crosses the adapter boundary we

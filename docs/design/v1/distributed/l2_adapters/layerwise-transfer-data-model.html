@@ -1,0 +1,1189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>LMCache: layer-wise transfer data model</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel-2: #1c2330;
+    --line: #2d3644;
+    --text: #e6edf3;
+    --dim: #8b949e;
+    --dimmer: #5c6673;
+
+    --attn:  #58a6ff;   /* full attention group */
+    --sw:    #d29922;   /* sliding window group */
+    --rec:   #bc8cff;   /* recurrent / Mamba group */
+    --kplane:#1f6feb;
+    --vplane:#39d3c3;
+    --hit:   #3fb950;
+    --miss:  #21262d;
+    --warn:  #f85149;
+    --gen:   #7c5a3c;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+  header { padding: 22px 28px 16px; border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0 0 4px; font-size: 20px; font-weight: 650; letter-spacing: -0.2px; }
+  header p { margin: 0; color: var(--dim); font-size: 13px; max-width: 940px; }
+  header p a { color: #58a6ff; }
+
+  .shell { display: grid; grid-template-columns: 290px minmax(0, 1fr); align-items: start; }
+
+  aside {
+    border-right: 1px solid var(--line);
+    padding: 18px 18px 60px;
+    position: sticky; top: 0; max-height: 100vh; overflow-y: auto;
+  }
+  main { padding: 18px 24px 90px; min-width: 0; }
+
+  h2.sec {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.9px;
+    color: var(--dimmer); margin: 22px 0 10px; font-weight: 650;
+  }
+  h2.sec:first-child { margin-top: 0; }
+
+  .field { margin-bottom: 11px; }
+  .field label {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 12px; color: var(--dim); margin-bottom: 3px;
+  }
+  .field label b { color: var(--text); font-weight: 600; font-family: ui-monospace, monospace; }
+  input[type=range] { width: 100%; accent-color: var(--attn); }
+  select {
+    width: 100%; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; padding: 5px 7px; font-size: 12px;
+  }
+  .toggle {
+    display: flex; align-items: flex-start; gap: 9px;
+    padding: 7px 9px; border: 1px solid var(--line); border-radius: 7px;
+    background: var(--panel-2); margin-bottom: 7px; cursor: pointer;
+    font-size: 12.5px; user-select: none;
+  }
+  .toggle input { accent-color: var(--hit); margin: 2px 0 0; }
+  .toggle span small { display: block; color: var(--dimmer); font-size: 11px; line-height: 1.35; }
+
+  .stepper { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  .step {
+    border: 1px solid var(--line); background: var(--panel);
+    color: var(--dim); border-radius: 999px; padding: 5px 12px;
+    font-size: 12px; cursor: pointer; white-space: nowrap;
+  }
+  .step:hover { border-color: var(--dimmer); color: var(--text); }
+  .step.on { background: #1f6feb22; border-color: #1f6feb; color: #cfe3ff; }
+  .step .n { color: var(--dimmer); margin-right: 5px; font-family: ui-monospace, monospace; }
+  .step.on .n { color: #6ea8ff; }
+
+  .navrow { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; }
+  button.nav {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 7px; padding: 6px 13px; font-size: 12.5px; cursor: pointer;
+  }
+  button.nav:hover { border-color: var(--dimmer); }
+  button.nav:disabled { opacity: 0.35; cursor: default; }
+  button.nav.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 14px 16px; margin-bottom: 14px;
+  }
+  .card.hidden { display: none; }
+  .card > h3 {
+    margin: 0 0 3px; font-size: 13.5px; font-weight: 640;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  .card > h3 .tag {
+    font-size: 10.5px; font-weight: 600; letter-spacing: 0.4px;
+    padding: 1.5px 7px; border-radius: 999px; border: 1px solid var(--line);
+    color: var(--dim); text-transform: uppercase;
+  }
+  .card > .sub { margin: 0 0 12px; color: var(--dim); font-size: 12px; }
+
+  .narr { border-left: 3px solid #1f6feb; padding-left: 13px; }
+  .narr h3 { margin: 0 0 6px; font-size: 15.5px; }
+  .narr p { margin: 0 0 9px; }
+  .narr p:last-child { margin-bottom: 0; }
+  .narr b.key { color: #cfe3ff; }
+  .narr .cites {
+    color: var(--dimmer); font-size: 11.5px;
+    font-family: ui-monospace, monospace; margin-top: 10px;
+  }
+
+  .danger { border-left-color: var(--warn); }
+  .danger h3 { color: #ffb4ae; }
+
+  /* ---- shape panel ---- */
+  .shapebox { display: flex; flex-wrap: wrap; align-items: stretch; gap: 6px; }
+  .dim {
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 11px; min-width: 76px; text-align: center;
+  }
+  .dim .dv { font-family: ui-monospace, monospace; font-size: 15px; font-weight: 650; }
+  .dim .dn { font-size: 10.5px; color: var(--dim); text-transform: uppercase; letter-spacing: .4px; }
+  .dim.lead { border-color: var(--warn); background: #f8514916; }
+  .dim.lead .dv { color: #ffb4ae; }
+  .dim.layerdim { border-color: var(--attn); background: #58a6ff16; }
+  .dim.layerdim .dv { color: #9ecbff; }
+  .dim.sep { border: none; background: none; display: flex; align-items: center; color: var(--dimmer); min-width: 14px; padding: 0; }
+  .shapemeta { margin-top: 10px; font-size: 12px; color: var(--dim); }
+  .shapemeta b { color: var(--text); font-family: ui-monospace, monospace; }
+
+  /* ---- generic strips ---- */
+  .strip { display: flex; gap: 2px; flex-wrap: wrap; }
+  .cell {
+    height: 26px; min-width: 20px; flex: 1 1 20px;
+    border-radius: 3px; background: var(--miss);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 9.5px; font-family: ui-monospace, monospace; color: #ffffffbb;
+    transition: background-color .25s, opacity .25s;
+  }
+  .cell.attn { background: var(--attn); color: #05233f; }
+  .cell.sw   { background: var(--sw);   color: #2b1d00; }
+  .cell.rec  { background: var(--rec);  color: #2a0f45; }
+  .cell.sel  { outline: 2px solid #fff; outline-offset: 1px; z-index: 2; }
+  .cell.dimmed { opacity: .25; }
+
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px; font-size: 11.5px; color: var(--dim); }
+  .legend i { display: inline-block; width: 11px; height: 11px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+
+  /* ---- payload bar ---- */
+  .payload { display: flex; width: 100%; height: 66px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .plane { display: flex; flex-direction: column; min-width: 0; }
+  .plane-hd {
+    font-size: 10px; letter-spacing: .5px; text-transform: uppercase;
+    padding: 3px 6px; color: #ffffffcc; font-weight: 650;
+    border-bottom: 1px solid #00000055; white-space: nowrap; overflow: hidden;
+  }
+  .plane-body { display: flex; flex: 1; min-width: 0; }
+  .plane.k .plane-hd { background: var(--kplane); }
+  .plane.v .plane-hd { background: var(--vplane); color: #04302c; }
+  .lslice {
+    flex: 1 1 0; min-width: 0; border-right: 1px solid #00000055;
+    background: #1b2430; transition: background-color .25s;
+  }
+  .lslice:last-child { border-right: none; }
+  .lslice.sel { background: #fff; }
+  .payload-axis { display: flex; justify-content: space-between; margin-top: 6px; font-size: 11px; color: var(--dimmer); font-family: ui-monospace, monospace; }
+
+  .callout {
+    margin-top: 12px; padding: 10px 12px; border-radius: 8px;
+    background: #f8514914; border: 1px solid #f8514944; font-size: 12.5px;
+  }
+  .callout.ok { background: #3fb95014; border-color: #3fb95044; }
+  .callout b { color: #ffb4ae; }
+  .callout.ok b { color: #7ee787; }
+
+  /* ---- slot chopping ---- */
+  .slots { display: flex; gap: 3px; flex-wrap: wrap; }
+  .slot {
+    padding: 5px 9px; border-radius: 5px; font-size: 11px;
+    font-family: ui-monospace, monospace; border: 1px solid var(--line);
+    background: var(--panel-2);
+  }
+  .slot.k { border-color: var(--kplane); color: #9ecbff; }
+  .slot.v { border-color: var(--vplane); color: #8ff0e6; }
+
+  /* ---- 32-bit immediate ---- */
+  .bits { display: flex; gap: 2px; margin-top: 4px; }
+  .bit {
+    flex: 1 1 0; height: 34px; border-radius: 3px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-family: ui-monospace, monospace;
+  }
+  .bit.g { background: var(--gen); color: #ffd9b0; }
+  .bit.s { background: #1f4f8f; color: #cfe3ff; }
+  .bitlabels { display: flex; margin-top: 5px; font-size: 11px; color: var(--dim); }
+  .bitlabels div { text-align: center; }
+
+  /* ---- readiness matrix ---- */
+  .matrix-wrap { display: grid; grid-template-columns: auto minmax(0,1fr); gap: 8px; align-items: start; }
+  .rowlabels { display: grid; gap: 2px; font-size: 10px; color: var(--dimmer); font-family: ui-monospace, monospace; }
+  .rowlabels div { height: 18px; display: flex; align-items: center; justify-content: flex-end; }
+  .matrix { display: grid; gap: 2px; }
+  .mcell { height: 18px; border-radius: 2px; background: var(--miss); transition: background-color .2s; }
+  .mcell.part { background: #2f5d38; }
+  .mcell.full { background: var(--hit); }
+  .mcell.na   { background: #16181d; }
+  .colhdr { display: grid; gap: 2px; margin-bottom: 4px; }
+  .ch {
+    height: 16px; border-radius: 2px; background: #1b2430;
+    font-size: 8.5px; display: flex; align-items: center; justify-content: center;
+    color: var(--dimmer); font-family: ui-monospace, monospace;
+  }
+  .ch.ready { background: var(--hit); color: #04240d; font-weight: 700; }
+  .readout { margin-top: 12px; font-size: 12.5px; }
+  .readout .pill {
+    display: inline-block; padding: 2px 9px; border-radius: 999px;
+    font-family: ui-monospace, monospace; font-size: 11.5px; margin-right: 6px;
+    border: 1px solid var(--line); background: var(--panel-2); color: var(--dim);
+  }
+  .readout .pill.on { background: #3fb95022; border-color: #3fb95066; color: #7ee787; }
+
+  table.facts { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.facts td { padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.facts tr:last-child td { border-bottom: none; }
+  table.facts td:first-child { color: var(--dim); white-space: nowrap; width: 1%; padding-right: 18px; }
+  table.facts b { font-family: ui-monospace, monospace; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Layer-wise transfer data model</h1>
+  <p>
+    How a real KV payload becomes per-layer RDMA deliveries, and what shape the data
+    has at every step. Companion to
+    <code>layerwise_transfer_data_model.md</code> and <code>aerospike_rdma.md</code>.
+    Move the controls on the left; every panel is derived, nothing is hard-coded.
+  </p>
+</header>
+
+<div class="shell">
+<aside>
+  <h2 class="sec">Model</h2>
+  <div class="field">
+    <label>Layers <b id="v-layers">32</b></label>
+    <input type="range" id="c-layers" min="8" max="80" step="4" value="32" />
+  </div>
+  <div class="field">
+    <label>KV heads (GQA) <b id="v-kvheads">8</b></label>
+    <input type="range" id="c-kvheads" min="1" max="32" step="1" value="8" />
+  </div>
+  <div class="field">
+    <label>Head dim <b id="v-headdim">128</b></label>
+    <input type="range" id="c-headdim" min="64" max="256" step="16" value="128" />
+  </div>
+  <div class="field">
+    <label>Bytes per element <b id="v-dtype">2</b></label>
+    <select id="c-dtype">
+      <option value="2" selected>2 &mdash; fp16 / bf16</option>
+      <option value="1">1 &mdash; fp8</option>
+    </select>
+  </div>
+
+  <h2 class="sec">Layout</h2>
+  <div class="field">
+    <label>Payload format</label>
+    <select id="c-format">
+      <option value="kv_outer" selected>(kv, layers, slots, hidden) &mdash; standard</option>
+      <option value="layer_outer">(layers, slots, hidden) &mdash; NL_X_NB_BS_HS</option>
+    </select>
+  </div>
+  <label class="toggle">
+    <input type="checkbox" id="t-hybrid" />
+    <span>Hybrid model
+      <small>Adds sliding-window and recurrent groups, so layers stop being alike.</small>
+    </span>
+  </label>
+
+  <h2 class="sec">Request</h2>
+  <div class="field">
+    <label>Chunks in prompt <b id="v-chunks">8</b></label>
+    <input type="range" id="c-chunks" min="2" max="16" step="1" value="8" />
+  </div>
+  <div class="field">
+    <label>Tokens per chunk <b id="v-tokens">256</b></label>
+    <input type="range" id="c-tokens" min="64" max="512" step="64" value="256" />
+  </div>
+  <div class="field">
+    <label>Max RDMA write <b id="v-maxwrite">1 MiB</b></label>
+    <input type="range" id="c-maxwrite" min="14" max="24" step="1" value="20" />
+  </div>
+
+  <h2 class="sec">Focus</h2>
+  <div class="field">
+    <label>Inspect layer <b id="v-sel">0</b></label>
+    <input type="range" id="c-sel" min="0" max="31" step="1" value="0" />
+  </div>
+</aside>
+
+<main>
+  <div class="stepper" id="stepper"></div>
+  <div class="navrow">
+    <button class="nav" id="btn-prev">&larr; Back</button>
+    <button class="nav primary" id="btn-next">Next &rarr;</button>
+    <span style="color:var(--dimmer);font-size:12px" id="phase-counter"></span>
+  </div>
+
+  <div class="card narr" id="narr">
+    <h3 id="narr-title"></h3>
+    <div id="narr-body"></div>
+    <div class="cites" id="narr-cites"></div>
+  </div>
+
+  <!-- persistent shape panel -->
+  <div class="card">
+    <h3>Shape at this point <span class="tag" id="shape-tag"></span></h3>
+    <p class="sub" id="shape-sub"></p>
+    <div class="shapebox" id="shapebox"></div>
+    <div class="shapemeta" id="shapemeta"></div>
+  </div>
+
+  <!-- P1/P2: layer strip -->
+  <div class="card hidden" id="p-layers">
+    <h3>The model's layers</h3>
+    <p class="sub" id="layers-sub"></p>
+    <div class="strip" id="layerstrip"></div>
+    <div class="legend" id="layerlegend"></div>
+  </div>
+
+  <!-- P3: grouping -->
+  <div class="card hidden" id="p-groups">
+    <h3>Kernel groups bundle into object groups</h3>
+    <p class="sub">An object group is what actually gets stored and keyed. It contains one or more kernel groups, laid out back to back in <code>kernel_group_indices</code> order.</p>
+    <div id="grouptree"></div>
+  </div>
+
+  <!-- P4: key grid -->
+  <div class="card hidden" id="p-keys">
+    <h3>One object per (chunk, object group)</h3>
+    <p class="sub" id="keys-sub"></p>
+    <div class="matrix-wrap">
+      <div class="rowlabels" id="keys-rows"></div>
+      <div><div class="matrix" id="keys-grid"></div></div>
+    </div>
+    <div class="callout"><b>No layer coordinate exists here.</b> <code>ObjectKey</code> carries
+      <code>object_group_id</code> and nothing finer, so &ldquo;layer 7 arrived&rdquo; can never be
+      answered by a key. It has to be derived from byte ranges inside a payload.</div>
+  </div>
+
+  <!-- P5/P6: payload bar -->
+  <div class="card hidden" id="p-payload">
+    <h3>Inside one object <span class="tag" id="payload-tag"></span></h3>
+    <p class="sub" id="payload-sub"></p>
+    <div class="payload" id="payload"></div>
+    <div class="payload-axis"><span>byte 0</span><span id="payload-end"></span></div>
+    <div id="payload-callout"></div>
+  </div>
+
+  <!-- P7: slots -->
+  <div class="card hidden" id="p-slots">
+    <h3>Cutting a layer into RDMA writes</h3>
+    <p class="sub" id="slots-sub"></p>
+    <div class="slots" id="slotlist"></div>
+    <div class="shapemeta" id="slotmeta"></div>
+  </div>
+
+  <!-- P8: immediate -->
+  <div class="card hidden" id="p-imm">
+    <h3>Naming a slot in 32 bits</h3>
+    <p class="sub">The completion notification carries exactly 32 bits of immediate data. That is the entire vocabulary the server has for telling us what just landed.</p>
+    <div class="bits" id="bits"></div>
+    <div class="bitlabels"><div style="flex:1">generation (16) &mdash; which request</div><div style="flex:1">slot index (16) &mdash; which write</div></div>
+    <div class="shapemeta" id="immmeta"></div>
+  </div>
+
+  <!-- P9: readiness matrix -->
+  <div class="card hidden" id="p-ready">
+    <h3>Readiness is a set, not a prefix</h3>
+    <p class="sub" id="ready-sub"></p>
+    <div class="navrow">
+      <button class="nav primary" id="btn-play">Stream arrivals</button>
+      <button class="nav" id="btn-reset">Reset</button>
+      <span style="color:var(--dimmer);font-size:12px" id="ready-counter"></span>
+    </div>
+    <div class="matrix-wrap">
+      <div class="rowlabels" id="ready-rows"></div>
+      <div>
+        <div class="colhdr" id="ready-cols"></div>
+        <div class="matrix" id="ready-grid"></div>
+      </div>
+    </div>
+    <div class="readout" id="ready-readout"></div>
+  </div>
+
+  <!-- P10: caveats -->
+  <div class="card hidden" id="p-caveats">
+    <h3>What still has to be got right</h3>
+    <table class="facts" id="caveats"></table>
+  </div>
+</main>
+</div>
+
+<script>
+"use strict";
+
+// ---------- state ----------
+const S = {
+  layers: 32, kvheads: 8, headdim: 128, dtype: 2,
+  format: "kv_outer", hybrid: false,
+  chunks: 8, tokens: 256, maxwritePow: 20,
+  sel: 0, phase: 0,
+};
+
+const IMM_BUDGET = 65536;
+
+// ---------- helpers ----------
+function bytes(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1048576) return (n / 1024).toFixed(n < 10240 ? 1 : 0) + " KiB";
+  if (n < 1073741824) return (n / 1048576).toFixed(n < 10485760 ? 2 : 1) + " MiB";
+  return (n / 1073741824).toFixed(2) + " GiB";
+}
+function el(tag, cls, txt) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (txt !== undefined) e.textContent = txt;
+  return e;
+}
+
+// ---------- derived model ----------
+// Assign every layer to a kernel group. Non-hybrid: one group, all full attention.
+// Hybrid: full attention / sliding window / recurrent, which is what makes a
+// single global stride wrong.
+function kernelGroups() {
+  if (!S.hybrid) {
+    return [{ id: 0, kind: "attn", label: "full attention", layers: range(S.layers), og: 0 }];
+  }
+  const attn = [], sw = [], rec = [];
+  for (let i = 0; i < S.layers; i++) {
+    if (i % 4 === 0) attn.push(i);
+    else if (i % 4 === 3) rec.push(i);
+    else sw.push(i);
+  }
+  const gs = [];
+  if (attn.length) gs.push({ id: gs.length, kind: "attn", label: "full attention", layers: attn, og: 0 });
+  if (sw.length)   gs.push({ id: gs.length, kind: "sw",   label: "sliding window", layers: sw,   og: 1 });
+  if (rec.length)  gs.push({ id: gs.length, kind: "rec",  label: "recurrent state", layers: rec, og: 2 });
+  return gs;
+}
+function range(n) { return Array.from({ length: n }, (_, i) => i); }
+
+function derive() {
+  const kgs = kernelGroups();
+  const hidden = S.kvheads * S.headdim;
+  const kvSize = S.format === "layer_outer" ? 1 : 2;
+  const maxWrite = Math.pow(2, S.maxwritePow);
+
+  // one physical slot per token here; a compressed group would differ, which is
+  // exactly why real code must ask get_slots_per_chunk_in_sw rather than assume.
+  const slotsPerChunk = S.tokens;
+
+  for (const g of kgs) {
+    // sliding-window groups only cover a window of the request's chunks
+    g.chunks = g.kind === "sw" ? Math.min(S.chunks, 4) : S.chunks;
+    g.planeBytes = slotsPerChunk * hidden * S.dtype;
+    g.piecesPerPlane = Math.ceil(g.planeBytes / maxWrite);
+    g.slotsPerLayerPerChunk = kvSize * g.piecesPerPlane;
+    g.layerBytes = kvSize * g.planeBytes;
+    g.groupBytes = g.layers.length * g.layerBytes;
+  }
+
+  const byLayer = new Map();
+  for (const g of kgs) g.layers.forEach((L, pos) => byLayer.set(L, { g, pos }));
+
+  const objectGroups = new Map();
+  for (const g of kgs) {
+    if (!objectGroups.has(g.og)) objectGroups.set(g.og, []);
+    objectGroups.get(g.og).push(g);
+  }
+
+  let totalSlots = 0;
+  for (const g of kgs) totalSlots += g.chunks * g.layers.length * g.slotsPerLayerPerChunk;
+
+  return { kgs, byLayer, objectGroups, hidden, kvSize, maxWrite, slotsPerChunk, totalSlots };
+}
+
+// ---------- narrative ----------
+const PHASES = [
+  {
+    name: "The ask",
+    title: "vLLM asks one very simple question",
+    body: `<p>During prefill the model walks its layers in order. Before it can compute
+      layer <i>i</i> it calls <code>wait_for_layer_load("...layers.i...")</code> and expects that
+      to block until layer <i>i</i>'s cached KV is actually present.</p>
+      <p>Today that function <b class="key">returns immediately and does nothing</b> &mdash; the
+      whole chunk is fetched up front, so there is never anything to wait for. Pipelining means
+      making that question answerable. Everything that follows exists only to answer
+      <i>&ldquo;has layer i arrived?&rdquo;</i></p>
+      <p>The catch that shapes the entire design: the model computes layer <i>i</i> for the
+      <b class="key">whole prompt at once</b>. So the answer is not about one piece of data,
+      it is about every piece of layer <i>i</i> from every part of the prompt.</p>`,
+    cites: "lmcache/integration/vllm/lmcache_mp_connector.py:786",
+    panels: ["p-layers"],
+  },
+  {
+    name: "Layers differ",
+    title: "Layers are not all the same shape",
+    body: `<p>It would be convenient if a model were 32 identical layers. Modern ones are not.
+      Some use full attention, some use a sliding window, some are recurrent (Mamba-style) and
+      store a state snapshot rather than per-token keys and values.</p>
+      <p>LMCache handles this by sorting layers into <b class="key">kernel groups</b>, where a group
+      is a set of layers that share one identical shape descriptor. Turn on <i>Hybrid model</i> in
+      the sidebar to see the strip fracture into several groups.</p>
+      <p>This is better news than it sounds. Layers are not irregular in some unmanageable way
+      &mdash; they are sorted so that <b class="key">each group is internally uniform by
+      construction</b>. Offsets inside a group are simple arithmetic. The trap is using one
+      group's stride on another group's layers.</p>`,
+    cites: "lmcache/v1/kv_layer_groups.py:181 — KernelGroupInfo.layer_indices / shape_desc",
+    panels: ["p-layers"],
+  },
+  {
+    name: "Grouping",
+    title: "Kernel groups bundle into object groups",
+    body: `<p>A kernel group is a <i>compute</i> unit. The <i>storage</i> unit is one level up: the
+      <b class="key">object group</b>, which holds one or more kernel groups laid out back to back.</p>
+      <p>That distinction is the root of the problem. The thing we store is coarser than the thing
+      we want to signal about. We want to say &ldquo;layer 7 is here&rdquo;; storage only knows
+      about a bundle that happens to contain layer 7 along with several others.</p>`,
+    cites: "lmcache_driven_transfer.build_memory_layout_desc — one shape per kernel group, in kernel_group_indices order",
+    panels: ["p-groups"],
+  },
+  {
+    name: "Keys",
+    title: "The key has no layer in it",
+    body: `<p>A prompt is split into fixed-size chunks of tokens. Each chunk, for each object group,
+      becomes one stored object. So a request is a grid: chunks across, object groups down.</p>
+      <p>Those objects are spread over the cluster by digest, so <b class="key">one layer's data
+      lives on several different machines</b> and arrives via several independent fetches in an
+      order nobody controls.</p>`,
+    cites: "ObjectKey(chunk_hash, model_name, kv_rank, object_group_id, cache_salt)",
+    panels: ["p-keys"],
+  },
+  {
+    name: "The payload",
+    title: "What one stored object actually looks like",
+    body: `<p>Now we open one object and look at the bytes. Its layout is not something to guess at
+      from model config &mdash; LMCache already defines it, one shape per kernel group.</p>
+      <p>For the standard format that shape is
+      <code>(kv_size, num_layers, num_slots, hidden_dim)</code>. Read the order of those dimensions
+      carefully, because the next step depends entirely on it.</p>`,
+    cites: "cache_context.get_kernel_group_shape_dtype",
+    panels: ["p-payload"],
+  },
+  {
+    name: "The trap",
+    title: "A layer is not one contiguous block of bytes",
+    danger: true,
+    body: `<p><b class="key">kv_size is the outermost dimension, not the layer.</b> That means all the
+      keys for every layer come first, and then all the values. Layer 7's keys and layer 7's values
+      sit at opposite ends of the payload, separated by everything else.</p>
+      <p>Look at the bar: the layer you selected is highlighted, and it lights up in
+      <b class="key">two separate places</b>.</p>
+      <p>This matters because an RDMA write lands in one continuous stretch of memory at the far end.
+      It cannot scatter. So a layer needs <b class="key">at least two writes</b>, not one.</p>
+      <p>Get this wrong and the failure is quiet and nasty: you deliver the keys, announce the layer
+      as ready, and hand the model a cache whose values are still uninitialised. No error, no crash
+      &mdash; just a model that has mysteriously become stupid. Switch the format to
+      <code>NL_X_NB_BS_HS</code> to see the one case where a layer <i>is</i> contiguous.</p>`,
+    cites: "torch.Size((sd.kv_size, group.num_layers, num_slots, group.hidden_dim_size))",
+    panels: ["p-payload"],
+  },
+  {
+    name: "Slots",
+    title: "Chopping a layer into writes",
+    body: `<p>Each of those regions is still too big for a single RDMA write, so it gets cut into
+      pieces bounded by the device's maximum transfer size and by the memory window we leased.</p>
+      <p>We call one write's worth of one layer a <b class="key">slot</b>. Drag the
+      <i>Max RDMA write</i> slider to watch the count change.</p>
+      <p>A layer counts as arrived only when <b class="key">every one of its slots</b> has landed
+      &mdash; both planes, all pieces.</p>`,
+    cites: "csrc/storage_backends/aerospike/layer_pipeline.h — FetchSlot",
+    panels: ["p-slots"],
+  },
+  {
+    name: "32 bits",
+    title: "The whole vocabulary is 32 bits",
+    body: `<p>When a write completes, the hardware hands us 32 bits chosen by the sender. That is the
+      entire channel for saying what just landed, so it has to be spent carefully: 16 bits naming
+      the request, 16 bits naming the slot.</p>
+      <p>The generation half exists to defend against a specific hazard. A write belonging to a
+      fetch that already timed out can still land later, into memory since handed to a different
+      request. The registration is still valid, so the hardware performs it happily. Tagging the
+      request and rejecting mismatches is what stops a ghost write from being counted as progress.</p>
+      <p>The slot half has to be numbered <b class="key">per request, not per fetch</b>. Every
+      machine reports into the same table, so if each numbered its slots from zero we could not tell
+      one machine's slot 5 from another's.</p>`,
+    cites: "encode_immediate(generation, slot_index) — generation << 16 | slot",
+    panels: ["p-imm"],
+  },
+  {
+    name: "Readiness",
+    title: "Layers finish out of order, and that is fine",
+    body: `<p>AWS's fast network deliberately delivers out of order &mdash; it sprays packets across
+      many paths for speed and leaves reordering to whoever is above it. Layer 5 can finish before
+      layer 2.</p>
+      <p>So readiness is a <b class="key">set</b>, not a high-water mark. Press
+      <i>Stream arrivals</i>: cells fill in randomly, and a column header turns green only when its
+      whole column is complete. Notice the greens do not appear left to right.</p>
+      <p>Tracking a &ldquo;everything up to layer k has arrived&rdquo; watermark instead would pass
+      every test on a local software device, which is ordered, and then silently corrupt data on real
+      hardware. That is the worst possible failure shape, so the model refuses it by design.</p>`,
+    cites: "LayerReadiness::note_arrival / ready_layers — a set, deliberately",
+    panels: ["p-ready"],
+  },
+  {
+    name: "Caveats",
+    title: "The parts that can still bite",
+    body: `<p>The mapping above is arithmetic over structures that already exist, so it is cheap.
+      The risks are elsewhere.</p>`,
+    cites: "docs/design/v1/distributed/l2_adapters/layerwise_transfer_data_model.md",
+    panels: ["p-caveats"],
+  },
+];
+
+// shape description per phase
+function shapeFor(d) {
+  const p = S.phase;
+  const hidden = d.hidden;
+  const kg = d.byLayer.get(S.sel) ? d.byLayer.get(S.sel).g : d.kgs[0];
+
+  if (p <= 1) {
+    return {
+      tag: "as vLLM holds it",
+      sub: "Paged KV on the GPU: one tensor per layer, indexed by block. The cache is scattered across blocks, not one run of memory.",
+      dims: [
+        { v: 2, n: "K / V" },
+        { v: "blocks", n: "num_blocks" },
+        { v: 16, n: "block size" },
+        { v: S.kvheads, n: "kv heads" },
+        { v: S.headdim, n: "head dim" },
+      ],
+      meta: `Per layer, per token: <b>${bytes(2 * hidden * S.dtype)}</b> &nbsp;&middot;&nbsp;
+             whole model, per token: <b>${bytes(2 * hidden * S.dtype * S.layers)}</b>`,
+    };
+  }
+  if (p === 2 || p === 3) {
+    return {
+      tag: "as LMCache stores it",
+      sub: "Gathered off the GPU into one packed buffer per kernel group. This is the shape that gets keyed and written to the backend.",
+      dims: [
+        { v: d.kvSize, n: "kv_size", lead: d.kvSize > 1 },
+        { v: kg.layers.length, n: "num_layers", layerdim: true },
+        { v: d.slotsPerChunk, n: "num_slots" },
+        { v: hidden, n: "hidden_dim" },
+      ],
+      meta: `One object = <b>${bytes(kg.groupBytes)}</b> &nbsp;&middot;&nbsp;
+             request total = <b>${bytes(d.kgs.reduce((a, g) => a + g.groupBytes * g.chunks, 0))}</b>`,
+    };
+  }
+  if (p === 4 || p === 5) {
+    return {
+      tag: "one layer inside it",
+      sub: S.format === "kv_outer"
+        ? "Slicing out a single layer leaves the kv dimension intact — which is precisely why it is not contiguous."
+        : "With the layer dimension outermost, a single layer is one clean contiguous run.",
+      dims: [
+        { v: d.kvSize, n: "kv_size", lead: d.kvSize > 1 },
+        { v: 1, n: "this layer", layerdim: true },
+        { v: d.slotsPerChunk, n: "num_slots" },
+        { v: hidden, n: "hidden_dim" },
+      ],
+      meta: `Layer ${S.sel}, one chunk: <b>${bytes(kg.layerBytes)}</b> in
+             <b>${d.kvSize}</b> region${d.kvSize > 1 ? "s" : ""} of <b>${bytes(kg.planeBytes)}</b>`,
+    };
+  }
+  if (p === 6 || p === 7) {
+    return {
+      tag: "on the wire",
+      sub: "A slot is flat. All structure has been flattened away — the receiver knows only an address, a length, and 32 bits of label.",
+      dims: [
+        { v: Math.min(kg.planeBytes, d.maxWrite), n: "bytes" },
+      ],
+      meta: `<b>${kg.slotsPerLayerPerChunk}</b> slots per layer per chunk &nbsp;&middot;&nbsp;
+             <b>${d.totalSlots.toLocaleString()}</b> slots for the whole request`,
+    };
+  }
+  return {
+    tag: "what we track",
+    sub: "Readiness collapses all of it back to one question per layer. The bytes are wherever they were written; this is only bookkeeping.",
+    dims: [
+      { v: S.layers, n: "layers" },
+      { v: "set", n: "ready or not", layerdim: true },
+    ],
+    meta: `Counting <b>${d.totalSlots.toLocaleString()}</b> arrivals into
+           <b>${S.layers}</b> yes/no answers`,
+  };
+}
+
+// ---------- rendering ----------
+function renderStepper() {
+  const s = document.getElementById("stepper");
+  s.innerHTML = "";
+  PHASES.forEach((ph, i) => {
+    const b = el("button", "step" + (i === S.phase ? " on" : ""));
+    b.appendChild(el("span", "n", String(i + 1)));
+    b.appendChild(document.createTextNode(ph.name));
+    b.onclick = () => { S.phase = i; render(); };
+    s.appendChild(b);
+  });
+  document.getElementById("phase-counter").textContent =
+    `${S.phase + 1} of ${PHASES.length}`;
+  document.getElementById("btn-prev").disabled = S.phase === 0;
+  document.getElementById("btn-next").disabled = S.phase === PHASES.length - 1;
+}
+
+function renderNarrative() {
+  const ph = PHASES[S.phase];
+  document.getElementById("narr-title").textContent = ph.title;
+  document.getElementById("narr-body").innerHTML = ph.body;
+  document.getElementById("narr-cites").textContent = ph.cites || "";
+  document.getElementById("narr").className = "card narr" + (ph.danger ? " danger" : "");
+}
+
+function renderShape(d) {
+  const sp = shapeFor(d);
+  document.getElementById("shape-tag").textContent = sp.tag;
+  document.getElementById("shape-sub").textContent = sp.sub;
+  const box = document.getElementById("shapebox");
+  box.innerHTML = "";
+  sp.dims.forEach((dm, i) => {
+    if (i > 0) { const s = el("div", "dim sep", "×"); box.appendChild(s); }
+    const cls = "dim" + (dm.lead ? " lead" : "") + (dm.layerdim ? " layerdim" : "");
+    const e = el("div", cls);
+    e.appendChild(el("div", "dv", typeof dm.v === "number" ? dm.v.toLocaleString() : dm.v));
+    e.appendChild(el("div", "dn", dm.n));
+    box.appendChild(e);
+  });
+  document.getElementById("shapemeta").innerHTML = sp.meta;
+}
+
+function renderLayerStrip(d) {
+  const strip = document.getElementById("layerstrip");
+  strip.innerHTML = "";
+  for (let i = 0; i < S.layers; i++) {
+    const info = d.byLayer.get(i);
+    const c = el("div", "cell " + info.g.kind + (i === S.sel ? " sel" : ""), String(i));
+    c.title = `layer ${i} — ${info.g.label} (kernel group ${info.g.id})`;
+    c.onclick = () => { S.sel = i; document.getElementById("c-sel").value = i; render(); };
+    strip.appendChild(c);
+  }
+  document.getElementById("layers-sub").textContent = S.hybrid
+    ? `${S.layers} layers across ${d.kgs.length} kernel groups. Click a layer to inspect it.`
+    : `${S.layers} identical full-attention layers, one kernel group. Click a layer to inspect it.`;
+
+  const lg = document.getElementById("layerlegend");
+  lg.innerHTML = "";
+  d.kgs.forEach(g => {
+    const w = el("span");
+    const sw = el("i"); sw.style.background = `var(--${g.kind})`;
+    w.appendChild(sw);
+    w.appendChild(document.createTextNode(
+      `${g.label} — ${g.layers.length} layers, object group ${g.og}` +
+      (g.kind === "sw" ? `, only ${g.chunks} of ${S.chunks} chunks` : "")));
+    lg.appendChild(w);
+  });
+}
+
+function renderGroupTree(d) {
+  const t = document.getElementById("grouptree");
+  t.innerHTML = "";
+  for (const [og, gs] of [...d.objectGroups.entries()].sort((a, b) => a[0] - b[0])) {
+    const wrap = el("div");
+    wrap.style.cssText = "border:1px solid var(--line);border-radius:9px;padding:11px 13px;margin-bottom:9px;background:var(--panel-2)";
+    const hd = el("div");
+    hd.style.cssText = "font-size:12.5px;font-weight:640;margin-bottom:8px";
+    hd.innerHTML = `Object group ${og} <span style="color:var(--dim);font-weight:400">` +
+      `— one stored object per chunk, ${bytes(gs.reduce((a, g) => a + g.groupBytes, 0))} each</span>`;
+    wrap.appendChild(hd);
+    gs.forEach(g => {
+      const row = el("div");
+      row.style.cssText = "display:flex;align-items:center;gap:9px;margin-bottom:5px";
+      const chip = el("span", null, g.label);
+      chip.style.cssText = `background:var(--${g.kind});color:#06121f;border-radius:5px;padding:2px 9px;font-size:11px;font-weight:650;white-space:nowrap`;
+      row.appendChild(chip);
+      const txt = el("span");
+      txt.style.cssText = "font-size:12px;color:var(--dim);font-family:ui-monospace,monospace";
+      txt.textContent = `layers [${g.layers.slice(0, 6).join(", ")}${g.layers.length > 6 ? ", …" : ""}] · ${bytes(g.layerBytes)} per layer`;
+      row.appendChild(txt);
+      wrap.appendChild(row);
+    });
+    t.appendChild(wrap);
+  }
+}
+
+function renderKeys(d) {
+  const ogs = [...d.objectGroups.keys()].sort((a, b) => a - b);
+  document.getElementById("keys-sub").textContent =
+    `${S.chunks} chunks × ${ogs.length} object group${ogs.length > 1 ? "s" : ""} = ` +
+    `${ogs.reduce((a, og) => a + Math.max(...d.objectGroups.get(og).map(g => g.chunks)), 0)} stored objects for this one request.`;
+
+  const rows = document.getElementById("keys-rows");
+  const grid = document.getElementById("keys-grid");
+  rows.innerHTML = ""; grid.innerHTML = "";
+  rows.style.gridTemplateRows = `repeat(${ogs.length}, 18px)`;
+  grid.style.gridTemplateColumns = `repeat(${S.chunks}, minmax(0,1fr))`;
+
+  ogs.forEach(og => {
+    rows.appendChild(el("div", null, `og ${og}`));
+    const maxChunks = Math.max(...d.objectGroups.get(og).map(g => g.chunks));
+    for (let c = 0; c < S.chunks; c++) {
+      const cell = el("div", "mcell " + (c < maxChunks ? "full" : "na"));
+      cell.title = c < maxChunks
+        ? `ObjectKey(chunk ${c}, object_group ${og})`
+        : `chunk ${c} outside this group's sliding window`;
+      grid.appendChild(cell);
+    }
+  });
+}
+
+function renderPayload(d) {
+  const kg = d.byLayer.get(S.sel).g;
+  const pos = d.byLayer.get(S.sel).pos;
+  const n = kg.layers.length;
+
+  document.getElementById("payload-tag").textContent =
+    `object group ${kg.og} · ${kg.label}`;
+  document.getElementById("payload-sub").innerHTML = S.format === "kv_outer"
+    ? `The payload for one chunk, drawn to scale. Keys for every layer first, then values for every layer. Layer <b>${S.sel}</b> is highlighted in white.`
+    : `The payload for one chunk. The layer dimension is outermost, so each layer's keys and values sit together. Layer <b>${S.sel}</b> is highlighted in white.`;
+
+  const bar = document.getElementById("payload");
+  bar.innerHTML = "";
+
+  const planes = S.format === "kv_outer"
+    ? [{ cls: "k", label: "K — keys, all layers" }, { cls: "v", label: "V — values, all layers" }]
+    : [{ cls: "k", label: "all layers, K and V interleaved" }];
+
+  planes.forEach(p => {
+    const pl = el("div", "plane " + p.cls);
+    pl.style.flex = "1 1 0";
+    pl.appendChild(el("div", "plane-hd", p.label));
+    const body = el("div", "plane-body");
+    for (let i = 0; i < n; i++) {
+      const sl = el("div", "lslice" + (i === pos ? " sel" : ""));
+      sl.title = `layer ${kg.layers[i]}`;
+      body.appendChild(sl);
+    }
+    pl.appendChild(body);
+    bar.appendChild(pl);
+  });
+
+  document.getElementById("payload-end").textContent = bytes(kg.groupBytes);
+
+  const co = document.getElementById("payload-callout");
+  if (S.phase >= 5) {
+    if (S.format === "kv_outer") {
+      co.innerHTML = `<div class="callout"><b>Two regions, not one.</b> Layer ${S.sel} occupies
+        ${bytes(kg.planeBytes)} in the K plane and another ${bytes(kg.planeBytes)} in the V plane,
+        ${bytes((n - 1) * kg.planeBytes)} apart. An RDMA write cannot span that gap, so this layer
+        needs at least 2 separate writes.</div>`;
+    } else {
+      co.innerHTML = `<div class="callout ok"><b>One contiguous region.</b> In this format layer
+        ${S.sel} is a single ${bytes(kg.layerBytes)} run, so one write can cover it. This is the
+        exception, not the norm — do not design for it.</div>`;
+    }
+  } else {
+    co.innerHTML = "";
+  }
+}
+
+function renderSlots(d) {
+  const kg = d.byLayer.get(S.sel).g;
+  const list = document.getElementById("slotlist");
+  list.innerHTML = "";
+
+  document.getElementById("slots-sub").innerHTML =
+    `Layer <b>${S.sel}</b>, one chunk, with a maximum write of <b>${bytes(d.maxWrite)}</b>.`;
+
+  const planeNames = S.format === "kv_outer" ? ["K", "V"] : ["KV"];
+  let idx = 0;
+  planeNames.forEach((pn, pi) => {
+    for (let piece = 0; piece < kg.piecesPerPlane; piece++) {
+      const len = Math.min(d.maxWrite, kg.planeBytes - piece * d.maxWrite);
+      const s = el("div", "slot " + (pi === 0 ? "k" : "v"),
+        `slot ${idx} · ${pn}${kg.piecesPerPlane > 1 ? " piece " + piece : ""} · ${bytes(len)}`);
+      list.appendChild(s);
+      idx++;
+    }
+  });
+
+  const overBudget = d.totalSlots > IMM_BUDGET;
+  document.getElementById("slotmeta").innerHTML =
+    `<b>${kg.slotsPerLayerPerChunk}</b> slots for this layer in this chunk &nbsp;&middot;&nbsp;
+     <b>${(kg.slotsPerLayerPerChunk * kg.chunks).toLocaleString()}</b> across all its chunks
+     &nbsp;&middot;&nbsp; <b>${d.totalSlots.toLocaleString()}</b> for the whole request` +
+    (overBudget
+      ? `<div class="callout"><b>Over the 16-bit slot budget.</b> ${d.totalSlots.toLocaleString()}
+         exceeds ${IMM_BUDGET.toLocaleString()}. The fix is coarser readiness, not more bits —
+         <code>add_slot</code> throws rather than wrapping silently.</div>`
+      : "");
+}
+
+function renderImmediate(d) {
+  const bits = document.getElementById("bits");
+  bits.innerHTML = "";
+  for (let i = 0; i < 32; i++) bits.appendChild(el("div", "bit " + (i < 16 ? "g" : "s")));
+  const pct = (d.totalSlots / IMM_BUDGET * 100);
+  document.getElementById("immmeta").innerHTML =
+    `This request needs <b>${d.totalSlots.toLocaleString()}</b> of
+     <b>${IMM_BUDGET.toLocaleString()}</b> slot numbers &mdash; <b>${pct.toFixed(1)}%</b> of the
+     address space. Comfortable, but a 4× margin rather than a 4000× one, and long contexts with
+     small chunks eat into it fast.`;
+}
+
+// ---- readiness simulation ----
+let R = { order: [], delivered: 0, timer: null, counts: null };
+
+function buildReadiness(d) {
+  const order = [];
+  d.kgs.forEach(g => {
+    g.layers.forEach(L => {
+      for (let c = 0; c < g.chunks; c++) {
+        for (let s = 0; s < g.slotsPerLayerPerChunk; s++) order.push({ L, c });
+      }
+    });
+  });
+  // SRD sprays across paths: arrival order is genuinely shuffled.
+  for (let i = order.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [order[i], order[j]] = [order[j], order[i]];
+  }
+  const counts = new Map();
+  d.kgs.forEach(g => g.layers.forEach(L => {
+    for (let c = 0; c < g.chunks; c++) counts.set(L + ":" + c, { got: 0, need: g.slotsPerLayerPerChunk });
+  }));
+  R = { order, delivered: 0, timer: null, counts };
+}
+
+function renderReady(d) {
+  document.getElementById("ready-sub").innerHTML =
+    `Rows are chunks, columns are layers. A cell fills as its slots land; a column header turns
+     green when <b>every chunk</b> of that layer is complete.`;
+
+  const rows = document.getElementById("ready-rows");
+  const cols = document.getElementById("ready-cols");
+  const grid = document.getElementById("ready-grid");
+  rows.innerHTML = ""; cols.innerHTML = ""; grid.innerHTML = "";
+
+  rows.style.gridTemplateRows = `repeat(${S.chunks}, 18px)`;
+  cols.style.gridTemplateColumns = `repeat(${S.layers}, minmax(0,1fr))`;
+  grid.style.gridTemplateColumns = `repeat(${S.layers}, minmax(0,1fr))`;
+
+  const readyLayers = [];
+  for (let L = 0; L < S.layers; L++) {
+    const g = d.byLayer.get(L).g;
+    let done = true;
+    for (let c = 0; c < g.chunks; c++) {
+      const k = R.counts.get(L + ":" + c);
+      if (!k || k.got < k.need) { done = false; break; }
+    }
+    if (done) readyLayers.push(L);
+    const ch = el("div", "ch" + (done ? " ready" : ""), String(L));
+    ch.title = `layer ${L}` + (done ? " — ready" : " — waiting");
+    cols.appendChild(ch);
+  }
+
+  for (let c = 0; c < S.chunks; c++) rows.appendChild(el("div", null, `c${c}`));
+  for (let c = 0; c < S.chunks; c++) {
+    for (let L = 0; L < S.layers; L++) {
+      const g = d.byLayer.get(L).g;
+      let cls = "mcell";
+      if (c >= g.chunks) cls += " na";
+      else {
+        const k = R.counts.get(L + ":" + c);
+        if (k.got >= k.need) cls += " full";
+        else if (k.got > 0) cls += " part";
+      }
+      const cell = el("div", cls);
+      cell.title = c >= g.chunks
+        ? `layer ${L}, chunk ${c} — outside the sliding window, never expected`
+        : `layer ${L}, chunk ${c}`;
+      grid.appendChild(cell);
+    }
+  }
+
+  document.getElementById("ready-counter").textContent =
+    `${R.delivered.toLocaleString()} of ${R.order.length.toLocaleString()} slots landed`;
+
+  const ro = document.getElementById("ready-readout");
+  ro.innerHTML = "";
+  const lbl = el("span", null, "Ready layers: ");
+  lbl.style.color = "var(--dim)";
+  ro.appendChild(lbl);
+  if (!readyLayers.length) {
+    ro.appendChild(el("span", "pill", "none yet"));
+  } else {
+    readyLayers.slice(0, 24).forEach(L => ro.appendChild(el("span", "pill on", String(L))));
+    if (readyLayers.length > 24) ro.appendChild(el("span", "pill", `+${readyLayers.length - 24} more`));
+  }
+  const gap = readyLayers.length && readyLayers[0] !== 0;
+  const holes = readyLayers.some((L, i) => i > 0 && L !== readyLayers[i - 1] + 1);
+  if (gap || holes) {
+    const note = el("div");
+    note.style.cssText = "margin-top:9px;font-size:12px;color:#7ee787";
+    note.textContent = "Note the gaps — later layers are ready while earlier ones are not. A high-water mark would report this wrong.";
+    ro.appendChild(note);
+  }
+}
+
+function renderCaveats(d) {
+  const rows = [
+    ["A layer is two regions", "Whenever <code>kv_size &gt; 1</code>. Announcing a layer ready after only the K plane lands gives the model uninitialised values, with no error raised anywhere."],
+    ["Slot numbers are request-wide", "Every node reports into one table over one queue pair. Per-fetch numbering makes two nodes' slot 5 indistinguishable."],
+    ["Not every chunk participates", `Sliding-window groups cover only part of the prompt — ${S.hybrid ? `here, ${Math.min(S.chunks, 4)} of ${S.chunks} chunks` : "turn on Hybrid model to see it"}. Waiting for all chunks in such a group waits forever.`],
+    ["Recurrent groups are different", "Mamba-style groups hold state snapshots, not per-token KV, and probably should not sit behind a per-layer barrier at all. Unconfirmed."],
+    ["Slots are not tokens", "Compressed groups have <code>tokens_per_block ≠ slots_per_block</code>. Always ask <code>get_slots_per_chunk_in_sw</code>; never derive slot counts from token counts."],
+    ["Tail latency, not median", "All-or-nothing waits once for the slowest transfer. Layer-major waits for the slowest transfer of <i>each</i> layer, in sequence — and a sum of maxima is worse than one maximum. Judge the transfer-vs-compute ratio at p99."],
+    ["Can one request saturate the link?", "The M0 sweep saw 1.88 GB/s for a single object against a 12.2 GB/s NIC ceiling. Pipelining's value depends on closing that gap. Unresolved, and it gates everything."],
+    ["Landing in host memory is half the trip", "The final destination is non-contiguous paged GPU blocks. A per-layer signal only helps if a per-layer copy to the GPU can be issued too."],
+  ];
+  const t = document.getElementById("caveats");
+  t.innerHTML = "";
+  rows.forEach(([k, v]) => {
+    const tr = el("tr");
+    tr.appendChild(el("td", null, k));
+    const td = el("td"); td.innerHTML = v; tr.appendChild(td);
+    t.appendChild(tr);
+  });
+}
+
+function render() {
+  const d = derive();
+  if (S.sel >= S.layers) S.sel = S.layers - 1;
+
+  renderStepper();
+  renderNarrative();
+  renderShape(d);
+
+  const active = new Set(PHASES[S.phase].panels);
+  ["p-layers", "p-groups", "p-keys", "p-payload", "p-slots", "p-imm", "p-ready", "p-caveats"]
+    .forEach(id => document.getElementById(id).classList.toggle("hidden", !active.has(id)));
+
+  if (active.has("p-layers")) renderLayerStrip(d);
+  if (active.has("p-groups")) renderGroupTree(d);
+  if (active.has("p-keys")) renderKeys(d);
+  if (active.has("p-payload")) renderPayload(d);
+  if (active.has("p-slots")) renderSlots(d);
+  if (active.has("p-imm")) renderImmediate(d);
+  if (active.has("p-ready")) {
+    if (!R.counts || R.order.length === 0) buildReadiness(d);
+    renderReady(d);
+  }
+  if (active.has("p-caveats")) renderCaveats(d);
+}
+
+// ---------- wiring ----------
+function bindRange(id, key, fmt, resetSim) {
+  const inp = document.getElementById("c-" + id);
+  const out = document.getElementById("v-" + id);
+  inp.addEventListener("input", () => {
+    S[key] = Number(inp.value);
+    out.textContent = fmt ? fmt(S[key]) : S[key];
+    if (key === "layers") {
+      const sel = document.getElementById("c-sel");
+      sel.max = String(S.layers - 1);
+      if (S.sel > S.layers - 1) { S.sel = S.layers - 1; sel.value = S.sel; document.getElementById("v-sel").textContent = S.sel; }
+    }
+    if (resetSim) { stopSim(); R = { order: [], delivered: 0, timer: null, counts: null }; }
+    render();
+  });
+}
+
+bindRange("layers", "layers", null, true);
+bindRange("kvheads", "kvheads", null, true);
+bindRange("headdim", "headdim", null, true);
+bindRange("chunks", "chunks", null, true);
+bindRange("tokens", "tokens", null, true);
+bindRange("sel", "sel", null, false);
+bindRange("maxwrite", "maxwritePow", p => bytes(Math.pow(2, p)), true);
+
+document.getElementById("c-dtype").addEventListener("change", e => {
+  S.dtype = Number(e.target.value);
+  document.getElementById("v-dtype").textContent = S.dtype;
+  render();
+});
+document.getElementById("c-format").addEventListener("change", e => {
+  S.format = e.target.value;
+  stopSim(); R = { order: [], delivered: 0, timer: null, counts: null };
+  render();
+});
+document.getElementById("t-hybrid").addEventListener("change", e => {
+  S.hybrid = e.target.checked;
+  stopSim(); R = { order: [], delivered: 0, timer: null, counts: null };
+  render();
+});
+
+document.getElementById("btn-prev").onclick = () => { if (S.phase > 0) { S.phase--; render(); } };
+document.getElementById("btn-next").onclick = () => { if (S.phase < PHASES.length - 1) { S.phase++; render(); } };
+
+function stopSim() {
+  if (R.timer) { clearInterval(R.timer); R.timer = null; }
+  const b = document.getElementById("btn-play");
+  if (b) b.textContent = "Stream arrivals";
+}
+
+document.getElementById("btn-play").onclick = () => {
+  const d = derive();
+  if (R.timer) { stopSim(); return; }
+  if (R.delivered >= R.order.length) buildReadiness(d);
+  document.getElementById("btn-play").textContent = "Pause";
+  const perTick = Math.max(1, Math.ceil(R.order.length / 90));
+  R.timer = setInterval(() => {
+    for (let i = 0; i < perTick && R.delivered < R.order.length; i++) {
+      const a = R.order[R.delivered++];
+      const k = R.counts.get(a.L + ":" + a.c);
+      if (k) k.got++;
+    }
+    renderReady(derive());
+    if (R.delivered >= R.order.length) stopSim();
+  }, 55);
+};
+
+document.getElementById("btn-reset").onclick = () => {
+  stopSim();
+  buildReadiness(derive());
+  renderReady(derive());
+};
+
+document.addEventListener("keydown", e => {
+  if (e.key === "ArrowRight" && S.phase < PHASES.length - 1) { S.phase++; render(); }
+  if (e.key === "ArrowLeft" && S.phase > 0) { S.phase--; render(); }
+});
+
+// Deep links, so a specific step can be shared:
+//   #step=6&hybrid=1&layer=5&format=layer_outer&chunks=12
+function applyHash() {
+  const h = location.hash.replace(/^#/, "");
+  if (!h) return;
+  const p = new URLSearchParams(h);
+  const num = (k, lo, hi) => {
+    const v = Number(p.get(k));
+    return p.has(k) && Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : null;
+  };
+
+  const step = num("step", 1, PHASES.length);
+  if (step !== null) S.phase = step - 1;
+
+  if (p.has("hybrid")) {
+    S.hybrid = p.get("hybrid") !== "0";
+    document.getElementById("t-hybrid").checked = S.hybrid;
+  }
+  if (p.has("format")) {
+    S.format = p.get("format") === "layer_outer" ? "layer_outer" : "kv_outer";
+    document.getElementById("c-format").value = S.format;
+  }
+  for (const [param, key, id, lo, hi] of [
+    ["layers", "layers", "layers", 8, 80], ["chunks", "chunks", "chunks", 2, 16],
+    ["tokens", "tokens", "tokens", 64, 512], ["layer", "sel", "sel", 0, 79],
+  ]) {
+    const v = num(param, lo, hi);
+    if (v === null) continue;
+    S[key] = v;
+    document.getElementById("c-" + id).value = String(v);
+    document.getElementById("v-" + id).textContent = String(v);
+  }
+  if (S.sel > S.layers - 1) S.sel = S.layers - 1;
+  document.getElementById("c-sel").max = String(S.layers - 1);
+  R = { order: [], delivered: 0, timer: null, counts: null };
+}
+
+window.addEventListener("hashchange", () => { stopSim(); applyHash(); render(); });
+
+applyHash();
+render();
+</script>
+</body>
+</html>
