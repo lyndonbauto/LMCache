@@ -321,10 +321,19 @@
       <option value="layer_outer">(layers, slots, hidden) &mdash; NL_X_NB_BS_HS</option>
     </select>
   </div>
+  <div class="field">
+    <label>Architecture</label>
+    <select id="c-arch">
+      <option value="sw" selected>Sliding-window hybrid &mdash; Gemma 3, gpt-oss</option>
+      <option value="linear">Linear-attention hybrid &mdash; Qwen3.5, Kimi</option>
+      <option value="uniform">Uniform &mdash; Llama, Qwen3 dense, Mistral</option>
+    </select>
+  </div>
   <label class="toggle">
-    <input type="checkbox" id="t-hybrid" />
-    <span>Hybrid model
-      <small>Adds sliding-window and recurrent groups, so layers stop being alike.</small>
+    <input type="checkbox" id="t-separate" />
+    <span><code>--separate-object-groups</code>
+      <small>One object group per attention window. Off by default in LMCache;
+        required for Mamba/GDN hybrids.</small>
     </span>
   </label>
 
@@ -335,7 +344,7 @@
   </div>
   <div class="field">
     <label>Tokens per chunk <b id="v-tokens">256</b></label>
-    <input type="range" id="c-tokens" min="64" max="512" step="64" value="256" />
+    <input type="range" id="c-tokens" min="64" max="1024" step="16" value="256" />
   </div>
   <div class="field">
     <label>Max RDMA write <b id="v-maxwrite">1 MiB</b></label>
@@ -498,7 +507,7 @@
 // ---------- state ----------
 const S = {
   layers: 32, kvheads: 8, headdim: 128, dtype: 2,
-  format: "kv_outer", hybrid: false,
+  format: "kv_outer", arch: "sw", separate: false,
   chunks: 8, tokens: 256, maxwritePow: 20,
   net: 122, gpu: 400, params: 8, jitter: true,
   sel: 0, phase: 0,
@@ -521,25 +530,48 @@ function el(tag, cls, txt) {
 }
 
 // ---------- derived model ----------
-// Assign every layer to a kernel group. Non-hybrid: one group, all full attention.
-// Hybrid: full attention / sliding window / recurrent, which is what makes a
-// single global stride wrong.
+// Assign every layer to a kernel group, following the two hybrid families
+// LMCache actually validates (docs/source/mp/hybrid_models.rst):
+//
+//   sw      — interleaved sliding-window + full attention, ~5:1. Gemma 3,
+//             gpt-oss. All layers are still paged KV.
+//   linear  — interleaved Mamba/GDN + full attention, ~3:1. Qwen3.5/3.6/3.8,
+//             Kimi-Linear, Kimi K3. The linear layers hold a recurrent state
+//             snapshot rather than per-token KV, and LMCache *requires*
+//             --separate-object-groups for them.
+//   uniform — one attention type throughout. Llama, dense Qwen3, Mistral.
+//
+// Object-group assignment follows the real flag: off by default, so a hybrid's
+// kernel groups share one object group unless asked otherwise.
 function kernelGroups() {
-  if (!S.hybrid) {
+  if (S.arch === "uniform") {
     return [{ id: 0, kind: "attn", label: "full attention", layers: range(S.layers), og: 0 }];
   }
-  const attn = [], sw = [], rec = [];
-  for (let i = 0; i < S.layers; i++) {
-    if (i % 4 === 0) attn.push(i);
-    else if (i % 4 === 3) rec.push(i);
-    else sw.push(i);
-  }
+  const period = S.arch === "sw" ? 6 : 4;       // 5:1 sliding, 3:1 linear
+  const otherKind = S.arch === "sw" ? "sw" : "rec";
+  const otherLabel = S.arch === "sw" ? "sliding window" : "recurrent state (Mamba/GDN)";
+
+  const attn = [], other = [];
+  for (let i = 0; i < S.layers; i++) (i % period === 0 ? attn : other).push(i);
+
+  const separate = separateObjectGroups();
   const gs = [];
-  if (attn.length) gs.push({ id: gs.length, kind: "attn", label: "full attention", layers: attn, og: 0 });
-  if (sw.length)   gs.push({ id: gs.length, kind: "sw",   label: "sliding window", layers: sw,   og: 1 });
-  if (rec.length)  gs.push({ id: gs.length, kind: "rec",  label: "recurrent state", layers: rec, og: 2 });
+  if (attn.length) {
+    gs.push({ id: gs.length, kind: "attn", label: "full attention", layers: attn, og: 0 });
+  }
+  if (other.length) {
+    gs.push({ id: gs.length, kind: otherKind, label: otherLabel, layers: other,
+              og: separate ? 1 : 0 });
+  }
   return gs;
 }
+
+// Mamba/GDN hybrids cannot share an object group with full attention, so the
+// flag is forced on for them regardless of the checkbox.
+function separateObjectGroups() {
+  return S.arch === "linear" ? true : S.separate;
+}
+
 function range(n) { return Array.from({ length: n }, (_, i) => i); }
 
 function derive() {
@@ -652,9 +684,13 @@ const PHASES = [
     body: `<p>It would be convenient if a model were 32 identical layers. Modern ones are not.
       Some use full attention, some use a sliding window, some are recurrent (Mamba-style) and
       store a state snapshot rather than per-token keys and values.</p>
+      <p>This is now the <b class="key">normal case, not an exotic one</b>. LMCache validates nine
+      hybrid architectures by name &mdash; Gemma 3/4, gpt-oss, Qwen3.5/3.6/3.8, Kimi-Linear, Kimi K3,
+      DeepSeek-V4-Flash, GLM 5.1/5.2, MiniMax-M3 &mdash; against a single catch-all row for
+      everything uniform. Switch <i>Architecture</i> to <i>Uniform</i> to see the older, simpler
+      shape.</p>
       <p>LMCache handles this by sorting layers into <b class="key">kernel groups</b>, where a group
-      is a set of layers that share one identical shape descriptor. Turn on <i>Hybrid model</i> in
-      the sidebar to see the strip fracture into several groups.</p>
+      is a set of layers that share one identical shape descriptor.</p>
       <p>This is better news than it sounds. Layers are not irregular in some unmanageable way
       &mdash; they are sorted so that <b class="key">each group is internally uniform by
       construction</b>. Offsets inside a group are simple arithmetic. The trap is using one
@@ -934,8 +970,13 @@ function renderLayerStrip(d) {
     c.onclick = () => { S.sel = i; document.getElementById("c-sel").value = i; render(); };
     strip.appendChild(c);
   }
-  document.getElementById("layers-sub").textContent = S.hybrid
-    ? `${S.layers} layers across ${d.kgs.length} kernel groups. Click a layer to inspect it.`
+  const ratio = d.kgs.length > 1
+    ? `${d.kgs[1].layers.length}:${d.kgs[0].layers.length} ` +
+      `${d.kgs[1].kind === "sw" ? "local" : "linear"}-to-full`
+    : "";
+  document.getElementById("layers-sub").textContent = d.kgs.length > 1
+    ? `${S.layers} layers across ${d.kgs.length} kernel groups, interleaved ${ratio}. ` +
+      `Click a layer to inspect it.`
     : `${S.layers} identical full-attention layers, one kernel group. Click a layer to inspect it.`;
 
   const lg = document.getElementById("layerlegend");
@@ -1325,8 +1366,8 @@ function renderCaveats(d) {
   const rows = [
     ["A layer is two regions", "Whenever <code>kv_size &gt; 1</code>. Announcing a layer ready after only the K plane lands gives the model uninitialised values, with no error raised anywhere."],
     ["Slot numbers are request-wide", "Every node reports into one table over one queue pair. Per-fetch numbering makes two nodes' slot 5 indistinguishable."],
-    ["Not every chunk participates", `Sliding-window groups cover only part of the prompt — ${S.hybrid ? `here, ${Math.min(S.chunks, 4)} of ${S.chunks} chunks` : "turn on Hybrid model to see it"}. Waiting for all chunks in such a group waits forever.`],
-    ["Recurrent groups are different", "Mamba-style groups hold state snapshots, not per-token KV, and probably should not sit behind a per-layer barrier at all. Unconfirmed."],
+    ["Not every chunk participates", `Sliding-window groups cover only part of the prompt — ${S.arch === "sw" ? `here, ${Math.min(S.chunks, 4)} of ${S.chunks} chunks` : "switch Architecture to the sliding-window hybrid to see it"}. Waiting for all chunks in such a group waits forever.`],
+    ["Recurrent groups are different", "Mamba/GDN groups hold state snapshots, not per-token KV, and probably should not sit behind a per-layer barrier at all. They also force <code>--separate-object-groups</code>, make the pages byte-opaque (no CacheGen or CacheBlend), and impose a unified block size of 544–944 tokens that the LMCache chunk size must be a multiple of. Unconfirmed how they should be treated here."],
     ["Slots are not tokens", "Compressed groups have <code>tokens_per_block ≠ slots_per_block</code>. Always ask <code>get_slots_per_chunk_in_sw</code>; never derive slot counts from token counts."],
     ["Tail latency, not median", "All-or-nothing waits once for the slowest transfer. Layer-major waits for the slowest transfer of <i>each</i> layer, in sequence — and a sum of maxima is worse than one maximum. Judge the transfer-vs-compute ratio at p99."],
     ["Can one request saturate the link?", "The M0 sweep saw 1.88 GB/s for a single object against a 12.2 GB/s NIC ceiling. Pipelining's value depends on closing that gap. Unresolved, and it gates everything."],
@@ -1345,6 +1386,12 @@ function renderCaveats(d) {
 function render() {
   const d = derive();
   if (S.sel >= S.layers) S.sel = S.layers - 1;
+
+  // Mamba/GDN forces the flag on; show that rather than letting the checkbox lie.
+  const sep = document.getElementById("t-separate");
+  sep.checked = separateObjectGroups();
+  sep.disabled = S.arch === "linear";
+  sep.parentElement.style.opacity = sep.disabled ? "0.6" : "1";
 
   renderStepper();
   renderNarrative();
@@ -1420,8 +1467,13 @@ document.getElementById("c-format").addEventListener("change", e => {
   stopSim(); R = { order: [], delivered: 0, timer: null, counts: null };
   render();
 });
-document.getElementById("t-hybrid").addEventListener("change", e => {
-  S.hybrid = e.target.checked;
+document.getElementById("c-arch").addEventListener("change", e => {
+  S.arch = e.target.value;
+  stopSim(); R = { order: [], delivered: 0, timer: null, counts: null };
+  render();
+});
+document.getElementById("t-separate").addEventListener("change", e => {
+  S.separate = e.target.checked;
   stopSim(); R = { order: [], delivered: 0, timer: null, counts: null };
   render();
 });
@@ -1464,7 +1516,7 @@ document.addEventListener("keydown", e => {
 });
 
 // Deep links, so a specific step can be shared:
-//   #step=6&hybrid=1&layer=5&format=layer_outer&chunks=12
+//   #step=6&arch=linear&layer=5&format=layer_outer&chunks=12
 function applyHash() {
   const h = location.hash.replace(/^#/, "");
   if (!h) return;
@@ -1477,9 +1529,14 @@ function applyHash() {
   const step = num("step", 1, PHASES.length);
   if (step !== null) S.phase = step - 1;
 
-  if (p.has("hybrid")) {
-    S.hybrid = p.get("hybrid") !== "0";
-    document.getElementById("t-hybrid").checked = S.hybrid;
+  if (p.has("arch")) {
+    const a = p.get("arch");
+    S.arch = ["sw", "linear", "uniform"].includes(a) ? a : "sw";
+    document.getElementById("c-arch").value = S.arch;
+  }
+  if (p.has("separate")) {
+    S.separate = p.get("separate") !== "0";
+    document.getElementById("t-separate").checked = S.separate;
   }
   if (p.has("format")) {
     S.format = p.get("format") === "layer_outer" ? "layer_outer" : "kv_outer";
@@ -1491,7 +1548,7 @@ function applyHash() {
   }
   for (const [param, key, id, lo, hi] of [
     ["layers", "layers", "layers", 8, 80], ["chunks", "chunks", "chunks", 2, 16],
-    ["tokens", "tokens", "tokens", 64, 512], ["layer", "sel", "sel", 0, 79],
+    ["tokens", "tokens", "tokens", 64, 1024], ["layer", "sel", "sel", 0, 79],
     ["net", "net", "net", 10, 250], ["gpu", "gpu", "gpu", 40, 900],
     ["params", "params", "params", 1, 140],
   ]) {

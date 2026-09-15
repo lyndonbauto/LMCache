@@ -11,7 +11,7 @@ the mapping from actual LMCache layout to those slots.
 > [`layerwise-transfer-data-model.html`](layerwise-transfer-data-model.html) steps
 > through the same material in plain language, drawing the shape at each stage.
 > Open it in a browser. Steps are deep-linkable, e.g.
-> `#step=6&hybrid=1&layer=5` lands on the non-contiguity problem for a
+> `#step=6&arch=linear&layer=5` lands on the non-contiguity problem for a
 > sliding-window layer.
 
 **Scope.** This changes no keys, no object model, and no L2 interface. It is
@@ -190,12 +190,32 @@ not more bits.
 
 ## Groups needing different treatment
 
+Treat these as the common case, not as edge handling.
+[`hybrid_models.rst`](../../../../source/mp/hybrid_models.rst) validates nine
+hybrid architectures by name — Gemma 3/4, gpt-oss, Qwen3.5/3.6/3.8,
+Kimi-Linear, Kimi K3, DeepSeek-V4-Flash, GLM 5.1/5.2, MiniMax-M3 — against a
+single catch-all row for everything uniform. There are two families, and they
+differ in how much they disturb this design: sliding-window + full attention
+(Gemma 3, gpt-oss), which is still paged KV throughout, and Mamba/GDN + full
+attention (Qwen3.5+, Kimi), which is not.
+
 **Recurrent / Mamba groups** (`KernelGroupInfo.recurrent_state`) hold state
 snapshots rather than per-token attention KV. They do not carry the same
 sequential per-layer dependency, and putting them behind a per-layer barrier is
 probably meaningless. Recommend excluding them from the layer barrier and
 treating them as all-or-nothing, but this needs confirming against how the
-model actually consumes them.
+model actually consumes them. Three further constraints come with them:
+
+- `--separate-object-groups` is **required**, so these models always present
+  more than one object group. The flag is off by default, which means a
+  sliding-window hybrid normally puts all its kernel groups in *one* object
+  group — both shapes must work.
+- The pages are **byte-opaque**, so CacheGen and CacheBlend do not apply. That
+  removes the CacheBlend interaction from scope for this family.
+- vLLM forces a **unified block size of 544–944 tokens** (model-specific, read
+  from its startup log), and the LMCache chunk size must be a multiple of it.
+  Chunks are therefore much larger than the 256 typical elsewhere, which moves
+  per-layer payload sizes and the slot budget accordingly.
 
 **Aux groups** (`ObjectGroupInfo.aux`, `extra_object_group_tag > 0`) are
 connector-private — notably the blend fused-aux pool. Out of scope; CacheBlend
