@@ -426,6 +426,10 @@ Not proven:
   the *disk read* of layer 1 with the network send of layer 0 needs
   independently readable layers, which is level-1 chunking above and a much
   larger change.
+- **Anything about real layers.** The harness moves synthetic pieces at
+  fabricated offsets. Mapping actual KV layout onto slots — and the fact that
+  a layer is *not* one contiguous range once `kv_size > 1` — is
+  [`layerwise_transfer_data_model.md`](layerwise_transfer_data_model.md).
 
 ## Reproducing the Soft-RoCE test setup
 
@@ -622,6 +626,8 @@ Aerospike**; no policy has been invented here.
 
 ## Related
 
+- [`layerwise_transfer_data_model.md`](layerwise_transfer_data_model.md) — how
+  real KV layout maps onto the slots this document signals about.
 - `docs/design/v1/multiprocess/transport/request_transport.md` — the MP request
   transport, relevant to any future per-layer delivery.
 - `lmcache/v1/distributed/l2_adapters/mooncake_store_l2_adapter.py` — the
