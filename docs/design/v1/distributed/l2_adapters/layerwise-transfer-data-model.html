@@ -207,6 +207,46 @@
   .bitlabels { display: flex; margin-top: 5px; font-size: 11px; color: var(--dim); }
   .bitlabels div { text-align: center; }
 
+  /* ---- pipeline timeline ---- */
+  .track { margin-bottom: 9px; }
+  .track-hd {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 11px; color: var(--dim); margin-bottom: 4px;
+  }
+  .track-hd b { color: var(--text); font-family: ui-monospace, monospace; font-weight: 600; }
+  .lane {
+    position: relative; height: 30px; border-radius: 6px;
+    background: #12171f; border: 1px solid var(--line); overflow: hidden;
+  }
+  .blk {
+    position: absolute; top: 0; bottom: 0;
+    border-right: 1px solid #0008; overflow: hidden;
+    font-size: 9px; font-family: ui-monospace, monospace;
+    display: flex; align-items: center; justify-content: center;
+    color: #ffffffcc;
+  }
+  .blk.net { background: var(--kplane); }
+  .blk.net.alt { background: #1a5bbf; }
+  .blk.cpu { background: var(--hit); color: #04240d; }
+  .blk.cpu.alt { background: #35a047; }
+  .blk.stall { background: repeating-linear-gradient(45deg, #3a1d1d, #3a1d1d 5px, #2a1414 5px, #2a1414 10px); }
+  .blk.sel { outline: 2px solid #fff; outline-offset: -2px; z-index: 3; }
+
+  .tl-axis {
+    position: relative; height: 16px; margin-top: 3px;
+    font-size: 10px; color: var(--dimmer); font-family: ui-monospace, monospace;
+  }
+  .tl-axis span { position: absolute; transform: translateX(-50%); }
+
+  .compare { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 9px; margin-top: 14px; }
+  .kpi { background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px; }
+  .kpi .k { font-size: 10.5px; text-transform: uppercase; letter-spacing: .4px; color: var(--dim); }
+  .kpi .val { font-size: 20px; font-weight: 650; font-family: ui-monospace, monospace; margin-top: 2px; }
+  .kpi.good { border-color: #3fb95055; background: #3fb95010; }
+  .kpi.good .val { color: #7ee787; }
+  .kpi.bad { border-color: #f8514955; background: #f8514910; }
+  .kpi.bad .val { color: #ffb4ae; }
+
   /* ---- readiness matrix ---- */
   .matrix-wrap { display: grid; grid-template-columns: auto minmax(0,1fr); gap: 8px; align-items: start; }
   .rowlabels { display: grid; gap: 2px; font-size: 10px; color: var(--dimmer); font-family: ui-monospace, monospace; }
@@ -302,6 +342,20 @@
     <input type="range" id="c-maxwrite" min="14" max="24" step="1" value="20" />
   </div>
 
+  <h2 class="sec">Pipeline</h2>
+  <div class="field">
+    <label>Network delivery <b id="v-net">12.2 GB/s</b></label>
+    <input type="range" id="c-net" min="10" max="250" step="2" value="122" />
+  </div>
+  <div class="field">
+    <label>GPU prefill <b id="v-gpu">400 TFLOP/s</b></label>
+    <input type="range" id="c-gpu" min="40" max="900" step="20" value="400" />
+  </div>
+  <div class="field">
+    <label>Model size <b id="v-params">8 B</b></label>
+    <input type="range" id="c-params" min="1" max="140" step="1" value="8" />
+  </div>
+
   <h2 class="sec">Focus</h2>
   <div class="field">
     <label>Inspect layer <b id="v-sel">0</b></label>
@@ -385,13 +439,39 @@
     <div class="shapemeta" id="immmeta"></div>
   </div>
 
-  <!-- P9: readiness matrix -->
+  <!-- P9: the pipeline timeline, the actual payoff -->
+  <div class="card hidden" id="p-timeline">
+    <h3>Transfer hiding behind compute <span class="tag" id="tl-tag"></span></h3>
+    <p class="sub" id="tl-sub"></p>
+
+    <div class="track">
+      <div class="track-hd"><span>Network &mdash; Aerospike pushes layer by layer</span><span id="tl-net-meta"></span></div>
+      <div class="lane" id="lane-net"></div>
+    </div>
+    <div class="track">
+      <div class="track-hd"><span>GPU &mdash; computes each layer as it lands</span><span id="tl-cpu-meta"></span></div>
+      <div class="lane" id="lane-cpu"></div>
+      <div class="tl-axis" id="tl-axis"></div>
+    </div>
+
+    <div class="track" style="margin-top:16px">
+      <div class="track-hd"><span>For comparison &mdash; today: fetch everything, then compute</span><span id="tl-base-meta"></span></div>
+      <div class="lane" id="lane-base"></div>
+    </div>
+
+    <div class="compare" id="tl-kpis"></div>
+    <div id="tl-callout"></div>
+  </div>
+
+  <!-- P10: readiness matrix -->
   <div class="card hidden" id="p-ready">
-    <h3>Readiness is a set, not a prefix</h3>
+    <h3>What &ldquo;layer i has landed&rdquo; actually requires</h3>
     <p class="sub" id="ready-sub"></p>
     <div class="navrow">
-      <button class="nav primary" id="btn-play">Stream arrivals</button>
+      <button class="nav primary" id="btn-play">Push layers</button>
       <button class="nav" id="btn-reset">Reset</button>
+      <label class="toggle" style="margin:0"><input type="checkbox" id="t-jitter" checked />
+        <span>SRD jitter<small>Reordering at the frontier</small></span></label>
       <span style="color:var(--dimmer);font-size:12px" id="ready-counter"></span>
     </div>
     <div class="matrix-wrap">
@@ -420,6 +500,7 @@ const S = {
   layers: 32, kvheads: 8, headdim: 128, dtype: 2,
   format: "kv_outer", hybrid: false,
   chunks: 8, tokens: 256, maxwritePow: 20,
+  net: 122, gpu: 400, params: 8, jitter: true,
   sel: 0, phase: 0,
 };
 
@@ -493,7 +574,58 @@ function derive() {
   let totalSlots = 0;
   for (const g of kgs) totalSlots += g.chunks * g.layers.length * g.slotsPerLayerPerChunk;
 
-  return { kgs, byLayer, objectGroups, hidden, kvSize, maxWrite, slotsPerChunk, totalSlots };
+  const d = { kgs, byLayer, objectGroups, hidden, kvSize, maxWrite, slotsPerChunk, totalSlots };
+  d.timing = schedule(d);
+  return d;
+}
+
+// Simulate the layer-major push against the GPU walking layers in order.
+//
+// Network: the server saturates the link, sending layer 0 (every chunk of it),
+// then layer 1, and so on. Layer i is deliverable at the moment its last byte
+// lands, which is just the running sum.
+//
+// GPU: cannot start layer i until that layer has landed AND it has finished
+// layer i-1. Any gap between those is the GPU idle, which is the failure this
+// whole design is trying to avoid.
+function schedule(d) {
+  const netBps = (S.net / 10) * 1e9;          // slider is tenths of a GB/s
+  const gpuFlops = S.gpu * 1e12;
+  const tokensTotal = S.chunks * S.tokens;
+  // Standard prefill approximation: ~2 FLOPs per parameter per token.
+  const flopsPerTokLayer = 2 * (S.params * 1e9 / S.layers);
+  const cpuPerLayerMs = (tokensTotal * flopsPerTokLayer / gpuFlops) * 1000;
+
+  const rows = [];
+  let netDone = 0, cpuDone = 0, stalled = 0;
+  for (let L = 0; L < S.layers; L++) {
+    const g = d.byLayer.get(L).g;
+    // this layer's bytes across every chunk that actually carries it
+    const netMs = (g.layerBytes * g.chunks / netBps) * 1000;
+    const netStart = netDone;
+    netDone += netMs;
+
+    const cpuStart = Math.max(netDone, cpuDone);
+    stalled += Math.max(0, netDone - cpuDone);
+    cpuDone = cpuStart + cpuPerLayerMs;
+
+    rows.push({ L, netStart, netEnd: netDone, cpuStart, cpuEnd: cpuDone, netMs, cpuMs: cpuPerLayerMs });
+  }
+
+  const transferAll = netDone;
+  const computeAll = cpuPerLayerMs * S.layers;
+  const baseline = transferAll + computeAll;   // fetch everything, then compute
+  const pipelined = cpuDone;
+
+  const avgNet = transferAll / S.layers;
+  return {
+    rows, transferAll, computeAll, baseline, pipelined, stalled,
+    saved: baseline - pipelined,
+    savedPct: baseline > 0 ? (baseline - pipelined) / baseline * 100 : 0,
+    hiddenPct: transferAll > 0 ? Math.max(0, transferAll - stalled) / transferAll * 100 : 0,
+    avgNet, avgCpu: cpuPerLayerMs,
+    ratio: cpuPerLayerMs > 0 ? avgNet / cpuPerLayerMs : Infinity,
+  };
 }
 
 // ---------- narrative ----------
@@ -610,18 +742,44 @@ const PHASES = [
     panels: ["p-imm"],
   },
   {
-    name: "Readiness",
-    title: "Layers finish out of order, and that is fine",
-    body: `<p>AWS's fast network deliberately delivers out of order &mdash; it sprays packets across
-      many paths for speed and leaves reordering to whoever is above it. Layer 5 can finish before
-      layer 2.</p>
-      <p>So readiness is a <b class="key">set</b>, not a high-water mark. Press
-      <i>Stream arrivals</i>: cells fill in randomly, and a column header turns green only when its
-      whole column is complete. Notice the greens do not appear left to right.</p>
-      <p>Tracking a &ldquo;everything up to layer k has arrived&rdquo; watermark instead would pass
-      every test on a local software device, which is ordered, and then silently corrupt data on real
-      hardware. That is the worst possible failure shape, so the model refuses it by design.</p>`,
-    cites: "LayerReadiness::note_arrival / ready_layers — a set, deliberately",
+    name: "The payoff",
+    title: "Why any of this is worth building",
+    body: `<p>Here is the entire point. Aerospike pushes <b class="key">layer 0 first, then layer 1,
+      then layer 2</b>, keeping the link saturated throughout. The GPU starts computing layer 0 the
+      moment it lands, while layer 1 is still crossing the wire.</p>
+      <p>Compare the two lanes with the grey bar underneath, which is what happens today: fetch the
+      entire cache, and only then start computing. Pipelining turns that addition into an overlap, so
+      you pay for <b class="key">one layer's transfer instead of all of them</b>.</p>
+      <p>Whether it works comes down to one race, per layer: can the network deliver layer
+      <i>i+1</i> in the time the GPU spends on layer <i>i</i>? Drag <i>Network delivery</i> down, or
+      <i>GPU prefill</i> up, until the green lane develops hatched gaps &mdash; those are the GPU
+      sitting idle, and they are the shape of the whole thing failing.</p>`,
+    cites: "ratio = (KV bytes per token per layer / FLOPs per token per layer) × (GPU FLOP/s / network B/s)",
+    panels: ["p-timeline"],
+  },
+  {
+    name: "The barrier",
+    title: "One layer means every chunk of that layer",
+    body: `<p>The staircase above hides something. A &ldquo;layer&rdquo; is not one delivery &mdash;
+      the prompt was split into chunks living on different machines, and the GPU computes layer
+      <i>i</i> for the <b class="key">whole prompt at once</b>. So a pipeline step only advances when
+      every chunk's copy of that layer has landed, from every machine.</p>
+      <p>Press <i>Push layers</i>. The green wavefront sweeps left to right, because that is the order
+      the servers send in. Each column completes only when its entire row of chunks is filled.</p>
+      <p>Now the ordering caveat, in proportion. The schedule is deliberately layer-major, so this is
+      not a free-for-all. Toggle <i>SRD jitter</i> off and exactly one column is ever partially
+      filled &mdash; a clean wavefront. Toggle it on and <b class="key">two or three adjacent columns
+      are in flight at once</b>, because AWS's network reorders packets among the writes that are
+      airborne together.</p>
+      <p>So the honest version of the out-of-order story is narrower than &ldquo;layer 30 beats layer
+      2&rdquo;, which cannot happen &mdash; layer 30 has not been sent yet. What actually happens is
+      that <b class="key">the individual writes making up a layer land in no particular order</b>,
+      and neighbouring layers overlap at the edge. That is why arrivals are counted rather than
+      assumed, and why readiness is a set: it costs nothing and it cannot be fooled by a straggler.</p>
+      <p>The barrier is the real risk, not the ordering. Waiting on the slowest chunk, once per
+      layer, exposes every single pipeline step to tail latency rather than the median &mdash; and a
+      sum of maxima is worse than one maximum.</p>`,
+    cites: "expected(L) = Σ over participating chunks of slots(L, c)",
     panels: ["p-ready"],
   },
   {
@@ -694,6 +852,22 @@ function shapeFor(d) {
       ],
       meta: `<b>${kg.slotsPerLayerPerChunk}</b> slots per layer per chunk &nbsp;&middot;&nbsp;
              <b>${d.totalSlots.toLocaleString()}</b> slots for the whole request`,
+    };
+  }
+  if (p === 8) {
+    const t = d.timing;
+    return {
+      tag: "one pipeline stage",
+      sub: "The unit that moves per step of the pipeline: one layer, but across every chunk of the prompt at once, because that is what the GPU consumes.",
+      dims: [
+        { v: d.kvSize, n: "kv_size", lead: d.kvSize > 1 },
+        { v: 1, n: "this layer", layerdim: true },
+        { v: d.slotsPerChunk * kg.chunks, n: "slots × chunks" },
+        { v: hidden, n: "hidden_dim" },
+      ],
+      meta: `Per stage: <b>${bytes(kg.layerBytes * kg.chunks)}</b> to move,
+             <b>${t.avgNet.toFixed(2)} ms</b> to deliver vs <b>${t.avgCpu.toFixed(2)} ms</b> to
+             compute &mdash; ratio <b>${t.ratio.toFixed(2)}</b>`,
     };
   }
   return {
@@ -924,22 +1098,132 @@ function renderImmediate(d) {
      small chunks eat into it fast.`;
 }
 
+function ms(v) { return v >= 100 ? v.toFixed(0) + " ms" : v.toFixed(v < 10 ? 2 : 1) + " ms"; }
+
+function renderTimeline(d) {
+  const t = d.timing;
+  const span = Math.max(t.baseline, t.pipelined) * 1.02;
+  const pct = v => (v / span * 100) + "%";
+
+  document.getElementById("tl-tag").textContent =
+    t.ratio < 1 ? "transfer hidden" : "network bound";
+  document.getElementById("tl-sub").innerHTML =
+    `${S.layers} layers, ${S.chunks} chunks, ${(S.chunks * S.tokens).toLocaleString()} tokens ` +
+    `&mdash; ${bytes(d.kgs.reduce((a, g) => a + g.groupBytes * g.chunks, 0))} of cache to move at ` +
+    `${(S.net / 10).toFixed(1)} GB/s, against a ${S.params}B model on a ${S.gpu} TFLOP/s GPU.`;
+
+  const netLane = document.getElementById("lane-net");
+  const cpuLane = document.getElementById("lane-cpu");
+  netLane.innerHTML = ""; cpuLane.innerHTML = "";
+
+  t.rows.forEach(r => {
+    const n = el("div", "blk net" + (r.L % 2 ? " alt" : "") + (r.L === S.sel ? " sel" : ""));
+    n.style.left = pct(r.netStart);
+    n.style.width = pct(r.netMs);
+    n.title = `layer ${r.L} on the wire — ${ms(r.netMs)}`;
+    if (r.netMs / span > 0.03) n.textContent = r.L;
+    netLane.appendChild(n);
+
+    // a gap before this layer's compute is the GPU waiting on the network
+    const priorEnd = r.L === 0 ? 0 : t.rows[r.L - 1].cpuEnd;
+    if (r.cpuStart - priorEnd > span * 0.002) {
+      const s = el("div", "blk stall");
+      s.style.left = pct(priorEnd);
+      s.style.width = pct(r.cpuStart - priorEnd);
+      s.title = `GPU idle ${ms(r.cpuStart - priorEnd)} waiting for layer ${r.L}`;
+      cpuLane.appendChild(s);
+    }
+    const c = el("div", "blk cpu" + (r.L % 2 ? " alt" : "") + (r.L === S.sel ? " sel" : ""));
+    c.style.left = pct(r.cpuStart);
+    c.style.width = pct(r.cpuMs);
+    c.title = `layer ${r.L} computing — ${ms(r.cpuMs)}`;
+    if (r.cpuMs / span > 0.03) c.textContent = r.L;
+    cpuLane.appendChild(c);
+  });
+
+  document.getElementById("tl-net-meta").innerHTML = `<b>${ms(t.transferAll)}</b> total`;
+  document.getElementById("tl-cpu-meta").innerHTML =
+    `done at <b>${ms(t.pipelined)}</b>` +
+    (t.stalled > 0.01 ? ` &middot; <b style="color:#ffb4ae">${ms(t.stalled)} idle</b>` : "");
+
+  // baseline lane: all transfer, then all compute
+  const base = document.getElementById("lane-base");
+  base.innerHTML = "";
+  const b1 = el("div", "blk net", "fetch everything");
+  b1.style.left = "0"; b1.style.width = pct(t.transferAll);
+  base.appendChild(b1);
+  const b2 = el("div", "blk cpu", "then compute");
+  b2.style.left = pct(t.transferAll); b2.style.width = pct(t.computeAll);
+  base.appendChild(b2);
+  document.getElementById("tl-base-meta").innerHTML = `done at <b>${ms(t.baseline)}</b>`;
+
+  const axis = document.getElementById("tl-axis");
+  axis.innerHTML = "";
+  for (let i = 0; i <= 4; i++) {
+    const s = el("span", null, ms(span * i / 4));
+    s.style.left = (i / 4 * 100) + "%";
+    axis.appendChild(s);
+  }
+
+  const kpis = document.getElementById("tl-kpis");
+  kpis.innerHTML = "";
+  const add = (k, v, cls) => {
+    const e = el("div", "kpi" + (cls ? " " + cls : ""));
+    e.appendChild(el("div", "k", k));
+    e.appendChild(el("div", "val", v));
+    kpis.appendChild(e);
+  };
+  add("Today", ms(t.baseline));
+  add("Pipelined", ms(t.pipelined), "good");
+  add("Saved", ms(t.saved) + ` (${t.savedPct.toFixed(0)}%)`, "good");
+  add("Transfer hidden", t.hiddenPct.toFixed(0) + "%", t.hiddenPct > 90 ? "good" : "bad");
+  add("Transfer ÷ compute", t.ratio.toFixed(2), t.ratio < 1 ? "good" : "bad");
+
+  const co = document.getElementById("tl-callout");
+  if (t.ratio < 1) {
+    co.innerHTML = `<div class="callout ok"><b>The pipeline holds.</b> Each layer is delivered in
+      ${ms(t.avgNet)}, faster than the ${ms(t.avgCpu)} the GPU needs to consume the one before it,
+      so after layer 0 the GPU never waits. You pay for one layer's transfer instead of
+      ${ms(t.transferAll)}.</div>`;
+  } else {
+    co.innerHTML = `<div class="callout"><b>Network bound &mdash; the GPU is starved.</b> Each layer
+      takes ${ms(t.avgNet)} to arrive but only ${ms(t.avgCpu)} to compute, so the hatched gaps are
+      the GPU idle for ${ms(t.stalled)} in total. Pipelining still beats fetch-then-compute here
+      (it overlaps compute under transfer rather than the reverse), but the win is capped by the
+      link, not by how cleverly the layers are scheduled.</div>`;
+  }
+}
+
 // ---- readiness simulation ----
 let R = { order: [], delivered: 0, timer: null, counts: null };
 
 function buildReadiness(d) {
+  // The server pushes layer-major: every chunk of layer 0, then layer 1, and so
+  // on. That is the schedule the whole design is built around, so the order is
+  // ordered -- not shuffled.
   const order = [];
-  d.kgs.forEach(g => {
-    g.layers.forEach(L => {
-      for (let c = 0; c < g.chunks; c++) {
-        for (let s = 0; s < g.slotsPerLayerPerChunk; s++) order.push({ L, c });
-      }
-    });
-  });
-  // SRD sprays across paths: arrival order is genuinely shuffled.
-  for (let i = order.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [order[i], order[j]] = [order[j], order[i]];
+  for (let L = 0; L < S.layers; L++) {
+    const g = d.byLayer.get(L).g;
+    for (let c = 0; c < g.chunks; c++) {
+      for (let s = 0; s < g.slotsPerLayerPerChunk; s++) order.push({ L, c });
+    }
+  }
+
+  // SRD reorders packets in flight, but only among writes that are actually in
+  // flight together. That is a bounded window at the frontier, not a global
+  // shuffle: layer 30 cannot overtake layer 2 because it has not been sent yet.
+  //
+  // Modelled by perturbing each write's delivery time within that window and
+  // re-sorting, which bounds displacement in *both* directions. Swapping in a
+  // loop would not -- an element can be pushed forward repeatedly and drift
+  // arbitrarily far, which is the global shuffle this is meant to avoid.
+  if (S.jitter && order.length > 1) {
+    const perLayer = Math.max(1, order.length / S.layers);
+    const window = Math.max(2, perLayer * 2);
+    order
+      .map((o, i) => ({ o, t: i + (Math.random() - 0.5) * window }))
+      .sort((a, b) => a.t - b.t)
+      .forEach((e, i) => { order[i] = e.o; });
   }
   const counts = new Map();
   d.kgs.forEach(g => g.layers.forEach(L => {
@@ -951,7 +1235,8 @@ function buildReadiness(d) {
 function renderReady(d) {
   document.getElementById("ready-sub").innerHTML =
     `Rows are chunks, columns are layers. A cell fills as its slots land; a column header turns
-     green when <b>every chunk</b> of that layer is complete.`;
+     green only when <b>every chunk</b> of that layer is complete, because that is what unblocks
+     a pipeline step.`;
 
   const rows = document.getElementById("ready-rows");
   const cols = document.getElementById("ready-cols");
@@ -1009,12 +1294,29 @@ function renderReady(d) {
     readyLayers.slice(0, 24).forEach(L => ro.appendChild(el("span", "pill on", String(L))));
     if (readyLayers.length > 24) ro.appendChild(el("span", "pill", `+${readyLayers.length - 24} more`));
   }
-  const gap = readyLayers.length && readyLayers[0] !== 0;
-  const holes = readyLayers.some((L, i) => i > 0 && L !== readyLayers[i - 1] + 1);
-  if (gap || holes) {
+  // Under a layer-major push the interesting signal is how wide the frontier
+  // is: how many layers are mid-flight at once. Strictly ordered delivery gives
+  // exactly one; reordering widens it, and that width is the reason arrivals
+  // are counted rather than assumed.
+  const inFlight = [];
+  for (let L = 0; L < S.layers; L++) {
+    const g = d.byLayer.get(L).g;
+    let got = 0, need = 0;
+    for (let c = 0; c < g.chunks; c++) {
+      const k = R.counts.get(L + ":" + c);
+      got += k.got; need += k.need;
+    }
+    if (got > 0 && got < need) inFlight.push(L);
+  }
+  if (inFlight.length) {
     const note = el("div");
-    note.style.cssText = "margin-top:9px;font-size:12px;color:#7ee787";
-    note.textContent = "Note the gaps — later layers are ready while earlier ones are not. A high-water mark would report this wrong.";
+    note.style.cssText = "margin-top:9px;font-size:12px;color:" +
+      (inFlight.length > 1 ? "#ffd9b0" : "var(--dim)");
+    note.textContent = inFlight.length > 1
+      ? `Frontier is ${inFlight.length} layers wide (${inFlight.join(", ")}) — reordering has ` +
+        `neighbouring layers in flight together, so the writes of a layer cannot be assumed to ` +
+        `arrive in order.`
+      : `Frontier is one layer wide (layer ${inFlight[0]}) — strictly ordered delivery.`;
     ro.appendChild(note);
   }
 }
@@ -1049,7 +1351,8 @@ function render() {
   renderShape(d);
 
   const active = new Set(PHASES[S.phase].panels);
-  ["p-layers", "p-groups", "p-keys", "p-payload", "p-slots", "p-imm", "p-ready", "p-caveats"]
+  ["p-layers", "p-groups", "p-keys", "p-payload", "p-slots", "p-imm",
+   "p-timeline", "p-ready", "p-caveats"]
     .forEach(id => document.getElementById(id).classList.toggle("hidden", !active.has(id)));
 
   if (active.has("p-layers")) renderLayerStrip(d);
@@ -1058,6 +1361,7 @@ function render() {
   if (active.has("p-payload")) renderPayload(d);
   if (active.has("p-slots")) renderSlots(d);
   if (active.has("p-imm")) renderImmediate(d);
+  if (active.has("p-timeline")) renderTimeline(d);
   if (active.has("p-ready")) {
     if (!R.counts || R.order.length === 0) buildReadiness(d);
     renderReady(d);
@@ -1066,6 +1370,14 @@ function render() {
 }
 
 // ---------- wiring ----------
+// Label formatters, shared by the sliders and by deep links.
+const LABEL = {
+  net: v => (v / 10).toFixed(1) + " GB/s",
+  gpu: v => v + " TFLOP/s",
+  params: v => v + " B",
+  maxwrite: v => bytes(Math.pow(2, v)),
+};
+
 function bindRange(id, key, fmt, resetSim) {
   const inp = document.getElementById("c-" + id);
   const out = document.getElementById("v-" + id);
@@ -1088,7 +1400,15 @@ bindRange("headdim", "headdim", null, true);
 bindRange("chunks", "chunks", null, true);
 bindRange("tokens", "tokens", null, true);
 bindRange("sel", "sel", null, false);
-bindRange("maxwrite", "maxwritePow", p => bytes(Math.pow(2, p)), true);
+bindRange("maxwrite", "maxwritePow", LABEL.maxwrite, true);
+bindRange("net", "net", LABEL.net, false);
+bindRange("gpu", "gpu", LABEL.gpu, false);
+bindRange("params", "params", LABEL.params, false);
+
+document.getElementById("t-jitter").addEventListener("change", e => {
+  S.jitter = e.target.checked;
+  stopSim(); buildReadiness(derive()); render();
+});
 
 document.getElementById("c-dtype").addEventListener("change", e => {
   S.dtype = Number(e.target.value);
@@ -1165,15 +1485,21 @@ function applyHash() {
     S.format = p.get("format") === "layer_outer" ? "layer_outer" : "kv_outer";
     document.getElementById("c-format").value = S.format;
   }
+  if (p.has("jitter")) {
+    S.jitter = p.get("jitter") !== "0";
+    document.getElementById("t-jitter").checked = S.jitter;
+  }
   for (const [param, key, id, lo, hi] of [
     ["layers", "layers", "layers", 8, 80], ["chunks", "chunks", "chunks", 2, 16],
     ["tokens", "tokens", "tokens", 64, 512], ["layer", "sel", "sel", 0, 79],
+    ["net", "net", "net", 10, 250], ["gpu", "gpu", "gpu", 40, 900],
+    ["params", "params", "params", 1, 140],
   ]) {
     const v = num(param, lo, hi);
     if (v === null) continue;
     S[key] = v;
     document.getElementById("c-" + id).value = String(v);
-    document.getElementById("v-" + id).textContent = String(v);
+    document.getElementById("v-" + id).textContent = LABEL[id] ? LABEL[id](v) : String(v);
   }
   if (S.sel > S.layers - 1) S.sel = S.layers - 1;
   document.getElementById("c-sel").max = String(S.layers - 1);

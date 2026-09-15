@@ -19,6 +19,37 @@ derivation only: everything here is computed from structures LMCache already
 builds. That is deliberate — the moment layout crosses the adapter boundary we
 are back in AIE-89 territory, which was deferred for good reason.
 
+## The payoff this serves
+
+Aerospike pushes layer-major: every chunk of layer 0, then layer 1, keeping the
+link saturated. The GPU consumes layer *i* while layer *i+1* is still in
+flight, so transfer stops being a term you add to TTFT and becomes something
+hidden behind compute. You pay for one layer's transfer instead of all of them.
+
+Whether that works is one race per layer, and the ratio that decides it is
+independent of prompt length, because tokens cancel from both sides:
+
+```text
+transfer per layer     KV bytes per token per layer       GPU FLOP/s
+------------------  =  ----------------------------  ×  --------------
+ compute per layer     FLOPs per token per layer        network bytes/s
+```
+
+Below 1, the GPU never waits after layer 0. Above 1, it starves and the ceiling
+is the link. For Llama-3.1 shapes (8 KV heads, head dim 128, fp16 → 4 KiB per
+token per layer) against the M0 measurements:
+
+| | @ 12.2 GB/s (NIC ceiling) | @ 1.88 GB/s (single-object rate) |
+|---|---|---|
+| 8B on H100 | 0.31 | **1.98 — starves** |
+| 8B on L40S | 0.08 | 0.55 |
+| 70B on H100 | 0.08 | 0.51 |
+
+Two caveats on those numbers. The favourable ratios are a gift from GQA; a
+model with full multi-head attention carries 4× the KV per token, which pushes
+8B-on-H100 to ~1.2 even at line rate. And the ratio must be evaluated at **p99,
+not median** — see the tail argument under Open questions.
+
 ## Four coordinate systems
 
 Pipelining has to reconcile four namespaces that do not line up:
@@ -180,7 +211,12 @@ has its own retrieve path and its own all-or-nothing scatter invariant.
   them. Hybrid models have several.
 - **A layer is one contiguous range.** False whenever `kv_size > 1`, which is
   the common case.
-- **Arrival order.** SRD is unordered; readiness is a set. See
+- **Arrival order.** The *schedule* is layer-major, so the common claim
+  "layer 30 can beat layer 2" is wrong — layer 30 has not been sent yet.
+  What is true is narrower and still decisive: SRD reorders among the writes
+  in flight together, so the slots of a layer land in no particular order and
+  neighbouring layers overlap at the frontier. Count arrivals; do not infer
+  completion from the last one. See
   [`aerospike_rdma.md`](aerospike_rdma.md#why-arrival-order-cannot-be-trusted).
 - **All chunks participate in every group.** False for sliding-window groups.
 - **Slot indices are unique per fetch.** They must be unique per *request*.
