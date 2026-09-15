@@ -143,6 +143,51 @@ Given global layer index *L* from vLLM's `layer_name`:
 Steps 1–3 are pure arithmetic over existing structures. Step 5 is where the
 cross-chunk barrier enters.
 
+## Where the bytes live, and what has to change
+
+An object does not sit on disk as one piece. `AerospikeNativeConnector::plan`
+shards it purely by byte count — `nseg = ceil(payload / target)`,
+`seg_b = ceil(payload / nseg)` — with no notion of layers. The useful finding is
+that **it does not need one**.
+
+Worked example: 32 layers, 8 KV heads, head dim 128, fp16, 256-token chunks.
+A plane is 512 KiB, a layer 1 MiB, the object 32 MiB, and at a 1 MiB cap that is
+32 records. The K plane is records 0–15 and the V plane 16–31, so:
+
+| Layer | K bytes | V bytes | Records |
+|---|---|---|---|
+| 0 | 0 – 512 KiB | 16 – 16.5 MiB | 0, 16 |
+| 1 | 512 KiB – 1 MiB | 16.5 – 17 MiB | 0, 16 (already read) |
+| 2 | 1 – 1.5 MiB | 17 – 17.5 MiB | 1, 17 |
+
+Two reads complete two whole layers. Steady state is one record read per layer,
+and the reads are independent, so they still fan out across devices — which the
+M0 sweep showed is where throughput comes from.
+
+**So the storage does not get reorganised.** No layer in the key, no change to
+the shard plan, no change to the record sizes that were tuned in M0. What
+changes is the *order*: `do_single_get` loops `i = 0 … nseg-1`, and serving a
+layer-major push means reading in schedule order (`0, 16, 1, 17, …`) with a
+small cache so consecutive layers sharing a record do not re-read it.
+
+Per-layer records were considered and rejected. They pin record size to the
+plane size, and M0 measured a 60–100% latency swing across record sizes; they
+multiply the primary index; and they push layout into the key, which is exactly
+the coupling AIE-89 deferred.
+
+### The alignment hazard
+
+That clean mapping is luck. It holds because plane sizes and record caps are
+both powers of two. Mamba/GDN hybrids use unified block sizes of 544, 784 and
+944 tokens — none of them powers of two. At 784 tokens the plane is 1.53 MiB
+against 1 MiB records, every layer straddles, and layer 0 needs records
+`{0, 1, 49, 50}`: 4 MiB read to use 3.06 MiB, 31% amplification.
+
+The fix is cheap: have LMCache pass a plane-size alignment hint into `plan()`
+so `seg_b` lands on plane boundaries, instead of relying on the arithmetic
+happening to work out. The connector currently takes an opaque payload and a
+byte target, so this is a small additive parameter, not a contract change.
+
 ## Readiness is request-scoped, not fetch-scoped
 
 vLLM computes layer *L* for the **whole sequence**, so it needs layer *L* of
