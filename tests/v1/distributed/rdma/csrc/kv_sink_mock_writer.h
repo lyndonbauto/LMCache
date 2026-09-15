@@ -86,6 +86,30 @@ class KvSinkMockWriter {
   // has not run, or if a completion reports a verbs error.
   std::string handle_fetch(const std::string& command);
 
+  // Push one piece of one layer with RDMA_WRITE_WITH_IMM, and return as soon
+  // as it is *posted*.
+  //
+  // This is the pipelined primitive, and the contrast with handle_fetch() is
+  // the whole point: handle_fetch fences on its own send CQ so that its reply
+  // can mean "everything landed", which makes a fetch all-or-nothing. Here
+  // each write instead carries `immediate`, raising a receive completion on
+  // the client the moment that piece lands. The client learns about layer 0
+  // without waiting for layer 31.
+  //
+  // Nothing is fenced here. There is deliberately no return value saying the
+  // write landed, because the client's notification is that signal -- adding
+  // a second one would invite code that waits for the wrong thing.
+  //
+  // Exposed as a per-slot call rather than a command parser so a test can
+  // stage delivery and observe a genuinely half-filled buffer. A real server
+  // would drive this from a parsed fetch command.
+  //
+  // Throws std::runtime_error if handle_register has not run, if the digest
+  // is unknown, if the length does not match the record, if the write would
+  // fall outside the client's registered window, or if ibv_post_send fails.
+  void push_slot(const std::string& digest_hex, size_t offset, size_t length,
+                 uint32_t immediate);
+
   // Region id handed out by the most recent successful registration.
   uint64_t region() const { return region_; }
 

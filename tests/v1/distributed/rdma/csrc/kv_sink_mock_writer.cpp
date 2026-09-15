@@ -422,5 +422,65 @@ std::string KvSinkMockWriter::handle_fetch(const std::string& command) {
   return os.str();
 }
 
+void KvSinkMockWriter::push_slot(const std::string& digest_hex, size_t offset,
+                                 size_t length, uint32_t immediate) {
+  if (!connected_) {
+    throw std::runtime_error(
+        "push_slot before handle_register: there is no client to write to");
+  }
+
+  const auto found = impl_->records.find(digest_hex);
+  if (found == impl_->records.end()) {
+    throw std::runtime_error("push_slot: unknown digest " + digest_hex);
+  }
+  if (length > found->second.length) {
+    throw std::runtime_error("push_slot: requested " + std::to_string(length) +
+                             " bytes but record holds " +
+                             std::to_string(found->second.length));
+  }
+  // Same bounded-window check as the fenced path. A pipelined write is no
+  // less capable of landing in someone else's KV cache.
+  if (offset + length > impl_->client_size) {
+    throw std::runtime_error("push_slot: offset " + std::to_string(offset) +
+                             " plus length " + std::to_string(length) +
+                             " overruns the client window of " +
+                             std::to_string(impl_->client_size) + " bytes");
+  }
+
+  ibv_sge sge{};
+  sge.addr = reinterpret_cast<uint64_t>(impl_->source + found->second.offset);
+  sge.length = static_cast<uint32_t>(length);
+  sge.lkey = impl_->source_mr->lkey;
+
+  ibv_send_wr wr{};
+  wr.wr_id = immediate;
+  wr.sg_list = &sge;
+  wr.num_sge = 1;
+  // The one line that makes pipelining possible: unlike IBV_WR_RDMA_WRITE,
+  // this raises a receive completion on the client carrying imm_data.
+  wr.opcode = IBV_WR_RDMA_WRITE_WITH_IMM;
+  wr.send_flags = IBV_SEND_SIGNALED;
+  wr.imm_data = htobe32(immediate);
+  wr.wr.rdma.remote_addr = impl_->client_addr + offset;
+  wr.wr.rdma.rkey = impl_->client_rkey;
+
+  ibv_send_wr* bad = nullptr;
+  if (ibv_post_send(impl_->qp, &wr, &bad) != 0) {
+    throw_verbs("ibv_post_send(write_with_imm)");
+  }
+
+  // Reap our own send completions so the send queue does not fill up over a
+  // long pipelined fetch. This is bookkeeping, not a fence: we do not block
+  // until the write has landed, which is the entire difference from
+  // handle_fetch().
+  ibv_wc wc{};
+  while (ibv_poll_cq(impl_->cq, 1, &wc) > 0) {
+    if (wc.status != IBV_WC_SUCCESS) {
+      throw std::runtime_error(std::string("push_slot: RDMA write failed: ") +
+                               ibv_wc_status_str(wc.status));
+    }
+  }
+}
+
 }  // namespace test
 }  // namespace lmcache

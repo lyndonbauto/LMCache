@@ -126,6 +126,10 @@ class AerospikeStorageBackend(StorageBackendProfile):
             sources.append("csrc/storage_backends/aerospike/rdma_context.cpp")
             sources.append("csrc/storage_backends/aerospike/kv_sink_client.cpp")
             sources.append("csrc/storage_backends/aerospike/kv_sink_fanout.cpp")
+            # No verbs dependency of its own, but built here so a break in the
+            # pipelining model fails the RDMA build rather than only the test
+            # harness. Not yet exposed through pybind.
+            sources.append("csrc/storage_backends/aerospike/layer_pipeline.cpp")
             libraries.append("ibverbs")
             macros.append(("LMCACHE_AEROSPIKE_RDMA", "1"))
             rdma_include = os.environ.get("RDMA_CORE_INCLUDE_DIR", "")

@@ -284,6 +284,149 @@ unreachable node should not disable RDMA cluster-wide, so
 decides. A cluster-wide failure (for example, a disconnected client) still
 throws.
 
+## Pipelined fetch: signaling and chunking
+
+The baseline protocol above is all-or-nothing. This section covers the
+pipelined variant, which is **prototyped and passing over Soft-RoCE** but has
+no server-side counterpart yet.
+
+### EFA actually supports the primitive we need
+
+This was the open question, and the answer is better than expected. Verified
+against `rdma-core`'s EFA provider and the `efadv_query_device` man page:
+
+| Capability | Flag | State |
+|---|---|---|
+| RDMA write | `EFADV_DEVICE_ATTR_CAPS_RDMA_WRITE` (1<<3) | Supported |
+| Write **with immediate** | `ibv_wr_rdma_write_imm`, `IBV_QP_EX_WITH_RDMA_WRITE_WITH_IMM` | Supported |
+| Unsolicited write recv | `EFADV_DEVICE_ATTR_CAPS_UNSOLICITED_WRITE_RECV` (1<<4) | Supported |
+| Atomics | — | **Not** supported |
+| In-order delivery | — | **Not** provided |
+
+Two consequences worth calling out.
+
+**Unsolicited receive is a gift for this design.** Normally each incoming
+write-with-immediate consumes a receive work request, so a pure target has to
+pre-post one per expected notification. EFA can create a queue pair with
+`EFA_CREATE_QP_WITH_UNSOLICITED_WRITE_RECV`, where notifications consume no
+receive work request and the completion is flagged unsolicited. That removes
+the need to size a receive queue against the fetch's slot count. It requires
+an extended CQ, and **peers must negotiate the same QP feature set**, so it is
+a joint decision with the server.
+
+**EFA exposes write-with-immediate only through the extended verbs API**
+(`ibv_qp_ex` / `ibv_wr_rdma_write_imm`), not through `ibv_post_send` with
+`IBV_WR_RDMA_WRITE_WITH_IMM`. The prototype here uses the legacy path because
+that is what `rxe` supports; the EFA path needs the extended API. This is a
+real porting step, not a flag change.
+
+### Why arrival order cannot be trusted
+
+SRD provides reliable but **out-of-order** delivery. AWS's own `SRD.txt` is
+explicit — "SRD QPs provide out-of-order delivery without segmentation
+support" — and there is no ordering guarantee between any two operations even
+on a single queue pair, because packets are sprayed across up to 64 paths to
+cut tail latency.
+
+So the two obvious tricks are both unsafe on EFA:
+
+- **Write data, then write a completion flag** — the flag can land first.
+- **Write data, then SEND a notification** — the SEND can overtake the writes.
+
+Both work perfectly on Soft-RoCE, which is RC and therefore ordered. That is
+the trap: an ordering-dependent design passes every local test and corrupts
+data on EFA.
+
+The design consequence is that **readiness is a set, not a high-water mark**.
+Layer 5 can complete before layer 2. `LayerReadiness` in
+`csrc/storage_backends/aerospike/layer_pipeline.h` models it that way, and
+`rdma_pipeline_test` asserts it by pushing layers 3, 2, 1 in that order and
+requiring that layer 3 reports ready while layer 1 does not. vLLM consumes
+layers in order and asks "is layer *i* ready?", which a set answers directly.
+
+### The two levels of chunking
+
+"How do we chunk keys for the layers" is really two questions with different
+owners.
+
+**Level 1: layers to Aerospike records.** This is Aerospike-side sharding
+policy. Today a chunk is one logical payload split into `|s|<i>` segments
+sized to the record cap, and those boundaries are *arbitrary* with respect to
+layers. For pipelining, segment boundaries should **align to layer
+boundaries**, so a record holds whole layers or a layer spans an integral
+number of records. Otherwise one record straddles two layers, neither layer
+completes until it lands, and the first layer is gated on data belonging to
+the second.
+
+This is where the layout derivation from `lmcache/v1/kv_layer_groups.py`
+(`group_layers_by_identity`, `_detect_object_groups`) is genuinely needed —
+not as an addition to the L2 interface, which is why AIE-89 was deferred, but
+as input to sharding and offset computation. Note the interaction with the M0
+finding that record size has a **crossover** around 8 MiB rather than "bigger
+is better": layer-aligned sharding constrains the record size, so the two
+have to be tuned together rather than independently.
+
+**Level 2: a layer to RDMA writes ("slots").** A layer can exceed one RDMA
+write. `efadv_query_device` reports `max_rdma_size`, and the leased window
+bounds it further, so a layer becomes N writes. Each write is a *slot* — one
+piece of one layer — and each carries its own immediate. A layer is ready only
+when every one of its slots has landed, which the harness checks with
+two-piece layers rather than the trivial one-piece case.
+
+### What the 32 bits carry
+
+RDMA immediate data is exactly 32 bits, split as:
+
+```text
+ 31            16 15             0
++----------------+----------------+
+|   generation   |   slot index   |
++----------------+----------------+
+```
+
+The immediate names a **slot index into a plan LMCache built itself**, not a
+layer id. Because LMCache chooses every destination offset, a slot index
+recovers the layer, offset, and length without the server knowing anything
+about transformer layers — which preserves the property that makes this
+protocol pleasant: the server never reasons about model structure.
+
+The **generation** exists because a write from a fetch that already timed out
+can land after its window has been leased to a different request. The rkey is
+still valid, so the NIC will perform that write. Tagging each fetch and
+rejecting mismatched immediates stops LMCache from *acting* on a late writer.
+It does not prevent the stray write itself — only re-registration does that —
+and that gap is still open. See `ArrivalStatus::kStaleGeneration`.
+
+16 bits of slot index caps a fetch at 65536 slots, far above a 60-layer model
+at a few writes per layer.
+
+### What the prototype proves, and what it does not
+
+Passing (`make -C tests/v1/distributed/rdma test`, 24 checks):
+
+- a layer is reported ready only once *every* piece has landed,
+- its bytes are correct at the moment it is reported ready,
+- **the destination regions of unsent layers are still untouched**, which is
+  what makes early consumption meaningful rather than a race,
+- a later layer can be ready while an earlier one is not,
+- stale generations, unknown slots, and duplicate immediates are each
+  distinguished rather than silently counted.
+
+Not proven:
+
+- **Any of it on EFA/SRD.** Soft-RoCE is RC-only and ordered, so the very
+  hazard this design guards against cannot be reproduced locally. The extended
+  verbs port and the unsolicited-receive negotiation are both untested.
+- **A server that can do this.** Aerospike currently fences and replies once.
+  Per-slot signaling needs the server to issue write-with-immediate per piece
+  and *not* fence, plus release its record lock per piece rather than holding
+  it across the whole transfer.
+- **That storage-level pipelining is possible at all.** Slicing an
+  already-read record into signaled pieces buys compute overlap. Overlapping
+  the *disk read* of layer 1 with the network send of layer 0 needs
+  independently readable layers, which is level-1 chunking above and a much
+  larger change.
+
 ## Reproducing the Soft-RoCE test setup
 
 Soft-RoCE (`rdma_rxe`) presents a functional RDMA device over ordinary
@@ -459,8 +602,11 @@ Aerospike**; no policy has been invented here.
 
 - **No per-layer signal.** Property 2 above (the info reply is the completion)
   makes a fetch all-or-nothing. Layer-by-layer pipelining needs per-layer
-  completion, which this protocol cannot express. Out of scope here by
-  instruction, but it is the main thing blocking the later tickets.
+  completion, which this protocol cannot express. The LMCache side of the fix
+  is now prototyped and passing — see
+  [Pipelined fetch](#pipelined-fetch-signaling-and-chunking) — so the blocker
+  is entirely server-side: the server must signal each piece with
+  write-with-immediate and stop fencing.
 - **Synchronous completion vs. an async adapter.** The fetch blocks a thread
   for the entire round trip including the DMA. LMCache's MP request path is
   future-based and expects to poll, so the blocking info call has to be run on

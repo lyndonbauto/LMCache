@@ -16,6 +16,7 @@ CONNECTOR_DIR := ../../../../csrc/storage_backends/aerospike
 SRC_DIR := csrc
 BUILD_DIR := build
 BIN := $(BUILD_DIR)/rdma_equivalence_test
+PIPELINE_BIN := $(BUILD_DIR)/rdma_pipeline_test
 
 INCLUDES := -I$(SRC_DIR) -I$(CONNECTOR_DIR)
 ifneq ($(RDMA_CORE_INCLUDE_DIR),)
@@ -30,17 +31,23 @@ LDLIBS := -libverbs
 
 # The harness deliberately reuses the production verbs context and codec
 # rather than reimplementing them, so a regression there fails this test.
-SOURCES := \
-	$(SRC_DIR)/rdma_equivalence_test.cpp \
+COMMON_SOURCES := \
 	$(SRC_DIR)/kv_sink_mock_writer.cpp \
 	$(CONNECTOR_DIR)/rdma_context.cpp \
-	$(CONNECTOR_DIR)/kv_sink_client.cpp
+	$(CONNECTOR_DIR)/kv_sink_client.cpp \
+	$(CONNECTOR_DIR)/layer_pipeline.cpp
+
+SOURCES := $(SRC_DIR)/rdma_equivalence_test.cpp $(COMMON_SOURCES)
+PIPELINE_SOURCES := $(SRC_DIR)/rdma_pipeline_test.cpp $(COMMON_SOURCES)
 
 .PHONY: all test clean
-all: $(BIN)
+all: $(BIN) $(PIPELINE_BIN)
 
 $(BIN): $(SOURCES) | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
+
+$(PIPELINE_BIN): $(PIPELINE_SOURCES) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(PIPELINE_SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
@@ -50,8 +57,9 @@ $(BUILD_DIR):
 # RDMA_DEVICE to be set too since the two are positional. Soft-RoCE on `lo`
 # needs the IPv4-mapped entry, usually index 1:
 #   make test RDMA_DEVICE=rxe0 RDMA_GID_INDEX=1
-test: $(BIN)
+test: $(BIN) $(PIPELINE_BIN)
 	$(BIN) $(RDMA_DEVICE) $(RDMA_GID_INDEX)
+	$(PIPELINE_BIN) $(RDMA_DEVICE) $(RDMA_GID_INDEX)
 
 clean:
 	rm -rf $(BUILD_DIR)

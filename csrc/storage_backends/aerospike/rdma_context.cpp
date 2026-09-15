@@ -272,9 +272,13 @@ void RdmaContext::create_queue_pair() {
         "command can publish rkeys alongside the qpn");
   }
 
-  // We never receive completions for the server's writes, but a QP still
-  // needs a CQ attached, so this one stays empty by design.
-  impl_->cq = ibv_create_cq(impl_->ctx, 1, nullptr, nullptr, 0);
+  // With notifications off the server fences and replies, so no completion
+  // ever lands here and this CQ stays empty by design. With them on it must
+  // hold one entry per unconsumed write-with-immediate.
+  const uint32_t queue_depth =
+      notification_depth_ == 0 ? 1 : notification_depth_;
+  impl_->cq = ibv_create_cq(impl_->ctx, static_cast<int>(queue_depth), nullptr,
+                            nullptr, 0);
   if (impl_->cq == nullptr) {
     throw_verbs("ibv_create_cq");
   }
@@ -283,7 +287,7 @@ void RdmaContext::create_queue_pair() {
   init.send_cq = impl_->cq;
   init.recv_cq = impl_->cq;
   init.cap.max_send_wr = 1;
-  init.cap.max_recv_wr = 1;
+  init.cap.max_recv_wr = queue_depth;
   init.cap.max_send_sge = 1;
   init.cap.max_recv_sge = 1;
   init.sq_sig_all = 0;
@@ -421,6 +425,96 @@ void RdmaContext::connect_peer(const PeerEndpoint& peer) {
   }
 
   connected_ = true;
+}
+
+void RdmaContext::enable_layer_notifications(uint32_t depth) {
+  if (qp_created_) {
+    throw std::runtime_error(
+        "enable_layer_notifications() must run before create_queue_pair(); it "
+        "sets the receive-queue depth, which is fixed at creation");
+  }
+  if (depth == 0) {
+    throw std::invalid_argument(
+        "notification depth must be positive; pass the slot count of the "
+        "largest planned fetch");
+  }
+  notification_depth_ = depth;
+}
+
+void RdmaContext::arm_notifications() {
+  if (notification_depth_ == 0) {
+    throw std::runtime_error(
+        "enable_layer_notifications() was never called, so this queue pair "
+        "has no room to receive per-layer signals");
+  }
+  if (!connected_) {
+    throw std::runtime_error("arm_notifications() requires a connected peer");
+  }
+
+  for (uint32_t i = 0; i < notification_depth_; ++i) {
+    post_notification_receive();
+  }
+}
+
+std::vector<uint32_t> RdmaContext::poll_notifications(uint32_t max_events) {
+  if (notification_depth_ == 0) {
+    throw std::runtime_error(
+        "enable_layer_notifications() was never called, so no notification "
+        "can ever arrive");
+  }
+
+  std::vector<uint32_t> immediates;
+  for (uint32_t drained = 0; drained < max_events; ++drained) {
+    ibv_wc wc{};
+    const int got = ibv_poll_cq(impl_->cq, 1, &wc);
+    if (got < 0) {
+      throw_verbs("ibv_poll_cq");
+    }
+    if (got == 0) {
+      break;
+    }
+    if (wc.status != IBV_WC_SUCCESS) {
+      throw std::runtime_error(std::string("notification completion failed: ") +
+                               ibv_wc_status_str(wc.status));
+    }
+    // A plain RDMA write raises nothing here, so anything that is not
+    // write-with-immediate means the peer is not speaking the pipelined
+    // protocol. Surfacing it as an error beats silently reporting no
+    // progress and timing out.
+    if (wc.opcode != IBV_WC_RECV_RDMA_WITH_IMM) {
+      throw std::runtime_error(
+          "unexpected completion opcode " + std::to_string(wc.opcode) +
+          " on the notification queue; expected IBV_WC_RECV_RDMA_WITH_IMM");
+    }
+    if ((wc.wc_flags & IBV_WC_WITH_IMM) == 0) {
+      throw std::runtime_error(
+          "write-with-immediate completion carried no immediate data");
+    }
+
+    // imm_data is big endian on the wire regardless of host order.
+    immediates.push_back(be32toh(wc.imm_data));
+
+    // Replace the work request this completion consumed, so a long fetch
+    // cannot exhaust the receive queue partway through.
+    post_notification_receive();
+  }
+  return immediates;
+}
+
+void RdmaContext::post_notification_receive() {
+  // A write-with-immediate consumes a receive work request but scatters no
+  // payload into it -- the data went to the RDMA address. So the request
+  // needs no buffer, and num_sge stays zero.
+  ibv_recv_wr wr{};
+  wr.wr_id = 0;
+  wr.sg_list = nullptr;
+  wr.num_sge = 0;
+  wr.next = nullptr;
+
+  ibv_recv_wr* bad = nullptr;
+  if (ibv_post_recv(impl_->qp, &wr, &bad) != 0) {
+    throw_verbs("ibv_post_recv");
+  }
 }
 
 }  // namespace rdma

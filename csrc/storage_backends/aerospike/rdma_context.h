@@ -5,15 +5,24 @@
 // LMCache's pinned L1 slab.
 //
 // LMCache is a pure *target* here: the Aerospike server issues every
-// ibv_post_send and fences on its own completion queue, and the info-command
-// reply is the completion signal. So this file never posts a work request and
-// never polls a CQ for data. What it must do is:
+// ibv_post_send, so this file never posts a send and never moves payload
+// bytes itself. What it must do is:
 //
 //   1. open a device, allocate a protection domain,
 //   2. register bounded windows of the L1 slab once, at init, with
 //      LOCAL_WRITE | REMOTE_WRITE, producing the rkeys we publish outward,
 //   3. create a queue pair and drive it INIT -> RTR -> RTS,
 //   4. create an address handle for the server peer.
+//
+// In the baseline protocol that is the whole job, because the server fences
+// on its own send CQ and the info reply is the completion.
+//
+// For *pipelined* fetches the server instead signals each piece with
+// RDMA_WRITE_WITH_IMM, which raises a receive completion on this side. So
+// this file also owns an optional notification path -- see
+// enable_layer_notifications() -- which posts receive work requests and polls
+// for those completions. It still posts no sends. See layer_pipeline.h for
+// what the immediate data means and why arrival order cannot be trusted.
 //
 // Step 4 is easy to mistake for dead code because we only ever receive. It is
 // not: the peer relationship is bidirectional at the device level, so without
@@ -155,7 +164,60 @@ class RdmaContext {
     return static_cast<uint32_t>(local_.windows.size());
   }
 
+  // Size the receive path so the server can signal per-layer progress with
+  // RDMA_WRITE_WITH_IMM instead of a single reply at the end.
+  //
+  // Must be called before create_queue_pair(), because it determines the
+  // receive-queue and completion-queue depths. Without it the QP is built
+  // with the baseline depth of one and this context cannot observe
+  // notifications at all -- which is the correct shape for the non-pipelined
+  // protocol, where the info reply is the completion.
+  //
+  // `depth` is the maximum number of unconsumed notifications to absorb, and
+  // should be at least the slot count of the largest planned fetch. An
+  // overflowing receive queue stalls the writer rather than losing data on
+  // RC, but on SRD it drops the notification, so size this generously.
+  //
+  // Throws std::runtime_error if the queue pair already exists, and
+  // std::invalid_argument if `depth` is zero.
+  void enable_layer_notifications(uint32_t depth);
+
+  // Post the receive work requests that incoming write-with-immediate
+  // completions consume.
+  //
+  // Must be called after connect_peer(). Each notification consumed by
+  // poll_notifications() is automatically replaced, so this only needs to run
+  // once to prime the queue.
+  //
+  // Note that this is a Reliable Connected requirement. EFA can create a
+  // queue pair with EFA_CREATE_QP_WITH_UNSOLICITED_WRITE_RECV, where incoming
+  // write-with-immediate consumes no receive work request at all and the
+  // completion is flagged unsolicited; on that path priming is unnecessary.
+  // The RC path is implemented here because it is what Soft-RoCE supports.
+  //
+  // Throws std::runtime_error if notifications were not enabled, if the QP is
+  // not connected, or if ibv_post_recv fails.
+  void arm_notifications();
+
+  // Drain up to `max_events` notifications and return their immediate data,
+  // already converted to host byte order.
+  //
+  // Non-blocking: returns an empty vector when nothing has landed. Values are
+  // returned in the order the completion queue yields them, which on SRD
+  // bears no relation to the order the writes were posted -- decode them with
+  // LayerReadiness rather than inferring anything from position.
+  //
+  // Each returned notification has its receive work request re-posted, so the
+  // queue stays primed.
+  //
+  // Throws std::runtime_error if notifications were not enabled, if
+  // ibv_poll_cq fails, or if a completion carries an error status.
+  std::vector<uint32_t> poll_notifications(uint32_t max_events);
+
  private:
+  // Post one receive work request for an incoming write-with-immediate.
+  void post_notification_receive();
+
   struct Impl;
   std::unique_ptr<Impl> impl_;
 
@@ -166,6 +228,9 @@ class RdmaContext {
   bool registered_ = false;
   bool qp_created_ = false;
   bool connected_ = false;
+  // Zero means notifications are off and the QP uses the baseline depth of
+  // one, matching the fence-then-reply protocol.
+  uint32_t notification_depth_ = 0;
 };
 
 }  // namespace rdma
