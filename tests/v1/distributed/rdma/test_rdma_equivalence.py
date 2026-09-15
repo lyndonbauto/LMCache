@@ -11,6 +11,11 @@ since neither is available on a typical CI box. To make it run locally:
     sudo modprobe rdma_rxe
     sudo rdma link add rxe0 type rxe netdev lo
     ibv_devinfo -d rxe0
+    export RDMA_DEVICE=rxe0 RDMA_GID_INDEX=1
+
+``RDMA_GID_INDEX=1`` is needed on ``lo``: its MAC is all zeros, so GID index 0
+is an ``fe80::`` link-local address with no route and the queue pair fails to
+reach RTR with ``ENETUNREACH``. Index 1 is the IPv4-mapped entry.
 
 See ``docs/design/v1/distributed/l2_adapters/aerospike_rdma.md`` for the full
 setup.
@@ -104,6 +109,10 @@ def test_rdma_write_is_byte_identical_to_the_normal_path(
     device = os.environ.get("RDMA_DEVICE", "")
     if device:
         command.append(device)
+        # Positional, so this can only be passed alongside a device name.
+        gid_index = os.environ.get("RDMA_GID_INDEX", "")
+        if gid_index:
+            command.append(gid_index)
 
     result = subprocess.run(
         command,

@@ -46,8 +46,12 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 # RDMA_DEVICE optionally names the device, e.g. RDMA_DEVICE=rxe0.
+# RDMA_GID_INDEX optionally selects the port GID index, and requires
+# RDMA_DEVICE to be set too since the two are positional. Soft-RoCE on `lo`
+# needs the IPv4-mapped entry, usually index 1:
+#   make test RDMA_DEVICE=rxe0 RDMA_GID_INDEX=1
 test: $(BIN)
-	$(BIN) $(RDMA_DEVICE)
+	$(BIN) $(RDMA_DEVICE) $(RDMA_GID_INDEX)
 
 clean:
 	rm -rf $(BUILD_DIR)

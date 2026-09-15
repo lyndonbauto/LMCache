@@ -19,6 +19,15 @@
 //
 // Build and run:
 //   make -C tests/v1/distributed/rdma test
+//
+// Usage: rdma_equivalence_test [device] [gid_index]
+//
+// The GID index is not always 0. On EFA index 0 is correct, but on Soft-RoCE
+// bound to a netdev with no usable MAC (notably `lo`, whose MAC is all zeros)
+// index 0 is an fe80:: link-local GID with no route, and ibv_modify_qp(RTR)
+// fails with ENETUNREACH. Pick the IPv4-mapped entry instead -- list them with
+//   ibv_devinfo -d rxe0 -v | grep GID
+// or read /sys/class/infiniband/<dev>/ports/1/gids/.
 
 #include <cstdint>
 #include <cstdio>
@@ -91,6 +100,8 @@ std::vector<uint8_t> make_payload(size_t bytes, uint32_t seed) {
 
 int main(int argc, char** argv) {
   const std::string device = argc > 1 ? argv[1] : "";
+  const uint8_t gid_index =
+      argc > 2 ? static_cast<uint8_t>(std::strtoul(argv[2], nullptr, 10)) : 0;
 
   if (!has_rdma_device()) {
     std::cout << "SKIP: no RDMA device present. To create a software device:\n"
@@ -116,14 +127,14 @@ int main(int argc, char** argv) {
                    "fails\n";
     }
 
-    RdmaContext sink(device, /*gid_index=*/0, Transport::kRc);
+    RdmaContext sink(device, gid_index, Transport::kRc);
     sink.register_l1(slab, kSlabBytes, {kWindowCount, kWindowBytes});
     sink.create_queue_pair();
     check(sink.window_count() == kWindowCount,
           "sink registered " + std::to_string(kWindowCount) + " windows");
 
     // ---- Mock server side. ----
-    KvSinkMockWriter writer(device, /*gid_index=*/0,
+    KvSinkMockWriter writer(device, gid_index,
                             /*source_bytes=*/kSlabBytes);
     const std::string digest_a = "aa00000000000000000000000000000000000000";
     const std::string digest_b = "bb00000000000000000000000000000000000000";

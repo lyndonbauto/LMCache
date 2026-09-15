@@ -249,6 +249,9 @@ RDMA is off unless the adapter config asks for it:
 }
 ```
 
+`gid_index` defaults to 0, which is correct on EFA but **not** on Soft-RoCE
+bound to `lo`; see [the GID index trap](#the-gid-index-trap).
+
 `RC` is the portable transport and is the only one Soft-RoCE supports. `SRD`
 exists only on AWS EFA. `fetch_timeout_seconds` is checked against the L1
 write-lock TTL at startup.
@@ -305,20 +308,45 @@ sudo rdma link add rxe0 type rxe netdev lo
 ibv_devinfo -d rxe0          # expect PORT_ACTIVE
 rdma link show
 
-# 5. Prove the fabric works independently of LMCache.
-ibv_rc_pingpong -d rxe0 -g 0 &   # server
-ibv_rc_pingpong -d rxe0 -g 0 localhost
+# 5. Pick the GID index -- see the trap below. On `lo` this is 1, not 0.
+cat /sys/class/infiniband/rxe0/ports/1/gids/*
+
+# 6. Prove the fabric works independently of LMCache.
+ibv_rc_pingpong -d rxe0 -g 1 &   # server
+ibv_rc_pingpong -d rxe0 -g 1 localhost
 ```
 
-`ibv_reg_mr` fails if the pinned slab exceeds `RLIMIT_MEMLOCK`. Raise it before
-registering a large L1:
+`ibv_reg_mr` fails if the pinned slab exceeds `RLIMIT_MEMLOCK`. Check it with
+`ulimit -l`. A plain `ulimit -l unlimited` only works if the *hard* limit
+allows it; otherwise set `memlock` in `/etc/security/limits.conf` and log in
+again. Many desktop distributions already ship a multi-gigabyte limit, which is
+ample for a test slab.
 
-```bash
-ulimit -l unlimited      # or set memlock in /etc/security/limits.conf
-```
+Then build with RDMA enabled and point the adapter at `device_name: "rxe0"` and
+the `gid_index` chosen in step 5.
 
-Then build with RDMA enabled and point the adapter at `device_name: "rxe0"`,
-`gid_index: 0`.
+### The GID index trap
+
+**`gid_index` is not always 0**, and getting it wrong fails late and
+confusingly: `ibv_modify_qp` returns `ENETUNREACH` ("Network is unreachable")
+at the **RTR** step, after registration has already succeeded.
+
+`rxe` derives GID 0 from the netdev's MAC as an `fe80::` link-local address.
+Loopback's MAC is all zeros, so GID 0 becomes
+`fe80:0000:0000:0000:0200:00ff:fe00:0000`, which has no route — the kernel
+cannot resolve a path from it, so the QP never reaches RTR. The table on `lo`
+looks like this:
+
+| Index | GID | Usable |
+|---|---|---|
+| 0 | `fe80::200:ff:fe00:0000` | No — link-local from an all-zero MAC |
+| 1 | `::ffff:7f00:0001` (IPv4-mapped `127.0.0.1`) | **Yes** |
+| 2 | `::1` | Yes |
+
+So Soft-RoCE on `lo` wants **index 1**. EFA wants index 0, which is why the
+reference client snippet uses `ibv_query_gid(ctx, IB_PORT, 0, &gid)` — correct
+there, wrong here. This is exactly the class of divergence that makes "it
+passes on Soft-RoCE" a weak signal for EFA.
 
 ### Equivalence test
 
@@ -341,14 +369,19 @@ write across the fabric.
 Once a device exists, it is one command:
 
 ```bash
-make -C tests/v1/distributed/rdma test          # or RDMA_DEVICE=rxe0
+make -C tests/v1/distributed/rdma test RDMA_DEVICE=rxe0 RDMA_GID_INDEX=1
 ```
 
 or through pytest, which builds it for you:
 
 ```bash
-pytest -xvs tests/v1/distributed/rdma/test_rdma_equivalence.py
+RDMA_DEVICE=rxe0 RDMA_GID_INDEX=1 \
+  pytest -xvs tests/v1/distributed/rdma/test_rdma_equivalence.py
 ```
+
+Both default to GID index 0, which is right for EFA and wrong for Soft-RoCE on
+`lo`; see [the GID index trap](#the-gid-index-trap). The device and index are
+positional, so `RDMA_GID_INDEX` requires `RDMA_DEVICE`.
 
 Both skip cleanly with no device — the binary exits 77 (the automake "skip"
 convention) and the wrapper turns that into a pytest skip. If your rdma-core
@@ -372,23 +405,32 @@ Being precise about this, because the gap matters:
 | Piece | State |
 |---|---|
 | Build profile, default-off | **Verified.** Default native build compiles and links with no libibverbs. |
-| `rdma_context.{h,cpp}` | **Compiles and links** cleanly (`-Wall -Wextra`, RC and EFA paths) against real `libibverbs`. Data path never executed. |
-| `kv_sink_client.{h,cpp}` codec | **Compiles**; exercised by the harness up to the point of the first verbs call. |
+| `rdma_context.{h,cpp}` | **Verified on RC.** QP reaches RTS and the data path executes over Soft-RoCE. The EFA/SRD path compiles but has never run. |
+| `kv_sink_client.{h,cpp}` codec | **Verified.** Register and fetch commands round-trip against the mock writer. |
 | Per-node `kv-sink-register` fanout | **Implemented and compiling** via `aerospike_info_foreach`. Never run against a cluster. |
 | Adapter plumbing, descriptor, window plan | **Implemented and unit-tested.** |
 | Write-lock TTL invariant | **Implemented and unit-tested** (startup check). |
-| Mock RDMA writer | **Authored, compiles and links, runs.** Reaches the device check and skips. |
-| Byte-equivalence harness | **Authored, builds, runs, skips cleanly.** One command away from executing. |
-| Real RDMA write landing in L1 | **Not achieved — needs a device.** |
-| Byte-equivalence assertion actually passing | **Not achieved — needs a device.** |
+| Mock RDMA writer | **Verified.** Posts real `ibv_post_send` writes and fences on its own send CQ. |
+| Real RDMA write landing in L1 | **Verified** over Soft-RoCE (`rxe0` on `lo`, GID index 1). |
+| Byte-equivalence assertion | **Verified.** Both chunks byte-identical, nothing outside the requested offsets, out-of-window write refused. |
+| Same over EFA/SRD | **Not achieved — needs an EFA instance.** |
+| Against a real Aerospike server | **Not achieved — needs Sriram's server branch deployed.** |
 
-The blocker for the last two rows is environmental and narrow: creating a
-Soft-RoCE device requires `root` (`modprobe rdma_rxe` and `rdma link add` both
-return `Operation not permitted` without it), and no RDMA device of any kind is
-present. Everything above those two rows is verified as far as compilation,
-linkage, and execution-up-to-the-device-check can verify it. The harness has
-been run and exits 77 with the setup instructions, so the remaining step is
-genuinely one privileged command plus one test invocation.
+The remaining two rows are the ones that matter now, and neither is a local
+environment problem.
+
+**EFA/SRD is a genuine gap, not a formality.** Soft-RoCE only supports RC, so
+the SRD path — `efadv_create_qp_ex`, the qkey at INIT, and the `ibv_create_ah`
+for the server without which its write fails `UNKNOWN_PEER` — is still
+untested. The GID index divergence documented above is a concrete instance of
+the same hazard: the correct value differs between the two fabrics, and the
+failure surfaces several calls later as `ENETUNREACH`. Re-verify the handshake
+on a real EFA instance before treating the M2 gate as passable.
+
+**The mock writer is a mock of a protocol, not of an implementation.** It
+implements the `kv-sink-*` command strings as specified, so it proves our side
+of the contract. It cannot catch a divergence between that specification and
+what the server actually does.
 
 ## Open questions
 
