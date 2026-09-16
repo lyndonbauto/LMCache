@@ -305,6 +305,7 @@ const shardOf = () => {
   };
 };
 const S_aligned = () => alignedTog.checked;
+const S_tokens = () => Number($("#c-tokens").value);
 
 assert(alignedTog.checked, "plane-aligned records are the default");
 
@@ -497,6 +498,30 @@ assert(Number(kpi("Transfer รท compute")) > 1, `ratio above 1 (${kpi("Transfer ร
     "and raises compute, so it only moves the ratio's denominator");
   setRange($("#c-params"), 8);
   assert($("#v-params").textContent === "8 B", "default model size is 8 B");
+
+  // Real frontier configurations must be reachable: Llama 3.1 405B is 126
+  // layers and the sliders used to stop at 80.
+  setRange($("#c-layers"), 126);
+  assert($("#v-layers").textContent === "126", "126 layers is reachable (Llama 3.1 405B)");
+  setRange($("#c-params"), 405);
+  assert($("#v-params").textContent === "405 B", "405 B is reachable");
+
+  // MLA caches one latent per token per layer, not separate K and V planes, so
+  // it is the layer_outer format -- 9 x 64 = the 576-wide DeepSeek-V3 latent.
+  setRange($("#c-layers"), 61);
+  $("#c-format").value = "layer_outer";
+  $("#c-format").dispatchEvent(new window.Event("change", { bubbles: true }));
+  setRange($("#c-kvheads"), 9);
+  setRange($("#c-headdim"), 64);
+  const mla = window.derive();
+  assert(mla.kvSize === 1, "MLA is a single plane, not K and V");
+  const perTokPerLayer = mla.kgs[0].planeBytes / S_tokens();
+  assert(perTokPerLayer === 1152,
+    `DeepSeek-V3 MLA is 576 elems = 1152 B per token per layer (got ${perTokPerLayer})`);
+
+  $("#c-format").value = "kv_outer";
+  $("#c-format").dispatchEvent(new window.Event("change", { bubbles: true }));
+  setRange($("#c-layers"), 32); setRange($("#c-kvheads"), 8); setRange($("#c-headdim"), 128);
   assert($("#v-layers").textContent === "32" && $("#v-kvheads").textContent === "8" &&
          $("#v-headdim").textContent === "128",
     "which is consistent with the default KV geometry (Llama-3-8B shape)");

@@ -367,7 +367,7 @@
   <h2 class="sec">Model</h2>
   <div class="field">
     <label>Layers <b id="v-layers">32</b></label>
-    <input type="range" id="c-layers" min="8" max="80" step="4" value="32" />
+    <input type="range" id="c-layers" min="8" max="128" step="1" value="32" />
   </div>
   <div class="field">
     <label>KV heads (GQA) <b id="v-kvheads">8</b></label>
@@ -450,7 +450,7 @@
   </div>
   <div class="field">
     <label>Model size <b id="v-params">8 B</b></label>
-    <input type="range" id="c-params" min="1" max="140" step="1" value="8" />
+    <input type="range" id="c-params" min="1" max="450" step="1" value="8" />
     <small style="display:block;color:var(--dimmer);font-size:11px;line-height:1.35;margin-top:4px">
       Total parameters, in billions. Drives <i>compute only</i> &mdash; prefill at
       ~2 FLOPs per parameter per token, split evenly across <i>Layers</i>. It does not
@@ -458,7 +458,22 @@
       <i>Head dim</i>. The defaults are a consistent pair (8 B, 32 layers, 8 GQA
       heads, 128 dim &mdash; a Llama-3-8B shape); set them apart and the ratio
       describes no real model.
+      <br><b>For a MoE model set the <i>active</i> parameter count</b>, not the total
+      &mdash; 37 for DeepSeek-V3, not 671 &mdash; since only the routed experts run
+      per token.
     </small>
+    <div style="margin-top:8px;font-size:11px;color:var(--dim);line-height:1.45">
+      <b style="color:var(--text)">Real configurations</b>
+      <table style="width:100%;border-collapse:collapse;margin-top:4px;font-size:10.5px">
+        <tr style="color:var(--dimmer)"><td></td><td>layers</td><td>KV geom</td><td>KV/token</td><td>params</td></tr>
+        <tr><td>Llama 3.1 8B</td><td>32</td><td>8&times;128</td><td>128 KiB</td><td>8 dense</td></tr>
+        <tr><td>Llama 3.1 70B</td><td>80</td><td>8&times;128</td><td>320 KiB</td><td>70 dense</td></tr>
+        <tr><td>Llama 3.1 405B</td><td>126</td><td>8&times;128</td><td>504 KiB</td><td>405 dense</td></tr>
+        <tr><td>DeepSeek-V3</td><td>61</td><td>MLA 576</td><td>69 KiB</td><td>671 / <b>37</b></td></tr>
+      </table>
+      For MLA, switch <i>Payload format</i> to <code>NL_X_NB_BS_HS</code> and set
+      9&times;64 &mdash; one 576-wide latent per token per layer, no separate K and V.
+    </div>
   </div>
 
   <h2 class="sec">Focus</h2>
@@ -2436,10 +2451,10 @@ function applyHash() {
     document.getElementById("t-jitter").checked = S.jitter;
   }
   for (const [param, key, id, lo, hi] of [
-    ["layers", "layers", "layers", 8, 80], ["chunks", "chunks", "chunks", 2, 16],
-    ["tokens", "tokens", "tokens", 64, 1024], ["layer", "sel", "sel", 0, 79],
+    ["layers", "layers", "layers", 8, 128], ["chunks", "chunks", "chunks", 2, 16],
+    ["tokens", "tokens", "tokens", 64, 1024], ["layer", "sel", "sel", 0, 127],
     ["net", "net", "net", 10, 250], ["gpu", "gpu", "gpu", 40, 900],
-    ["params", "params", "params", 1, 140],
+    ["params", "params", "params", 1, 450],
     ["reccap", "reccapPow", "reccap", 18, 23],
     ["recomp", "recomp", "recomp", 5, 100],
   ]) {
