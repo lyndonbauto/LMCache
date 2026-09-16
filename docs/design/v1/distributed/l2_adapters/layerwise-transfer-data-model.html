@@ -554,10 +554,10 @@
 
     <h3 style="margin-top:18px">Read order is the only thing that has to change</h3>
     <p class="sub">Same records, same keys. The connector reads
-      <code>i = 0 … nseg-1</code> today; serving a layer-major push means reading in the
+      <code>i = 0 … nseg-1</code> if read naively; serving a layer-major push means reading in the
       order the schedule asks for. The reads stay independent, so they still fan out
       across devices.</p>
-    <div class="shapemeta" style="margin:0 0 5px">Today &mdash; sequential</div>
+    <div class="shapemeta" style="margin:0 0 5px">Naive &mdash; sequential by segment index</div>
     <div class="order" id="rec-order-seq"></div>
     <div class="shapemeta" style="margin:11px 0 5px">Layer-major &mdash; first read yields layer 0</div>
     <div class="order" id="rec-order-lm"></div>
@@ -596,7 +596,7 @@
     </div>
 
     <div class="track" style="margin-top:16px">
-      <div class="track-hd"><span>For comparison &mdash; today: fetch everything, then compute</span><span id="tl-base-meta"></span></div>
+      <div class="track-hd"><span>The alternative protocol shape &mdash; all-or-nothing: server fences, replies once, then compute</span><span id="tl-base-meta"></span></div>
       <div class="lane" id="lane-base"></div>
     </div>
 
@@ -864,14 +864,16 @@ function schedule(d, computeScale = 1) {
 
   const transferAll = netDone;
   const computeAll = cpuPerLayerMs * S.layers;
-  const baseline = transferAll + computeAll;   // fetch everything, then compute
+  // The all-or-nothing alternative: the server fences its send queue and the
+  // reply *is* the completion, so nothing can start until everything has landed.
+  const allOrNothing = transferAll + computeAll;
   const pipelined = cpuDone;
 
   const avgNet = transferAll / S.layers;
   return {
-    rows, transferAll, computeAll, baseline, pipelined, stalled,
-    saved: baseline - pipelined,
-    savedPct: baseline > 0 ? (baseline - pipelined) / baseline * 100 : 0,
+    rows, transferAll, computeAll, allOrNothing, pipelined, stalled,
+    saved: allOrNothing - pipelined,
+    savedPct: allOrNothing > 0 ? (allOrNothing - pipelined) / allOrNothing * 100 : 0,
     hiddenPct: transferAll > 0 ? Math.max(0, transferAll - stalled) / transferAll * 100 : 0,
     avgNet, avgCpu: cpuPerLayerMs,
     ratio: cpuPerLayerMs > 0 ? avgNet / cpuPerLayerMs : Infinity,
@@ -886,8 +888,8 @@ const PHASES = [
     body: `<p>During prefill the model walks its layers in order. Before it can compute
       layer <i>i</i> it calls <code>wait_for_layer_load("...layers.i...")</code> and expects that
       to block until layer <i>i</i>'s cached KV is actually present.</p>
-      <p>Today that function <b class="key">returns immediately and does nothing</b> &mdash; the
-      whole chunk is fetched up front, so there is never anything to wait for. Pipelining means
+      <p>That function <b class="key">returns immediately and does nothing</b> &mdash; with an
+      all-or-nothing fetch the whole chunk arrives up front, so there is never anything to wait for. Pipelining means
       making that question answerable. Everything that follows exists only to answer
       <i>&ldquo;has layer i arrived?&rdquo;</i></p>
       <p>The catch that shapes the entire design: the model computes layer <i>i</i> for the
@@ -952,7 +954,8 @@ const PHASES = [
       <p>Two consequences for us, and they pull in opposite directions.</p>
       <p><b class="key">It is the best case for the RDMA work.</b> A prefix fetch reads a
       contiguous run of chunks; a blend fetch reads chunks from wherever they happened to be
-      stored, scattered across the cluster by digest. Today each one costs a metadata read and
+      stored, scattered across the cluster by digest. On the classic batch-read path each one
+      costs a metadata read and
       then serial segment reads, so the cost is round trips rather than bandwidth &mdash; which
       is exactly what a server-side push removes. Our M0 benchmark measured the contiguous case,
       where plain TCP already reached 98% of line rate. <b class="key">We benchmarked the case
@@ -1055,9 +1058,11 @@ const PHASES = [
     body: `<p>Here is the entire point. Aerospike pushes <b class="key">layer 0 first, then layer 1,
       then layer 2</b>, keeping the link saturated throughout. The GPU starts computing layer 0 the
       moment it lands, while layer 1 is still crossing the wire.</p>
-      <p>Compare the two lanes with the grey bar underneath, which is what happens today: fetch the
-      entire cache, and only then start computing. Pipelining turns that addition into an overlap, so
-      you pay for <b class="key">one layer's transfer instead of all of them</b>.</p>
+      <p>The bar underneath is the alternative shape the protocol could take, and the one the
+      Aerospike PoC currently has: the server fences its send queue and replies once, so the reply
+      <i>is</i> the completion and nothing can start until every byte has landed. Pipelining turns
+      that addition into an overlap, so you pay for <b class="key">one layer's transfer instead of
+      all of them</b>. That is the decision this page exists to inform.</p>
       <p>Whether it works comes down to one race, per layer: can the network deliver layer
       <i>i+1</i> in the time the GPU spends on layer <i>i</i>? Drag <i>Network delivery</i> down, or
       <i>GPU prefill</i> up, until the green lane develops hatched gaps &mdash; those are the GPU
@@ -1391,12 +1396,12 @@ function renderBlendChunks(d) {
     `<span><i style="background:#f8514977"></i>recomputed</span>`;
   wrap.appendChild(lg);
 
-  // Round trips the scattered leg costs today, from the live sidebar values.
+  // Round trips the scattered leg costs on the classic batch-read path.
   const { objectBytes } = layerRanges(d, S.sel);
   const { nseg } = shardPlan(objectBytes);
   const k = blendHits.size;
   const co = el("div", "callout");
-  co.innerHTML = `<b>Why the scattered hits are expensive today.</b> Those
+  co.innerHTML = `<b>Why the scattered hits are expensive without a push.</b> Those
     ${k} relocated chunks live on up to ${k} different nodes, and each needs a metadata read
     then <code>${nseg}</code> segment read${nseg === 1 ? "" : "s"}, issued one after another
     &mdash; <code>${k} × (1 + ${nseg}) = ${k * (1 + nseg)}</code> round trips. A server-side
@@ -1447,7 +1452,7 @@ function renderBlendFlows() {
   co.style.gridColumn = "1 / -1";
   co.innerHTML = `<b>Read the red rows together.</b> Both routes move a whole kernel group's
     layers in a single operation, and <code>wait_for_layer_load</code> is an empty stub for
-    both. <b>Nothing in multiprocess mode pipelines to the GPU today.</b> Per-layer delivery is
+    both. <b>Nothing in multiprocess mode pipelines to the GPU yet.</b> Per-layer delivery is
     the same unbuilt change in two different kernels &mdash; do the ordinary one first, since it
     is simpler and it is the one we benchmarked, then port it across. Blend is arguably the more
     natural fit: the original algorithm inspects deviation at selected layers
@@ -1514,7 +1519,7 @@ function renderBlendPayoff(d) {
   // score, and at r = 1 it cheerfully reports "transfer hides" for a
   // configuration that fetched a whole cache and then ignored it.
   const noCache = dense.computeAll;                 // full prefill, nothing fetched
-  const serial = blend.baseline;                    // fetch everything, then compute
+  const serial = blend.allOrNothing;                // every byte lands, then compute
   const piped = blend.pipelined;                    // overlapped
   const worst = Math.max(noCache, serial, piped) * 1.02;
   const bpct = v => (v / worst * 100) + "%";
@@ -1545,7 +1550,7 @@ function renderBlendPayoff(d) {
   };
 
   bar("No cache at all", [["cpu", noCache, "full prefill"]], noCache, "nothing fetched");
-  bar("Blend today — fetch, then compute",
+  bar("Blend on an all-or-nothing fetch",
     [["net", blend.transferAll, "fetch"], ["cpu", blend.computeAll, "recompute"]],
     serial, serial > noCache ? "worse than not caching" : "still ahead");
   // Layer 0's transfer is the one piece that can never be overlapped: there is
@@ -1559,16 +1564,16 @@ function renderBlendPayoff(d) {
   const breakEven = Math.max(0, 1 - dense.ratio) * 100;
   const co2 = el("div", "callout" + (serial > noCache ? "" : " ok"));
   co2.innerHTML = `<b>This is the part that looks paradoxical.</b> A high recompute ratio is
-    close to a cache miss, so you would expect the cache to stop helping &mdash; and for
-    <i>today's</i> serial fetch it does. Fetching costs
-    <code>${ms(blend.transferAll)}</code> whether or not you then throw the data away, so serial
-    blend loses to not caching at all above about
+    close to a cache miss, so you would expect the cache to stop helping &mdash; and on an
+    all-or-nothing fetch it does. The fetch costs
+    <code>${ms(blend.transferAll)}</code> whether or not you then throw the data away, so that
+    shape loses to not caching at all above about
     <b>${breakEven.toFixed(0)}% recompute</b> (where <code>transfer + r×compute &gt; compute</code>,
     i.e. <code>r &gt; 1 − ${dense.ratio.toFixed(2)}</code>). At
-    ${S.recomp}% it is currently <b>${serial > noCache
+    ${S.recomp}% it is <b>${serial > noCache
       ? `${ms(serial - noCache)} slower than not caching</b>`
       : `${ms(noCache - serial)} faster than not caching</b>`}.
-    <br><br><b>Pipelining nearly removes that cliff.</b> Overlapped, the fetch hides inside
+    <br><br><b>Pipelining is what removes that cliff.</b> Overlapped, the fetch hides inside
     compute you were doing anyway &mdash; all of it except layer 0, which has no earlier compute
     to hide behind. So the worst case shrinks from <i>the whole transfer</i> to
     <i>one layer's transfer</i>, a factor of ${S.layers}:
@@ -1881,7 +1886,7 @@ function ms(v) { return v >= 100 ? v.toFixed(0) + " ms" : v.toFixed(v < 10 ? 2 :
 
 function renderTimeline(d) {
   const t = d.timing;
-  const span = Math.max(t.baseline, t.pipelined) * 1.02;
+  const span = Math.max(t.allOrNothing, t.pipelined) * 1.02;
   const pct = v => (v / span * 100) + "%";
 
   document.getElementById("tl-tag").textContent =
@@ -1925,7 +1930,7 @@ function renderTimeline(d) {
     `done at <b>${ms(t.pipelined)}</b>` +
     (t.stalled > 0.01 ? ` &middot; <b style="color:#ffb4ae">${ms(t.stalled)} idle</b>` : "");
 
-  // baseline lane: all transfer, then all compute
+  // the all-or-nothing lane: every byte, then all compute
   const base = document.getElementById("lane-base");
   base.innerHTML = "";
   const b1 = el("div", "blk net", "fetch everything");
@@ -1934,7 +1939,7 @@ function renderTimeline(d) {
   const b2 = el("div", "blk cpu", "then compute");
   b2.style.left = pct(t.transferAll); b2.style.width = pct(t.computeAll);
   base.appendChild(b2);
-  document.getElementById("tl-base-meta").innerHTML = `done at <b>${ms(t.baseline)}</b>`;
+  document.getElementById("tl-base-meta").innerHTML = `done at <b>${ms(t.allOrNothing)}</b>`;
 
   const axis = document.getElementById("tl-axis");
   axis.innerHTML = "";
@@ -1952,9 +1957,9 @@ function renderTimeline(d) {
     e.appendChild(el("div", "val", v));
     kpis.appendChild(e);
   };
-  add("Today", ms(t.baseline));
+  add("All-or-nothing", ms(t.allOrNothing));
   add("Pipelined", ms(t.pipelined), "good");
-  add("Saved", ms(t.saved) + ` (${t.savedPct.toFixed(0)}%)`, "good");
+  add("Won by pipelining", ms(t.saved) + ` (${t.savedPct.toFixed(0)}%)`, "good");
   add("Transfer hidden", t.hiddenPct.toFixed(0) + "%", t.hiddenPct > 90 ? "good" : "bad");
   add("Transfer ÷ compute", t.ratio.toFixed(2), t.ratio < 1 ? "good" : "bad");
 
@@ -2107,8 +2112,8 @@ function renderCaveats(d) {
     ["Not every chunk participates", `Sliding-window groups cover only part of the prompt — ${S.arch === "sw" ? `here, ${Math.min(S.chunks, 4)} of ${S.chunks} chunks` : "switch Architecture to the sliding-window hybrid to see it"}. Waiting for all chunks in such a group waits forever.`],
     ["Recurrent groups are different", "Mamba/GDN groups hold state snapshots, not per-token KV, and probably should not sit behind a per-layer barrier at all. They also force <code>--separate-object-groups</code>, make the pages byte-opaque (no CacheGen or CacheBlend), and impose a unified block size of 544–944 tokens that the LMCache chunk size must be a multiple of. Unconfirmed how they should be treated here."],
     ["CacheBlend: half of it comes free", "Blend prefetches L2&rarr;L1 through the same <code>storage_manager.submit_prefetch_task</code> the dense path uses, so the RDMA server-push benefits it with no blend-specific work at all."],
-    ["CacheBlend is not the reason the GPU hop isn't pipelined", "Blend's L1&rarr;GPU kernel takes all layers of a kernel group at once — but so does the dense one (<code>multi_layer_block_kv_transfer</code>), and <code>wait_for_layer_load</code> is a no-op stub for both. Nothing in MP mode pipelines to the GPU today. Per-layer delivery is the same unbuilt change in two kernels, so blend is a second instance of the work, not an obstacle. Blend is arguably the better conceptual fit: the original algorithm inspects selected layers (<code>blend_check_layers</code>) and the in-process version requires <code>use_layerwise=True</code>."],
-    ["CacheBlend: the transfer/compute ratio is not a score", "It answers whether transfer can be hidden, not whether the cache is worth fetching. At high recompute it reports &ldquo;transfer hides&rdquo; for a request that fetched a whole cache and recomputed everything regardless. Judge that against <i>no cache at all</i>: serial blend loses to not caching above <code>r* = 1 − ratio</code> (~73% on the default model), and pipelining shrinks that worst case from the whole transfer to one layer's — layer 0 has no earlier compute to hide behind, so <code>T/L</code> is a hard floor, not break-even."],
+    ["CacheBlend is not the reason the GPU hop isn't pipelined", "Blend's L1&rarr;GPU kernel takes all layers of a kernel group at once — but so does the dense one (<code>multi_layer_block_kv_transfer</code>), and <code>wait_for_layer_load</code> is a no-op stub for both. Nothing in MP mode pipelines to the GPU yet. Per-layer delivery is the same unbuilt change in two kernels, so blend is a second instance of the work, not an obstacle. Blend is arguably the better conceptual fit: the original algorithm inspects selected layers (<code>blend_check_layers</code>) and the in-process version requires <code>use_layerwise=True</code>."],
+    ["CacheBlend: the transfer/compute ratio is not a score", "It answers whether transfer can be hidden, not whether the cache is worth fetching. At high recompute it reports &ldquo;transfer hides&rdquo; for a request that fetched a whole cache and recomputed everything regardless. Judge that against <i>no cache at all</i>: an all-or-nothing fetch loses to not caching above <code>r* = 1 − ratio</code> (~73% on the default model), and pipelining shrinks that worst case from the whole transfer to one layer's — layer 0 has no earlier compute to hide behind, so <code>T/L</code> is a hard floor, not break-even."],
     ["CacheBlend: readiness is per leg", "Blend issues two prefetches over different group sets — the prefix leg reads attention + recurrent, the blend leg attention only. <code>expected(L)</code> must be summed over the leg's groups, not over every group in the registration."],
     ["CacheBlend: one attention group, hard limit", "<code>_classify_cb_read_groups</code> raises unless there is exactly one group labelled <code>\"attention\"</code>. A sliding-window group is labelled attention, so splitting a sliding-window hybrid is a hard incompatibility. Mamba hybrids are fine: attention + recurrent is one attention group."],
     ["Record alignment is luck, not design", "<code>plan()</code> shards purely by byte count. A layer's bytes happen to land on record boundaries only because plane sizes and record caps are both powers of two. Mamba hybrids use 544/784/944-token blocks, and then every layer straddles. LMCache should pass a plane-size alignment hint rather than rely on it."],

@@ -160,7 +160,7 @@ assert($$("#blend-flows .fstep.alllayers").length === 2,
   "both paths are flagged all-layers, not just blend's");
 assert($$("#blend-flows .fstep.shared").length >= 4,
   "the shared L2->L1 steps are marked shared on both paths");
-assert(flowText.includes("Nothing in multiprocess mode pipelines to the GPU today"),
+assert(flowText.includes("Nothing in multiprocess mode pipelines to the GPU yet"),
   "the corrected conclusion is stated in the panel, not just the caveats");
 
 // --- the payoff question: does pipelining help blend? ---
@@ -363,10 +363,16 @@ assert($$("#lane-cpu .blk.stall").length > 0, "slow link + fast GPU: GPU stalls 
 assert($("#tl-callout").textContent.includes("Network bound"), "reports network-bound starvation");
 assert(Number(kpi("Transfer ÷ compute")) > 1, `ratio above 1 (${kpi("Transfer ÷ compute")})`);
 
-// pipelining must never be worse than fetch-then-compute
+// pipelining must never lose to the all-or-nothing protocol shape
 setRange(netSlider, 122); setRange(gpuSlider, 400);
-const pipeMs = parseFloat(kpi("Pipelined")), baseMs = parseFloat(kpi("Today"));
-assert(pipeMs < baseMs, `pipelined (${kpi("Pipelined")}) beats baseline (${kpi("Today")})`);
+const pipeMs = parseFloat(kpi("Pipelined")), aonMs = parseFloat(kpi("All-or-nothing"));
+assert(pipeMs < aonMs,
+  `pipelined (${kpi("Pipelined")}) beats all-or-nothing (${kpi("All-or-nothing")})`);
+
+// Nothing should frame the design against a legacy path: the comparison is
+// between two protocol shapes we could build, not against what exists.
+assert(!/\btoday\b/i.test(doc.body.textContent),
+  "the page makes no appeal to what exists today");
 assert($$("#lane-net .blk").length === 32, "one network block per layer");
 
 // --- readiness: layer-major wavefront, NOT a global shuffle ---

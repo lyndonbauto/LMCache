@@ -384,14 +384,15 @@ measures it:
 | | End-to-end |
 | --- | --- |
 | No cache at all | `C` |
-| Blend today, serial fetch then compute | `T + rC` |
+| Blend on an all-or-nothing fetch | `T + rC` |
 | Blend pipelined | `≈ max(T, rC) + T/L` |
 
-Serial blend stops beating no-cache when `T + rC > C`, i.e. above
+An all-or-nothing fetch stops beating no-cache when `T + rC > C`, i.e. above
 `r* = 1 − T/C = 1 − ratio_dense`. On the walkthrough's defaults that is about
-**73% recompute** — beyond which today's fetch-then-compute path is actively
-worse than not caching, because the fetch is paid for whether or not the data
-is then discarded.
+**73% recompute** — beyond which fetch-then-compute is actively worse than not
+caching, because the fetch is paid for whether or not the data is then
+discarded. That shape is not hypothetical: it is what the Aerospike PoC does,
+since the server fences its send queue and the reply *is* the completion.
 
 **Pipelining nearly removes that cliff, and this is the argument for it in the
 blend case.** Overlapped, the fetch hides inside compute that was happening
