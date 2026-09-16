@@ -179,19 +179,59 @@ the coupling AIE-89 deferred.
 
 ### The alignment hazard
 
-**What alignment does and does not mean.** It is *not* "one layer per record".
-Multiple layers sharing a record is fine, and so is one layer spanning several.
-Either of these is aligned:
+**Decision: a record never holds pieces of more than one plane. Undersize it
+instead.**
 
-- **Record is a multiple of a plane** — 1 MiB records, 512 KiB planes. One
-  record holds two whole planes, so reading it completes two layers.
-- **Plane is a multiple of a record** — 4 MiB planes, 1 MiB records. Four
-  records make exactly one plane, nothing else in them.
+The weaker rule — "either size must divide the other" — also avoids straddles,
+and would permit a 1 MiB record holding two 512 KiB planes. We are not taking
+it. A record is instead sized from the *plane*, not from the cap: exactly one
+plane when a plane fits under the cap, otherwise an equal fraction of one.
 
-The bad case is neither, and the test is just
-`segBytes % planeBytes == 0 || planeBytes % segBytes == 0`. When it fails, no
-record belongs to exactly one layer: each carries the tail of one and the head
-of the next.
+```
+pieces_per_plane = ceil(plane_bytes / cap)
+seg_bytes        = plane_bytes / pieces_per_plane
+```
+
+The reason is that it removes the half-record case rather than managing it.
+Under this rule a record maps to exactly one layer, a write maps to exactly one
+slot, and `FetchSlot`'s single `layer_id` is always well defined — no cutting
+writes at layer boundaries, no record shared between two layers' readiness
+counts, and no alignment predicate to get wrong. Straddling becomes
+unrepresentable instead of merely unlikely.
+
+**What it costs: record count.** Records are deliberately smaller than the cap
+permits, so there are more of them — 64 instead of 32 on the default model.
+Two things make that acceptable:
+
+- The M0 sweep measured *smaller* records as **faster** at a fixed object size:
+  1 MiB records reached 1880 MB/s against 8 MiB records at 1659 MB/s, because a
+  larger record coarsens the unit of concurrency and reduces device fanout. The
+  trade is not obviously a loss and may be a gain.
+- There is no internal fragmentation. `max-record-size` is a cap, not a fixed
+  allocation, so an undersized record wastes no space.
+
+Measured across the Mamba unified block sizes, the rule is exact where
+byte-count sharding is not:
+
+| Tokens per chunk | Byte-count sharding | Plane-aligned |
+| --- | --- | --- |
+| 544 | +88% over the layer's own size | exact |
+| 784 | +31% | exact |
+| 944 | +8% | exact |
+
+**A consequence worth noting:** under this rule, `max-record-size` stops being a
+tuning knob for any object whose planes fit under it — the record size is
+derived from the plane, so raising the cap changes nothing. It binds only when a
+single plane exceeds it. That retires most of what the M0 cap sweep was
+exploring.
+
+**Where it is more than picking a smaller number.** A single `seg_b` for the
+whole object only works while every kernel group in the object group has the
+same plane size. That holds for the common hybrids, where a sliding-window and
+a full-attention group share heads and head dimension, but not in general —
+compressed groups have `tokens_per_block != slots_per_block`. Where plane sizes
+differ, segment boundaries must **reset at each region boundary** rather than
+being one uniform stride across the object.
 
 That clean mapping is luck. It holds because plane sizes and record caps are
 both powers of two. Mamba/GDN hybrids use unified block sizes of 544, 784 and

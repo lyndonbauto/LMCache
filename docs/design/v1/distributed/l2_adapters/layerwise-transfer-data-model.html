@@ -422,6 +422,14 @@
     <label>Aerospike record cap <b id="v-reccap">1 MiB</b></label>
     <input type="range" id="c-reccap" min="18" max="23" step="1" value="20" />
   </div>
+  <label class="toggle">
+    <input type="checkbox" id="t-aligned" checked />
+    <span>Plane-aligned records
+      <small>A record never holds pieces of two planes &mdash; undersize it
+        instead. Off shows plain byte-count sharding, which is what
+        <code>plan()</code> implements.</small>
+    </span>
+  </label>
   <div class="field">
     <label>Max RDMA write <b id="v-maxwrite">1 MiB</b></label>
     <input type="range" id="c-maxwrite" min="14" max="24" step="1" value="20" />
@@ -640,7 +648,7 @@
 // ---------- state ----------
 const S = {
   layers: 32, kvheads: 8, headdim: 128, dtype: 2,
-  format: "kv_outer", arch: "sw", separate: false, recomp: 15,
+  format: "kv_outer", arch: "sw", separate: false, recomp: 15, aligned: true,
   chunks: 8, tokens: 256, maxwritePow: 20, reccapPow: 20,
   net: 122, gpu: 400, params: 8, jitter: true,
   sel: 0, phase: 0,
@@ -835,11 +843,35 @@ function planeMap(d, og) {
   return regions;
 }
 
-function shardPlan(objectBytes) {
+// How the object is cut into segment records.
+//
+// Two policies. `plan()` currently implements the first: divide by byte count
+// to get the fewest records under the cap, knowing nothing about planes. The
+// second is the rule we want -- a record never holds pieces of more than one
+// plane, so it is either exactly one plane or an equal fraction of one.
+//
+// The aligned policy makes records *smaller* than the cap allows, and that is
+// deliberate rather than a concession. It removes every straddle by
+// construction, so there is no half-record case to handle anywhere downstream:
+// a record maps to exactly one layer, a write maps to exactly one slot, and
+// FetchSlot's single layer_id is always well defined. The M0 sweep also found
+// smaller records *faster* at a fixed object size -- 1 MiB records reached
+// 1880 MB/s against 8 MiB records at 1659 MB/s -- because a larger record
+// coarsens the unit of concurrency and reduces device fanout.
+function shardPlan(objectBytes, planeBytes) {
   const cap = Math.pow(2, S.reccapPow);
-  if (objectBytes <= cap) return { nseg: 1, segBytes: objectBytes, cap };
+
+  if (S.aligned && planeBytes) {
+    // Cut within a plane, never across one. If the plane fits, the record *is*
+    // the plane; otherwise split it into equal pieces that each fit.
+    const piecesPerPlane = Math.ceil(planeBytes / cap);
+    const segBytes = planeBytes / piecesPerPlane;
+    return { nseg: Math.ceil(objectBytes / segBytes), segBytes, cap, aligned: true };
+  }
+
+  if (objectBytes <= cap) return { nseg: 1, segBytes: objectBytes, cap, aligned: false };
   const nseg = Math.ceil(objectBytes / cap);
-  return { nseg, segBytes: Math.ceil(objectBytes / nseg), cap };
+  return { nseg, segBytes: Math.ceil(objectBytes / nseg), cap, aligned: false };
 }
 
 // Segment indices covering [start, start+length), and whether the range starts
@@ -1189,8 +1221,8 @@ function shapeFor(d) {
     };
   }
   if (p === 7) {
-    const { objectBytes } = layerRanges(d, S.sel);
-    const { nseg, segBytes } = shardPlan(objectBytes);
+    const { objectBytes, planeBytes } = layerRanges(d, S.sel);
+    const { nseg, segBytes } = shardPlan(objectBytes, planeBytes);
     return {
       tag: "as Aerospike stores it",
       sub: "Split by byte count into numbered segment records, each within the server's record cap. The split knows nothing about layers — it does not need to.",
@@ -1429,8 +1461,8 @@ function renderBlendChunks(d) {
   wrap.appendChild(lg);
 
   // Round trips the scattered leg costs on the classic batch-read path.
-  const { objectBytes } = layerRanges(d, S.sel);
-  const { nseg } = shardPlan(objectBytes);
+  const { objectBytes, planeBytes } = layerRanges(d, S.sel);
+  const { nseg } = shardPlan(objectBytes, planeBytes);
   const k = blendHits.size;
   const co = el("div", "callout");
   co.innerHTML = `<b>Why the scattered hits are expensive without a push.</b> Those
@@ -1759,11 +1791,11 @@ function renderPayload(d) {
 
 function renderRecords(d) {
   const { ranges, objectBytes, planeBytes, kg } = layerRanges(d, S.sel);
-  const { nseg, segBytes } = shardPlan(objectBytes);
+  const { nseg, segBytes, cap } = shardPlan(objectBytes, planeBytes);
 
   const aligned = segBytes % planeBytes === 0 || planeBytes % segBytes === 0;
   document.getElementById("rec-tag").textContent =
-    nseg === 1 ? "single record" : (aligned ? "plane aligned" : "straddling");
+    S.aligned ? "plane aligned by construction" : (aligned ? "aligned by luck" : "straddling");
   const ogKgs = d.objectGroups.get(kg.og);
   document.getElementById("rec-sub").innerHTML =
     `Object group ${kg.og} is <b>${bytes(objectBytes)}</b> per chunk. At a
@@ -1836,7 +1868,26 @@ function renderRecords(d) {
     ` <b>${bytes(needed)}</b> to be complete`;
 
   const co = document.getElementById("rec-callout");
-  if (nseg === 1) {
+  if (S.aligned) {
+    const naive = shardPlan(objectBytes, 0);
+    const perPlane = planeBytes / segBytes;
+    co.innerHTML = `<div class="callout ok"><b>One plane per record, by construction.</b> The
+      record size is derived from the plane size rather than from the cap, so
+      ${perPlane > 1
+        ? `each plane is cut into ${perPlane} equal pieces of ${bytes(segBytes)}`
+        : `a record <i>is</i> a plane, ${bytes(segBytes)}`} and a record can never hold pieces of
+      two planes. No straddles are possible at any chunk size &mdash; drag <i>Tokens per chunk</i>
+      to 784 and nothing degrades.
+      <br><br><b>What it costs:</b> ${nseg} records instead of ${naive.nseg}, because
+      ${bytes(segBytes)} is under the ${bytes(cap)} cap and the spare capacity goes unused.
+      That is the intended trade. It buys away every half-record case downstream: a record maps
+      to exactly one layer, a write maps to exactly one slot, and <code>FetchSlot</code>'s single
+      <code>layer_id</code> is always well defined. The M0 sweep also measured smaller records as
+      <i>faster</i> at a fixed object size &mdash; 1880 MB/s at 1 MiB against 1659 MB/s at 8 MiB
+      &mdash; since a larger record coarsens the unit of concurrency.
+      <br><br>Uncheck <i>Plane-aligned records</i> to see what byte-count sharding gives
+      instead.</div>`;
+  } else if (nseg === 1) {
     co.innerHTML = `<div class="callout ok"><b>One record.</b> The whole object fits under the cap,
       so every layer is served by a single read. Raise the chunk count or lower the cap to see it
       shard.</div>`;
@@ -1847,7 +1898,7 @@ function renderRecords(d) {
     const yielded = perSeg >= 1
       ? `${perSeg} complete layer${perSeg > 1 ? "s" : ""}`
       : `this one layer, which spans ${1 / perSeg} records per plane`;
-    co.innerHTML = `<div class="callout ok"><b>Clean mapping, for now.</b> Each record holds
+    co.innerHTML = `<div class="callout ok"><b>Clean mapping, but only by luck.</b> Each record holds
       ${perSeg >= 1 ? `${perSeg} whole layer plane${perSeg > 1 ? "s" : ""}` :
         `part of a single plane`}, so a layer's bytes never straddle a record boundary.
       Reading ${bytes(read)} yields ${yielded} — nothing wasted, since the layers sharing a
@@ -2182,7 +2233,7 @@ function renderCaveats(d) {
     ["CacheBlend: the transfer/compute ratio is not a score", "It answers whether transfer can be hidden, not whether the cache is worth fetching. At high recompute it reports &ldquo;transfer hides&rdquo; for a request that fetched a whole cache and recomputed everything regardless. Judge that against <i>no cache at all</i>: an all-or-nothing fetch loses to not caching above <code>r* = 1 − ratio</code> (~73% on the default model), and pipelining shrinks that worst case from the whole transfer to one layer's — layer 0 has no earlier compute to hide behind, so <code>T/L</code> is a hard floor, not break-even."],
     ["CacheBlend: readiness is per leg", "Blend issues two prefetches over different group sets — the prefix leg reads attention + recurrent, the blend leg attention only. <code>expected(L)</code> must be summed over the leg's groups, not over every group in the registration."],
     ["CacheBlend: one attention group, hard limit", "<code>_classify_cb_read_groups</code> raises unless there is exactly one group labelled <code>\"attention\"</code>. A sliding-window group is labelled attention, so splitting a sliding-window hybrid is a hard incompatibility. Mamba hybrids are fine: attention + recurrent is one attention group."],
-    ["Record alignment is luck, not design", "Aligned does <i>not</i> mean one layer per record &mdash; a record holding several whole planes is fine, and so is a plane spanning several whole records. The test is whether either divides the other. <code>plan()</code> shards purely by byte count, so it holds only because plane sizes and record caps are both powers of two; Mamba hybrids use 544/784/944-token blocks and then every layer straddles. The cost is not wasted bandwidth (every record is still used by some layer) but inflated first-layer latency, which is the one cost pipelining cannot hide. LMCache should pass a plane-size alignment hint rather than rely on luck."],
+    ["One plane per record; undersize rather than share", "Decision: a record never holds pieces of two planes. Size it from the plane (<code>seg_b = plane / ceil(plane / cap)</code>), not from the cap. That makes straddling unrepresentable instead of unlikely &mdash; a record maps to one layer, a write to one slot, and <code>FetchSlot</code>'s single <code>layer_id</code> is always well defined, with no half-record handling anywhere. It costs record count (64 instead of 32 on the defaults), which M0 suggests is free or better: 1 MiB records measured 1880 MB/s against 8 MiB at 1659 MB/s. Two riders: <code>max-record-size</code> stops mattering for planes that fit under it, and where kernel groups in one object have different plane sizes the boundaries must reset per region rather than use one uniform stride."],
     ["Storage does not need reorganising", "No new keys, no layer in the key, no change to the shard plan. Putting layout into the key is the coupling AIE-89 deferred, and per-layer records would pin record size to the plane size — which the M0 sweep showed swings latency by 60–100%. Only the read <i>order</i> changes."],
     ["Slots are not tokens", "Compressed groups have <code>tokens_per_block ≠ slots_per_block</code>. Always ask <code>get_slots_per_chunk_in_sw</code>; never derive slot counts from token counts."],
     ["Tail latency, not median", "All-or-nothing waits once for the slowest transfer. Layer-major waits for the slowest transfer of <i>each</i> layer, in sequence — and a sum of maxima is worse than one maximum. Judge the transfer-vs-compute ratio at p99."],
@@ -2274,6 +2325,10 @@ bindRange("net", "net", LABEL.net, false);
 bindRange("gpu", "gpu", LABEL.gpu, false);
 bindRange("params", "params", LABEL.params, false);
 
+document.getElementById("t-aligned").addEventListener("change", e => {
+  S.aligned = e.target.checked;
+  render();
+});
 document.getElementById("t-jitter").addEventListener("change", e => {
   S.jitter = e.target.checked;
   stopSim(); buildReadiness(derive()); render();
@@ -2363,6 +2418,10 @@ function applyHash() {
   if (p.has("format")) {
     S.format = p.get("format") === "layer_outer" ? "layer_outer" : "kv_outer";
     document.getElementById("c-format").value = S.format;
+  }
+  if (p.has("aligned")) {
+    S.aligned = p.get("aligned") !== "0";
+    document.getElementById("t-aligned").checked = S.aligned;
   }
   if (p.has("jitter")) {
     S.jitter = p.get("jitter") !== "0";

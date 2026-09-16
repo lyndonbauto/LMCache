@@ -279,6 +279,68 @@ assert(Number($("#c-tokens").max) >= 944, `chunk size slider reaches 944 (max ${
 // --- Aerospike record map: alignment is luck, and the read order is the fix ---
 go("Records");
 
+// --- record sharding policy ---
+//
+// Decision: a record never holds pieces of two planes. Undersize it instead.
+// That removes every straddle by construction, so no half-record case exists
+// downstream -- a record maps to one layer, a write to one slot, and
+// FetchSlot's single layer_id is always well defined.
+const alignedTog = $("#t-aligned");
+const setAligned = v => {
+  alignedTog.checked = v;
+  alignedTog.dispatchEvent(new window.Event("change", { bubbles: true }));
+};
+const shardOf = () => {
+  const d = window.derive();
+  const lr = window.layerRanges(d, 0);
+  const sp = window.shardPlan(lr.objectBytes, S_aligned() ? lr.planeBytes : 0);
+  const need = new Set();
+  lr.ranges.forEach(r =>
+    window.segmentsFor(r.start, r.length, sp.segBytes).list.forEach(i => need.add(i)));
+  return {
+    ...sp,
+    planeBytes: lr.planeBytes,
+    read: need.size * sp.segBytes,
+    needed: lr.ranges.reduce((a, r) => a + r.length, 0),
+  };
+};
+const S_aligned = () => alignedTog.checked;
+
+assert(alignedTog.checked, "plane-aligned records are the default");
+
+// The load-bearing property: exact, at every Mamba unified block size. These
+// are the sizes that broke byte-count sharding -- none is a power of two.
+for (const tok of [544, 784, 944, 256]) {
+  setRange($("#c-tokens"), tok);
+  setAligned(true);
+  const a = shardOf();
+  assert(a.read === a.needed,
+    `aligned at ${tok} tokens: reads exactly the layer, no straddle (${a.read} vs ${a.needed})`);
+  assert(a.planeBytes % a.segBytes === 0,
+    `aligned at ${tok} tokens: the record divides the plane exactly`);
+  assert(a.segBytes <= a.cap,
+    `aligned at ${tok} tokens: still within the server's record cap`);
+
+  setAligned(false);
+  const n = shardOf();
+  if (tok !== 256) {
+    assert(n.read > n.needed,
+      `byte-count sharding at ${tok} tokens straddles, which is what we are avoiding`);
+  }
+  // Undersizing costs record count, and that is the accepted trade.
+  setAligned(true);
+  assert(shardOf().nseg >= n.nseg,
+    `aligned at ${tok} tokens uses at least as many records (the trade)`);
+}
+setRange($("#c-tokens"), 256);
+setAligned(true);
+{
+  const rc = $("#rec-callout").textContent.replace(/\s+/g, " ");
+  assert(/by construction/.test(rc), "the panel states the guarantee is structural");
+  assert(/records instead of/.test(rc), "and quantifies the extra records it costs");
+  assert(/1880 MB\/s/.test(rc), "citing the M0 measurement that smaller records were faster");
+}
+
 // An object group concatenates its kernel groups, and planes are outermost
 // *within* each one. A flat "first half K, second half V" reading mislabels a
 // layer's V plane as K and marks unrelated segments as the V plane.
@@ -315,10 +377,17 @@ function setTokens(v) {
   $("#c-tokens").dispatchEvent(new window.Event("input", { bubbles: true }));
 }
 
-setTokens(256);       // 512 KiB plane against 1 MiB records -> exact
-assert($("#rec-tag").textContent === "plane aligned",
-  `power-of-two sizes divide evenly (${$("#rec-tag").textContent})`);
-assert($("#rec-callout").textContent.includes("Clean mapping"), "reports the clean mapping");
+// --- byte-count sharding, behind the toggle ---
+//
+// This is what plan() does now, and what the aligned policy exists to replace.
+// It is kept tested because the panel still has to explain the hazard.
+setAligned(false);
+
+setTokens(256);       // 512 KiB plane against 1 MiB records -> exact by luck
+assert($("#rec-tag").textContent === "aligned by luck",
+  `power-of-two sizes happen to divide (${$("#rec-tag").textContent})`);
+assert($("#rec-callout").textContent.includes("only by luck"),
+  "and the panel says it is luck, not design");
 assert($$("#rec-segs .seg2.need").length === 2,
   `a layer needs exactly 2 records, one per plane (${$$("#rec-segs .seg2.need").length})`);
 assert($$("#rec-segs .seg2.partial").length === 0, "and neither is a partial read");
@@ -346,13 +415,21 @@ assert($("#rec-tag").textContent === "straddling",
 assert($$("#rec-segs .seg2.partial").length > 0, "straddling records are marked partial");
 
 setTokens(256);
-// the record cap is a separate axis from the RDMA write size
+// Under byte-count sharding the cap sets the record size, so raising it means
+// fewer records.
 const capBefore = $$("#rec-segs .seg2").length;
 $("#c-reccap").value = "23"; $("#c-reccap").dispatchEvent(new window.Event("input", { bubbles: true }));
 assert($$("#rec-segs .seg2").length < capBefore,
   `a larger record cap means fewer records (${capBefore} -> ${$$("#rec-segs .seg2").length})`);
-$("#c-reccap").value = "20"; $("#c-reccap").dispatchEvent(new window.Event("input", { bubbles: true }));
 
+// Under the aligned policy it does not: the record size comes from the plane,
+// so the cap only binds when a plane exceeds it. That retires max-record-size
+// as a tuning knob for anything smaller than one plane.
+setAligned(true);
+const alignedAtBigCap = $$("#rec-segs .seg2").length;
+$("#c-reccap").value = "20"; $("#c-reccap").dispatchEvent(new window.Event("input", { bubbles: true }));
+assert($$("#rec-segs .seg2").length === alignedAtBigCap,
+  `aligned: raising the record cap changes nothing while a plane fits (${alignedAtBigCap})`);
 // layer-major read order must front-load the segments layer 0 needs
 const lm = $$("#rec-order-lm .ord:not(.ell)").map(e => e.textContent);
 const seq = $$("#rec-order-seq .ord:not(.ell)").map(e => e.textContent);
