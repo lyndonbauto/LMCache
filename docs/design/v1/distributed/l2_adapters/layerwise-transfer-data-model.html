@@ -451,6 +451,14 @@
   <div class="field">
     <label>Model size <b id="v-params">8 B</b></label>
     <input type="range" id="c-params" min="1" max="140" step="1" value="8" />
+    <small style="display:block;color:var(--dimmer);font-size:11px;line-height:1.35;margin-top:4px">
+      Total parameters, in billions. Drives <i>compute only</i> &mdash; prefill at
+      ~2 FLOPs per parameter per token, split evenly across <i>Layers</i>. It does not
+      affect KV size, which comes from <i>Layers</i> &times; <i>KV heads</i> &times;
+      <i>Head dim</i>. The defaults are a consistent pair (8 B, 32 layers, 8 GQA
+      heads, 128 dim &mdash; a Llama-3-8B shape); set them apart and the ratio
+      describes no real model.
+    </small>
   </div>
 
   <h2 class="sec">Focus</h2>

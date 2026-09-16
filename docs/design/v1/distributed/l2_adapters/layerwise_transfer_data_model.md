@@ -432,7 +432,7 @@ ratio_blend = transfer / (r × compute) = ratio_dense / r
 
 At the CacheBlend paper's `r ≈ 0.15` that is a **6.7× worse** transfer-to-compute
 ratio. Using the walkthrough's default model (32 layers, 8 chunks of 256
-tokens, 30 B parameters, 400 TFLOP/s, 12.2 GB/s), dense sits at ratio 0.27 —
+tokens, 8 B parameters, 400 TFLOP/s, 12.2 GB/s), dense sits at ratio 0.27 —
 transfer comfortably hidden — while blend lands at **1.79, i.e. network-bound**.
 Pipelining still starts layer 0 sooner, but the ceiling becomes bandwidth
 rather than compute, so the win is capped.

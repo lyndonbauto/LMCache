@@ -483,6 +483,25 @@ assert($$("#lane-cpu .blk.stall").length > 0, "slow link + fast GPU: GPU stalls 
 assert($("#tl-callout").textContent.includes("Network bound"), "reports network-bound starvation");
 assert(Number(kpi("Transfer ÷ compute")) > 1, `ratio above 1 (${kpi("Transfer ÷ compute")})`);
 
+// Model size drives compute only, and the defaults must be a self-consistent
+// model -- the ratio is meaningless if the parameter count and the KV geometry
+// describe different models, and they are set by independent sliders.
+{
+  const d0 = window.derive();
+  const before = d0.timing.avgNet;
+  setRange($("#c-params"), 70);
+  const d1 = window.derive();
+  assert(d1.timing.avgNet === before,
+    "model size leaves KV transfer untouched");
+  assert(d1.timing.avgCpu > d0.timing.avgCpu,
+    "and raises compute, so it only moves the ratio's denominator");
+  setRange($("#c-params"), 8);
+  assert($("#v-params").textContent === "8 B", "default model size is 8 B");
+  assert($("#v-layers").textContent === "32" && $("#v-kvheads").textContent === "8" &&
+         $("#v-headdim").textContent === "128",
+    "which is consistent with the default KV geometry (Llama-3-8B shape)");
+}
+
 // pipelining must never lose to the all-or-nothing protocol shape
 setRange(netSlider, 122); setRange(gpuSlider, 400);
 const pipeMs = parseFloat(kpi("Pipelined")), aonMs = parseFloat(kpi("All-or-nothing"));
