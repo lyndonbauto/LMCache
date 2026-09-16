@@ -218,6 +218,7 @@
   .seg2.k { background: #173a63; color: #9ecbff; }
   .seg2.v { background: #134b45; color: #8ff0e6; }
   .seg2.need { outline: 2px solid #fff; outline-offset: 1px; color: #fff; font-weight: 700; }
+  .seg2.faint { opacity: .32; }
   .seg2.partial {
     background-image: repeating-linear-gradient(45deg, #0000, #0000 4px, #ffffff2e 4px, #ffffff2e 8px);
   }
@@ -803,6 +804,37 @@ function layerRanges(d, layer) {
 }
 
 // Reproduces AerospikeNativeConnector::plan(): shard purely by byte count.
+// The object group's byte layout, region by region, in the order they are
+// concatenated.
+//
+// This is the detail that makes a flat "first half K, second half V" reading
+// wrong: an object group holds its kernel groups back to back, and the planes
+// are outermost *within* each kernel group. So a two-kernel-group object is
+//
+//   [kg0 K][kg0 V][kg1 K][kg1 V]
+//
+// not [all K][all V]. With a sliding-window hybrid and groups merged -- the
+// default -- that is exactly the shape, and assuming the flat one puts a
+// layer's V plane in the region labelled K.
+function planeMap(d, og) {
+  const regions = [];
+  let at = 0;
+  for (const g of d.objectGroups.get(og)) {
+    for (let p = 0; p < d.kvSize; p++) {
+      const length = g.layers.length * g.planeBytes;
+      regions.push({
+        kind: g.kind,
+        plane: d.kvSize > 1 ? (p === 0 ? "K" : "V") : "KV",
+        start: at,
+        length,
+        kg: g,
+      });
+      at += length;
+    }
+  }
+  return regions;
+}
+
 function shardPlan(objectBytes) {
   const cap = Math.pow(2, S.reccapPow);
   if (objectBytes <= cap) return { nseg: 1, segBytes: objectBytes, cap };
@@ -1732,10 +1764,19 @@ function renderRecords(d) {
   const aligned = segBytes % planeBytes === 0 || planeBytes % segBytes === 0;
   document.getElementById("rec-tag").textContent =
     nseg === 1 ? "single record" : (aligned ? "plane aligned" : "straddling");
+  const ogKgs = d.objectGroups.get(kg.og);
   document.getElementById("rec-sub").innerHTML =
     `Object group ${kg.og} is <b>${bytes(objectBytes)}</b> per chunk. At a
      <b>${bytes(Math.pow(2, S.reccapPow))}</b> record cap that is
-     <b>${nseg}</b> record${nseg > 1 ? "s" : ""} of <b>${bytes(segBytes)}</b>.`;
+     <b>${nseg}</b> record${nseg > 1 ? "s" : ""} of <b>${bytes(segBytes)}</b>.` +
+    (ogKgs.length > 1
+      ? ` It holds <b>${ogKgs.length} kernel groups</b> back to back, and the planes are
+         outermost <i>within</i> each one — so the layout is
+         <code>${ogKgs.map(g => `[${g.kind} K][${g.kind} V]`).join("")}</code>, not one K half
+         and one V half. Layer ${S.sel} lives in the <b>${kg.kind}</b> group, so the
+         ${ogKgs.length > 1 ? "faded" : ""} segments belonging to the other group can never
+         serve it, however the records are cut.`
+      : "");
 
   // Which segments this layer needs. A record is only a *wasteful* read when
   // the two sizes do not divide into each other -- a plane that is an exact
@@ -1747,28 +1788,41 @@ function renderRecords(d) {
   });
   const straddles = !aligned;
 
+  // Regions are per kernel group *and* per plane, so name them that way rather
+  // than pretending the object is one K half and one V half.
+  const regions = planeMap(d, kg.og);
+  const regionOf = byteOffset =>
+    regions.find(r => byteOffset >= r.start && byteOffset < r.start + r.length) ||
+    regions[regions.length - 1];
+  const multiKg = d.objectGroups.get(kg.og).length > 1;
+  const label = r => (multiKg ? `${r.kind} ${r.plane}` : `${r.plane} plane`);
+
   const planesEl = document.getElementById("rec-planes");
   planesEl.innerHTML = "";
-  if (d.kvSize > 1) {
-    const half = Math.ceil(nseg / 2);
-    planesEl.appendChild(el("span", "pk", `K plane — segments 0…${half - 1}`));
-    planesEl.appendChild(el("span", "pv", `V plane — segments ${half}…${nseg - 1}`));
-  } else {
-    planesEl.appendChild(el("span", "pk", `all ${nseg} segments, layers in order`));
-  }
+  regions.forEach(r => {
+    const first = Math.floor(r.start / segBytes);
+    const last = Math.floor((r.start + r.length - 1) / segBytes);
+    const sp = el("span", r.plane === "V" ? "pv" : "pk",
+      `${label(r)} — segment${first === last ? " " + first : `s ${first}…${last}`}`);
+    sp.style.opacity = r.kg === kg ? "1" : "0.5";
+    planesEl.appendChild(sp);
+  });
 
   const segsEl = document.getElementById("rec-segs");
   segsEl.innerHTML = "";
   const shown = Math.min(nseg, 96);
   for (let i = 0; i < shown; i++) {
-    // which plane this segment mostly belongs to, for colour only
-    const half = objectBytes / d.kvSize;
-    const cls = d.kvSize > 1 && (i * segBytes) >= half ? "v" : "k";
-    const box = el("div", "seg2 " + cls +
+    // Colour by the region the segment starts in. A segment that spans two
+    // regions takes the colour of the first; that only happens when the sizes
+    // do not divide, which the straddling callout already flags.
+    const r = regionOf(i * segBytes);
+    const box = el("div", "seg2 " + (r.plane === "V" ? "v" : "k") +
+      (r.kg === kg ? "" : " faint") +
       (need.has(i) ? " need" : "") + (need.has(i) && straddles ? " partial" : ""), String(i));
     box.title = need.has(i)
       ? `segment ${i} — holds part of layer ${S.sel}'s ${need.get(i)} plane`
-      : `segment ${i}`;
+      : `segment ${i} — ${label(r)}` +
+        (r.kg === kg ? "" : `, a different kernel group, so it can never serve layer ${S.sel}`);
     segsEl.appendChild(box);
   }
   if (nseg > shown) segsEl.appendChild(el("div", "seg2", `+${nseg - shown}`));

@@ -278,6 +278,37 @@ assert(Number($("#c-tokens").max) >= 944, `chunk size slider reaches 944 (max ${
 
 // --- Aerospike record map: alignment is luck, and the read order is the fix ---
 go("Records");
+
+// An object group concatenates its kernel groups, and planes are outermost
+// *within* each one. A flat "first half K, second half V" reading mislabels a
+// layer's V plane as K and marks unrelated segments as the V plane.
+{
+  const d = window.derive();
+  const kgs = d.objectGroups.get(0);
+  assert(kgs.length === 2,
+    "the default sliding-window hybrid merges two kernel groups into one object");
+  const planes = $("#rec-planes").textContent;
+  assert(/attn K.*attn V.*sw K.*sw V/s.test(planes),
+    `regions are named per kernel group and plane (${planes})`);
+  assert(!/^K plane/.test(planes),
+    "and not as a single K half followed by a single V half");
+
+  // Layer 0 is in the attn group: one K segment and one V segment, not two K.
+  const segs = $$("#rec-segs .seg2");
+  const needed = segs.filter(s => s.classList.contains("need"));
+  assert(needed.length === 2, "layer 0 needs exactly two segments, one per plane");
+  assert(needed.filter(s => s.classList.contains("k")).length === 1 &&
+         needed.filter(s => s.classList.contains("v")).length === 1,
+    "one is coloured K and the other V — previously both read as K");
+
+  // Segments of the other kernel group can never serve this layer.
+  const faint = segs.filter(s => s.classList.contains("faint"));
+  assert(faint.length > 0 && faint.every(s => !s.classList.contains("need")),
+    "the other kernel group's segments are faded and never needed");
+  assert(/can never serve it/.test($("#rec-sub").textContent.replace(/\s+/g, " ")),
+    "and the panel says why they are unread, rather than leaving it to be inferred");
+}
+
 setArch("uniform");   // 32 layers in one group, the worked example
 function setTokens(v) {
   $("#c-tokens").value = String(v);

@@ -467,6 +467,27 @@ looks like a pure performance knob. Note the asymmetry: the flag is *required*
 for Mamba hybrids and that configuration is fine, while for sliding-window
 hybrids the flag is optional and turning it on is what breaks blend.
 
+### Region layout within an object group
+
+An object group concatenates its kernel groups, and the planes are outermost
+*within* each kernel group. So a two-kernel-group object is
+
+```
+[kg0 K][kg0 V][kg1 K][kg1 V]
+```
+
+and **not** `[all K][all V]`. With a sliding-window hybrid and
+`--separate-object-groups` off — the default — that is exactly the shape.
+
+This matters when mapping a layer to records. On the walkthrough's defaults the
+attention group holds 6 layers and the sliding-window group 26, giving a 32 MiB
+object in 32 records of 1 MiB. Layer 0's two planes sit at byte 0 and byte
+3 MiB, i.e. records 0 and 3 — both inside the *attention* group's region. A flat
+half-and-half reading puts the K/V boundary at 16 MiB and so mislabels record 3
+as part of the K plane, while marking records 16–31 as "the V plane" when they
+are really the sliding-window group's two planes and can never serve layer 0 at
+all. Regions must be enumerated per kernel group and per plane.
+
 ## What must not be assumed
 
 - **One global per-layer stride.** Valid within a kernel group, wrong across
@@ -484,6 +505,9 @@ hybrids the flag is optional and turning it on is what breaks blend.
 - **Slot indices are unique per fetch.** They must be unique per *request*.
 - **That readiness can be counted over every object group.** Under CacheBlend
   each leg reads a different subset, so `expected(L)` is per leg.
+- **That an object group is one K half and one V half.** It is
+  `[kg0 K][kg0 V][kg1 K][kg1 V]` — planes are outermost within each kernel
+  group, not across the object.
 
 ## Open questions
 
