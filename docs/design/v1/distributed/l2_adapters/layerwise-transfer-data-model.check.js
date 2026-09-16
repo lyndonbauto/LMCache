@@ -689,6 +689,43 @@ function finish() {
       errors.forEach(e => console.log("  - " + e));
       process.exit(1);
     }
+// ---- scenario matrix -------------------------------------------------------
+// The five operating points exist to stop the pipelining percentage being read
+// in isolation. The load-bearing property is that pipelining's *absolute*
+// saving depends only on the link, so rows differing solely in GPU speed or
+// parameter count must save the same number of milliseconds while reporting
+// very different percentages. If that ever stops holding, the panel's argument
+// is wrong and not merely stale.
+{
+  go("The payoff");
+  const rows = $$("#tl-matrix .smat tbody tr")
+    .map(r => [...r.querySelectorAll("td")].map(c => c.textContent.trim()));
+  assert(rows.length === 5, `expected 5 scenarios, got ${rows.length}`);
+
+  const cfg = rows.map(r => r[0].replace(/\s+/g, " "));
+  assert(cfg[0].startsWith("12.5 GB/s · 400 TFLOP/s · 8 B"), `row 0 config: ${cfg[0]}`);
+  assert(cfg[4].startsWith("25.0 GB/s · 800 TFLOP/s · 40 B"), `row 4 config: ${cfg[4]}`);
+
+  const savedMs = rows.map(r => parseFloat(r[6]));
+  // Rows 1-3 share a 12.5 GB/s link and differ only in GPU and parameters.
+  assert(Math.abs(savedMs[1] - savedMs[2]) < 0.05,
+    `same link must save the same ms regardless of GPU: ${savedMs[1]} vs ${savedMs[2]}`);
+  // ...yet the percentages must differ, which is the whole point of the panel.
+  const pct = rows.map(r => parseFloat(r[5]));
+  assert(pct[2] > pct[1] * 1.5,
+    `a faster GPU must inflate the percentage without changing the saving: ${pct[1]} vs ${pct[2]}`);
+  // Doubling the link halves the saving.
+  assert(Math.abs(savedMs[3] * 2 - savedMs[1]) < 0.3,
+    `doubling the link should halve the saving: ${savedMs[1]} vs ${savedMs[3]}`);
+  // Caching's win moves opposite to pipelining's.
+  const cache = rows.map(r => parseFloat(r[3]));
+  assert(cache[1] > cache[0] && pct[1] < pct[0],
+    "more parameters must raise caching's win and lower pipelining's");
+  // Peak overlap is hardware independent: it depends only on layer count.
+  const peak = rows.map(r => parseFloat(r[7]));
+  assert(new Set(peak).size === 1, `peak pipelining must be invariant, got ${peak}`);
+}
+
     console.log("PASS");
     process.exit(0);
 }

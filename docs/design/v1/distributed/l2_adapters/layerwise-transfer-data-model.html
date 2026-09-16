@@ -348,6 +348,22 @@
   .fstep.alllayers { border-left-color: var(--warn); }
   .fstep.alllayers .fnote { color: #ffb4ae; }
   .fstep .farrow { color: var(--dimmer); margin-right: 5px; font-family: ui-monospace, monospace; }
+  .smat { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+  .smat th {
+    text-align: right; font-weight: 600; color: var(--dimmer); font-size: 10.5px;
+    padding: 0 8px 5px; border-bottom: 1px solid var(--line); white-space: nowrap;
+  }
+  .smat th:first-child, .smat td:first-child { text-align: left; }
+  .smat td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  .smat tbody tr:hover { background: var(--panel-2); }
+  .smat tr.here td { background: rgba(88,166,255,.10); }
+  .smat td.cfg { color: var(--dim); font-variant-numeric: tabular-nums; }
+  .smat td.big { color: var(--hit); font-weight: 650; }
+  .smat td.small { color: var(--warn); }
+  .smat .tag {
+    display: inline-block; font-size: 9.5px; color: var(--dimmer);
+    border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; margin-left: 6px;
+  }
 </style>
 </head>
 <body>
@@ -648,6 +664,7 @@
     <div class="compare" id="tl-kpis"></div>
     <div id="tl-callout"></div>
     <div id="tl-scope"></div>
+    <div id="tl-matrix"></div>
   </div>
 
   <!-- P10: readiness matrix -->
@@ -2038,6 +2055,98 @@ function renderImmediate(d) {
 
 function ms(v) { return v >= 100 ? v.toFixed(0) + " ms" : v.toFixed(v < 10 ? 2 : 1) + " ms"; }
 
+// Five fixed operating points, held against the same prompt and model geometry
+// so only link speed, GPU throughput and active parameter count vary.
+//
+// The point of the table is that the two effects move in opposite directions.
+// A faster GPU or more parameters shrinks the ratio, which makes caching look
+// better and pipelining look worse; a faster link does the same to both. Seeing
+// them side by side is the only way to stop reading one column in isolation.
+const SCENARIOS = [
+  { net: 125, gpu: 400, params: 8 },
+  { net: 125, gpu: 400, params: 40 },
+  { net: 125, gpu: 800, params: 40 },
+  { net: 250, gpu: 400, params: 40 },
+  { net: 250, gpu: 800, params: 40 },
+];
+
+// Evaluate `fn` with the operating point temporarily applied, then restore.
+// schedule() reads S directly, so this is the least invasive way to price a
+// configuration other than the one the sliders are on.
+function withOperatingPoint(sc, fn) {
+  const saved = { net: S.net, gpu: S.gpu, params: S.params };
+  S.net = sc.net; S.gpu = sc.gpu; S.params = sc.params;
+  try { return fn(); } finally { Object.assign(S, saved); }
+}
+
+function renderScenarios(d) {
+  const host = document.getElementById("tl-matrix");
+  const rows = SCENARIOS.map(sc => withOperatingPoint(sc, () => {
+    const t = schedule(d);
+    // Pipelining's best case is the partial hit where the two lanes balance,
+    // which is where the fraction still needing prefill equals the ratio.
+    const peak = t.ratio < 1 ? schedule(d, t.ratio).savedPct : t.savedPct;
+    return { sc, t, peak };
+  }));
+
+  const cells = rows.map(({ sc, t, peak }) => {
+    const here = sc.net === S.net && sc.gpu === S.gpu && sc.params === S.params;
+    const cacheSaves = Math.max(0, 1 - t.ratio) * 100;
+    return `<tr class="${here ? "here" : ""}">
+      <td class="cfg">${(sc.net / 10).toFixed(1)} GB/s &middot; ${sc.gpu} TFLOP/s &middot;
+        ${sc.params} B${here ? '<span class="tag">sliders</span>' : ""}</td>
+      <td>${ms(t.transferAll)}</td>
+      <td>${ms(t.computeAll)}</td>
+      <td class="big">${cacheSaves.toFixed(0)}%</td>
+      <td>${t.ratio.toFixed(3)}</td>
+      <td class="${t.savedPct < 5 ? "small" : ""}">${t.savedPct.toFixed(1)}%</td>
+      <td class="cfg">${ms(t.saved)}</td>
+      <td>${peak.toFixed(0)}%</td>
+    </tr>`;
+  }).join("");
+
+  const base = rows[0], fastGpu = rows[2], fastNet = rows[3], both = rows[4];
+  host.innerHTML = `<div class="callout"><b>Five operating points, same prompt.</b>
+    ${S.layers} layers, ${(S.chunks * S.tokens).toLocaleString()} tokens,
+    ${bytes(d.kgs.reduce((a, g) => a + g.groupBytes * g.chunks, 0))} of cache. Only the link,
+    the GPU and the active parameter count change.
+    <table class="smat">
+      <thead><tr>
+        <th>link &middot; GPU &middot; active params</th>
+        <th>fetch</th><th>prefill</th><th>caching saves</th>
+        <th>ratio</th><th>pipelining</th><th>&nbsp;&nbsp;in ms</th><th>peak pipelining</th>
+      </tr></thead>
+      <tbody>${cells}</tbody>
+    </table>
+    <br><b>Reading the columns.</b> <i>Caching saves</i> is what you gain by fetching instead of
+    recomputing &mdash; the large, unconditional win. <i>Pipelining</i> is the extra gain from
+    overlapping delivery with compute on top of that, and <i>in ms</i> is that same gain in
+    absolute terms. <i>Peak pipelining</i> is what overlap is worth on a partial hit where the
+    two lanes balance, which is the case CacheBlend creates on purpose.
+    <br><br><b>The percentage column is mostly an illusion, and the ms column says why.</b>
+    Pipelining recovers the transfer minus the one layer it can never hide, so its absolute
+    saving is <code>${ms(rows[1].t.saved)}</code> at 12.5 GB/s and
+    <code>${ms(rows[3].t.saved)}</code> at 25 GB/s &mdash; and that is the whole story. Rows 2
+    and 3 differ only in GPU speed and save an identical
+    <code>${ms(rows[2].t.saved)}</code>, yet report
+    ${rows[1].t.savedPct.toFixed(1)}% and ${rows[2].t.savedPct.toFixed(1)}%. Nothing about
+    pipelining changed; the denominator halved because the faster GPU cut the prefill it is
+    measured against.
+    <br><br><b>So only two things actually move the needle.</b> Link speed sets what pipelining
+    has to win &mdash; doubling it to 25 GB/s halves both the fetch and the saving. Everything
+    else (parameters, GPU) moves only the prefill, which changes how large that fixed saving
+    looks as a fraction. Going 8 B &rarr; 40 B takes caching from
+    ${(Math.max(0, 1 - rows[0].t.ratio) * 100).toFixed(0)}% to
+    ${(Math.max(0, 1 - rows[1].t.ratio) * 100).toFixed(0)}% and pipelining from
+    ${rows[0].t.savedPct.toFixed(1)}% to ${rows[1].t.savedPct.toFixed(1)}% &mdash; one fact
+    reported twice, not two findings.
+    <br><br><b>The column that does not move is <i>peak pipelining</i>.</b> It sits at
+    ${rows[0].peak.toFixed(0)}% in every row, because on a balanced partial hit the saving is
+    <code>(1 &minus; 1/${S.layers})/2</code> of the total whatever the hardware does. That
+    invariance is the argument for this work: the hit-rate regime decides whether pipelining
+    pays, and no amount of faster network or GPU decides it for you.</div>`;
+}
+
 function renderTimeline(d) {
   const t = d.timing;
   const span = Math.max(t.allOrNothing, t.pipelined) * 1.02;
@@ -2171,6 +2280,8 @@ function renderTimeline(d) {
     that there is too little compute to hide the transfer behind; above it the transfer runs
     out first. A complete hit wins nothing from pipelining because no prefill remains to
     overlap with.</div>`;
+
+  renderScenarios(d);
 }
 
 // ---- readiness simulation ----
