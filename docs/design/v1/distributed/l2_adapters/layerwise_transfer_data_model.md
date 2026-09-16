@@ -255,20 +255,107 @@ model actually consumes them. Three further constraints come with them:
   more than one object group. The flag is off by default, which means a
   sliding-window hybrid normally puts all its kernel groups in *one* object
   group — both shapes must work.
-- The pages are **byte-opaque**, so CacheGen and CacheBlend do not apply. That
-  removes the CacheBlend interaction from scope for this family.
+- The pages are **byte-opaque**, so CacheGen does not apply and the recurrent
+  state itself cannot be blended. This does *not* put the family outside
+  CacheBlend: `_classify_cb_read_groups` handles recurrent groups explicitly,
+  giving them to the prefix leg only. See the CacheBlend section below.
 - vLLM forces a **unified block size of 544–944 tokens** (model-specific, read
   from its startup log), and the LMCache chunk size must be a multiple of it.
   Chunks are therefore much larger than the 256 typical elsewhere, which moves
   per-layer payload sizes and the slot budget accordingly.
 
 **Aux groups** (`ObjectGroupInfo.aux`, `extra_object_group_tag > 0`) are
-connector-private — notably the blend fused-aux pool. Out of scope; CacheBlend
-has its own retrieve path and its own all-or-nothing scatter invariant.
+connector-private — notably the blend fused-aux pool. The blend leg reads at
+most one of them alongside the attention group.
 
 **Compressed groups** have `tokens_per_block != slots_per_block`, so
 `num_slots` is not the token count. Always take slot counts from
 `get_slots_per_chunk_in_sw` / `calculate_slots`, never from tokens directly.
+
+## CacheBlend
+
+CacheBlend reuses chunks that are *not* a prefix of the prompt, rotating their
+K vectors to new positions (re-RoPE) and scattering them into the request's
+paged blocks. It splits cleanly across this design: **one half comes free and
+the other does not**, and the split is worth being precise about, because it
+determines how much blend-specific work the pipelining tickets carry.
+
+### The half that comes free: L2 → L1
+
+Blend prefetches through `storage_manager.submit_prefetch_task` and polls
+`query_prefetch_status` — the *same* calls the dense path uses
+(`blend/lookup.py:203`, `:371`). Nothing in the L2 adapter, the object model,
+the record sharding, or the RDMA server-push is blend-aware, and none of it
+needs to be. Blend inherits the bandwidth and the CPU offload unchanged.
+
+It arguably benefits more than the dense path does. `CB_UNIFIED_LOOKUP` issues
+**two** prefetches — a prefix one and a sparse one — and returns `None` to
+defer until both have landed in L1, so a blend request waits on the slower of
+two fetches rather than one. The sparse fetch asks for chunks scattered
+arbitrarily across the cluster by digest, which is precisely the access pattern
+the current connector handles worst: per chunk, a metadata GET followed by
+serial segment GETs, so `K` scattered chunks cost `K × (1 + nseg)` round trips.
+A server-side push collapses that to one info command plus the writes. **The
+strongest single argument for the RDMA work is blend's sparse leg**, not the
+dense prefix path that M0 already showed reaching 98% of line rate on TCP.
+
+### The half that does not: L1 → GPU
+
+Blend does not use the dense transfer path to reach the GPU. `CB_RETRIEVE_PRE_COMPUTED`
+is a blocking RPC that runs blend's own fused re-RoPE-and-scatter kernel, and
+that kernel is dispatched **per kernel group with every layer at once** — the
+spec passes `num_layers = buf0.shape[1]`, the whole layer extent of the group
+(`blend/retrieve.py:215`). There is no layer loop to interrupt.
+
+So per-layer delivery into L1 does not by itself pipeline blend. Making it
+pipeline would mean splitting that kernel per layer and making the retrieve RPC
+incremental — a separate, larger change whose payoff is less clear, since the
+re-RoPE compute is not obviously large enough to hide behind. **Recommend
+scoping blend pipelining out of the current tickets** and taking the free L2→L1
+win, with the per-layer scatter revisited only if measurement justifies it.
+
+### The two legs, and what they mean for readiness
+
+`_classify_cb_read_groups` (`blend/read_set.py:39`) splits a registration's
+object groups into two read sets:
+
+| Leg | Reads | Why |
+| --- | --- | --- |
+| prefix | attention + recurrent | Contiguous history, so position-bound state is valid. |
+| blend | attention + aux | Relocates chunks to new positions; a recurrent snapshot is the result of a scan ending at a fixed position and cannot be moved. |
+
+Each leg keys, locks, and reads only its own set. The consequence for the
+readiness model: **`expected(L)` must be summed over the leg's group set, not
+over every group in the registration.** This is the same rule already stated
+for sliding-window groups ("participating chunks is group-dependent"), extended
+one level up — participating *groups* is leg-dependent. A readiness tracker
+that counts slots across all groups will never complete the blend leg, because
+the recurrent group's slots are never requested on it.
+
+### The hard incompatibility
+
+Blend requires **exactly one** object group labelled `"attention"`, and at most
+one `"aux"`. The label comes from `kv_layer_groups.py:617`:
+
+```python
+"aux" if g.aux else ("recurrent" if g.recurrent else "attention")
+```
+
+A sliding-window group is neither aux nor recurrent, so it is labelled
+`"attention"`. That yields:
+
+| Architecture | `--separate-object-groups` | Groups | Blend |
+| --- | --- | --- | --- |
+| Uniform | off (default) | `["attention"]` | works |
+| Sliding-window hybrid | off (default) | `["attention"]` | works |
+| Sliding-window hybrid | **on** | `["attention", "attention"]` | **`RuntimeError`** |
+| Mamba/GDN hybrid | on (required) | `["attention", "recurrent"]` | works |
+
+The failure mode is a startup-time `RuntimeError`, not silent corruption, so it
+is safe — but it is easy to hit by accident, since `--separate-object-groups`
+looks like a pure performance knob. Note the asymmetry: the flag is *required*
+for Mamba hybrids and that configuration is fine, while for sliding-window
+hybrids the flag is optional and turning it on is what breaks blend.
 
 ## What must not be assumed
 
@@ -285,6 +372,8 @@ has its own retrieve path and its own all-or-nothing scatter invariant.
   [`aerospike_rdma.md`](aerospike_rdma.md#why-arrival-order-cannot-be-trusted).
 - **All chunks participate in every group.** False for sliding-window groups.
 - **Slot indices are unique per fetch.** They must be unique per *request*.
+- **That readiness can be counted over every object group.** Under CacheBlend
+  each leg reads a different subset, so `expected(L)` is per leg.
 
 ## Open questions
 
@@ -302,6 +391,11 @@ has its own retrieve path and its own all-or-nothing scatter invariant.
    is only useful if a per-layer H2D copy can be issued, which interacts with
    the existing batched transfer kernel.
 4. **Recurrent group semantics**, per above.
+5. **Is blend's sparse leg the better benchmark target?** The arithmetic above
+   says yes — `K × (1 + nseg)` round trips for scattered chunks, against a
+   dense prefix path that already reaches 98% of line rate on TCP. If it holds,
+   the RDMA value story should be led by blend, not by bulk throughput. Needs
+   a measurement that M0 did not take.
 
 ## Relationship to the tickets
 

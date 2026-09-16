@@ -360,6 +360,13 @@
     </select>
   </div>
   <label class="toggle">
+    <input type="checkbox" id="t-blend" />
+    <span>CacheBlend
+      <small>Reuse non-prefix chunks by re-RoPE. Reads object groups in two
+        legs, and constrains how they may be split.</small>
+    </span>
+  </label>
+  <label class="toggle">
     <input type="checkbox" id="t-separate" />
     <span><code>--separate-object-groups</code>
       <small>One object group per attention window. Off by default in LMCache;
@@ -454,6 +461,15 @@
     <div class="callout"><b>No layer coordinate exists here.</b> <code>ObjectKey</code> carries
       <code>object_group_id</code> and nothing finer, so &ldquo;layer 7 arrived&rdquo; can never be
       answered by a key. It has to be derived from byte ranges inside a payload.</div>
+
+    <div id="blend-block" class="hidden">
+      <h3 style="margin-top:18px">CacheBlend reads these in two legs</h3>
+      <p class="sub">Blend reuses chunks that are <i>not</i> a prefix of the prompt, rotating
+        their keys to new positions. It issues two separate prefetches, and they read
+        different object groups.</p>
+      <div id="blend-legs"></div>
+      <div id="blend-callout"></div>
+    </div>
   </div>
 
   <!-- P5/P6: payload bar -->
@@ -561,7 +577,7 @@
 // ---------- state ----------
 const S = {
   layers: 32, kvheads: 8, headdim: 128, dtype: 2,
-  format: "kv_outer", arch: "sw", separate: false,
+  format: "kv_outer", arch: "sw", separate: false, blend: false,
   chunks: 8, tokens: 256, maxwritePow: 20, reccapPow: 20,
   net: 122, gpu: 400, params: 8, jitter: true,
   sel: 0, phase: 0,
@@ -663,6 +679,38 @@ function derive() {
   const d = { kgs, byLayer, objectGroups, hidden, kvSize, maxWrite, slotsPerChunk, totalSlots };
   d.timing = schedule(d);
   return d;
+}
+
+// Object-group kind labels, as kv_layer_groups.py:617 derives them:
+//   "aux" if g.aux else ("recurrent" if g.recurrent else "attention")
+// Note what that means for a sliding-window group -- it is neither aux nor
+// recurrent, so it is labelled "attention". That is the whole reason splitting
+// a sliding-window hybrid breaks blend.
+function objectGroupKinds(d) {
+  return [...d.objectGroups.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, gs]) => (gs.every(g => g.kind === "rec") ? "recurrent" : "attention"));
+}
+
+// Mirror of blend's _classify_cb_read_groups.
+//
+// The prefix leg loads contiguous history, so it may read recurrent state.
+// The blend leg relocates chunks to new positions, and a recurrent snapshot is
+// the result of a sequential scan at one position -- it cannot be moved -- so
+// that leg reads attention (and aux) only.
+function blendLegs(d) {
+  const kinds = objectGroupKinds(d);
+  const attn = kinds.map((k, i) => (k === "attention" ? i : -1)).filter(i => i >= 0);
+  const recurrent = kinds.map((k, i) => (k === "recurrent" ? i : -1)).filter(i => i >= 0);
+  return {
+    kinds,
+    attn,
+    recurrent,
+    // "Blend supports exactly one attention object group and at most one aux"
+    valid: attn.length === 1,
+    blendGids: attn,
+    prefixGids: [...attn, ...recurrent].sort((a, b) => a - b),
+  };
 }
 
 // Byte ranges of one layer within its object-group payload, one per kv plane.
@@ -819,8 +867,13 @@ const PHASES = [
       becomes one stored object. So a request is a grid: chunks across, object groups down.</p>
       <p>Those objects are spread over the cluster by digest, so <b class="key">one layer's data
       lives on several different machines</b> and arrives via several independent fetches in an
-      order nobody controls.</p>`,
-    cites: "ObjectKey(chunk_hash, model_name, kv_rank, object_group_id, cache_salt)",
+      order nobody controls.</p>
+      <p>Turn on <i>CacheBlend</i> to see the one feature that cares which object groups exist.
+      It is also the feature with <b class="key">most to gain</b> from the RDMA work: its second
+      prefetch asks for chunks scattered arbitrarily across the cluster, which is the worst case
+      for today's metadata-then-segment round trips and the best case for a server-side
+      push.</p>`,
+    cites: "ObjectKey(chunk_hash, model_name, kv_rank, object_group_id, cache_salt) · blend/read_set.py:39",
     panels: ["p-keys"],
   },
   {
@@ -1183,6 +1236,61 @@ function renderKeys(d) {
       grid.appendChild(cell);
     }
   });
+
+  renderBlend(d);
+}
+
+function renderBlend(d) {
+  const block = document.getElementById("blend-block");
+  block.classList.toggle("hidden", !S.blend);
+  if (!S.blend) return;
+
+  const legs = blendLegs(d);
+  const wrap = document.getElementById("blend-legs");
+  wrap.innerHTML = "";
+
+  const row = (name, gids, note) => {
+    const e = el("div");
+    e.style.cssText = "display:flex;align-items:baseline;gap:10px;margin-bottom:7px;flex-wrap:wrap";
+    const tag = el("span", null, name);
+    tag.style.cssText = "background:var(--panel-2);border:1px solid var(--line);" +
+      "border-radius:5px;padding:2px 9px;font-size:11px;font-weight:650;white-space:nowrap";
+    e.appendChild(tag);
+    const g = el("span");
+    g.style.cssText = "font-family:ui-monospace,monospace;font-size:12px;color:var(--text)";
+    g.textContent = gids.length ? `object groups {${gids.join(", ")}}` : "nothing to read";
+    e.appendChild(g);
+    const n = el("span");
+    n.style.cssText = "font-size:12px;color:var(--dim)";
+    n.textContent = note;
+    e.appendChild(n);
+    wrap.appendChild(e);
+  };
+
+  row("prefix leg", legs.prefixGids, "contiguous history — attention + recurrent state");
+  row("blend leg", legs.blendGids, "relocatable chunks — attention only, never recurrent");
+
+  const co = document.getElementById("blend-callout");
+  if (!legs.valid) {
+    co.innerHTML = `<div class="callout"><b>This configuration does not run.</b> Blend resolves its
+      read set by group kind, and a sliding-window group is labelled
+      <code>"attention"</code> — it is neither aux nor recurrent. Splitting the hybrid therefore
+      produces ${legs.attn.length} attention groups, and
+      <code>_classify_cb_read_groups</code> raises:
+      <br><code style="color:#ffb4ae">Blend supports exactly one attention object group and at
+      most one aux (fused-aux) object group; got ${JSON.stringify(legs.kinds)}.</code>
+      <br>Turn <code>--separate-object-groups</code> off, or accept that this model cannot use
+      blend.</div>`;
+  } else if (legs.recurrent.length) {
+    co.innerHTML = `<div class="callout ok"><b>Valid, and the split is required here.</b> One
+      attention group plus ${legs.recurrent.length} recurrent group, which is exactly what blend
+      expects. The recurrent state is position-bound, so only the prefix leg reads it — a chunk
+      cannot be relocated if its state is the result of a scan ending at a fixed position.</div>`;
+  } else {
+    co.innerHTML = `<div class="callout ok"><b>Valid.</b> A single attention object group, which
+      is what blend requires. Both legs read the same group; they differ in <i>which chunks</i>
+      they ask for, not which groups.</div>`;
+  }
 }
 
 function renderPayload(d) {
@@ -1622,6 +1730,9 @@ function renderCaveats(d) {
     ["Slot numbers are request-wide", "Every node reports into one table over one queue pair. Per-fetch numbering makes two nodes' slot 5 indistinguishable."],
     ["Not every chunk participates", `Sliding-window groups cover only part of the prompt — ${S.arch === "sw" ? `here, ${Math.min(S.chunks, 4)} of ${S.chunks} chunks` : "switch Architecture to the sliding-window hybrid to see it"}. Waiting for all chunks in such a group waits forever.`],
     ["Recurrent groups are different", "Mamba/GDN groups hold state snapshots, not per-token KV, and probably should not sit behind a per-layer barrier at all. They also force <code>--separate-object-groups</code>, make the pages byte-opaque (no CacheGen or CacheBlend), and impose a unified block size of 544–944 tokens that the LMCache chunk size must be a multiple of. Unconfirmed how they should be treated here."],
+    ["CacheBlend: half of it comes free", "Blend prefetches L2&rarr;L1 through the same <code>storage_manager.submit_prefetch_task</code> the dense path uses, so the RDMA server-push benefits it with no blend-specific work. Its L1&rarr;GPU step is its own kernel (re-RoPE plus scatter), dispatched per kernel group with <i>all layers at once</i> — so per-layer pipelining would need separate work there, and that half is not free."],
+    ["CacheBlend: readiness is per leg", "Blend issues two prefetches over different group sets — the prefix leg reads attention + recurrent, the blend leg attention only. <code>expected(L)</code> must be summed over the leg's groups, not over every group in the registration."],
+    ["CacheBlend: one attention group, hard limit", "<code>_classify_cb_read_groups</code> raises unless there is exactly one group labelled <code>\"attention\"</code>. A sliding-window group is labelled attention, so splitting a sliding-window hybrid is a hard incompatibility. Mamba hybrids are fine: attention + recurrent is one attention group."],
     ["Record alignment is luck, not design", "<code>plan()</code> shards purely by byte count. A layer's bytes happen to land on record boundaries only because plane sizes and record caps are both powers of two. Mamba hybrids use 544/784/944-token blocks, and then every layer straddles. LMCache should pass a plane-size alignment hint rather than rely on it."],
     ["Storage does not need reorganising", "No new keys, no layer in the key, no change to the shard plan. Putting layout into the key is the coupling AIE-89 deferred, and per-layer records would pin record size to the plane size — which the M0 sweep showed swings latency by 60–100%. Only the read <i>order</i> changes."],
     ["Slots are not tokens", "Compressed groups have <code>tokens_per_block ≠ slots_per_block</code>. Always ask <code>get_slots_per_chunk_in_sw</code>; never derive slot counts from token counts."],
@@ -1736,6 +1847,10 @@ document.getElementById("t-separate").addEventListener("change", e => {
   stopSim(); R = { order: [], delivered: 0, timer: null, counts: null };
   render();
 });
+document.getElementById("t-blend").addEventListener("change", e => {
+  S.blend = e.target.checked;
+  render();
+});
 
 document.getElementById("btn-prev").onclick = () => { if (S.phase > 0) { S.phase--; render(); } };
 document.getElementById("btn-next").onclick = () => { if (S.phase < PHASES.length - 1) { S.phase++; render(); } };
@@ -1796,6 +1911,10 @@ function applyHash() {
   if (p.has("separate")) {
     S.separate = p.get("separate") !== "0";
     document.getElementById("t-separate").checked = S.separate;
+  }
+  if (p.has("blend")) {
+    S.blend = p.get("blend") !== "0";
+    document.getElementById("t-blend").checked = S.blend;
   }
   if (p.has("format")) {
     S.format = p.get("format") === "layer_outer" ? "layer_outer" : "kv_outer";
