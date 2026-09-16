@@ -11,8 +11,10 @@ the mapping from actual LMCache layout to those slots.
 > [`layerwise-transfer-data-model.html`](layerwise-transfer-data-model.html) steps
 > through the same material in plain language, drawing the shape at each stage.
 > Open it in a browser. Steps are deep-linkable, e.g.
-> `#step=6&arch=linear&layer=5` lands on the non-contiguity problem for a
-> sliding-window layer.
+> `#step=7&arch=linear&layer=5` lands on the non-contiguity problem for a
+> sliding-window layer, and `#step=5` on the CacheBlend comparison.
+> [`layerwise-transfer-data-model.check.js`](layerwise-transfer-data-model.check.js)
+> asserts the claims the page makes; run it after editing the page.
 
 **Scope.** This changes no keys, no object model, and no L2 interface. It is
 derivation only: everything here is computed from structures LMCache already

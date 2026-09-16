@@ -306,6 +306,47 @@
   table.facts tr:last-child td { border-bottom: none; }
   table.facts td:first-child { color: var(--dim); white-space: nowrap; width: 1%; padding-right: 18px; }
   table.facts b { font-family: ui-monospace, monospace; }
+
+  /* --- CacheBlend --- */
+  .crow { display: flex; align-items: center; gap: 10px; margin-bottom: 7px; }
+  .crow .clab {
+    width: 122px; flex: none; font-size: 11.5px; color: var(--dim); text-align: right;
+  }
+  .crow .clab b { display: block; color: var(--text); font-size: 12px; font-weight: 650; }
+  .cstrip { display: flex; gap: 3px; flex-wrap: wrap; }
+  .chunk {
+    width: 40px; height: 38px; border-radius: 5px; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; font-size: 10px; line-height: 1.25;
+    font-family: ui-monospace, monospace; background: var(--miss); color: var(--dimmer);
+    border: 1px solid var(--line);
+  }
+  .chunk .cn { font-size: 11px; font-weight: 650; }
+  .chunk.hit { background: #3fb95026; border-color: #3fb95077; color: #7ee787; }
+  .chunk.blendhit { background: #d2992226; border-color: #d2992288; color: #f2cc60; }
+  .chunk.blendhit .was { color: #d29922; font-size: 9px; }
+  .chunk.recomp { background: #f8514922; border-color: #f8514977; color: #ffb4ae; }
+
+  .flows { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 900px) { .flows { grid-template-columns: 1fr; } }
+  .flow { border: 1px solid var(--line); border-radius: 8px; padding: 12px 13px; background: var(--panel-2); }
+  .flow > h4 {
+    margin: 0 0 10px; font-size: 12.5px; font-weight: 650; color: var(--text);
+    display: flex; align-items: baseline; gap: 8px;
+  }
+  .flow > h4 em { font-style: normal; font-size: 11px; color: var(--dim); font-weight: 400; }
+  .fstep {
+    border-left: 3px solid var(--line); padding: 5px 0 5px 10px; margin-bottom: 3px;
+    font-size: 12px; position: relative;
+  }
+  .fstep code { font-size: 11.5px; }
+  .fstep .fnote { display: block; font-size: 10.5px; color: var(--dimmer); margin-top: 2px; }
+  .fstep.shared { border-left-color: var(--hit); }
+  .fstep.shared .fnote { color: #7ee787; }
+  .fstep.diverge { border-left-color: var(--sw); }
+  .fstep.diverge .fnote { color: #e3b341; }
+  .fstep.alllayers { border-left-color: var(--warn); }
+  .fstep.alllayers .fnote { color: #ffb4ae; }
+  .fstep .farrow { color: var(--dimmer); margin-right: 5px; font-family: ui-monospace, monospace; }
 </style>
 </head>
 <body>
@@ -359,13 +400,6 @@
       <option value="uniform">Uniform &mdash; Llama, Qwen3 dense, Mistral</option>
     </select>
   </div>
-  <label class="toggle">
-    <input type="checkbox" id="t-blend" />
-    <span>CacheBlend
-      <small>Reuse non-prefix chunks by re-RoPE. Reads object groups in two
-        legs, and constrains how they may be split.</small>
-    </span>
-  </label>
   <label class="toggle">
     <input type="checkbox" id="t-separate" />
     <span><code>--separate-object-groups</code>
@@ -462,14 +496,26 @@
       <code>object_group_id</code> and nothing finer, so &ldquo;layer 7 arrived&rdquo; can never be
       answered by a key. It has to be derived from byte ranges inside a payload.</div>
 
-    <div id="blend-block" class="hidden">
-      <h3 style="margin-top:18px">CacheBlend reads these in two legs</h3>
-      <p class="sub">Blend reuses chunks that are <i>not</i> a prefix of the prompt, rotating
-        their keys to new positions. It issues two separate prefetches, and they read
-        different object groups.</p>
-      <div id="blend-legs"></div>
-      <div id="blend-callout"></div>
-    </div>
+  </div>
+
+  <div class="card hidden" id="p-blend">
+    <h3>CacheBlend <span class="tag">what changes, and what does not</span></h3>
+    <p class="sub">Which chunks of the prompt each route can reuse. Green is a plain cache hit;
+      gold is a chunk that was cached at a <i>different</i> position and had its keys re-rotated
+      to fit this one.</p>
+    <div id="blend-chunks"></div>
+
+    <h3 style="margin-top:20px">The two data paths</h3>
+    <p class="sub">Green steps are shared code, so the RDMA work reaches them with no
+      blend-specific effort. Red steps move every layer of a kernel group in one operation
+      &mdash; note that <b>both</b> routes are red there.</p>
+    <div class="flows" id="blend-flows"></div>
+
+    <h3 style="margin-top:20px">Blend reads its object groups in two legs</h3>
+    <p class="sub">It issues two prefetches, and they ask for different object groups. This is
+      driven by <i>Architecture</i> and <code>--separate-object-groups</code> in the sidebar.</p>
+    <div id="blend-legs"></div>
+    <div id="blend-callout"></div>
   </div>
 
   <!-- P5/P6: payload bar -->
@@ -577,7 +623,7 @@
 // ---------- state ----------
 const S = {
   layers: 32, kvheads: 8, headdim: 128, dtype: 2,
-  format: "kv_outer", arch: "sw", separate: false, blend: false,
+  format: "kv_outer", arch: "sw", separate: false,
   chunks: 8, tokens: 256, maxwritePow: 20, reccapPow: 20,
   net: 122, gpu: 400, params: 8, jitter: true,
   sel: 0, phase: 0,
@@ -868,13 +914,34 @@ const PHASES = [
       <p>Those objects are spread over the cluster by digest, so <b class="key">one layer's data
       lives on several different machines</b> and arrives via several independent fetches in an
       order nobody controls.</p>
-      <p>Turn on <i>CacheBlend</i> to see the one feature that cares which object groups exist.
-      It is also the feature with <b class="key">most to gain</b> from the RDMA work: its second
-      prefetch asks for chunks scattered arbitrarily across the cluster, which is the worst case
-      for today's metadata-then-segment round trips and the best case for a server-side
-      push.</p>`,
-    cites: "ObjectKey(chunk_hash, model_name, kv_rank, object_group_id, cache_salt) · blend/read_set.py:39",
+      order nobody controls.</p>`,
+    cites: "ObjectKey(chunk_hash, model_name, kv_rank, object_group_id, cache_salt)",
     panels: ["p-keys"],
+  },
+  {
+    name: "CacheBlend",
+    title: "One feature reads this grid differently",
+    body: `<p>Ordinary caching only reuses a <b class="key">prefix</b>: it matches from the first
+      token and stops at the first difference. For a RAG prompt &mdash;
+      <code>[system][doc A][doc B][question]</code> &mdash; if you have seen doc B before but in
+      a different slot, a prefix cache cannot touch it.</p>
+      <p>CacheBlend reuses it anyway. Position is encoded as a rotation of the key vectors, so
+      it <b class="key">re-rotates them</b> to the new position (re-RoPE) and scatters them in.
+      The payoff is cache hits where a prefix cache gets none.</p>
+      <p>Two consequences for us, and they pull in opposite directions.</p>
+      <p><b class="key">It is the best case for the RDMA work.</b> A prefix fetch reads a
+      contiguous run of chunks; a blend fetch reads chunks from wherever they happened to be
+      stored, scattered across the cluster by digest. Today each one costs a metadata read and
+      then serial segment reads, so the cost is round trips rather than bandwidth &mdash; which
+      is exactly what a server-side push removes. Our M0 benchmark measured the contiguous case,
+      where plain TCP already reached 98% of line rate. <b class="key">We benchmarked the case
+      where RDMA helps least.</b></p>
+      <p><b class="key">It is not the reason the GPU hop isn't pipelined.</b> Blend's copy
+      kernel takes every layer of a kernel group at once &mdash; but so does the ordinary one.
+      Nothing here pipelines to the GPU yet. Blend is a second instance of the same unbuilt
+      change, not an obstacle to it.</p>`,
+    cites: "blend/read_set.py:39 · blend/lookup.py:203 · blend/retrieve.py:215 · lmcache_driven_transfer.py:623",
+    panels: ["p-blend"],
   },
   {
     name: "The payload",
@@ -1028,7 +1095,7 @@ function shapeFor(d) {
              whole model, per token: <b>${bytes(2 * hidden * S.dtype * S.layers)}</b>`,
     };
   }
-  if (p === 2 || p === 3) {
+  if (p >= 2 && p <= 4) {
     return {
       tag: "as LMCache stores it",
       sub: "Gathered off the GPU into one packed buffer per kernel group. This is the shape that gets keyed and written to the backend.",
@@ -1042,7 +1109,7 @@ function shapeFor(d) {
              request total = <b>${bytes(d.kgs.reduce((a, g) => a + g.groupBytes * g.chunks, 0))}</b>`,
     };
   }
-  if (p === 4 || p === 5) {
+  if (p === 5 || p === 6) {
     return {
       tag: "one layer inside it",
       sub: S.format === "kv_outer"
@@ -1058,7 +1125,7 @@ function shapeFor(d) {
              <b>${d.kvSize}</b> region${d.kvSize > 1 ? "s" : ""} of <b>${bytes(kg.planeBytes)}</b>`,
     };
   }
-  if (p === 6) {
+  if (p === 7) {
     const { objectBytes } = layerRanges(d, S.sel);
     const { nseg, segBytes } = shardPlan(objectBytes);
     return {
@@ -1073,7 +1140,7 @@ function shapeFor(d) {
              <b>${(segBytes / kg.planeBytes).toFixed(2)}</b> of them`,
     };
   }
-  if (p === 7 || p === 8) {
+  if (p === 8 || p === 9) {
     return {
       tag: "on the wire",
       sub: "A slot is flat. All structure has been flattened away — the receiver knows only an address, a length, and 32 bits of label.",
@@ -1084,7 +1151,7 @@ function shapeFor(d) {
              <b>${d.totalSlots.toLocaleString()}</b> slots for the whole request`,
     };
   }
-  if (p === 9) {
+  if (p === 10) {
     const t = d.timing;
     return {
       tag: "one pipeline stage",
@@ -1236,14 +1303,136 @@ function renderKeys(d) {
       grid.appendChild(cell);
     }
   });
+}
 
-  renderBlend(d);
+// Which chunks each route reuses.
+//
+// The blend hits are fixed positions rather than random so the picture is
+// stable while the sidebar is being driven; the point being made is the shape
+// of the access pattern, not any particular hit set.
+function renderBlendChunks(d) {
+  const wrap = document.getElementById("blend-chunks");
+  wrap.innerHTML = "";
+  const n = Math.max(8, S.chunks);
+  const prefixHits = Math.min(2, n);
+  // chunk index -> the position it was originally cached at
+  const blendHits = new Map(
+    [[3, 41], [4, 42], [6, 17], [9, 8]].filter(([i]) => i < n)
+  );
+
+  const row = (labelTop, labelSub, build) => {
+    const r = el("div", "crow");
+    const lab = el("div", "clab");
+    lab.innerHTML = `<b>${labelTop}</b>${labelSub}`;
+    r.appendChild(lab);
+    const strip = el("div", "cstrip");
+    for (let i = 0; i < n; i++) strip.appendChild(build(i));
+    r.appendChild(strip);
+    wrap.appendChild(r);
+  };
+
+  row("prefix cache", "the default", i => {
+    const c = el("div", "chunk" + (i < 4 && i < n ? " hit" : ""));
+    c.innerHTML = `<span class="cn">${i}</span>` +
+      (i < 4 ? "<span>hit</span>" : "<span>&mdash;</span>");
+    c.title = i < 4
+      ? `chunk ${i}: matches the cached prefix`
+      : `chunk ${i}: past the first mismatch, so unusable however well it is cached`;
+    return c;
+  });
+
+  row("CacheBlend", "prefix + relocated", i => {
+    const was = blendHits.get(i);
+    const isPrefix = i < prefixHits;
+    const cls = isPrefix ? " hit" : was !== undefined ? " blendhit" : " recomp";
+    const c = el("div", "chunk" + cls);
+    c.innerHTML = `<span class="cn">${i}</span>` +
+      (isPrefix ? "<span>hit</span>"
+        : was !== undefined ? `<span class="was">was ${was}</span>`
+        : "<span>calc</span>");
+    c.title = isPrefix
+      ? `chunk ${i}: ordinary prefix hit`
+      : was !== undefined
+        ? `chunk ${i}: found in cache at position ${was}; keys re-rotated from ${was} to ${i}`
+        : `chunk ${i}: no cache entry, recomputed`;
+    return c;
+  });
+
+  const lg = el("div", "legend");
+  lg.innerHTML =
+    `<span><i style="background:#3fb95066"></i>prefix hit</span>` +
+    `<span><i style="background:#d2992288"></i>relocated hit — re-RoPE'd from another position</span>` +
+    `<span><i style="background:#f8514977"></i>recomputed</span>`;
+  wrap.appendChild(lg);
+
+  // Round trips the scattered leg costs today, from the live sidebar values.
+  const { objectBytes } = layerRanges(d, S.sel);
+  const { nseg } = shardPlan(objectBytes);
+  const k = blendHits.size;
+  const co = el("div", "callout");
+  co.innerHTML = `<b>Why the scattered hits are expensive today.</b> Those
+    ${k} relocated chunks live on up to ${k} different nodes, and each needs a metadata read
+    then <code>${nseg}</code> segment read${nseg === 1 ? "" : "s"}, issued one after another
+    &mdash; <code>${k} × (1 + ${nseg}) = ${k * (1 + nseg)}</code> round trips. A server-side
+    push replaces all of them with one info command and
+    <code>${k * nseg}</code> unacknowledged writes. The saving is round trips, not bandwidth.`;
+  wrap.appendChild(co);
+}
+
+// The two routes from Aerospike to the GPU, step by step.
+function renderBlendFlows() {
+  const wrap = document.getElementById("blend-flows");
+  wrap.innerHTML = "";
+
+  const build = (title, sub, steps) => {
+    const f = el("div", "flow");
+    f.innerHTML = `<h4>${title} <em>${sub}</em></h4>`;
+    steps.forEach(([cls, html, note]) => {
+      const s = el("div", "fstep" + (cls ? " " + cls : ""));
+      s.innerHTML = `<span class="farrow">&darr;</span>${html}` +
+        (note ? `<span class="fnote">${note}</span>` : "");
+      f.appendChild(s);
+    });
+    wrap.appendChild(f);
+  };
+
+  build("Ordinary caching", "one prefetch", [
+    ["", "<code>LOOKUP</code>", "contiguous run of chunks"],
+    ["shared", "<code>submit_prefetch_task</code>", "shared code — RDMA push lands here"],
+    ["shared", "L1, pinned host DRAM", "the RDMA destination window"],
+    ["alllayers", "<code>multi_layer_block_kv_transfer</code>",
+      "every layer of a kernel group, one operation"],
+    ["", "paged GPU blocks", ""],
+  ]);
+
+  build("CacheBlend", "two prefetches", [
+    ["", "<code>CB_UNIFIED_LOOKUP</code>", "prefix match + non-prefix fingerprint match"],
+    ["shared", "<code>submit_prefetch_task</code> &times;2",
+      "same call, twice — prefix leg and scattered blend leg"],
+    ["shared", "L1, pinned host DRAM", "same destination, same RDMA benefit, no extra work"],
+    ["diverge", "waits for <i>both</i> legs",
+      "returns None until each has landed — waits on the slower of two"],
+    ["alllayers", "<code>CB_RETRIEVE_PRE_COMPUTED</code>: re-RoPE + scatter",
+      "every layer at once too — its own kernel, because it re-rotates while copying"],
+    ["", "paged GPU blocks", ""],
+  ]);
+
+  const co = el("div", "callout");
+  co.style.gridColumn = "1 / -1";
+  co.innerHTML = `<b>Read the red rows together.</b> Both routes move a whole kernel group's
+    layers in a single operation, and <code>wait_for_layer_load</code> is an empty stub for
+    both. <b>Nothing in multiprocess mode pipelines to the GPU today.</b> Per-layer delivery is
+    the same unbuilt change in two different kernels &mdash; do the ordinary one first, since it
+    is simpler and it is the one we benchmarked, then port it across. Blend is arguably the more
+    natural fit: the original algorithm inspects deviation at selected layers
+    (<code>blend_check_layers</code>) and the in-process implementation already requires
+    <code>use_layerwise=True</code>.`;
+  wrap.appendChild(co);
 }
 
 function renderBlend(d) {
-  const block = document.getElementById("blend-block");
-  block.classList.toggle("hidden", !S.blend);
-  if (!S.blend) return;
+  renderBlendChunks(d);
+  renderBlendFlows();
 
   const legs = blendLegs(d);
   const wrap = document.getElementById("blend-legs");
@@ -1328,7 +1517,7 @@ function renderPayload(d) {
   document.getElementById("payload-end").textContent = bytes(kg.groupBytes);
 
   const co = document.getElementById("payload-callout");
-  if (S.phase >= 5) {
+  if (S.phase >= 6) {
     if (S.format === "kv_outer") {
       co.innerHTML = `<div class="callout"><b>Two regions, not one.</b> Layer ${S.sel} occupies
         ${bytes(kg.planeBytes)} in the K plane and another ${bytes(kg.planeBytes)} in the V plane,
@@ -1766,13 +1955,14 @@ function render() {
   renderShape(d);
 
   const active = new Set(PHASES[S.phase].panels);
-  ["p-layers", "p-groups", "p-keys", "p-payload", "p-records", "p-slots", "p-imm",
+  ["p-layers", "p-groups", "p-keys", "p-blend", "p-payload", "p-records", "p-slots", "p-imm",
    "p-timeline", "p-ready", "p-caveats"]
     .forEach(id => document.getElementById(id).classList.toggle("hidden", !active.has(id)));
 
   if (active.has("p-layers")) renderLayerStrip(d);
   if (active.has("p-groups")) renderGroupTree(d);
   if (active.has("p-keys")) renderKeys(d);
+  if (active.has("p-blend")) renderBlend(d);
   if (active.has("p-payload")) renderPayload(d);
   if (active.has("p-records")) renderRecords(d);
   if (active.has("p-slots")) renderSlots(d);
@@ -1848,10 +2038,6 @@ document.getElementById("t-separate").addEventListener("change", e => {
   stopSim(); R = { order: [], delivered: 0, timer: null, counts: null };
   render();
 });
-document.getElementById("t-blend").addEventListener("change", e => {
-  S.blend = e.target.checked;
-  render();
-});
 
 document.getElementById("btn-prev").onclick = () => { if (S.phase > 0) { S.phase--; render(); } };
 document.getElementById("btn-next").onclick = () => { if (S.phase < PHASES.length - 1) { S.phase++; render(); } };
@@ -1912,10 +2098,6 @@ function applyHash() {
   if (p.has("separate")) {
     S.separate = p.get("separate") !== "0";
     document.getElementById("t-separate").checked = S.separate;
-  }
-  if (p.has("blend")) {
-    S.blend = p.get("blend") !== "0";
-    document.getElementById("t-blend").checked = S.blend;
   }
   if (p.has("format")) {
     S.format = p.get("format") === "layer_outer" ? "layer_outer" : "kv_outer";
