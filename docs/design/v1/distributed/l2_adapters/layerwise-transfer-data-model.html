@@ -458,21 +458,34 @@
       <i>Head dim</i>. The defaults are a consistent pair (8 B, 32 layers, 8 GQA
       heads, 128 dim &mdash; a Llama-3-8B shape); set them apart and the ratio
       describes no real model.
-      <br><b>For a MoE model set the <i>active</i> parameter count</b>, not the total
-      &mdash; 37 for DeepSeek-V3, not 671 &mdash; since only the routed experts run
-      per token.
+      <br><b>Set the <i>active</i> parameter count, not the total.</b> Serving is
+      overwhelmingly MoE now, at 3&ndash;6% sparsity, so the two differ by 20&times;
+      or more &mdash; only the routed experts run per token.
     </small>
     <div style="margin-top:8px;font-size:11px;color:var(--dim);line-height:1.45">
-      <b style="color:var(--text)">Real configurations</b>
+      <b style="color:var(--text)">Active parameters, real models</b>
       <table style="width:100%;border-collapse:collapse;margin-top:4px;font-size:10.5px">
-        <tr style="color:var(--dimmer)"><td></td><td>layers</td><td>KV geom</td><td>KV/token</td><td>params</td></tr>
-        <tr><td>Llama 3.1 8B</td><td>32</td><td>8&times;128</td><td>128 KiB</td><td>8 dense</td></tr>
-        <tr><td>Llama 3.1 70B</td><td>80</td><td>8&times;128</td><td>320 KiB</td><td>70 dense</td></tr>
-        <tr><td>Llama 3.1 405B</td><td>126</td><td>8&times;128</td><td>504 KiB</td><td>405 dense</td></tr>
-        <tr><td>DeepSeek-V3</td><td>61</td><td>MLA 576</td><td>69 KiB</td><td>671 / <b>37</b></td></tr>
+        <tr style="color:var(--dimmer)"><td></td><td>total</td><td>active</td></tr>
+        <tr><td>Qwen3-Next 80B-A3B</td><td>80 B</td><td><b>3</b></td></tr>
+        <tr><td>gpt-oss-20b</td><td>20.9 B</td><td><b>3.6</b></td></tr>
+        <tr><td>gpt-oss-120b</td><td>116.8 B</td><td><b>5.1</b></td></tr>
+        <tr><td>DeepSeek V4.1-Flash</td><td>552 B</td><td><b>8</b> prefill / 16 decode</td></tr>
+        <tr><td>Qwen3.5 397B</td><td>397 B</td><td><b>17</b></td></tr>
+        <tr><td>MiniMax M3</td><td>428 B</td><td><b>23</b></td></tr>
+        <tr><td>Kimi K2.6</td><td>1 T</td><td><b>32</b></td></tr>
+        <tr><td>GLM-5.3</td><td>753 B</td><td><b>40</b></td></tr>
+        <tr><td>DeepSeek V4 Pro</td><td>1.6 T</td><td><b>49</b></td></tr>
+        <tr><td>Qwen3.8</td><td>2.4 T</td><td><b>95</b></td></tr>
+        <tr><td>Kimi K3</td><td>2.8 T</td><td><b>104</b></td></tr>
       </table>
-      For MLA, switch <i>Payload format</i> to <code>NL_X_NB_BS_HS</code> and set
-      9&times;64 &mdash; one 576-wide latent per token per layer, no separate K and V.
+      <b style="color:var(--text)">The realistic band is 3&ndash;104, usually under 50.</b>
+      Nothing served activates hundreds of billions per token, and prefill can activate
+      less than decode. Values far above ~104 describe a dense model nobody runs &mdash;
+      useful as a limit, not a target.
+      <br><br>KV geometry is per model too: gpt-oss is 8&times;64 over 36 layers
+      (72 KiB/token), Llama 3.1 405B is 8&times;128 over 126 (504 KiB/token). For MLA
+      switch <i>Payload format</i> to <code>NL_X_NB_BS_HS</code> and set 9&times;64 &mdash;
+      one 576-wide latent per token per layer, no separate K and V.
     </div>
   </div>
 
