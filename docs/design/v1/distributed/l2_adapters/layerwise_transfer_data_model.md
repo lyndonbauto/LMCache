@@ -343,6 +343,15 @@ time, because blend needs layer *i*'s cached KV before it can decide which
 tokens to recompute at layer *i*. Per-layer delivery is what the algorithm
 would ask for.
 
+**What `r` means**, since the natural reading is backwards: `r` is the fraction
+of tokens the GPU **computes from scratch** instead of taking from cache
+(`blend_recompute_ratios`). It measures how much of the prompt blend *failed*
+to reuse, so lower is better. Blend ranks the reused tokens by how much using
+cached KV would distort the result and recomputes only the worst `r` of them.
+`r = 0.15` is the published operating point; `r = 1.0` means nothing was reused
+and the request is simply a full prefill. Re-RoPE is **not** recompute — that
+is a rotation applied to the keys of the tokens being *kept*, and it is cheap.
+
 Economically it pays off *less*, and the reason is worth stating plainly
 because it is the opposite of intuitive: **pipelining hides transfer behind
 compute, and deleting compute is the entire purpose of CacheBlend.** Blend
@@ -364,6 +373,15 @@ rather than compute, so the win is capped.
 compute by design. That one fact is why it is simultaneously the strongest case
 for the RDMA round-trip work and the weaker case for pipelining. If only one
 lands, for blend it should be RDMA.
+
+Two caveats on the reference lane. The comparison is against a **full prefill**
+of every token, which is the cost of computing a layer from scratch — a pure
+cache hit does far less work than that, so the reference is an *optimistic*
+bound on how much compute is available to hide transfer behind, and it flatters
+pipelining in both lanes equally. And `r = 1.0` making the two lanes coincide
+is an arithmetic sanity check rather than an operating point: if you recompute
+everything you would not fetch the KV at all, so the transfer would be pure
+waste.
 
 One caveat on the arithmetic: modelling blend's compute as `r ×` dense assumes
 recompute cost scales linearly with the recomputed token count, which ignores

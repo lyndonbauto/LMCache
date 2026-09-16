@@ -178,9 +178,24 @@ const ratioOf = who => {
 assert($$("#blend-payoff .track").length === 2,
   "dense and blend are drawn as two comparable lanes");
 
+// "Recompute" is the fraction NOT reused, which is the opposite of the natural
+// reading, so the panel has to define it rather than assume it.
+// Normalised: the source wraps mid-sentence, so raw textContent has newlines.
+const payoffDefn = $("#p-blend").textContent.replace(/\s+/g, " ");
+assert(/fraction of tokens the GPU calculates from scratch/.test(payoffDefn),
+  "recompute is defined as compute-from-scratch, not as reuse");
+assert(/failed.{0,3} to reuse/.test(payoffDefn),
+  "and framed as the share that was not reused");
+assert(/Re-RoPE is not recompute/.test(payoffDefn),
+  "rotation is distinguished from recompute, since both sound like work");
+assert(/Full prefill \(reference\)/.test(payoffDefn),
+  "the comparison lane is labelled a reference bound, not a real cache hit");
+
 // The load-bearing claim: identical bytes, less compute, so blend's ratio is
 // strictly worse -- and worse by roughly 1/recompute.
 setRecomp(100);
+assert(/sanity check, not an operating point/.test($("#blend-payoff").textContent),
+  "100% recompute is flagged as degenerate rather than read as a result");
 const parity = ratioOf("blend");
 assert(Math.abs(parity - ratioOf("dense")) < 0.02,
   `at 100% recompute blend matches dense (${parity} vs ${ratioOf("dense")})`);

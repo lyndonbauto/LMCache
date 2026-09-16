@@ -516,8 +516,15 @@
     <div class="flows" id="blend-flows"></div>
 
     <h3 style="margin-top:20px">So does pipelining actually help blend?</h3>
-    <p class="sub">Same bytes on the wire, less compute to hide them behind &mdash; because
-      deleting compute is the entire point of blend. Drag <i>Blend recompute</i> in the sidebar.</p>
+    <p class="sub"><b>&ldquo;Recompute&rdquo; is the fraction of tokens the GPU calculates from
+      scratch instead of taking from cache</b> &mdash; so it measures how much of the prompt blend
+      <i>failed</i> to reuse. Blend picks the tokens where cached KV would hurt most and
+      recomputes only those. Lower is better: 15% is the published operating point, and 100%
+      means nothing was reused, which is just a full prefill. Re-RoPE is not recompute &mdash;
+      rotating a reused key is cheap, and it applies to the tokens we <i>keep</i>.</p>
+    <p class="sub">Same bytes on the wire either way, less compute to hide them behind, because
+      deleting compute is the entire point of blend. Drag <i>Blend recompute</i> in the
+      sidebar.</p>
     <div id="blend-payoff"></div>
 
     <h3 style="margin-top:20px">Blend reads its object groups in two legs</h3>
@@ -1487,8 +1494,13 @@ function renderBlendPayoff(d) {
   };
 
   const verdict = t => t.ratio < 1 ? "compute bound — transfer hides" : "network bound — GPU waits";
-  lane("Ordinary prefill", `${ms(dense.pipelined)} · ${verdict(dense)}`, dense);
-  lane(`Blend at ${S.recomp}% recompute`, `${ms(blend.pipelined)} · ${verdict(blend)}`, blend);
+  // Named "reference" rather than "dense": the compute term is a full prefill
+  // of every token, which is the cost of computing a layer from scratch. A pure
+  // cache hit does far less than that, so this lane is the optimistic bound on
+  // how much compute is available to hide transfer behind.
+  lane("Full prefill (reference)", `${ms(dense.pipelined)} · ${verdict(dense)}`, dense);
+  lane(`Blend, ${S.recomp}% of tokens recomputed`,
+    `${ms(blend.pipelined)} · ${verdict(blend)}`, blend);
 
   const ro = el("div", "readout");
   ro.innerHTML =
@@ -1518,7 +1530,13 @@ function renderBlendPayoff(d) {
        ${blend.hiddenPct.toFixed(0)}% of transfer is hidden versus
        ${dense.hiddenPct.toFixed(0)}% for dense. Pipelining still starts layer 0 sooner, but the
        ceiling is now bandwidth, not compute, so the win is capped.`;
-  co.innerHTML = structural + economic +
+  const degenerate = S.recomp >= 100
+    ? `<br><br><b>Note that 100% is a sanity check, not an operating point.</b> The two lanes
+       coincide because recomputing every token costs exactly a full prefill &mdash; and in
+       reality you would not fetch the KV at all, so the transfer would be pure waste. Blend
+       only earns its keep below 100%.`
+    : "";
+  co.innerHTML = structural + economic + degenerate +
     `<br><br><b>The conclusion that matters for sequencing:</b> blend is transfer-heavy
      relative to its compute, by design &mdash; deleting compute is the whole point of it. That
      single fact is why blend is the <i>strongest</i> case for the RDMA round-trip work and the
