@@ -335,6 +335,43 @@ kernel first, because it is the simpler kernel and the one M0 characterised,
 then port the same change to blend's. Blend takes the L2→L1 win immediately
 either way.
 
+### Whether pipelining pays off for blend
+
+Structurally it suits blend better than it suits the dense path, for the reason
+above: `process_qkv(..., layer_id)` calls `get_kv(layer_id)` for one layer at a
+time, because blend needs layer *i*'s cached KV before it can decide which
+tokens to recompute at layer *i*. Per-layer delivery is what the algorithm
+would ask for.
+
+Economically it pays off *less*, and the reason is worth stating plainly
+because it is the opposite of intuitive: **pipelining hides transfer behind
+compute, and deleting compute is the entire purpose of CacheBlend.** Blend
+moves the same bytes as a dense fetch — it still needs the reused chunks' KV —
+while recomputing only a fraction `r` of the tokens. So per layer:
+
+```
+ratio_blend = transfer / (r × compute) = ratio_dense / r
+```
+
+At the CacheBlend paper's `r ≈ 0.15` that is a **6.7× worse** transfer-to-compute
+ratio. Using the walkthrough's default model (32 layers, 8 chunks of 256
+tokens, 30 B parameters, 400 TFLOP/s, 12.2 GB/s), dense sits at ratio 0.27 —
+transfer comfortably hidden — while blend lands at **1.79, i.e. network-bound**.
+Pipelining still starts layer 0 sooner, but the ceiling becomes bandwidth
+rather than compute, so the win is capped.
+
+**These are the same finding, not two.** Blend is transfer-heavy relative to its
+compute by design. That one fact is why it is simultaneously the strongest case
+for the RDMA round-trip work and the weaker case for pipelining. If only one
+lands, for blend it should be RDMA.
+
+One caveat on the arithmetic: modelling blend's compute as `r ×` dense assumes
+recompute cost scales linearly with the recomputed token count, which ignores
+that those tokens still attend over the full sequence. It is a first-order
+estimate and it is directionally safe — the true compute is somewhat higher
+than `r ×`, so blend's real ratio is somewhat better than quoted. It does not
+change the ordering.
+
 ### The two legs, and what they mean for readiness
 
 `_classify_cb_read_groups` (`blend/read_set.py:39`) splits a registration's

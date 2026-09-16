@@ -428,6 +428,10 @@
 
   <h2 class="sec">Pipeline</h2>
   <div class="field">
+    <label>Blend recompute <b id="v-recomp">15%</b></label>
+    <input type="range" id="c-recomp" min="5" max="100" step="5" value="15" />
+  </div>
+  <div class="field">
     <label>Network delivery <b id="v-net">12.2 GB/s</b></label>
     <input type="range" id="c-net" min="10" max="250" step="2" value="122" />
   </div>
@@ -510,6 +514,11 @@
       blend-specific effort. Red steps move every layer of a kernel group in one operation
       &mdash; note that <b>both</b> routes are red there.</p>
     <div class="flows" id="blend-flows"></div>
+
+    <h3 style="margin-top:20px">So does pipelining actually help blend?</h3>
+    <p class="sub">Same bytes on the wire, less compute to hide them behind &mdash; because
+      deleting compute is the entire point of blend. Drag <i>Blend recompute</i> in the sidebar.</p>
+    <div id="blend-payoff"></div>
 
     <h3 style="margin-top:20px">Blend reads its object groups in two legs</h3>
     <p class="sub">It issues two prefetches, and they ask for different object groups. This is
@@ -623,7 +632,7 @@
 // ---------- state ----------
 const S = {
   layers: 32, kvheads: 8, headdim: 128, dtype: 2,
-  format: "kv_outer", arch: "sw", separate: false,
+  format: "kv_outer", arch: "sw", separate: false, recomp: 15,
   chunks: 8, tokens: 256, maxwritePow: 20, reccapPow: 20,
   net: 122, gpu: 400, params: 8, jitter: true,
   sel: 0, phase: 0,
@@ -817,13 +826,18 @@ function segmentsFor(start, length, segBytes) {
 // GPU: cannot start layer i until that layer has landed AND it has finished
 // layer i-1. Any gap between those is the GPU idle, which is the failure this
 // whole design is trying to avoid.
-function schedule(d) {
+// `computeScale` shrinks the per-layer compute without touching the transfer.
+// CacheBlend is exactly that case: it recomputes only a fraction of the tokens
+// and reads the rest from cache, so it has the same bytes to move and less
+// compute to move them behind.
+function schedule(d, computeScale = 1) {
   const netBps = (S.net / 10) * 1e9;          // slider is tenths of a GB/s
   const gpuFlops = S.gpu * 1e12;
   const tokensTotal = S.chunks * S.tokens;
   // Standard prefill approximation: ~2 FLOPs per parameter per token.
   const flopsPerTokLayer = 2 * (S.params * 1e9 / S.layers);
-  const cpuPerLayerMs = (tokensTotal * flopsPerTokLayer / gpuFlops) * 1000;
+  const cpuPerLayerMs =
+    (tokensTotal * flopsPerTokLayer / gpuFlops) * 1000 * computeScale;
 
   const rows = [];
   let netDone = 0, cpuDone = 0, stalled = 0;
@@ -939,7 +953,12 @@ const PHASES = [
       <p><b class="key">It is not the reason the GPU hop isn't pipelined.</b> Blend's copy
       kernel takes every layer of a kernel group at once &mdash; but so does the ordinary one.
       Nothing here pipelines to the GPU yet. Blend is a second instance of the same unbuilt
-      change, not an obstacle to it.</p>`,
+      change, not an obstacle to it.</p>
+      <p>Whether pipelining <i>pays off</i> for blend is a separate question from whether it
+      fits, and the panel below answers both. The short version:
+      <b class="key">pipelining hides transfer behind compute, and deleting compute is the
+      whole point of blend</b> &mdash; so blend has the same bytes to move and less shadow to
+      move them under.</p>`,
     cites: "blend/read_set.py:39 · blend/lookup.py:203 · blend/retrieve.py:215 · lmcache_driven_transfer.py:623",
     panels: ["p-blend"],
   },
@@ -1430,9 +1449,88 @@ function renderBlendFlows() {
   wrap.appendChild(co);
 }
 
+// Does pipelining pay off for blend? Two compact lanes, dense vs blend, with
+// identical transfer and blend's compute scaled by the recompute ratio.
+function renderBlendPayoff(d) {
+  const wrap = document.getElementById("blend-payoff");
+  wrap.innerHTML = "";
+
+  const r = S.recomp / 100;
+  const dense = d.timing;                 // computeScale 1
+  const blend = schedule(d, r);
+  const span = Math.max(dense.pipelined, blend.pipelined) * 1.02;
+  const pct = v => (v / span * 100) + "%";
+
+  const lane = (label, meta, t) => {
+    const tr = el("div", "track");
+    const hd = el("div", "track-hd");
+    hd.innerHTML = `<b>${label}</b><span>${meta}</span>`;
+    tr.appendChild(hd);
+    const ln = el("div", "lane");
+    t.rows.forEach(row => {
+      const priorEnd = row.L === 0 ? 0 : t.rows[row.L - 1].cpuEnd;
+      if (row.cpuStart - priorEnd > span * 0.002) {
+        const s = el("div", "blk stall");
+        s.style.left = pct(priorEnd);
+        s.style.width = pct(row.cpuStart - priorEnd);
+        s.title = `GPU idle ${ms(row.cpuStart - priorEnd)} waiting on layer ${row.L}`;
+        ln.appendChild(s);
+      }
+      const c = el("div", "blk cpu" + (row.L % 2 ? " alt" : ""));
+      c.style.left = pct(row.cpuStart);
+      c.style.width = pct(row.cpuMs);
+      c.title = `layer ${row.L} computing — ${ms(row.cpuMs)}`;
+      ln.appendChild(c);
+    });
+    tr.appendChild(ln);
+    wrap.appendChild(tr);
+  };
+
+  const verdict = t => t.ratio < 1 ? "compute bound — transfer hides" : "network bound — GPU waits";
+  lane("Ordinary prefill", `${ms(dense.pipelined)} · ${verdict(dense)}`, dense);
+  lane(`Blend at ${S.recomp}% recompute`, `${ms(blend.pipelined)} · ${verdict(blend)}`, blend);
+
+  const ro = el("div", "readout");
+  ro.innerHTML =
+    `<span class="pill${dense.ratio < 1 ? " on" : ""}">dense ratio ${dense.ratio.toFixed(2)}</span>` +
+    `<span class="pill${blend.ratio < 1 ? " on" : ""}">blend ratio ${blend.ratio.toFixed(2)}</span>` +
+    `<span class="pill${dense.hiddenPct > 90 ? " on" : ""}">dense ${dense.hiddenPct.toFixed(0)}% hidden</span>` +
+    `<span class="pill${blend.hiddenPct > 90 ? " on" : ""}">blend ${blend.hiddenPct.toFixed(0)}% hidden</span>`;
+  wrap.appendChild(ro);
+
+  // The honest answer, stated from whichever regime the sliders land in.
+  const co = el("div", "callout" + (blend.ratio < 1 ? " ok" : ""));
+  const structural = `<b>Structurally, yes — better than dense, in fact.</b> Blend's algorithm is
+    already per-layer: <code>process_qkv(..., layer_id)</code> calls
+    <code>get_kv(layer_id)</code> for one layer at a time, and the in-process implementation
+    requires <code>use_layerwise=True</code>. It wants layer <i>i</i>'s cached KV before it can
+    decide which tokens to recompute at layer <i>i</i>. Per-layer delivery is what it would
+    ask for if asked.`;
+  const economic = blend.ratio < 1
+    ? `<br><br><b>And at ${S.recomp}% recompute the economics still work here</b> &mdash; ratio
+       ${blend.ratio.toFixed(2)}, so transfer still fits inside compute. But notice how much
+       less headroom there is than dense's ${dense.ratio.toFixed(2)}: pull the recompute ratio
+       down, or the link speed down, and blend crosses into network-bound well before dense
+       does.`
+    : `<br><br><b>But at ${S.recomp}% recompute the economics do not.</b> Blend's ratio is
+       ${blend.ratio.toFixed(2)} against dense's ${dense.ratio.toFixed(2)} &mdash; the GPU sits
+       idle ${ms(blend.stalled)} waiting on the wire, and only
+       ${blend.hiddenPct.toFixed(0)}% of transfer is hidden versus
+       ${dense.hiddenPct.toFixed(0)}% for dense. Pipelining still starts layer 0 sooner, but the
+       ceiling is now bandwidth, not compute, so the win is capped.`;
+  co.innerHTML = structural + economic +
+    `<br><br><b>The conclusion that matters for sequencing:</b> blend is transfer-heavy
+     relative to its compute, by design &mdash; deleting compute is the whole point of it. That
+     single fact is why blend is the <i>strongest</i> case for the RDMA round-trip work and the
+     <i>weaker</i> case for pipelining. The two findings are the same finding. If we only get to
+     do one, for blend it is RDMA.`;
+  wrap.appendChild(co);
+}
+
 function renderBlend(d) {
   renderBlendChunks(d);
   renderBlendFlows();
+  renderBlendPayoff(d);
 
   const legs = blendLegs(d);
   const wrap = document.getElementById("blend-legs");
@@ -1983,6 +2081,7 @@ const LABEL = {
   params: v => v + " B",
   maxwrite: v => bytes(Math.pow(2, v)),
   reccap: v => bytes(Math.pow(2, v)),
+  recomp: v => v + "%",
 };
 
 function bindRange(id, key, fmt, resetSim) {
@@ -2009,6 +2108,7 @@ bindRange("tokens", "tokens", null, true);
 bindRange("sel", "sel", null, false);
 bindRange("maxwrite", "maxwritePow", LABEL.maxwrite, true);
 bindRange("reccap", "reccapPow", LABEL.reccap, false);
+bindRange("recomp", "recomp", LABEL.recomp, false);
 bindRange("net", "net", LABEL.net, false);
 bindRange("gpu", "gpu", LABEL.gpu, false);
 bindRange("params", "params", LABEL.params, false);
@@ -2113,6 +2213,7 @@ function applyHash() {
     ["net", "net", "net", 10, 250], ["gpu", "gpu", "gpu", 40, 900],
     ["params", "params", "params", 1, 140],
     ["reccap", "reccapPow", "reccap", 18, 23],
+    ["recomp", "recomp", "recomp", 5, 100],
   ]) {
     const v = num(param, lo, hi);
     if (v === null) continue;

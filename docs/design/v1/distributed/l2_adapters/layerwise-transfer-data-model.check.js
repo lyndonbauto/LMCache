@@ -163,6 +163,49 @@ assert($$("#blend-flows .fstep.shared").length >= 4,
 assert(flowText.includes("Nothing in multiprocess mode pipelines to the GPU today"),
   "the corrected conclusion is stated in the panel, not just the caveats");
 
+// --- the payoff question: does pipelining help blend? ---
+const recomp = $("#c-recomp");
+const setRecomp = v => {
+  recomp.value = String(v);
+  recomp.dispatchEvent(new window.Event("input", { bubbles: true }));
+};
+const pills = () => $("#blend-payoff .readout").textContent;
+const ratioOf = who => {
+  const m = pills().match(new RegExp(who + " ratio ([\\d.]+)"));
+  return m ? Number(m[1]) : NaN;
+};
+
+assert($$("#blend-payoff .track").length === 2,
+  "dense and blend are drawn as two comparable lanes");
+
+// The load-bearing claim: identical bytes, less compute, so blend's ratio is
+// strictly worse -- and worse by roughly 1/recompute.
+setRecomp(100);
+const parity = ratioOf("blend");
+assert(Math.abs(parity - ratioOf("dense")) < 0.02,
+  `at 100% recompute blend matches dense (${parity} vs ${ratioOf("dense")})`);
+setRecomp(15);
+const r15 = ratioOf("blend");
+assert(r15 > parity * 5,
+  `at 15% recompute blend's ratio is ~1/0.15 worse than at parity (${parity} -> ${r15})`);
+assert(ratioOf("dense") < r15,
+  "blend is always the more transfer-bound of the two");
+
+// Both halves of the answer must be present, not just the discouraging one.
+const payoffText = $("#blend-payoff").textContent;
+assert(/Structurally, yes/.test(payoffText),
+  "the structural answer is stated: blend suits per-layer delivery");
+assert(payoffText.includes("process_qkv") && payoffText.includes("get_kv"),
+  "and is evidenced by the per-layer calls in the in-process blender");
+assert(/strongest.*RDMA|RDMA.*round-trip/s.test(payoffText),
+  "the sequencing conclusion names RDMA as the bigger win for blend");
+
+// Driving recompute down must flip the verdict into network-bound.
+setRecomp(5);
+assert(/network bound/.test($("#blend-payoff").textContent),
+  "at low recompute blend goes network bound");
+setRecomp(15);
+
 // compatibility, driven from the sidebar
 setArch("uniform");
 assert($("#blend-callout").textContent.includes("Valid"), "uniform is valid for blend");
