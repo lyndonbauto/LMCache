@@ -329,8 +329,20 @@ assert($("#rec-callout").textContent.includes("yields 2 complete layers"),
 setTokens(784);       // a real Mamba unified block size: 1.53 MiB plane
 assert($("#rec-tag").textContent === "straddling",
   `784-token chunks straddle record boundaries (${$("#rec-tag").textContent})`);
-assert($("#rec-callout").textContent.includes("read amplification"),
-  "quantifies the resulting read amplification");
+{
+  // The harm is inflated first-layer latency, not wasted bandwidth: on a full
+  // fetch every record is consumed by some layer. Calling it read
+  // amplification invited exactly the wrong conclusion.
+  const rc = $("#rec-callout").textContent.replace(/\s+/g, " ");
+  assert(/not wasted bandwidth/.test(rc),
+    "the cost is explicitly not framed as wasted bandwidth");
+  assert(/pipelining can never hide|never hide/.test(rc),
+    "it is framed as inflating the first layer, the cost pipelining cannot hide");
+  assert(/\d+% more than its own size/.test(rc),
+    "and the inflation is still quantified");
+  assert(!/read amplification/.test(rc),
+    "the misleading 'read amplification' framing is gone");
+}
 assert($$("#rec-segs .seg2.partial").length > 0, "straddling records are marked partial");
 
 setTokens(256);

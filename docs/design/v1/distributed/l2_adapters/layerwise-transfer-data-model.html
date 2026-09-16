@@ -1832,7 +1832,8 @@ function renderRecords(d) {
   document.getElementById("rec-meta").innerHTML =
     ranges.map(r => `<b>${r.plane}</b> at ${bytes(r.start)}, ${bytes(r.length)}`).join(" &nbsp;&middot;&nbsp; ") +
     ` &nbsp;&rarr;&nbsp; segments <b>{${[...need.keys()].join(", ")}}</b>` +
-    ` &nbsp;&middot;&nbsp; reads <b>${bytes(read)}</b> to get <b>${bytes(needed)}</b>`;
+    ` &nbsp;&middot;&nbsp; <b>${bytes(read)}</b> must land for this layer's` +
+    ` <b>${bytes(needed)}</b> to be complete`;
 
   const co = document.getElementById("rec-callout");
   if (nseg === 1) {
@@ -1855,12 +1856,23 @@ function renderRecords(d) {
   } else {
     const waste = (read - needed) / needed * 100;
     co.innerHTML = `<div class="callout"><b>Every layer straddles a record boundary.</b> A plane is
-      ${bytes(planeBytes)} against ${bytes(segBytes)} records, which divide into each other
-      unevenly, so serving this layer pulls ${bytes(read)} to use ${bytes(needed)} —
-      ${waste.toFixed(0)}% read amplification. This is the Mamba-hybrid case: unified block sizes
-      are 544, 784 and 944 tokens, none of them powers of two. The fix is for LMCache to pass a
-      plane-size alignment hint into <code>plan()</code> rather than relying on the arithmetic
-      happening to work out.</div>`;
+      ${bytes(planeBytes)} against ${bytes(segBytes)} records, and they divide into each other
+      unevenly, so no record belongs to exactly one layer &mdash; each one carries the tail of
+      one and the head of the next.
+      <br><br><b>The cost is not wasted bandwidth.</b> Fetching the whole object, every record is
+      used by <i>some</i> layer, so the aggregate bytes read are the bytes needed. The cost is
+      that serving this layer needs <b>${bytes(read)}</b> to land before its
+      <b>${bytes(needed)}</b> is complete &mdash; ${waste.toFixed(0)}% more than its own size,
+      because it must wait for a record that mostly belongs to its neighbour. That delays the
+      <i>first</i> layer, which is the one cost pipelining can never hide, so misalignment taxes
+      the irreducible part.
+      <br><br>It also breaks the one-layer-per-slot assumption: a natural record-sized write
+      would span two layers, so the client has to cut writes at layer boundaries and the server
+      reads a whole record to serve a partial one.
+      <br><br>This is the Mamba-hybrid case &mdash; unified block sizes are 544, 784 and 944
+      tokens, none of them powers of two. The fix is for LMCache to pass a plane-size alignment
+      hint into <code>plan()</code> rather than relying on the arithmetic happening to work
+      out.</div>`;
   }
 
   // read order: sequential vs layer-major
@@ -2170,7 +2182,7 @@ function renderCaveats(d) {
     ["CacheBlend: the transfer/compute ratio is not a score", "It answers whether transfer can be hidden, not whether the cache is worth fetching. At high recompute it reports &ldquo;transfer hides&rdquo; for a request that fetched a whole cache and recomputed everything regardless. Judge that against <i>no cache at all</i>: an all-or-nothing fetch loses to not caching above <code>r* = 1 − ratio</code> (~73% on the default model), and pipelining shrinks that worst case from the whole transfer to one layer's — layer 0 has no earlier compute to hide behind, so <code>T/L</code> is a hard floor, not break-even."],
     ["CacheBlend: readiness is per leg", "Blend issues two prefetches over different group sets — the prefix leg reads attention + recurrent, the blend leg attention only. <code>expected(L)</code> must be summed over the leg's groups, not over every group in the registration."],
     ["CacheBlend: one attention group, hard limit", "<code>_classify_cb_read_groups</code> raises unless there is exactly one group labelled <code>\"attention\"</code>. A sliding-window group is labelled attention, so splitting a sliding-window hybrid is a hard incompatibility. Mamba hybrids are fine: attention + recurrent is one attention group."],
-    ["Record alignment is luck, not design", "<code>plan()</code> shards purely by byte count. A layer's bytes happen to land on record boundaries only because plane sizes and record caps are both powers of two. Mamba hybrids use 544/784/944-token blocks, and then every layer straddles. LMCache should pass a plane-size alignment hint rather than rely on it."],
+    ["Record alignment is luck, not design", "Aligned does <i>not</i> mean one layer per record &mdash; a record holding several whole planes is fine, and so is a plane spanning several whole records. The test is whether either divides the other. <code>plan()</code> shards purely by byte count, so it holds only because plane sizes and record caps are both powers of two; Mamba hybrids use 544/784/944-token blocks and then every layer straddles. The cost is not wasted bandwidth (every record is still used by some layer) but inflated first-layer latency, which is the one cost pipelining cannot hide. LMCache should pass a plane-size alignment hint rather than rely on luck."],
     ["Storage does not need reorganising", "No new keys, no layer in the key, no change to the shard plan. Putting layout into the key is the coupling AIE-89 deferred, and per-layer records would pin record size to the plane size — which the M0 sweep showed swings latency by 60–100%. Only the read <i>order</i> changes."],
     ["Slots are not tokens", "Compressed groups have <code>tokens_per_block ≠ slots_per_block</code>. Always ask <code>get_slots_per_chunk_in_sw</code>; never derive slot counts from token counts."],
     ["Tail latency, not median", "All-or-nothing waits once for the slowest transfer. Layer-major waits for the slowest transfer of <i>each</i> layer, in sequence — and a sum of maxima is worse than one maximum. Judge the transfer-vs-compute ratio at p99."],

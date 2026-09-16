@@ -179,11 +179,39 @@ the coupling AIE-89 deferred.
 
 ### The alignment hazard
 
+**What alignment does and does not mean.** It is *not* "one layer per record".
+Multiple layers sharing a record is fine, and so is one layer spanning several.
+Either of these is aligned:
+
+- **Record is a multiple of a plane** — 1 MiB records, 512 KiB planes. One
+  record holds two whole planes, so reading it completes two layers.
+- **Plane is a multiple of a record** — 4 MiB planes, 1 MiB records. Four
+  records make exactly one plane, nothing else in them.
+
+The bad case is neither, and the test is just
+`segBytes % planeBytes == 0 || planeBytes % segBytes == 0`. When it fails, no
+record belongs to exactly one layer: each carries the tail of one and the head
+of the next.
+
 That clean mapping is luck. It holds because plane sizes and record caps are
 both powers of two. Mamba/GDN hybrids use unified block sizes of 544, 784 and
 944 tokens — none of them powers of two. At 784 tokens the plane is 1.53 MiB
 against 1 MiB records, every layer straddles, and layer 0 needs records
-`{0, 1, 49, 50}`: 4 MiB read to use 3.06 MiB, 31% amplification.
+`{0, 1, 49, 50}` — 4 MiB must land before its 3.06 MiB is complete.
+
+**The cost is not wasted bandwidth**, and it should not be described as read
+amplification. Fetching the whole object, every record is consumed by *some*
+layer, so aggregate bytes read equal bytes needed. Two real costs:
+
+1. **It inflates first-layer latency.** A layer is not ready until every record
+   touching it has landed, including one that mostly belongs to its neighbour —
+   31% more bytes than the layer's own size at 784 tokens. First-layer transfer
+   is the `T/L` floor that pipelining can never hide, so misalignment taxes
+   precisely the irreducible part.
+2. **It breaks one-layer-per-slot.** `FetchSlot` carries a single `layer_id`. A
+   natural record-sized write would span two layers, so the client must cut
+   writes at layer boundaries and the server then reads a whole record to serve
+   a partial one.
 
 The fix is cheap: have LMCache pass a plane-size alignment hint into `plan()`
 so `seg_b` lands on plane boundaries, instead of relying on the arithmetic
