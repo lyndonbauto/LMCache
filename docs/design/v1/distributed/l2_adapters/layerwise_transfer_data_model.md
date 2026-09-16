@@ -52,6 +52,52 @@ model with full multi-head attention carries 4× the KV per token, which pushes
 8B-on-H100 to ~1.2 even at line rate. And the ratio must be evaluated at **p99,
 not median** — see the tail argument under Open questions.
 
+## Where pipelining pays off, and where it does not
+
+Worth stating before the mechanism, because it bounds the whole exercise and is
+easy to get backwards.
+
+**Caching's value and pipelining's value scale in opposite directions.**
+
+- **Caching** avoids prefill compute. Its value is `C`, which grows with every
+  parameter added to the model.
+- **Pipelining** hides transfer behind that compute. Its value is bounded by
+  `T`, the transfer itself, and `T` does not depend on the model at all — it is
+  set by layers, KV heads, head dimension, dtype, and token count. Layer 0
+  cannot be overlapped, so the ceiling is `T(1 − 1/L)`.
+
+Holding KV geometry fixed at a Llama-3-8B shape, maxing the link and the GPU:
+
+| Model size | `T` | `C` | Pipelining gain | Prefill caching avoids |
+| --- | --- | --- | --- | --- |
+| 8 B | 6.4 ms | 36 ms | 14% | 36 ms |
+| 70 B | 6.4 ms | 319 ms | 1.9% | 319 ms |
+| 405 B | 6.4 ms | 1843 ms | 0.3% | 1843 ms |
+
+`T` never moves. `C` grows 51×. So the *percentage* pipelining contributes
+collapses, while nothing about pipelining got worse and caching got far more
+valuable — at 405 B the cache trades 6.4 ms of network for 1843 ms of prefill,
+a 288× return.
+
+**The inference to avoid:** a small pipelining percentage on a large model does
+*not* mean caching is unhelpful there. It means the opposite. The percentage is
+pipelining's marginal gain *on top of* caching, measured between two already-
+cached configurations.
+
+**So this work targets configurations where `T` is large relative to `C`:**
+
+- **Long context.** `T` scales with tokens.
+- **Small and mid-size models**, where `C` is modest.
+- **MoE with a low active parameter count** — `C` follows active parameters, so
+  DeepSeek-V3 computes like a 37 B model. (Its MLA also shrinks `T` by ~7×, so
+  the two partly cancel; worth measuring rather than assuming.)
+- **CacheBlend**, which deletes compute deliberately and is therefore the most
+  transfer-bound case of all. See the CacheBlend section.
+
+A dense 405 B model on short prompts is the configuration where this work
+matters least, and it is worth not benchmarking it as though it were the
+headline.
+
 ## Four coordinate systems
 
 Pipelining has to reconcile four namespaces that do not line up:

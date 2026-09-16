@@ -527,6 +527,35 @@ assert(Number(kpi("Transfer รท compute")) > 1, `ratio above 1 (${kpi("Transfer ร
     "which is consistent with the default KV geometry (Llama-3-8B shape)");
 }
 
+// A large model drives the pipelining percentage toward zero while making
+// caching *more* valuable. The page must not let that read as "caching does
+// not help for big models".
+{
+  setRange(netSlider, 250); setRange(gpuSlider, 900);
+  const pctAt = p => { setRange($("#c-params"), p); return window.derive().timing; };
+  const small = pctAt(8), big = pctAt(405);
+
+  assert(Math.abs(small.transferAll - big.transferAll) < 0.01,
+    "transfer does not depend on model size");
+  assert(big.computeAll > small.computeAll * 10,
+    "compute scales with model size");
+  assert(big.savedPct < small.savedPct,
+    `the pipelining percentage falls as the model grows (${small.savedPct.toFixed(1)}% -> ${big.savedPct.toFixed(1)}%)`);
+  assert(big.savedPct < 1, "and at 405 B it is under 1%, which is the reported surprise");
+
+  const scope = $("#tl-scope").textContent.replace(/\s+/g, " ");
+  assert(/not the value of caching/.test(scope),
+    "the panel says the percentage is not caching's value");
+  assert(/opposite directions/.test(scope),
+    "and that the two scale in opposite directions");
+  assert(/nothing about pipelining got worse/.test(scope),
+    "and that a falling percentage is not pipelining degrading");
+  assert(/CacheBlend/.test(scope) && /long context/.test(scope),
+    "and names where pipelining does earn its keep");
+
+  setRange($("#c-params"), 8);
+}
+
 // pipelining must never lose to the all-or-nothing protocol shape
 setRange(netSlider, 122); setRange(gpuSlider, 400);
 const pipeMs = parseFloat(kpi("Pipelined")), aonMs = parseFloat(kpi("All-or-nothing"));

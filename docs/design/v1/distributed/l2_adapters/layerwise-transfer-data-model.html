@@ -634,6 +634,7 @@
 
     <div class="compare" id="tl-kpis"></div>
     <div id="tl-callout"></div>
+    <div id="tl-scope"></div>
   </div>
 
   <!-- P10: readiness matrix -->
@@ -2116,6 +2117,35 @@ function renderTimeline(d) {
       (it overlaps compute under transfer rather than the reverse), but the win is capped by the
       link, not by how cleverly the layers are scheduled.</div>`;
   }
+
+  // The percentage above is pipelining's marginal value on top of caching. It
+  // is NOT the value of caching, and the two move in opposite directions with
+  // model size -- which makes a small percentage here very easy to misread as
+  // "caching does not help for big models".
+  const scope = document.getElementById("tl-scope");
+  scope.innerHTML = `<div class="callout"><b>What this percentage is, and is not.</b>
+    Both lanes above are <i>already cached</i> &mdash; they differ only in whether delivery is
+    pipelined. So <b>${t.savedPct.toFixed(0)}%</b> is pipelining's marginal gain on top of
+    caching, not the value of caching.
+    <br><br>The two scale in opposite directions, which is why a big model makes this number
+    look bad:
+    <br>&nbsp;&nbsp;&middot; <b>Pipelining's ceiling is the transfer itself</b> &mdash;
+    <code>${ms(t.transferAll)}</code>, and it does not depend on the model at all. Layer 0 is
+    irreducible, so the most it can ever recover is
+    <code>${ms(t.transferAll - t.transferAll / S.layers)}</code>.
+    <br>&nbsp;&nbsp;&middot; <b>Caching's value is the prefill it avoids</b> &mdash;
+    <code>${ms(t.computeAll)}</code> here, and that grows with every parameter you add.
+    <br><br>Drag <i>Model size</i>: the transfer figure never moves, the compute figure grows,
+    so the percentage falls while <i>nothing about pipelining got worse</i>. At
+    ${S.params} B the cache avoids <code>${ms(t.computeAll)}</code> of prefill to spend
+    <code>${ms(t.transferAll)}</code> of network &mdash;
+    <b>${(t.computeAll / Math.max(t.transferAll, 0.001)).toFixed(0)}&times;</b>. The bigger the
+    model, the better caching looks and the less pipelining adds.
+    <br><br><b>So where does pipelining earn its keep?</b> Where transfer is large relative to
+    compute: long context (KV grows with tokens, compute per layer does too, but transfer is the
+    part that is not already overlapped), small and mid-size models, MoE with a low active
+    parameter count, and CacheBlend &mdash; which deletes compute deliberately. Those are the
+    configurations this work is for.</div>`;
 }
 
 // ---- readiness simulation ----
@@ -2251,6 +2281,7 @@ function renderCaveats(d) {
     ["Slot numbers are request-wide", "Every node reports into one table over one queue pair. Per-fetch numbering makes two nodes' slot 5 indistinguishable."],
     ["Not every chunk participates", `Sliding-window groups cover only part of the prompt — ${S.arch === "sw" ? `here, ${Math.min(S.chunks, 4)} of ${S.chunks} chunks` : "switch Architecture to the sliding-window hybrid to see it"}. Waiting for all chunks in such a group waits forever.`],
     ["Recurrent groups are different", "Mamba/GDN groups hold state snapshots, not per-token KV, and probably should not sit behind a per-layer barrier at all. They also force <code>--separate-object-groups</code>, make the pages byte-opaque (no CacheGen or CacheBlend), and impose a unified block size of 544–944 tokens that the LMCache chunk size must be a multiple of. Unconfirmed how they should be treated here."],
+    ["A small pipelining gain does not mean caching is useless", "Caching's value is the prefill it avoids and grows with the model; pipelining's value is bounded by the transfer and does not depend on the model. At 405 B with an 8B KV shape the cache trades 6.4 ms of network for 1843 ms of prefill while pipelining adds 0.3% &mdash; the percentage collapsed because the denominator grew, not because pipelining degraded. This work targets large <code>T</code> relative to <code>C</code>: long context, small and mid-size models, low-active-parameter MoE, and CacheBlend."],
     ["CacheBlend: half of it comes free", "Blend prefetches L2&rarr;L1 through the same <code>storage_manager.submit_prefetch_task</code> the dense path uses, so the RDMA server-push benefits it with no blend-specific work at all."],
     ["CacheBlend is not the reason the GPU hop isn't pipelined", "Blend's L1&rarr;GPU kernel takes all layers of a kernel group at once — but so does the dense one (<code>multi_layer_block_kv_transfer</code>), and <code>wait_for_layer_load</code> is a no-op stub for both. Nothing in MP mode pipelines to the GPU yet. Per-layer delivery is the same unbuilt change in two kernels, so blend is a second instance of the work, not an obstacle. Blend is arguably the better conceptual fit: the original algorithm inspects selected layers (<code>blend_check_layers</code>) and the in-process version requires <code>use_layerwise=True</code>."],
     ["CacheBlend: the transfer/compute ratio is not a score", "It answers whether transfer can be hidden, not whether the cache is worth fetching. At high recompute it reports &ldquo;transfer hides&rdquo; for a request that fetched a whole cache and recomputed everything regardless. Judge that against <i>no cache at all</i>: an all-or-nothing fetch loses to not caching above <code>r* = 1 − ratio</code> (~73% on the default model), and pipelining shrinks that worst case from the whole transfer to one layer's — layer 0 has no earlier compute to hide behind, so <code>T/L</code> is a hard floor, not break-even."],
