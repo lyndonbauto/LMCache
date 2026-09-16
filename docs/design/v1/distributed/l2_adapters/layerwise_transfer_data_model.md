@@ -299,20 +299,39 @@ A server-side push collapses that to one info command plus the writes. **The
 strongest single argument for the RDMA work is blend's sparse leg**, not the
 dense prefix path that M0 already showed reaching 98% of line rate on TCP.
 
-### The half that does not: L1 → GPU
+### The half that needs work: L1 → GPU
 
-Blend does not use the dense transfer path to reach the GPU. `CB_RETRIEVE_PRE_COMPUTED`
-is a blocking RPC that runs blend's own fused re-RoPE-and-scatter kernel, and
-that kernel is dispatched **per kernel group with every layer at once** — the
-spec passes `num_layers = buf0.shape[1]`, the whole layer extent of the group
-(`blend/retrieve.py:215`). There is no layer loop to interrupt.
+Blend reaches the GPU by its own route. `CB_RETRIEVE_PRE_COMPUTED` is a
+blocking RPC running blend's fused re-RoPE-and-scatter kernel, dispatched per
+kernel group with every layer at once — the spec passes
+`num_layers = buf0.shape[1]`, the whole layer extent of the group
+(`blend/retrieve.py:215`).
 
-So per-layer delivery into L1 does not by itself pipeline blend. Making it
-pipeline would mean splitting that kernel per layer and making the retrieve RPC
-incremental — a separate, larger change whose payoff is less clear, since the
-re-RoPE compute is not obviously large enough to hide behind. **Recommend
-scoping blend pipelining out of the current tickets** and taking the free L2→L1
-win, with the per-layer scatter revisited only if measurement justifies it.
+**This is not a blend-specific limitation, and it must not be written up as
+one.** The dense path is in exactly the same position: it calls
+`device_ops.multi_layer_block_kv_transfer` (`lmcache_driven_transfer.py:623`),
+also per kernel group and also every layer at once, batched across chunks. And
+`wait_for_layer_load` is a no-op stub for both
+(`lmcache_mp_connector.py:786`). **Nothing in MP mode pipelines to the GPU
+today.**
+
+So per-layer GPU delivery is unbuilt work in both routes, and it is the same
+shape of work in each: make a kernel accept a layer range instead of the whole
+group, and make its caller incremental. The difference is only that there are
+two such kernels, so blend is a *second instance* of the change rather than an
+obstacle to it.
+
+Blend is in fact the more natural fit conceptually. The original CacheBlend
+algorithm is inherently layerwise — it inspects deviation at selected layers
+(`blend_check_layers`) to choose which tokens to recompute — and the in-process
+implementation requires `use_layerwise=True`
+(`lmcache/v1/compute/blend/blender.py:48`). Layerwise blend is an existing
+idea, just not in MP mode.
+
+**Recommend sequencing, not exclusion:** build the per-layer path on the dense
+kernel first, because it is the simpler kernel and the one M0 characterised,
+then port the same change to blend's. Blend takes the L2→L1 win immediately
+either way.
 
 ### The two legs, and what they mean for readiness
 
