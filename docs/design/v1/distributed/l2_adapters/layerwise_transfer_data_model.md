@@ -369,10 +369,43 @@ transfer comfortably hidden — while blend lands at **1.79, i.e. network-bound*
 Pipelining still starts layer 0 sooner, but the ceiling becomes bandwidth
 rather than compute, so the win is capped.
 
-**These are the same finding, not two.** Blend is transfer-heavy relative to its
-compute by design. That one fact is why it is simultaneously the strongest case
-for the RDMA round-trip work and the weaker case for pipelining. If only one
-lands, for blend it should be RDMA.
+### But the ratio is not a score
+
+The ratio answers *can the transfer be hidden*, which is a different question
+from *is the cache worth fetching*, and the two come apart badly at high `r`.
+At `r = 1.0` the ratio cheerfully reports "transfer hides" for a request that
+fetched an entire cache and then recomputed everything anyway. Intuition says a
+high recompute ratio is close to a cache miss and so the cache should stop
+helping — and intuition is right. The ratio just does not measure it.
+
+Comparing against **no cache at all** (full prefill, nothing fetched) is what
+measures it:
+
+| | End-to-end |
+| --- | --- |
+| No cache at all | `C` |
+| Blend today, serial fetch then compute | `T + rC` |
+| Blend pipelined | `≈ max(T, rC) + T/L` |
+
+Serial blend stops beating no-cache when `T + rC > C`, i.e. above
+`r* = 1 − T/C = 1 − ratio_dense`. On the walkthrough's defaults that is about
+**73% recompute** — beyond which today's fetch-then-compute path is actively
+worse than not caching, because the fetch is paid for whether or not the data
+is then discarded.
+
+**Pipelining nearly removes that cliff, and this is the argument for it in the
+blend case.** Overlapped, the fetch hides inside compute that was happening
+anyway — all of it except layer 0, which has no earlier compute to hide behind.
+The worst-case penalty therefore shrinks from the whole transfer `T` to one
+layer's transfer `T/L`, a factor of `L` (32× on the default model). It is not
+break-even; `T/L` is a real floor.
+
+**So the conclusion is two-sided, not one-sided.** Blend is transfer-heavy
+relative to its compute by design, which is why it is the strongest case for
+the RDMA round-trip work. But pipelining's value for blend is not mainly
+speedup — it is **downside protection**: it is what makes it safe to leave the
+cache enabled when reuse turns out poor. Those serve different risks and should
+not be traded off against each other.
 
 Two caveats on the reference lane. The comparison is against a **full prefill**
 of every token, which is the cost of computing a layer from scratch — a pure

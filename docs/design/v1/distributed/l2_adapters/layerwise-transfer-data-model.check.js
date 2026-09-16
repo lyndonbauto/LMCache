@@ -175,8 +175,8 @@ const ratioOf = who => {
   return m ? Number(m[1]) : NaN;
 };
 
-assert($$("#blend-payoff .track").length === 2,
-  "dense and blend are drawn as two comparable lanes");
+assert($$("#blend-payoff .track").length === 5,
+  "two staircase lanes plus three end-to-end bars");
 
 // "Recompute" is the fraction NOT reused, which is the opposite of the natural
 // reading, so the panel has to define it rather than assume it.
@@ -197,13 +197,13 @@ setRecomp(100);
 assert(/sanity check, not an operating point/.test($("#blend-payoff").textContent),
   "100% recompute is flagged as degenerate rather than read as a result");
 const parity = ratioOf("blend");
-assert(Math.abs(parity - ratioOf("dense")) < 0.02,
-  `at 100% recompute blend matches dense (${parity} vs ${ratioOf("dense")})`);
+assert(Math.abs(parity - ratioOf("reference")) < 0.02,
+  `at 100% recompute blend matches dense (${parity} vs ${ratioOf("reference")})`);
 setRecomp(15);
 const r15 = ratioOf("blend");
 assert(r15 > parity * 5,
   `at 15% recompute blend's ratio is ~1/0.15 worse than at parity (${parity} -> ${r15})`);
-assert(ratioOf("dense") < r15,
+assert(ratioOf("reference") < r15,
   "blend is always the more transfer-bound of the two");
 
 // Both halves of the answer must be present, not just the discouraging one.
@@ -212,8 +212,31 @@ assert(/Structurally, yes/.test(payoffText),
   "the structural answer is stated: blend suits per-layer delivery");
 assert(payoffText.includes("process_qkv") && payoffText.includes("get_kv"),
   "and is evidenced by the per-layer calls in the in-process blender");
-assert(/strongest.*RDMA|RDMA.*round-trip/s.test(payoffText),
-  "the sequencing conclusion names RDMA as the bigger win for blend");
+assert(/not the same question/.test(payoffText),
+  "the ratio is explicitly distinguished from whether caching is worth it");
+
+// The question the ratio does NOT answer: is fetching worth it at all?
+
+const worth = $("#blend-payoff").textContent.replace(/\s+/g, " ");
+assert(/No cache at all/.test(worth), "a no-cache reference is shown");
+assert(/break-?even|% recompute/.test(worth),
+  "the break-even recompute ratio is quantified");
+assert(/making a bad hit nearly harmless/.test(worth),
+  "pipelining's real value for blend is named: removing the downside");
+
+// At high recompute serial blend must be reported as losing to no cache.
+setRecomp(100);
+const hi = $("#blend-payoff").textContent.replace(/\s+/g, " ");
+assert(/worse than not caching/.test(hi),
+  "at 100% recompute, fetching then discarding loses to not caching");
+assert(/worst case: one layer's transfer/.test(hi),
+  "pipelined worst case is one layer's transfer, not break-even — L0 cannot overlap");
+assert(/factor of 32/.test(hi),
+  "and the downside shrinks by a factor of the layer count");
+setRecomp(15);
+const lo = $("#blend-payoff").textContent.replace(/\s+/g, " ");
+assert(/still ahead/.test(lo),
+  "at the published 15% operating point the cache pays for itself even serially");
 
 // Driving recompute down must flip the verdict into network-bound.
 setRecomp(5);

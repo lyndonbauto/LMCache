@@ -1504,11 +1504,83 @@ function renderBlendPayoff(d) {
 
   const ro = el("div", "readout");
   ro.innerHTML =
-    `<span class="pill${dense.ratio < 1 ? " on" : ""}">dense ratio ${dense.ratio.toFixed(2)}</span>` +
+    `<span class="pill${dense.ratio < 1 ? " on" : ""}">reference ratio ${dense.ratio.toFixed(2)}</span>` +
     `<span class="pill${blend.ratio < 1 ? " on" : ""}">blend ratio ${blend.ratio.toFixed(2)}</span>` +
-    `<span class="pill${dense.hiddenPct > 90 ? " on" : ""}">dense ${dense.hiddenPct.toFixed(0)}% hidden</span>` +
     `<span class="pill${blend.hiddenPct > 90 ? " on" : ""}">blend ${blend.hiddenPct.toFixed(0)}% hidden</span>`;
   wrap.appendChild(ro);
+
+  // The ratio answers "can transfer be hidden", which is NOT the same question
+  // as "is caching worth it". Without this comparison the ratio reads as a
+  // score, and at r = 1 it cheerfully reports "transfer hides" for a
+  // configuration that fetched a whole cache and then ignored it.
+  const noCache = dense.computeAll;                 // full prefill, nothing fetched
+  const serial = blend.baseline;                    // fetch everything, then compute
+  const piped = blend.pipelined;                    // overlapped
+  const worst = Math.max(noCache, serial, piped) * 1.02;
+  const bpct = v => (v / worst * 100) + "%";
+
+  wrap.appendChild(el("div", null, "")).style.height = "6px";
+  const h = el("div", "track-hd");
+  h.innerHTML = `<b>Is the cache even worth fetching?</b><span>end-to-end, same request</span>`;
+  wrap.appendChild(h);
+
+  const bar = (label, segs, total, note) => {
+    const tr = el("div", "track");
+    const hd = el("div", "track-hd");
+    hd.innerHTML = `<b>${label}</b><span>${ms(total)}${note ? " · " + note : ""}</span>`;
+    tr.appendChild(hd);
+    const ln = el("div", "lane");
+    let at = 0;
+    segs.forEach(([cls, len, txt]) => {
+      if (len <= 0) return;
+      const b = el("div", "blk " + cls, len / worst > 0.08 ? txt : "");
+      b.style.left = bpct(at);
+      b.style.width = bpct(len);
+      b.title = `${txt} — ${ms(len)}`;
+      ln.appendChild(b);
+      at += len;
+    });
+    tr.appendChild(ln);
+    wrap.appendChild(tr);
+  };
+
+  bar("No cache at all", [["cpu", noCache, "full prefill"]], noCache, "nothing fetched");
+  bar("Blend today — fetch, then compute",
+    [["net", blend.transferAll, "fetch"], ["cpu", blend.computeAll, "recompute"]],
+    serial, serial > noCache ? "worse than not caching" : "still ahead");
+  // Layer 0's transfer is the one piece that can never be overlapped: there is
+  // no earlier compute to hide it behind. So the pipelined worst case is not
+  // break-even, it is break-even plus one layer.
+  const floor = blend.rows[0].netMs;
+  bar("Blend pipelined", [["net", floor, "L0"], ["cpu", piped - floor, "overlapped"]],
+    piped, piped - noCache <= floor * 1.05 ? "worst case: one layer's transfer" : "");
+
+  // r* where serial blend stops beating no cache at all: T + r*C = C.
+  const breakEven = Math.max(0, 1 - dense.ratio) * 100;
+  const co2 = el("div", "callout" + (serial > noCache ? "" : " ok"));
+  co2.innerHTML = `<b>This is the part that looks paradoxical.</b> A high recompute ratio is
+    close to a cache miss, so you would expect the cache to stop helping &mdash; and for
+    <i>today's</i> serial fetch it does. Fetching costs
+    <code>${ms(blend.transferAll)}</code> whether or not you then throw the data away, so serial
+    blend loses to not caching at all above about
+    <b>${breakEven.toFixed(0)}% recompute</b> (where <code>transfer + r×compute &gt; compute</code>,
+    i.e. <code>r &gt; 1 − ${dense.ratio.toFixed(2)}</code>). At
+    ${S.recomp}% it is currently <b>${serial > noCache
+      ? `${ms(serial - noCache)} slower than not caching</b>`
+      : `${ms(noCache - serial)} faster than not caching</b>`}.
+    <br><br><b>Pipelining nearly removes that cliff.</b> Overlapped, the fetch hides inside
+    compute you were doing anyway &mdash; all of it except layer 0, which has no earlier compute
+    to hide behind. So the worst case shrinks from <i>the whole transfer</i> to
+    <i>one layer's transfer</i>, a factor of ${S.layers}:
+    <code>${ms(piped)}</code> against <code>${ms(noCache)}</code> for no cache, a penalty of
+    <code>${ms(Math.max(0, piped - noCache))}</code> versus serial's
+    <code>${ms(Math.max(0, serial - noCache))}</code>.
+    <br><br>That reframes the earlier point rather than contradicting it. Pipelining's value for
+    blend is less about raw speedup and more about <b>making a bad hit nearly harmless</b> &mdash;
+    it is what lets you leave the cache switched on when reuse turns out poor, instead of it
+    costing you. RDMA is still the bigger win for blend's good case; pipelining is what protects
+    its bad case.`;
+  wrap.appendChild(co2);
 
   // The honest answer, stated from whichever regime the sliders land in.
   const co = el("div", "callout" + (blend.ratio < 1 ? " ok" : ""));
@@ -1537,11 +1609,10 @@ function renderBlendPayoff(d) {
        only earns its keep below 100%.`
     : "";
   co.innerHTML = structural + economic + degenerate +
-    `<br><br><b>The conclusion that matters for sequencing:</b> blend is transfer-heavy
-     relative to its compute, by design &mdash; deleting compute is the whole point of it. That
-     single fact is why blend is the <i>strongest</i> case for the RDMA round-trip work and the
-     <i>weaker</i> case for pipelining. The two findings are the same finding. If we only get to
-     do one, for blend it is RDMA.`;
+    `<br><br><b>Careful with this ratio though.</b> It answers &ldquo;can the transfer be
+     hidden?&rdquo;, which is not the same question as &ldquo;is the cache worth
+     fetching?&rdquo; &mdash; see the bars below, because the two come apart badly at high
+     recompute.`;
   wrap.appendChild(co);
 }
 
@@ -2037,6 +2108,7 @@ function renderCaveats(d) {
     ["Recurrent groups are different", "Mamba/GDN groups hold state snapshots, not per-token KV, and probably should not sit behind a per-layer barrier at all. They also force <code>--separate-object-groups</code>, make the pages byte-opaque (no CacheGen or CacheBlend), and impose a unified block size of 544–944 tokens that the LMCache chunk size must be a multiple of. Unconfirmed how they should be treated here."],
     ["CacheBlend: half of it comes free", "Blend prefetches L2&rarr;L1 through the same <code>storage_manager.submit_prefetch_task</code> the dense path uses, so the RDMA server-push benefits it with no blend-specific work at all."],
     ["CacheBlend is not the reason the GPU hop isn't pipelined", "Blend's L1&rarr;GPU kernel takes all layers of a kernel group at once — but so does the dense one (<code>multi_layer_block_kv_transfer</code>), and <code>wait_for_layer_load</code> is a no-op stub for both. Nothing in MP mode pipelines to the GPU today. Per-layer delivery is the same unbuilt change in two kernels, so blend is a second instance of the work, not an obstacle. Blend is arguably the better conceptual fit: the original algorithm inspects selected layers (<code>blend_check_layers</code>) and the in-process version requires <code>use_layerwise=True</code>."],
+    ["CacheBlend: the transfer/compute ratio is not a score", "It answers whether transfer can be hidden, not whether the cache is worth fetching. At high recompute it reports &ldquo;transfer hides&rdquo; for a request that fetched a whole cache and recomputed everything regardless. Judge that against <i>no cache at all</i>: serial blend loses to not caching above <code>r* = 1 − ratio</code> (~73% on the default model), and pipelining shrinks that worst case from the whole transfer to one layer's — layer 0 has no earlier compute to hide behind, so <code>T/L</code> is a hard floor, not break-even."],
     ["CacheBlend: readiness is per leg", "Blend issues two prefetches over different group sets — the prefix leg reads attention + recurrent, the blend leg attention only. <code>expected(L)</code> must be summed over the leg's groups, not over every group in the registration."],
     ["CacheBlend: one attention group, hard limit", "<code>_classify_cb_read_groups</code> raises unless there is exactly one group labelled <code>\"attention\"</code>. A sliding-window group is labelled attention, so splitting a sliding-window hybrid is a hard incompatibility. Mamba hybrids are fine: attention + recurrent is one attention group."],
     ["Record alignment is luck, not design", "<code>plan()</code> shards purely by byte count. A layer's bytes happen to land on record boundaries only because plane sizes and record caps are both powers of two. Mamba hybrids use 544/784/944-token blocks, and then every layer straddles. LMCache should pass a plane-size alignment hint rather than rely on it."],
