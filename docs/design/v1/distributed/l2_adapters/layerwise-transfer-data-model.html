@@ -2116,6 +2116,12 @@ function renderTimeline(d) {
   add("Won by pipelining", ms(t.saved) + ` (${t.savedPct.toFixed(0)}%)`, "good");
   add("Transfer hidden", t.hiddenPct.toFixed(0) + "%", t.hiddenPct > 90 ? "good" : "bad");
   add("Transfer ÷ compute", t.ratio.toFixed(2), t.ratio < 1 ? "good" : "bad");
+  // The same ratio, read the other way round: fetching instead of computing is
+  // what caching *is*, so 1 - ratio is what the cache saves before pipelining
+  // contributes anything at all.
+  add("Caching saves (vs no cache)",
+      (Math.max(0, 1 - t.ratio) * 100).toFixed(0) + "%",
+      t.ratio < 1 ? "good" : "bad");
 
   const co = document.getElementById("tl-callout");
   if (t.ratio < 1) {
@@ -2158,7 +2164,13 @@ function renderTimeline(d) {
     compute: long context (KV grows with tokens, compute per layer does too, but transfer is the
     part that is not already overlapped), small and mid-size models, MoE with a low active
     parameter count, and CacheBlend &mdash; which deletes compute deliberately. Those are the
-    configurations this work is for.</div>`;
+    configurations this work is for.
+    <br><br><b>Concretely, the partial hit is the case.</b> Overlap is greatest when the two
+    lanes are balanced &mdash; when the fraction of the prompt still needing prefill is about
+    equal to the ratio itself, <b>${(Math.min(1, t.ratio) * 100).toFixed(0)}%</b> here. Below
+    that there is too little compute to hide the transfer behind; above it the transfer runs
+    out first. A complete hit wins nothing from pipelining because no prefill remains to
+    overlap with.</div>`;
 }
 
 // ---- readiness simulation ----
