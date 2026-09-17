@@ -561,10 +561,12 @@ chunks while the slot indices stay in the request's numbering.
 `build_pipelined_fetch_command` refuses a sink list with a repeated slot index,
 which is the mistake that per-fetch numbering would produce.
 
-**Device-free verification:** `pipelined_fetch_session_test` (via
-`make -C tests/v1/distributed/rdma logic-test`) covers multi-node slot
-numbering, declined-slot handling, stale generations, and abandon — without
-libibverbs or a cluster. That is **implemented** logic, not fabric proof.
+**Device-free verification:** `pipelined_fetch_session_test` and
+`pipelined_fetch_issue_test` (via `make -C tests/v1/distributed/rdma
+logic-test`) cover multi-node slot numbering, declined-slot handling, stale
+generations, abandon, transport-level node failures, and layout conversion —
+without libibverbs or a cluster. That is **implemented** logic, not fabric
+proof.
 
 Two things this format does **not** yet settle, both needing the server
 team's input:
@@ -747,7 +749,7 @@ Being precise about this, because the gap matters:
 | `kv_sink_client.{h,cpp}` codec | **Verified.** Register and fetch commands round-trip against the mock writer. |
 | Per-node `kv-sink-register` fanout | **Implemented and compiling** via `aerospike_info_foreach`. Never run against a cluster. |
 | `PipelinedFetchSession` driver | **Implemented** and covered by `pipelined_fetch_session_test` (no device). |
-| Connector + Python pipelined path | **Partially wired.** `PipelinedFetchSession` and `connector_pipelined_rdma` implement multi-QP register/connect, slot-major commands, generation-scoped replies, and notification draining inside `is_pipelined_layer_ready`. Python receives layouts via `StorageManager.set_object_group_layouts` at KV registration; native pybind for the full fetch lifecycle is still outstanding in this branch, so end-to-end MP load cannot drive a pipelined fetch until those bindings land. |
+| Connector + Python pipelined path | **Implemented (device-free).** `AerospikeNativeConnector::issue_pipelined_fetch` performs begin, per-node `aerospike_info_node`, and reply feeding without holding the driver lock across I/O; `set_object_group_layouts` converts registered `MemoryLayoutDesc` shapes in C++; `finish_pipelined_fetch` / `abandon_pipelined_fetch` and `pipelined_fetch_init_error` are bound through pybind and threaded via `StorageManager` and `NativeConnectorL2Adapter`. Covered by `pipelined_fetch_issue_test` and Python adapter tests. **Not verified over a fabric** with real digests from a prefetch load. |
 | Adapter plumbing, descriptor, window plan | **Implemented and unit-tested.** |
 | Write-lock TTL invariant | **Implemented and unit-tested** (startup check). |
 | Mock RDMA writer | **Verified.** Posts real `ibv_post_send` writes and fences on its own send CQ. |

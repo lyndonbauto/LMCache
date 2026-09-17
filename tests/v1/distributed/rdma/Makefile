@@ -22,6 +22,7 @@ PLAN_BIN := $(BUILD_DIR)/request_plan_test
 PLANNER_BIN := $(BUILD_DIR)/slot_planner_test
 CODEC_BIN := $(BUILD_DIR)/pipelined_fetch_test
 SESSION_BIN := $(BUILD_DIR)/pipelined_fetch_session_test
+ISSUE_BIN := $(BUILD_DIR)/pipelined_fetch_issue_test
 
 INCLUDES := -I$(SRC_DIR) -I$(CONNECTOR_DIR)
 ifneq ($(RDMA_CORE_INCLUDE_DIR),)
@@ -73,7 +74,16 @@ SESSION_SOURCES := \
 	$(CONNECTOR_DIR)/layer_pipeline.cpp \
 	$(CONNECTOR_DIR)/slot_planner.cpp \
 	$(CONNECTOR_DIR)/shard_plan.cpp
-LOGIC_BINS := $(SHARD_BIN) $(PLAN_BIN) $(PLANNER_BIN) $(CODEC_BIN) $(SESSION_BIN)
+ISSUE_SOURCES := \
+	$(SRC_DIR)/pipelined_fetch_issue_test.cpp \
+	$(CONNECTOR_DIR)/pipelined_fetch_issue.cpp \
+	$(CONNECTOR_DIR)/pipelined_fetch_session.cpp \
+	$(CONNECTOR_DIR)/memory_layout_conversion.cpp \
+	$(CONNECTOR_DIR)/kv_sink_client.cpp \
+	$(CONNECTOR_DIR)/layer_pipeline.cpp \
+	$(CONNECTOR_DIR)/slot_planner.cpp \
+	$(CONNECTOR_DIR)/shard_plan.cpp
+LOGIC_BINS := $(SHARD_BIN) $(PLAN_BIN) $(PLANNER_BIN) $(CODEC_BIN) $(SESSION_BIN) $(ISSUE_BIN)
 
 .PHONY: all test logic logic-test clean
 all: $(BIN) $(PIPELINE_BIN) $(LOGIC_BINS)
@@ -88,6 +98,7 @@ logic-test: $(LOGIC_BINS)
 	$(PLANNER_BIN)
 	$(CODEC_BIN)
 	$(SESSION_BIN)
+	$(ISSUE_BIN)
 
 $(BIN): $(SOURCES) | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
@@ -110,6 +121,9 @@ $(CODEC_BIN): $(CODEC_SOURCES) | $(BUILD_DIR)
 $(SESSION_BIN): $(SESSION_SOURCES) | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(SESSION_SOURCES) -o $@
 
+$(ISSUE_BIN): $(ISSUE_SOURCES) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(ISSUE_SOURCES) -o $@
+
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
@@ -124,6 +138,7 @@ test: $(BIN) $(PIPELINE_BIN) $(LOGIC_BINS)
 	$(PLANNER_BIN)
 	$(CODEC_BIN)
 	$(SESSION_BIN)
+	$(ISSUE_BIN)
 	$(BIN) $(RDMA_DEVICE) $(RDMA_GID_INDEX)
 	$(PIPELINE_BIN) $(RDMA_DEVICE) $(RDMA_GID_INDEX)
 

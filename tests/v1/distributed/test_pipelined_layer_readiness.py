@@ -65,6 +65,51 @@ def test_native_adapter_without_binding_returns_false() -> None:
     assert adapter.is_pipelined_layer_ready(0) is False
 
 
+def test_native_adapter_forwards_pipelined_fetch_lifecycle() -> None:
+    """Begin, finish, and init-error surface delegate to the native client."""
+
+    class _PipelinedClient:
+        def __init__(self) -> None:
+            self._efd = create_event_notifier()
+            self.layouts: dict | None = None
+            self.finished = False
+            self.abandoned = False
+            self.generation = 7
+
+        def event_fd(self) -> int:
+            return self._efd.fileno()
+
+        def pipelined_fetch_init_error(self) -> str:
+            return "verbs init failed"
+
+        def set_object_group_layouts(self, layouts: dict) -> None:
+            self.layouts = layouts
+
+        def issue_pipelined_fetch(
+            self,
+            placements: list[object],
+            chunk_nodes: list[object],
+            digests: list[object],
+        ) -> int:
+            del placements, chunk_nodes, digests
+            return self.generation
+
+        def finish_pipelined_fetch(self) -> None:
+            self.finished = True
+
+        def abandon_pipelined_fetch(self) -> None:
+            self.abandoned = True
+
+    client = _PipelinedClient()
+    adapter = NativeConnectorL2Adapter(native_client=client, type_name="test")
+    assert adapter.pipelined_fetch_init_error() == "verbs init failed"
+    assert adapter.begin_pipelined_fetch([], [], []) == 7
+    adapter.finish_pipelined_fetch()
+    assert client.finished is True
+    adapter.abandon_pipelined_fetch()
+    assert client.abandoned is True
+
+
 def test_readiness_is_scoped_to_request_generation() -> None:
     """The base contract accepts a generation handle for pipelined queries."""
 
