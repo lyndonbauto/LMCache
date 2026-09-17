@@ -3,7 +3,6 @@
 
 # Standard
 from collections.abc import Sequence
-import inspect
 
 # Third Party
 import torch
@@ -17,66 +16,11 @@ from lmcache.v1.multiprocess.layer_progress import (
     DaemonLayerLaunchEventPool,
     LayerProgressRecord,
 )
-from lmcache.v1.multiprocess.layerwise_schedule import LayerLaunch, LayerwiseSchedule
+from lmcache.v1.multiprocess.layerwise_schedule import LayerwiseSchedule
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
-
-
-def _invoke_multi_layer_block_kv_transfer(
-    paged_buffer_ptrs: torch.Tensor,
-    staging_ptrs: list[int],
-    block_ids_gpu: torch.Tensor,
-    device: torch.device,
-    direction: lmcache_native.TransferDirection,
-    shape_desc: lmcache_native.PageBufferShapeDesc,
-    lmcache_chunk_size: int,
-    engine_kv_format: lmcache_native.EngineKVFormat,
-    skip_prefix_n_blocks: int,
-    layer_offset: int,
-    n_layers: int,
-) -> None:
-    """Call the native block transfer, including optional layer sub-range."""
-    try:
-        # First Party
-        import lmcache.cuda_ops as cuda_ops
-
-        sig = inspect.signature(cuda_ops.multi_layer_block_kv_transfer)
-        if "layer_offset" in sig.parameters:
-            cuda_ops.multi_layer_block_kv_transfer(
-                paged_buffer_ptrs,
-                staging_ptrs,
-                block_ids_gpu,
-                device,
-                int(direction),
-                shape_desc,
-                lmcache_chunk_size,
-                int(engine_kv_format),
-                skip_prefix_n_blocks,
-                layer_offset,
-                n_layers,
-            )
-            return
-    except (ImportError, ValueError, TypeError):
-        pass
-
-    if layer_offset != 0 or n_layers != 1:
-        raise RuntimeError(
-            "layerwise MP retrieve requires a CUDA extension that supports "
-            "layer_offset and n_layers on multi_layer_block_kv_transfer"
-        )
-    device_ops.multi_layer_block_kv_transfer(
-        paged_buffer_ptrs,
-        staging_ptrs,
-        block_ids_gpu,
-        device,
-        direction,
-        shape_desc,
-        lmcache_chunk_size,
-        engine_kv_format,
-        skip_prefix_n_blocks,
-    )
 
 
 def _kernel_group_to_object_group(
@@ -224,7 +168,7 @@ def transfer_kv_layerwise_h2d(
                     ).data_ptr()
                     for slot in range(batch_len)
                 ]
-                _invoke_multi_layer_block_kv_transfer(
+                device_ops.multi_layer_block_kv_transfer(
                     cache_context.get_kernel_group_kv_pointers(kernel_group_id),
                     tmp_gpu_buffers_batched,
                     block_ids_curr_batch,
@@ -243,19 +187,3 @@ def transfer_kv_layerwise_h2d(
     except Exception:
         progress.mark_retrieve_failed()
         raise
-
-
-def launch_for_layer(schedule: LayerwiseSchedule, layer_id: int) -> LayerLaunch:
-    """Return the scheduled launch metadata for ``layer_id``.
-
-    Args:
-        schedule: Layerwise schedule for the registered layout.
-        layer_id: Global layer index.
-
-    Returns:
-        The :class:`LayerLaunch` entry for that layer.
-
-    Raises:
-        KeyError: If ``layer_id`` is not scheduled.
-    """
-    return schedule.launch_for(layer_id)

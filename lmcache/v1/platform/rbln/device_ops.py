@@ -56,6 +56,8 @@ class RblnDeviceOps(DeviceOps):
         lmcache_chunk_size: int,
         engine_kv_format: lmcache_native.EngineKVFormat,
         skip_prefix_n_blocks: int,
+        layer_offset: int = 0,
+        n_layers: int = -1,
     ) -> None:
         """Move whole paged blocks between RBLN KV and token-major chunks.
 
@@ -79,6 +81,11 @@ class RblnDeviceOps(DeviceOps):
                 native ``[2, NB, NH, 1, BS, HS]`` shape, or the direction is
                 unknown.
         """
+        if layer_offset != 0 or n_layers not in (-1,):
+            raise NotImplementedError(
+                "RBLN multi_layer_block_kv_transfer does not support layer "
+                f"sub-ranges (layer_offset={layer_offset}, n_layers={n_layers})"
+            )
         del device  # taken from the operands
         if isinstance(paged_buffer_ptrs_tensor, torch.Tensor) or not all(
             isinstance(obj, torch.Tensor) for obj in lmcache_objects_ptrs
