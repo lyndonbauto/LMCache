@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -45,46 +46,47 @@ struct ChunkNodeBinding {
   std::string node_name;
 };
 
-// Aerospike record digest for one slot in the active plan.
+// Aerospike record digest for one logical slot in the active plan.
 struct SlotDigest {
-  uint16_t slot_index = 0;
+  uint32_t chunk_id = 0;
+  uint32_t layer_id = 0;
+  uint32_t plane = 0;
+  uint32_t piece = 0;
   std::string digest_hex;
 };
 
 // Owns one in-flight pipelined fetch at a time: plan, readiness, commands.
 //
-// Thread safety: every public method is safe to call from any thread; an
-// internal mutex serializes mutation. Const queries (is_layer_ready,
-// unservable_layers, pipelined_fetch_commands while a request is active)
-// take the same lock. The connector should drive replies and notifications
-// from one thread if it wants to avoid lock contention, but the contract
-// does not require it.
-//
-// No I/O: produces command strings and consumes reply/notification data.
+// Thread safety: every public method takes `mu_` and may be called from any
+// thread. `planner` and `registry` must not be mutated for this session's
+// lifetime; they are not locked here.
 class PipelinedFetchSession {
  public:
-  // `planner` and `registry` must outlive this session. `namespace` is the
-  // Aerospike namespace embedded in kv-sink-fetch-pipelined commands.
+  // `planner` and `registry` must outlive this session and must not change
+  // while the session exists. `namespace_name` is embedded in fetch commands.
   PipelinedFetchSession(const SlotPlanner& planner,
                         const NodeRegistry& registry,
                         std::string namespace_name, size_t max_record_bytes,
-                        size_t max_write_bytes);
+                        size_t max_write_bytes, size_t window_bytes,
+                        uint32_t max_notification_slots);
 
-  // Report whether a request is currently active (not abandoned).
+  // Report whether a request is currently active.
+  //
+  // Thread safety: takes `mu_`.
   bool has_active_request() const;
 
-  // Generation of the active request. Throws std::runtime_error when none.
+  // Generation of the active request.
+  //
+  // Thread safety: takes `mu_`. Throws std::runtime_error when none is active.
   uint16_t active_generation() const;
 
   // Build a new request plan and readiness tracker.
   //
-  // `chunk_nodes` maps every participating chunk id to the node that holds
-  // it. `slot_digests` must name every slot index the plan will contain,
-  // in ascending slot order (one entry per slot, index i at position i).
-  //
-  // Throws std::runtime_error if a request is already active,
-  // std::invalid_argument if a chunk lacks a node or digests do not match
-  // the plan, or any exception SlotPlanner::plan_request may throw.
+  // Thread safety: takes `mu_`. Throws std::runtime_error if a request is
+  // already active, if `slot_count()` exceeds `max_notification_slots_`, if a
+  // planned slot falls outside `window_bytes_`, if a digest is missing, or if
+  // any exception SlotPlanner::plan_request may throw. Throws
+  // std::invalid_argument if a chunk lacks a node binding.
   uint16_t begin_request(const std::vector<ChunkPlacement>& placements,
                          const std::vector<ChunkNodeBinding>& chunk_nodes,
                          const std::vector<SlotDigest>& slot_digests);
@@ -92,39 +94,49 @@ class PipelinedFetchSession {
   // One kv-sink-fetch-pipelined command per node that owns a chunk in the
   // active plan. Empty when no request is active.
   //
-  // Throws std::runtime_error if a chunk's node was never registered.
+  // Thread safety: takes `mu_`.
   std::map<std::string, std::string> pipelined_fetch_commands() const;
 
   // Feed one node's acknowledgement string from aerospike_info_node.
   //
-  // No-op when no request is active or the request was abandoned, so a late
-  // reply cannot mutate live state. Throws std::runtime_error if the reply
-  // is malformed.
-  void on_node_reply(const std::string& node_name, const std::string& reply);
+  // Thread safety: takes `mu_`. Ignores the reply when `generation` does not
+  // match the active request, when no request is active, or when the request
+  // was finished or abandoned after that generation was issued. Throws
+  // std::runtime_error if the reply is malformed, if accepted plus failed does
+  // not equal requested, or if a failed slot is not owned by `node_name`.
+  void on_node_reply(const std::string& node_name, const std::string& reply,
+                     uint16_t generation);
 
   // Feed immediate data from RdmaContext::poll_notifications.
   //
-  // Ignored when no request is active or the request was abandoned.
-  // Immediates whose generation does not match the active plan are reported
-  // by LayerReadiness and discarded.
+  // Thread safety: takes `mu_`. Ignored when no request is active. Stale
+  // generations are discarded by LayerReadiness.
   void on_notifications(const std::vector<uint32_t>& immediates);
 
-  // Layer readiness for the active request. False when no request is active.
+  // Layer readiness for the active request.
+  //
+  // Thread safety: takes `mu_`.
   bool is_layer_ready(uint32_t layer_id) const;
 
-  // Layers marked unservable on the active request. Empty when none.
+  // Layers marked unservable on the active request.
+  //
+  // Thread safety: takes `mu_`.
   std::vector<uint32_t> unservable_layers() const;
 
-  // Layers fully landed on the active request. Empty when none.
+  // Layers fully landed on the active request.
+  //
+  // Thread safety: takes `mu_`.
   std::vector<uint32_t> ready_layers() const;
 
   // Drop the active request after a successful completion.
   //
-  // Throws std::runtime_error when no request is active.
+  // Thread safety: takes `mu_`. Throws std::runtime_error when none is active.
   void finish_request();
 
-  // Abandon the active request. Late replies and notifications are ignored
-  // afterward. Throws std::runtime_error when no request is active.
+  // Abandon the active request. Replies for that generation are ignored
+  // afterward.
+  //
+  // Thread safety: takes `mu_`. Throws std::runtime_error when none is active.
   void abandon_request();
 
  private:
@@ -135,16 +147,19 @@ class PipelinedFetchSession {
   std::string namespace_name_;
   size_t max_record_bytes_;
   size_t max_write_bytes_;
+  size_t window_bytes_;
+  uint32_t max_notification_slots_;
 
   mutable std::mutex mu_;
   uint16_t next_generation_ = 0;
+  uint16_t last_abandoned_generation_ = 0;
 
   bool has_request_ = false;
-  bool abandoned_ = false;
   uint16_t active_generation_ = 0;
   RequestPlan plan_;
   LayerReadiness readiness_;
   std::map<uint32_t, std::string> chunk_to_node_;
+  std::map<std::string, std::set<uint16_t>> slots_by_node_;
   std::vector<std::string> digest_per_slot_;
 };
 
