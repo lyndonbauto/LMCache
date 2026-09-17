@@ -2,13 +2,14 @@
 """Object-group KV transfer helpers, including layerwise H2D retrieve."""
 
 # Standard
-import inspect
 from collections.abc import Sequence
+import inspect
 
 # Third Party
 import torch
 
 # First Party
+from lmcache import device_ops
 from lmcache.logging import init_logger
 from lmcache.v1.gpu_connector.gpu_ops import lmcache_memcpy_async_h2d
 from lmcache.v1.memory_management import MemoryObj
@@ -19,7 +20,6 @@ from lmcache.v1.multiprocess.layer_progress import (
 from lmcache.v1.multiprocess.layerwise_schedule import LayerLaunch, LayerwiseSchedule
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 import lmcache.lmcache_native as lmcache_native
-from lmcache import device_ops
 
 logger = init_logger(__name__)
 
@@ -29,10 +29,10 @@ def _invoke_multi_layer_block_kv_transfer(
     staging_ptrs: list[int],
     block_ids_gpu: torch.Tensor,
     device: torch.device,
-    direction: int,
-    shape_desc: object,
+    direction: lmcache_native.TransferDirection,
+    shape_desc: lmcache_native.PageBufferShapeDesc,
     lmcache_chunk_size: int,
-    engine_kv_format: int,
+    engine_kv_format: lmcache_native.EngineKVFormat,
     skip_prefix_n_blocks: int,
     layer_offset: int,
     n_layers: int,
@@ -49,10 +49,10 @@ def _invoke_multi_layer_block_kv_transfer(
                 staging_ptrs,
                 block_ids_gpu,
                 device,
-                direction,
+                int(direction),
                 shape_desc,
                 lmcache_chunk_size,
-                engine_kv_format,
+                int(engine_kv_format),
                 skip_prefix_n_blocks,
                 layer_offset,
                 n_layers,
@@ -131,6 +131,7 @@ def transfer_kv_layerwise_h2d(
     del transfer_key  # reserved for future phase timing on layerwise path
 
     # Local import avoids a module cycle with lmcache_driven_transfer.
+    # First Party
     from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
         _recalculate_blocks_to_skip,
         batched_iteration_with_skip,
@@ -139,7 +140,7 @@ def transfer_kv_layerwise_h2d(
     lmcache_chunk_size = cache_context.lmcache_tokens_per_chunk
     kv_groups_manager = cache_context.kv_layer_groups_manager
     kg_to_og = _kernel_group_to_object_group(cache_context)
-    direction_int = int(lmcache_native.TransferDirection.H2D)
+    direction = lmcache_native.TransferDirection.H2D
 
     attn_desc = kv_groups_manager.get_attn_desc()
     progress.begin_retrieve(retrieve_generation)
@@ -179,9 +180,7 @@ def transfer_kv_layerwise_h2d(
                 skip_tokens_in_chunk = effective_start - batch_start_token
                 batch_key = (object_group_id, start_object_idx)
                 object_group_buffers = [
-                    cache_context.get_temp_object_group_buffer(
-                        slot, object_group_id
-                    )
+                    cache_context.get_temp_object_group_buffer(slot, object_group_id)
                     for slot in range(batch_len)
                 ]
                 if batch_key not in staged_batches:
@@ -230,7 +229,7 @@ def transfer_kv_layerwise_h2d(
                     tmp_gpu_buffers_batched,
                     block_ids_curr_batch,
                     cache_context.device,
-                    direction_int,
+                    direction,
                     cache_context.get_shape_desc(kernel_group_id),
                     cache_context.get_slots_per_chunk_in_sw(kernel_group_id),
                     cache_context.get_engine_kv_format(kernel_group_id),
@@ -246,9 +245,7 @@ def transfer_kv_layerwise_h2d(
         raise
 
 
-def launch_for_layer(
-    schedule: LayerwiseSchedule, layer_id: int
-) -> LayerLaunch:
+def launch_for_layer(schedule: LayerwiseSchedule, layer_id: int) -> LayerLaunch:
     """Return the scheduled launch metadata for ``layer_id``.
 
     Args:
