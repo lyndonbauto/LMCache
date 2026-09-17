@@ -133,18 +133,20 @@ PYBIND11_MODULE(cuda_ops, m) {
          std::vector<int64_t> lmcache_objects_ptrs,
          const torch::Tensor& block_ids, const torch::Device& device,
          int direction, PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
-         int engine_kv_format, int skip_prefix_n_blocks) {
+         int engine_kv_format, int skip_prefix_n_blocks, int layer_offset,
+         int n_layers) {
         return multi_layer_block_kv_transfer(
             paged_buffer_ptrs_tensor, std::move(lmcache_objects_ptrs),
             block_ids, device, static_cast<TransferDirection>(direction),
             shape_desc, lmcache_chunk_size,
             static_cast<EngineKVFormat>(engine_kv_format),
-            skip_prefix_n_blocks);
+            skip_prefix_n_blocks, layer_offset, n_layers);
       },
       py::arg("paged_buffer_ptrs_tensor"), py::arg("lmcache_objects_ptrs"),
       py::arg("block_ids"), py::arg("device"), py::arg("direction"),
       py::arg("shape_desc"), py::arg("lmcache_chunk_size"),
       py::arg("engine_kv_format"), py::arg("skip_prefix_n_blocks"),
+      py::arg("layer_offset") = 0, py::arg("n_layers") = -1,
       py::call_guard<py::gil_scoped_release>());
   // Object-group transfer plan types (see mp_mem_kernels.cuh). Built on the
   // Python side and consumed by execute_object_group_transfer.

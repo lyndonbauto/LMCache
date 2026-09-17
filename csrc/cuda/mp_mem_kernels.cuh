@@ -70,10 +70,17 @@ void execute_object_group_transfer(
  * @param lmcache_chunk_size        Tokens per LMCache memory object
  * @param engine_kv_format             EngineKVFormat identifier
  * @param skip_prefix_n_blocks      Number of blocks to skip at the beginning
+ * @param layer_offset              First layer index along the kernel group's
+ *                                  layer dimension (absolute index into the
+ *                                  group's ``shape_desc.nl`` layers)
+ * @param n_layers                  Number of contiguous layers to transfer
+ *                                  starting at ``layer_offset``; negative means
+ *                                  all layers in the group (``shape_desc.nl``)
  */
 void multi_layer_block_kv_transfer(
     const torch::Tensor& paged_buffer_ptrs_tensor,
     std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
     const torch::Device& device, TransferDirection direction,
     PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
-    EngineKVFormat engine_kv_format, int skip_prefix_n_blocks);
+    EngineKVFormat engine_kv_format, int skip_prefix_n_blocks,
+    int layer_offset = 0, int n_layers = -1);
