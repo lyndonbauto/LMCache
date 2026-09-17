@@ -35,11 +35,8 @@ from dataclasses import dataclass
 import struct
 import time
 
-# Third Party
-import torch
-
 # First Party
-from lmcache import torch_dev
+from lmcache import torch_dev, torch_device_type
 from lmcache.v1.multiprocess.layerwise_schedule import LayerwiseSchedule
 from lmcache.v1.platform.base.event_ipc import EventIPCBackend
 
@@ -272,8 +269,8 @@ class LayerProgressWaiter:
                 f"layer {layer_id} is not covered by the layerwise schedule"
             )
         is_capturing = None
-        if torch.cuda.is_available():
-            is_capturing = getattr(torch.cuda, "is_current_stream_capturing", None)
+        if torch_device_type == "cuda" and torch_dev.is_available():
+            is_capturing = getattr(torch_dev, "is_current_stream_capturing", None)
         if is_capturing is not None and is_capturing():
             raise LayerProgressIncompatibleWithCudaGraphError(
                 "MP layerwise load uses host-side progress polling and "
@@ -353,7 +350,8 @@ class WorkerComputeLayerLaunchEventPool(LayerLaunchEventPool):
         Args:
             events: Imported events from the daemon registration response.
             event_backend: Platform :class:`EventIPCBackend` instance.
-            expected_count: Expected pool size from :meth:`LayerwiseSchedule.launch_count`.
+            expected_count: Expected pool size from
+                :meth:`LayerwiseSchedule.launch_count`.
         """
         if expected_count <= 0:
             raise ValueError("expected_count must be positive for layerwise mode")
@@ -388,7 +386,8 @@ class DaemonLayerLaunchEventPool:
         Args:
             events: Events created on the daemon at registration.
             event_backend: Platform :class:`EventIPCBackend` instance.
-            expected_count: Expected pool size from :meth:`LayerwiseSchedule.launch_count`.
+            expected_count: Expected pool size from
+                :meth:`LayerwiseSchedule.launch_count`.
         """
         if expected_count <= 0:
             raise ValueError("expected_count must be positive for layerwise mode")

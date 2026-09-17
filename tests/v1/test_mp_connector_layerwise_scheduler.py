@@ -35,7 +35,7 @@ def test_scheduler_reports_synchronous_load_when_layerwise_enabled() -> None:
 
     connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
     connector.use_layerwise = True
-    connector.role = KVConnectorRole.SCHEDULER
+    connector.role = KVConnectorRole.SCHEDULER  # type: ignore[misc]
     connector._hit_alignment_tokens = 1
     connector._connector_stats = MagicMock()
     connector.request_trackers = {request.request_id: tracker}
@@ -48,5 +48,5 @@ def test_scheduler_reports_synchronous_load_when_layerwise_enabled() -> None:
         num_computed_tokens=0,
     )
 
-    assert need_to_load > 0
+    assert need_to_load is not None and need_to_load > 0
     assert load_async is False

@@ -145,6 +145,7 @@ def test_tp_failed_worker_releases_only_its_reader_share_once(mla: bool) -> None
         session_manager=sessions,
         layout_desc_registry=layout_registry,
         storage_manager=storage,
+        use_layerwise=False,
     )
 
     hashes = hasher.compute_chunk_hashes(list(lookup_key.token_ids), end=lookup_key.end)
@@ -213,6 +214,7 @@ def test_cleanup_exception_does_not_suppress_terminal_false() -> None:
         return_value=None
     )
     module._ctx = MagicMock()
+    module._ctx.use_layerwise = False
     session = MagicMock()
     session.prepare_failed_retrieve_release.return_value = (2, (0,), (-1,), 7)
     module._ctx.session_manager.get.return_value = session

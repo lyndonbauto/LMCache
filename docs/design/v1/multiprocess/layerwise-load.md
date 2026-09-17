@@ -90,6 +90,8 @@ Config (must match on worker and server):
 
 - Server: `--use-layerwise` / `MPServerConfig.use_layerwise`
 - Worker: `lmcache.mp.use_layerwise` in vLLM `kv_connector_extra_config`
+- Worker per-layer wait budget: `lmcache.mp.layerwise_wait_timeout_seconds`
+  (default ``5.0``; must be positive)
 
 When the flag is off, layerwise code paths are inert.
 

@@ -127,6 +127,7 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
     ]
     ctx = MagicMock()
     ctx.chunk_size = 256
+    ctx.use_layerwise = False
     ctx.resolve_obj_keys.return_value = obj_keys
 
     read_calls: list[list[str]] = []

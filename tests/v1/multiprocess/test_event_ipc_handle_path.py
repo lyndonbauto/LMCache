@@ -233,6 +233,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     server_context = SimpleNamespace(
         chunk_size=1,
         storage_manager=storage_manager,
+        use_layerwise=False,
         event_bus=SimpleNamespace(
             publish=lambda event: None,
             publish_on_stream=lambda stream, event: None,

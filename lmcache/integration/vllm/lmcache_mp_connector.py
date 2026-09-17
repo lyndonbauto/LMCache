@@ -65,6 +65,9 @@ from lmcache.integration.vllm.utils import (
     vllm_layout_hints,
 )
 from lmcache.utils import init_logger as lmcache_init_logger
+from lmcache.v1.multiprocess.layer_progress import (
+    LayerProgressRetrieveGenerationTimeoutError,
+)
 
 try:
     # First Party
@@ -113,11 +116,6 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 logger = lmcache_init_logger(__name__)
-
-# First Party
-from lmcache.v1.multiprocess.layer_progress import (
-    LayerProgressRetrieveGenerationTimeoutError,
-)
 
 _DCP_LAYOUT_NAMESPACE = "##lmcache-dcp-layout-v1-"
 _MAX_LCM_EXPANSION_FACTOR = 4
@@ -1032,7 +1030,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             element is always ``False`` even when tokens must be loaded, so
             vLLM enters the forward pass immediately and blocks inside
             attention via :meth:`wait_for_layer_load` instead of parking in
-            ``WAITING_FOR_REMOTE_KVS``. That trades a clean scheduler wait for
+            ``WAITING_FOR_REMOTE_KVS``. Per-layer wait timeouts use
+            ``lmcache.mp.layerwise_wait_timeout_seconds`` in
+            ``kv_connector_extra_config`` (default ``5.0``). That trades a clean
+            scheduler wait for
             overlap between attention on layer *L* and H2D for layer *L+1*, but
             if the transfer cannot keep up the stall holds GPU execution
             resources inside the forward pass rather than outside it.

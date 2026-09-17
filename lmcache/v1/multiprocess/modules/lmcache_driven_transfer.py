@@ -662,7 +662,7 @@ def _publish_layerwise_retrieve_terminal(
     retrieve_generation: int,
 ) -> None:
     """Publish a terminal layerwise retrieve state under ``retrieve_generation``."""
-    if not getattr(ctx, "use_layerwise", False) or retrieve_generation <= 0:
+    if not ctx.use_layerwise or retrieve_generation <= 0:
         return
     progress = entry.layer_progress if entry is not None else None
     shm_to_close: shared_memory.SharedMemory | None = None
@@ -1024,7 +1024,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         existing.cache_context.device
                     )
                 return RegisterKvCacheResponse(
-                    server_use_layerwise=getattr(self._ctx, "use_layerwise", False),
+                    server_use_layerwise=self._ctx.use_layerwise,
                     layer_event_ipc_handles=response_handles,
                 )
 
@@ -1073,7 +1073,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         layer_progress_shm: shared_memory.SharedMemory | None = None
         daemon_layer_event_pool: DaemonLayerLaunchEventPool | None = None
         response_handles = []
-        if getattr(self._ctx, "use_layerwise", False):
+        if self._ctx.use_layerwise:
             engine_layers = [list(group.layer_indices) for group in engine_group_infos]
             if any(engine_layers):
                 assert_registration_schedules_agree(
@@ -1121,7 +1121,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             cache_context.num_layers,
         )
         return RegisterKvCacheResponse(
-            server_use_layerwise=getattr(self._ctx, "use_layerwise", False),
+            server_use_layerwise=self._ctx.use_layerwise,
             layer_event_ipc_handles=response_handles,
         )
 
@@ -1570,7 +1570,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 [] for _ in range(num_object_groups)
             ]
             layerwise_active = (
-                getattr(self._ctx, "use_layerwise", False)
+                self._ctx.use_layerwise
                 and getattr(entry, "layerwise_schedule", None) is not None
                 and getattr(entry, "layer_progress", None) is not None
                 and getattr(entry, "daemon_layer_event_pool", None) is not None
