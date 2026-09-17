@@ -58,18 +58,18 @@ PYBIND11_MODULE(lmcache_aerospike, m) {
                py::arg("plane_bytes") = 0)
           .def("set_plane_bytes",
                &lmcache::connector::AerospikeNativeConnector::set_plane_bytes,
-               py::arg("plane_bytes"))
+               py::arg("plane_bytes"));
 #ifdef LMCACHE_AEROSPIKE_RDMA
-          .def("pipelined_fetch_ready",
-               &lmcache::connector::AerospikeNativeConnector::
-                   pipelined_fetch_ready)
-          .def("is_pipelined_layer_ready",
-               &lmcache::connector::AerospikeNativeConnector::
-                   is_pipelined_layer_ready,
-               py::arg("layer_id"), py::arg("request_generation") = 0)
-          .def("poll_pipelined_fetch_notifications",
-               &lmcache::connector::AerospikeNativeConnector::
-                   poll_pipelined_fetch_notifications);
+  aerospike_client
+      .def("pipelined_fetch_ready",
+           &lmcache::connector::AerospikeNativeConnector::pipelined_fetch_ready)
+      .def("is_pipelined_layer_ready",
+           &lmcache::connector::AerospikeNativeConnector::
+               is_pipelined_layer_ready,
+           py::arg("layer_id"), py::arg("request_generation") = 0)
+      .def("poll_pipelined_fetch_notifications",
+           &lmcache::connector::AerospikeNativeConnector::
+               poll_pipelined_fetch_notifications);
   lmcache::connector::aerospike_pipelined_pybind::bind_pipelined_fetch(
       m, aerospike_client);
 #endif
