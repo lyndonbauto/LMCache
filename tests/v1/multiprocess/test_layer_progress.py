@@ -7,6 +7,7 @@ import pytest
 
 # First Party
 from lmcache.v1.multiprocess.layer_progress import (
+    DaemonLayerLaunchEventPool,
     LayerLaunchEventPool,
     LayerProgressLayerNotScheduledError,
     LayerProgressRecord,
@@ -187,3 +188,72 @@ def test_worker_event_pool_validates_size() -> None:
     backend = _RecordingEventBackend()
     with pytest.raises(ValueError, match="expected"):
         WorkerComputeLayerLaunchEventPool([object()], backend, 2)
+
+
+class _CallTrackingBackend(_RecordingEventBackend):
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def record_event(self, event: object, stream: object) -> None:
+        self.calls.append("record")
+
+    def wait_event(self, event: object, stream: object) -> None:
+        self.calls.append("wait")
+
+
+def test_daemon_event_pool_validates_size_and_ordinal() -> None:
+    backend = _RecordingEventBackend()
+    with pytest.raises(ValueError, match="expected"):
+        DaemonLayerLaunchEventPool([object()], backend, 2)
+
+    pool = DaemonLayerLaunchEventPool([object(), object()], backend, 2)
+    with pytest.raises(ValueError, match="out of range"):
+        pool.record_ordinal(2, object())
+    with pytest.raises(ValueError, match="out of range"):
+        pool.record_ordinal(-1, object())
+
+
+def test_worker_event_pool_waits_without_recording(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = _CallTrackingBackend()
+    events = [object()]
+    pool = WorkerComputeLayerLaunchEventPool(events, backend, 1)
+    stream = object()
+    monkeypatch.setattr(
+        "lmcache.v1.multiprocess.layer_progress.torch_dev.current_stream",
+        lambda: stream,
+    )
+
+    pool.wait_on_ordinal(0)
+
+    assert backend.calls == ["wait"]
+
+    with pytest.raises(ValueError, match="out of range"):
+        pool.wait_on_ordinal(1)
+
+
+def test_progress_record_precedes_watermark_for_each_ordinal() -> None:
+    """Swapping record and watermark lets the worker wait on stale events."""
+    backend = _RecordingEventBackend()
+    pool = DaemonLayerLaunchEventPool([object(), object()], backend, 2)
+    buf = bytearray(LayerProgressRecord.RECORD_SIZE)
+    progress = LayerProgressRecord(buf)
+    progress.begin_retrieve(1)
+    publication: list[tuple[str, int]] = []
+
+    def record_then_watermark(ordinal: int) -> None:
+        pool.record_ordinal(ordinal, object())
+        publication.append(("record", ordinal))
+        watermark = ordinal + 1
+        progress.report_launch_recorded(watermark)
+        publication.append(("watermark", watermark))
+
+    record_then_watermark(0)
+    record_then_watermark(1)
+
+    for ordinal in range(2):
+        watermark = ordinal + 1
+        record_index = publication.index(("record", ordinal))
+        watermark_index = publication.index(("watermark", watermark))
+        assert record_index < watermark_index

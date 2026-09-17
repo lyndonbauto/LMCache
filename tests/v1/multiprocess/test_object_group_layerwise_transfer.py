@@ -50,9 +50,12 @@ class _RecordingEventPool(DaemonLayerLaunchEventPool):
     def __init__(self, expected: int) -> None:
         super().__init__([object()] * expected, _FakeEventBackend(), expected)
         self.recorded: list[tuple[int, object]] = []
+        self.publication_order: list[tuple[str, int]] = []
 
     def record_ordinal(self, ordinal: int, stream: object) -> None:
+        self.publication_order.append(("record", ordinal))
         self.recorded.append((ordinal, stream))
+        super().record_ordinal(ordinal, stream)
 
 
 def test_transfer_kv_layerwise_records_before_watermark(
@@ -69,6 +72,7 @@ def test_transfer_kv_layerwise_records_before_watermark(
 
     def fake_report(watermark: int) -> None:
         order.append(f"watermark:{watermark}")
+        pool.publication_order.append(("watermark", watermark))
         LayerProgressRecord.report_launch_recorded(progress, watermark)
 
     monkeypatch.setattr(
@@ -129,3 +133,15 @@ def test_transfer_kv_layerwise_records_before_watermark(
         if entry.startswith("watermark:"):
             assert idx > 0
             assert order[idx - 1] == "transfer" or idx == 1
+
+    for ordinal in range(schedule.launch_count()):
+        watermark = ordinal + 1
+        record_step = next(
+            step for step in pool.publication_order if step == ("record", ordinal)
+        )
+        watermark_step = ("watermark", watermark)
+        record_index = pool.publication_order.index(record_step)
+        watermark_index = pool.publication_order.index(watermark_step)
+        assert record_index < watermark_index, (
+            "event must be recorded before the watermark reaches that ordinal"
+        )

@@ -9,9 +9,15 @@ it has to be caught by assertion rather than by observation.
 
 # Third Party
 import pytest
+import torch
 
 # First Party
-from lmcache.v1.multiprocess.layerwise_schedule import LayerwiseSchedule
+from lmcache.v1.kv_layer_groups import KernelGroupInfo
+from lmcache.v1.multiprocess.layerwise_schedule import (
+    LayerwiseSchedule,
+    assert_registration_schedules_agree,
+)
+import lmcache.lmcache_native as lmcache_native
 
 
 class TestLaunchOrder:
@@ -178,3 +184,38 @@ class TestRejectedLayouts:
 
         assert schedule.launch_count() == 2
         assert [launch.kernel_group_index for launch in schedule.launches] == [1, 1]
+
+
+def _kernel_group(layer_indices: list[int]) -> KernelGroupInfo:
+    """Minimal kernel group; schedule agreement cares only about layer order."""
+    return KernelGroupInfo(
+        layer_indices=list(layer_indices),
+        shape_desc=lmcache_native.PageBufferShapeDesc(),
+        dtype=torch.float32,
+    )
+
+
+class TestRegistrationScheduleAgreement:
+    """Worker engine groups and daemon kernel groups must yield one schedule."""
+
+    def test_hybrid_layouts_agree_on_interleaved_ordinals(self) -> None:
+        """Attention and recurrent groups must interleave to the same ordinals."""
+        engine_layers = [[0, 2, 4, 6], [1, 3, 5, 7]]
+        kernel_groups = [_kernel_group([0, 2, 4, 6]), _kernel_group([1, 3, 5, 7])]
+
+        assert_registration_schedules_agree(engine_layers, kernel_groups)
+
+        from_engine = LayerwiseSchedule(engine_layers)
+        from_kernels = LayerwiseSchedule.from_kernel_groups(kernel_groups)
+        assert from_engine.launches == from_kernels.launches
+        assert [from_engine.wait_ordinal(layer) for layer in range(8)] == list(
+            range(1, 9)
+        )
+
+    def test_divergent_group_layer_order_is_rejected_at_registration(self) -> None:
+        """A stride index mismatch must fail loudly, not wait on the wrong layer."""
+        engine_layers = [[0, 2, 4], [1, 3, 5]]
+        kernel_groups = [_kernel_group([0, 4, 2]), _kernel_group([1, 3, 5])]
+
+        with pytest.raises(ValueError, match="different schedules"):
+            assert_registration_schedules_agree(engine_layers, kernel_groups)
