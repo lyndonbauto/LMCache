@@ -13,6 +13,7 @@
 #include <stdexcept>
 
 #include "kv_sink_client.h"
+#include "layer_pipeline.h"
 
 namespace lmcache {
 namespace test {
@@ -307,7 +308,10 @@ std::string KvSinkMockWriter::handle_fetch(const std::string& command) {
     throw std::runtime_error(
         "mock writer: kv-sink-fetch before kv-sink-register");
   }
-  if (command.rfind("kv-sink-fetch", 0) != 0) {
+  // The colon matters: without it this would also accept
+  // "kv-sink-fetch-pipelined" and silently serve it all-or-nothing, so the
+  // client's per-slot signals would never arrive.
+  if (command.rfind("kv-sink-fetch:", 0) != 0) {
     throw std::runtime_error("mock writer: not a kv-sink-fetch command: '" +
                              command + "'");
   }
@@ -419,6 +423,96 @@ std::string KvSinkMockWriter::handle_fetch(const std::string& command) {
     }
     os << results[i];
   }
+  return os.str();
+}
+
+std::string KvSinkMockWriter::handle_pipelined_fetch(
+    const std::string& command) {
+  if (!connected_) {
+    throw std::runtime_error(
+        "mock writer: kv-sink-fetch-pipelined before kv-sink-register");
+  }
+  if (command.rfind("kv-sink-fetch-pipelined:", 0) != 0) {
+    throw std::runtime_error(
+        "mock writer: not a kv-sink-fetch-pipelined command: '" + command +
+        "'");
+  }
+
+  const std::string gen_field =
+      connector::rdma::find_info_field(command, "gen");
+  if (gen_field.empty()) {
+    throw std::runtime_error(
+        "mock writer: pipelined fetch command has no gen; without it the "
+        "client cannot tell our writes from a previous request's");
+  }
+  const uint16_t generation = static_cast<uint16_t>(std::stoul(gen_field));
+
+  const std::string sinks = connector::rdma::find_info_field(command, "sinks");
+  if (sinks.empty()) {
+    throw std::runtime_error(
+        "mock writer: pipelined fetch command has no sinks");
+  }
+
+  uint32_t requested = 0;
+  uint32_t accepted = 0;
+  uint64_t bytes = 0;
+  std::vector<uint16_t> failed;
+
+  size_t cursor = 0;
+  while (cursor <= sinks.size()) {
+    const size_t comma = sinks.find(',', cursor);
+    const std::string entry =
+        sinks.substr(cursor, comma == std::string::npos ? std::string::npos
+                                                        : comma - cursor);
+    cursor = comma == std::string::npos ? sinks.size() + 1 : comma + 1;
+    if (entry.empty()) {
+      continue;
+    }
+    ++requested;
+
+    // <digest>@<offset>:<length>#<slot>
+    const size_t at = entry.find('@');
+    const size_t colon = entry.find(':', at == std::string::npos ? 0 : at);
+    const size_t hash = entry.find('#', colon == std::string::npos ? 0 : colon);
+    if (at == std::string::npos || colon == std::string::npos ||
+        hash == std::string::npos) {
+      throw std::runtime_error("mock writer: malformed pipelined sink '" +
+                               entry + "'");
+    }
+    const std::string digest = entry.substr(0, at);
+    const size_t offset = std::stoull(entry.substr(at + 1, colon - at - 1));
+    const size_t length =
+        std::stoull(entry.substr(colon + 1, hash - colon - 1));
+    const uint16_t slot =
+        static_cast<uint16_t>(std::stoul(entry.substr(hash + 1)));
+
+    // Validated here rather than by catching push_slot's exception, so that a
+    // data problem becomes a named failed slot while a fabric problem still
+    // propagates.
+    const auto found = impl_->records.find(digest);
+    if (found == impl_->records.end() || found->second.length != length ||
+        offset + length > impl_->client_size) {
+      failed.push_back(slot);
+      continue;
+    }
+
+    push_slot(digest, offset, length,
+              connector::rdma::encode_immediate(generation, slot));
+    ++accepted;
+    bytes += length;
+  }
+
+  // No fence. Writes are still in flight as this reply is built, and that is
+  // the point.
+  std::ostringstream os;
+  os << "n=" << requested << ";accepted=" << accepted << ";failed=";
+  for (size_t i = 0; i < failed.size(); ++i) {
+    if (i > 0) {
+      os << ',';
+    }
+    os << failed[i];
+  }
+  os << ";bytes=" << bytes;
   return os.str();
 }
 

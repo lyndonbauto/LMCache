@@ -26,7 +26,7 @@
 //      KV as though it were cache.
 //
 // The data path is a genuine RDMA_WRITE_WITH_IMM across the fabric, driven
-// through the production RdmaContext and the production FetchPlan /
+// through the production RdmaContext and the production RequestPlan /
 // LayerReadiness. Only the Aerospike control plane is mocked.
 //
 // Requires a working RDMA device; exits 77 (the automake "skip" convention)
@@ -56,11 +56,15 @@
 namespace {
 
 using lmcache::connector::rdma::ArrivalStatus;
-using lmcache::connector::rdma::FetchPlan;
+using lmcache::connector::rdma::build_pipelined_fetch_command;
 using lmcache::connector::rdma::LayerReadiness;
 using lmcache::connector::rdma::LocalEndpoint;
 using lmcache::connector::rdma::NodeRegistration;
+using lmcache::connector::rdma::parse_pipelined_fetch_reply;
+using lmcache::connector::rdma::PipelinedFetchReply;
 using lmcache::connector::rdma::RdmaContext;
+using lmcache::connector::rdma::RequestPlan;
+using lmcache::connector::rdma::SinkRequest;
 using lmcache::connector::rdma::Transport;
 using lmcache::test::KvSinkMockWriter;
 using lmcache::test::MockRecord;
@@ -78,6 +82,10 @@ constexpr uint32_t kLayerCount = 4;
 constexpr uint32_t kPiecesPerLayer = 2;
 constexpr size_t kPieceBytes = 8 * 1024;
 constexpr uint16_t kGeneration = 0x2a2a;
+// This harness drives the data path over a real fabric, so it uses a single
+// chunk to keep the mock server simple. Request-scoped bookkeeping across
+// several chunks and nodes is covered by request_plan_test.cpp.
+constexpr uint32_t kChunkId = 0;
 
 constexpr int kPollAttempts = 2000000;
 
@@ -177,12 +185,12 @@ int main(int argc, char** argv) {
 
   try {
     // ---- The plan. LMCache chooses every destination offset. ----
-    FetchPlan plan(kGeneration);
+    RequestPlan plan(kGeneration);
     for (uint32_t layer = 0; layer < kLayerCount; ++layer) {
       for (uint32_t piece = 0; piece < kPiecesPerLayer; ++piece) {
         const size_t offset =
             static_cast<size_t>(slot_index_of(layer, piece)) * kPieceBytes;
-        plan.add_slot(layer, offset, kPieceBytes);
+        plan.add_slot(layer, kChunkId, offset, kPieceBytes);
       }
     }
     check(plan.slot_count() == kLayerCount * kPiecesPerLayer,
@@ -331,6 +339,83 @@ int main(int argc, char** argv) {
                                     payloads[slot].data(), kPieceBytes) == 0;
     }
     check(all_intact, "every layer is byte-identical once the fetch completes");
+
+    // ---- Stage 5: the same thing, driven by the wire format. ----
+    //
+    // Every stage above staged writes by calling push_slot directly, which
+    // proves the fabric behaviour but bypasses the command. This drives the
+    // same path through the codec instead: the client builds the command from
+    // its plan, the server parses it and pushes without fencing, and the
+    // client learns of the one sink the server could not serve from the
+    // reply rather than by waiting for it.
+    std::memset(slab, 0, kSlabBytes);
+
+    RequestPlan replan(kGeneration + 7);
+    std::vector<SinkRequest> sinks;
+    const uint16_t missing_slot = slot_index_of(2, 0);
+    for (uint32_t layer = 0; layer < kLayerCount; ++layer) {
+      for (uint32_t piece = 0; piece < kPiecesPerLayer; ++piece) {
+        const size_t offset =
+            static_cast<size_t>(slot_index_of(layer, piece)) * kPieceBytes;
+        const uint16_t slot =
+            replan.add_slot(layer, kChunkId, offset, kPieceBytes);
+        SinkRequest request;
+        // One sink names a record the server does not hold, which is what an
+        // evicted or never-written chunk piece looks like in practice.
+        request.digest_hex = slot == missing_slot ? std::string(40, 'f')
+                                                  : digest_for(layer, piece);
+        request.offset = offset;
+        request.length = kPieceBytes;
+        request.slot = slot;
+        sinks.push_back(request);
+      }
+    }
+
+    const PipelinedFetchReply reply = parse_pipelined_fetch_reply(
+        writer.handle_pipelined_fetch(build_pipelined_fetch_command(
+            "kv", registration.region, replan.generation(), sinks)));
+    check(reply.requested == replan.slot_count(),
+          "the server accounted for every sink the command carried");
+    check(reply.accepted == replan.slot_count() - 1,
+          "the server undertook every write it could serve");
+    check(reply.failed_slots == std::vector<uint16_t>({missing_slot}),
+          "the slot it could not serve is named, so the client need not wait "
+          "out its deadline to discover it");
+    check(!reply.all_accepted(), "the reply does not claim a clean fetch");
+
+    LayerReadiness staged(replan);
+    for (const uint16_t failed : reply.failed_slots) {
+      staged.note_unservable(failed);
+    }
+    check(drain_until_layer_ready(sink, staged, 0) >= 0,
+          "layer 0 is ready from a command-driven fetch, and the reply "
+          "arrived before the writes did");
+    check(drain_until_layer_ready(sink, staged, 1) >= 0 &&
+              drain_until_layer_ready(sink, staged, 3) >= 0,
+          "the remaining servable layers complete");
+    check(!staged.is_layer_ready(2),
+          "the layer holding the missing record is never reported ready, "
+          "even though its other piece landed");
+    check(staged.unservable_layers() == std::vector<uint32_t>({2}),
+          "layer 2 is named as needing recompute");
+    check(!staged.all_ready(),
+          "the request does not report completion with a layer missing");
+
+    bool servable_intact = true;
+    for (uint16_t slot = 0; slot < replan.slot_count(); ++slot) {
+      if (slot == missing_slot) {
+        servable_intact =
+            servable_intact &&
+            region_is_zero(slab_bytes, replan.slot(slot).offset, kPieceBytes);
+        continue;
+      }
+      servable_intact = servable_intact &&
+                        std::memcmp(slab_bytes + replan.slot(slot).offset,
+                                    payloads[slot].data(), kPieceBytes) == 0;
+    }
+    check(servable_intact,
+          "every servable piece landed byte-identical and the refused one was "
+          "left alone");
 
     // ---- Stale and bogus immediates are rejected, not counted. ----
     LayerReadiness fresh(plan);

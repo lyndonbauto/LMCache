@@ -380,6 +380,31 @@ class L2AdapterInterface(ABC):
         self._backend_name = name
         self._shared = shared
 
+    def set_kv_plane_bytes(self, plane_bytes: int) -> None:
+        """Tell the adapter the size of one K/V plane, in bytes.
+
+        A plane is one model layer's bytes within one of the K/V halves.
+        Backends that split a stored object into fixed-size pieces can use
+        this to place their boundaries on plane edges, so a piece belongs to
+        exactly one layer and a layer-pipelined reader can serve that layer
+        without waiting for its neighbours.
+
+        Called by the storage manager once a worker has registered its KV
+        cache, which is the earliest point the layout is known -- adapters are
+        constructed before that, so this cannot be a constructor argument. It
+        may be called again if a later registration reports a different
+        layout.
+
+        The default implementation ignores the hint, which is correct for any
+        backend whose layout does not depend on it.
+
+        Args:
+            plane_bytes: Size of one K/V plane in bytes, or 0 when no single
+                plane size describes the model, which happens when its kernel
+                groups disagree. Treat 0 as "do not align".
+        """
+        del plane_bytes
+
     def _notify_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
         """Update byte accounting and notify listeners that ``keys`` were
         stored. ``sizes[i]`` is the byte size of ``keys[i]``.

@@ -91,6 +91,74 @@ def _harness_build_dir() -> Path:
     return _HARNESS_DIR / "build"
 
 
+@pytest.fixture(scope="session")
+def _logic_build_dir() -> Path:
+    """Build the device-independent harnesses once and return their directory.
+
+    Kept separate from ``_harness_build_dir`` because these harnesses cover
+    arithmetic and bookkeeping rather than the data path: they link neither
+    libibverbs nor the Aerospike client, so they must still run on a box with
+    no RDMA toolchain, where the build for the other harnesses skips.
+
+    Returns:
+        Path to the directory holding the built executables.
+
+    Raises:
+        pytest.skip.Exception: If ``make`` or a C++ compiler is unavailable.
+    """
+    if shutil.which("make") is None:
+        pytest.skip("make is not available")
+    if shutil.which(os.environ.get("CXX", "g++")) is None:
+        pytest.skip("no C++ compiler available")
+
+    build = subprocess.run(
+        ["make", "--silent", "logic"],
+        cwd=_HARNESS_DIR,
+        capture_output=True,
+        text=True,
+        timeout=_BUILD_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if build.returncode != 0:
+        pytest.fail(
+            "failed to build the device-independent harnesses:\n"
+            f"stdout:\n{build.stdout}\nstderr:\n{build.stderr}"
+        )
+    return _HARNESS_DIR / "build"
+
+
+@pytest.fixture
+def logic_harness(_logic_build_dir: Path) -> Callable[[str], str]:
+    """Return a callable that runs a named logic harness and yields its stdout.
+
+    Unlike ``rdma_harness`` there is no device to skip on, so any non-zero
+    exit is a failure.
+
+    Returns:
+        A function mapping a harness name to that harness's stdout.
+    """
+
+    def run(name: str) -> str:
+        binary = _logic_build_dir / name
+        if not binary.exists():
+            pytest.fail(f"harness build reported success but {binary} is missing")
+
+        result = subprocess.run(
+            [str(binary)],
+            capture_output=True,
+            text=True,
+            timeout=_RUN_TIMEOUT_SECONDS,
+            check=False,
+        )
+        if result.returncode != 0:
+            pytest.fail(
+                f"{name} failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            )
+        return result.stdout
+
+    return run
+
+
 @pytest.fixture
 def rdma_harness(_harness_build_dir: Path) -> Callable[[str], str]:
     """Return a callable that runs a named harness and yields its stdout.

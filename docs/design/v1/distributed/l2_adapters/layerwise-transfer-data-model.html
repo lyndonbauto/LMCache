@@ -774,6 +774,7 @@ function derive() {
   const hidden = S.kvheads * S.headdim;
   const kvSize = S.format === "layer_outer" ? 1 : 2;
   const maxWrite = Math.pow(2, S.maxwritePow);
+  const recordCap = Math.pow(2, S.reccapPow);
 
   // one physical slot per token here; a compressed group would differ, which is
   // exactly why real code must ask get_slots_per_chunk_in_sw rather than assume.
@@ -783,7 +784,12 @@ function derive() {
     // sliding-window groups only cover a window of the request's chunks
     g.chunks = g.kind === "sw" ? Math.min(S.chunks, 4) : S.chunks;
     g.planeBytes = slotsPerChunk * hidden * S.dtype;
-    g.piecesPerPlane = Math.ceil(g.planeBytes / maxWrite);
+    // A slot is exactly one record, because a sink names a record digest and a
+    // length and cannot name part of one. So the record cap cuts the plane and
+    // the write limit only has to be able to carry one record.
+    g.recordBytes = Math.ceil(g.planeBytes / Math.ceil(g.planeBytes / recordCap));
+    g.piecesPerPlane = Math.ceil(g.planeBytes / g.recordBytes);
+    g.recordOverWrite = g.recordBytes > maxWrite;
     g.slotsPerLayerPerChunk = kvSize * g.piecesPerPlane;
     g.layerBytes = kvSize * g.planeBytes;
     g.groupBytes = g.layers.length * g.layerBytes;
@@ -801,7 +807,8 @@ function derive() {
   let totalSlots = 0;
   for (const g of kgs) totalSlots += g.chunks * g.layers.length * g.slotsPerLayerPerChunk;
 
-  const d = { kgs, byLayer, objectGroups, hidden, kvSize, maxWrite, slotsPerChunk, totalSlots };
+  const d = { kgs, byLayer, objectGroups, hidden, kvSize, maxWrite, recordCap,
+              slotsPerChunk, totalSlots };
   d.timing = schedule(d);
   return d;
 }
@@ -1143,12 +1150,16 @@ const PHASES = [
     name: "Slots",
     title: "Chopping a layer into writes",
     body: `<p>This is a <b class="key">second, independent</b> cut. Records are how the data is
-      stored; slots are how it crosses the wire. The two sizes are tuned against different
-      things and need not agree.</p>
-      <p>Each of a layer's regions is still too big for a single RDMA write, so it gets cut into
-      pieces bounded by the device's maximum transfer size and by the memory window we leased.</p>
-      <p>We call one write's worth of one layer a <b class="key">slot</b>. Drag the
-      <i>Max RDMA write</i> slider to watch the count change.</p>
+      stored; slots are how it crosses the wire. They are the <b>same size</b>, and that is a
+      constraint rather than a coincidence.</p>
+      <p>A sink on the wire reads <code>&lt;digest&gt;@&lt;offset&gt;:&lt;length&gt;</code>: it names
+      one record and one destination, with no way to say "the second half of that record". So a
+      slot larger than its record asks for bytes the record does not hold, and a slot smaller than
+      its record names no particular part of it. One slot is one record is one write.</p>
+      <p>We call that a <b class="key">slot</b>. Drag the <i>Record cap</i> slider to watch the
+      count change; the <i>Max RDMA write</i> slider now only has to be large enough to carry one
+      record, which in practice it always is &mdash; Aerospike caps a record at 8 MiB and EFA
+      allows roughly a gigabyte per write.</p>
       <p>A layer counts as arrived only when <b class="key">every one of its slots</b> has landed
       &mdash; both planes, all pieces.</p>`,
     cites: "csrc/storage_backends/aerospike/layer_pipeline.h — FetchSlot",
@@ -1294,7 +1305,7 @@ function shapeFor(d) {
       tag: "on the wire",
       sub: "A slot is flat. All structure has been flattened away — the receiver knows only an address, a length, and 32 bits of label.",
       dims: [
-        { v: Math.min(kg.planeBytes, d.maxWrite), n: "bytes" },
+        { v: kg.recordBytes, n: "bytes" },
       ],
       meta: `<b>${kg.slotsPerLayerPerChunk}</b> slots per layer per chunk &nbsp;&middot;&nbsp;
              <b>${d.totalSlots.toLocaleString()}</b> slots for the whole request`,
@@ -2015,13 +2026,16 @@ function renderSlots(d) {
   list.innerHTML = "";
 
   document.getElementById("slots-sub").innerHTML =
-    `Layer <b>${S.sel}</b>, one chunk, with a maximum write of <b>${bytes(d.maxWrite)}</b>.`;
+    `Layer <b>${S.sel}</b>, one chunk. A slot is one record of <b>${bytes(kg.recordBytes)}</b>` +
+    (kg.recordOverWrite
+      ? `, which does <b>not</b> fit the ${bytes(d.maxWrite)} write limit &mdash; unplannable.`
+      : `, which fits the ${bytes(d.maxWrite)} write limit.`);
 
   const planeNames = S.format === "kv_outer" ? ["K", "V"] : ["KV"];
   let idx = 0;
   planeNames.forEach((pn, pi) => {
     for (let piece = 0; piece < kg.piecesPerPlane; piece++) {
-      const len = Math.min(d.maxWrite, kg.planeBytes - piece * d.maxWrite);
+      const len = Math.min(kg.recordBytes, kg.planeBytes - piece * kg.recordBytes);
       const s = el("div", "slot " + (pi === 0 ? "k" : "v"),
         `slot ${idx} · ${pn}${kg.piecesPerPlane > 1 ? " piece " + piece : ""} · ${bytes(len)}`);
       list.appendChild(s);

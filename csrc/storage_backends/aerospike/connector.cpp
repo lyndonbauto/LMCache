@@ -26,6 +26,7 @@ constexpr const char* kBinPayload = "b";
 constexpr const char* kBinState = "state";
 constexpr const char* kBinNseg = "nseg";
 constexpr const char* kBinSegBytes = "seg_b";
+constexpr const char* kBinPlaneBytes = "plane_b";
 constexpr const char* kBinTotalBytes = "tot_b";
 constexpr const char* kBinVersion = "ver";
 constexpr const char* kBinCreatedAt = "created_at";
@@ -71,7 +72,7 @@ AerospikeNativeConnector::AerospikeNativeConnector(
     uint32_t read_timeout_ms, uint32_t write_timeout_ms,
     uint32_t default_ttl_seconds, size_t target_segment_bytes,
     size_t max_record_bytes, std::string username, std::string password,
-    L1RdmaRegistration l1_rdma_registration)
+    L1RdmaRegistration l1_rdma_registration, size_t plane_bytes)
     : ConnectorBase(num_workers),
       hosts_(std::move(hosts)),
       ns_(std::move(ns)),
@@ -79,6 +80,7 @@ AerospikeNativeConnector::AerospikeNativeConnector(
       read_timeout_ms_(read_timeout_ms),
       write_timeout_ms_(write_timeout_ms),
       default_ttl_seconds_(default_ttl_seconds),
+      plane_bytes_(plane_bytes),
       l1_rdma_registration_(std::move(l1_rdma_registration)) {
   as_config config;
   as_config_init(&config);
@@ -201,8 +203,15 @@ void AerospikeNativeConnector::do_single_get(WorkerAerospikeConn& conn,
     throw std::runtime_error("meta record is not ready");
   }
 
-  uint32_t nseg = static_cast<uint32_t>(positive_int_bin(rec, kBinNseg, 1));
-  size_t seg_b = static_cast<size_t>(positive_int_bin(rec, kBinSegBytes, len));
+  ShardPlan shard;
+  shard.nseg = static_cast<uint32_t>(positive_int_bin(rec, kBinNseg, 1));
+  shard.seg_b = static_cast<size_t>(positive_int_bin(rec, kBinSegBytes, len));
+  // Absent on records written before plane-aligned sharding existed, and on
+  // any payload sharded by byte count. Zero means "records tile the payload
+  // uniformly", which is what those records did, so they stay readable.
+  shard.plane_b = static_cast<size_t>(
+      std::max<int64_t>(as_record_get_int64(rec, kBinPlaneBytes, 0), 0));
+  uint32_t nseg = shard.nseg;
   // Read the stored total directly with a sentinel so a missing or corrupt bin
   // fails the integrity check instead of silently matching `len`.
   int64_t total_raw = as_record_get_int64(rec, kBinTotalBytes, -1);
@@ -228,17 +237,18 @@ void AerospikeNativeConnector::do_single_get(WorkerAerospikeConn& conn,
     return;
   }
 
-  size_t offset = 0;
+  size_t covered = 0;
   for (uint32_t i = 0; i < nseg; ++i) {
     std::string segment_key_i = segment_user_key(key, i);
-    size_t chunk_len = std::min(seg_b, len - offset);
+    ShardRange range = segment_range(shard, i, len);
     if (!read_payload_record(conn, segment_key_i,
-                             static_cast<char*>(buf) + offset, chunk_len)) {
+                             static_cast<char*>(buf) + range.offset,
+                             range.length)) {
       throw std::runtime_error("missing segment payload");
     }
-    offset += chunk_len;
+    covered += range.length;
   }
-  if (offset != len) {
+  if (covered != len) {
     throw std::runtime_error("segment read size mismatch");
   }
 }
@@ -255,10 +265,10 @@ void AerospikeNativeConnector::do_single_set(WorkerAerospikeConn& conn,
   }
 
   for (uint32_t i = 0; i < shard.nseg; ++i) {
-    size_t start = static_cast<size_t>(i) * shard.seg_b;
-    size_t chunk_len = std::min(shard.seg_b, len - start);
+    ShardRange range = segment_range(shard, i, len);
     put_payload_record(conn, segment_user_key(key, i),
-                       static_cast<const char*>(buf) + start, chunk_len);
+                       static_cast<const char*>(buf) + range.offset,
+                       range.length);
   }
   put_meta_record(conn, meta_user_key(key), shard, len, nullptr);
 }
@@ -386,18 +396,14 @@ void AerospikeNativeConnector::throw_status(const char* op, as_status status,
                            status_message(status, err));
 }
 
+void AerospikeNativeConnector::set_plane_bytes(size_t plane_bytes) {
+  plane_bytes_.store(plane_bytes, std::memory_order_relaxed);
+}
+
 ShardPlan AerospikeNativeConnector::plan(size_t payload_bytes) const {
-  if (payload_bytes <= single_record_threshold_bytes_ &&
-      payload_bytes <= max_record_bytes_) {
-    return {1, payload_bytes};
-  }
-  uint32_t nseg = static_cast<uint32_t>(
-      (payload_bytes + target_segment_bytes_ - 1) / target_segment_bytes_);
-  size_t seg_b = (payload_bytes + nseg - 1) / nseg;
-  if (seg_b > max_record_bytes_) {
-    throw std::runtime_error("payload cannot be sharded within record cap");
-  }
-  return {nseg, seg_b};
+  return make_shard_plan(payload_bytes, target_segment_bytes_,
+                         max_record_bytes_, single_record_threshold_bytes_,
+                         plane_bytes_.load(std::memory_order_relaxed));
 }
 
 size_t AerospikeNativeConnector::discover_record_cap() {
@@ -471,12 +477,18 @@ void AerospikeNativeConnector::put_meta_record(WorkerAerospikeConn& conn,
                   user_key.c_str());
 
   as_record rec;
-  as_record_inita(&rec, inline_buf == nullptr ? 7 : 8);
+  // Bin count must match the number of as_record_set_* calls below: the bin
+  // array is allocated on the stack here, so an undercount overruns it.
+  as_record_inita(&rec, inline_buf == nullptr ? 8 : 9);
   rec.ttl = AS_RECORD_CLIENT_DEFAULT_TTL;
   as_record_set_int64(&rec, kBinVersion, 1);
   as_record_set_str(&rec, kBinState, kReady);
   as_record_set_int64(&rec, kBinNseg, shard.nseg);
   as_record_set_int64(&rec, kBinSegBytes, static_cast<int64_t>(shard.seg_b));
+  // Written even when zero, so a reader never has to distinguish "byte-count
+  // sharded" from "bin absent" -- both mean uniform tiling.
+  as_record_set_int64(&rec, kBinPlaneBytes,
+                      static_cast<int64_t>(shard.plane_b));
   as_record_set_int64(&rec, kBinTotalBytes, static_cast<int64_t>(total_bytes));
   as_record_set_int64(&rec, kBinCreatedAt,
                       static_cast<int64_t>(std::time(nullptr)));

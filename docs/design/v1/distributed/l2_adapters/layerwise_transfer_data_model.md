@@ -3,7 +3,7 @@
 How a real KV payload maps onto per-layer RDMA delivery and per-layer
 readiness. This is the missing half of the pipelining prototype:
 [`aerospike_rdma.md`](aerospike_rdma.md) covers the *signaling* mechanism
-(`RDMA_WRITE_WITH_IMM`, `FetchPlan`, `LayerReadiness`) and proves it works,
+(`RDMA_WRITE_WITH_IMM`, `RequestPlan`, `LayerReadiness`) and proves it works,
 but it moves synthetic layers with fabricated offsets. This document defines
 the mapping from actual LMCache layout to those slots.
 
@@ -195,7 +195,7 @@ Pipelining has to reconcile four namespaces that do not line up:
 | vLLM | `layer_name` → global layer index | `wait_for_layer_load(layer_name)` |
 | Kernel dispatch | kernel group + position in `layer_indices` | `KVLayerGroupsManager.kernel_groups` |
 | Storage | `ObjectKey(chunk_hash, …, object_group_id)` | one object per *(chunk, object group)* |
-| RDMA | slot = one write's worth, named by immediate data | `FetchPlan` in `layer_pipeline.h` |
+| RDMA | slot = one write's worth of one layer of one chunk, named by immediate data | `RequestPlan` in `layer_pipeline.h` |
 
 The awkward part is that **storage has no layer coordinate at all**.
 `ObjectKey` carries `object_group_id` and nothing finer, so "layer 7 arrived"
@@ -248,12 +248,22 @@ range. The local side can gather from multiple buffers via several SGEs, but
 the remote side cannot scatter. Therefore:
 
 ```text
-slots(layer L, chunk c) = kv_size × ceil(plane_bytes(L) / max_write_bytes)
+slots(layer L, chunk c) = kv_size × ceil(plane_bytes(L) / record_bytes)
 ```
 
 where `plane_bytes(L) = num_slots × hidden_dim × element_size` and
-`max_write_bytes` is the smaller of EFA's `max_rdma_size` and the leased
-window.
+`record_bytes` is the size of one Aerospike record holding part of that plane,
+`plane_segment_bytes(plane_bytes, record_cap)` from the plane-aligned sharding
+rule below.
+
+The piece size is the record size and **not** the device's write limit,
+because a sink on the wire is `<digest>@<offset>:<length>` — one record, one
+destination, and no record-relative source offset. A slot larger than its
+record asks for bytes the record does not hold; a slot smaller than its record
+names no particular part of it. So one slot is one record is one write, and
+the device limit (the smaller of EFA's `max_rdma_size` and the leased window)
+only has to be large enough to carry one record — which it is by three orders
+of magnitude, since Aerospike caps a record at 8 MiB.
 
 **A layer is ready only when all `kv_size` of its planes have landed, for
 every participating chunk.** A design that assumed one slot per layer per
@@ -273,7 +283,7 @@ Given global layer index *L* from vLLM's `layer_name`:
 3. Within *k*'s tensor, for each `kv` plane in `range(kv_size)`, the plane's
    byte range for position *p* is at
    `((kv × num_layers) + p) × num_slots × hidden_dim × element_size`.
-4. Split each plane by `max_write_bytes` into slots.
+4. Split each plane into slots of `record_bytes`, one slot per record.
 5. Repeat for every participating chunk *c*.
 
 Steps 1–3 are pure arithmetic over existing structures. Step 5 is where the
@@ -392,6 +402,54 @@ so `seg_b` lands on plane boundaries, instead of relying on the arithmetic
 happening to work out. The connector currently takes an opaque payload and a
 byte target, so this is a small additive parameter, not a contract change.
 
+**Implemented.** The arithmetic lives in `csrc/storage_backends/aerospike/
+shard_plan.{h,cpp}`, which depends on neither libibverbs nor the Aerospike
+client and is therefore unit-tested with no hardware
+(`tests/v1/distributed/rdma/test_shard_plan.py`). Three details were not
+obvious from the design:
+
+- **`(nseg, seg_b)` is a storage format, not an internal detail.** Both
+  numbers are persisted in the meta record's bins and the reader reconstructs
+  boundaries from them, so variable-length segments would have been a format
+  change. A plane size is persisted alongside them instead (`plane_b`), and
+  the reader resolves a record's position *within its plane*. A plane whose
+  size is not a whole multiple of `seg_b` therefore ends in a short record
+  rather than spilling into the next plane, which keeps the format to three
+  numbers. An absent bin means uniform tiling, so records written before the
+  change stay readable.
+- **The plane rule must be checked before the single-record fast path.** A
+  multi-plane payload small enough to fit one record would otherwise be
+  stored as one record holding several planes — precisely the weaker "either
+  size divides the other" rule rejected above.
+- **The hint is refused unless it divides the payload.** A payload that is not
+  a whole number of planes *is* the non-uniform-plane case, so this doubles as
+  the detection mechanism: no separate predicate, and the refusal is visible
+  to the caller as `plane_b` coming back zero.
+
+### Where the plane size comes from
+
+Not from configuration — the operator should never be computing
+`num_slots × hidden_dim × itemsize` by hand — and not from the L2 adapter
+factory either, which is the natural-looking place and does not work:
+**adapters are constructed before any worker has registered its KV cache**, so
+no geometry exists yet. `StorageManager._build_l2_adapter` has only the
+config and the L1 slab descriptor, and `L1MemoryDesc` carries `ptr`/`size`/
+`align_bytes` and nothing about shapes.
+
+Deriving it from the store path does not work either: `MemoryObjMetadata`
+carries a single "logical" `shape`, which cannot represent the per-kernel-group
+shapes of a hybrid object group.
+
+The authoritative point is `register_kv_cache`, which already builds one
+`MemoryLayoutDesc` per object group via `get_layout_desc`. `uniform_kv_plane_
+bytes` reduces those to one integer — the plane is the innermost two
+dimensions, which holds for both the standard shape and the `NL_X_NB_BS_HS`
+variant — or to 0 when the kernel groups disagree. It travels
+`register_kv_cache` → `StorageManager.set_kv_plane_bytes` → the L2 adapter →
+the native client, and the connector holds it atomically because stores may be
+in flight when it lands. Changing it mid-run is safe: each record persists the
+plane size it was written with.
+
 ## Readiness is request-scoped, not fetch-scoped
 
 vLLM computes layer *L* for the **whole sequence**, so it needs layer *L* of
@@ -399,8 +457,7 @@ every chunk. Chunks are distinct keys distributed across cluster nodes by
 digest, so one layer's data arrives from several nodes, via several fetch
 commands, in an order nobody controls.
 
-`LayerReadiness` as prototyped is per-fetch. It needs to become
-request-scoped:
+`LayerReadiness` as prototyped was per-fetch. It is now request-scoped:
 
 ```text
 expected(L) = Σ over participating chunks c of slots(L, c)
@@ -421,6 +478,31 @@ covers a window of chunks (`ObjectGroupInfo.sw_size_chunks`,
 wait forever. `expected(L)` must be computed from the group's own window, not
 from the request's chunk count.
 
+**Implemented.** `FetchPlan` became `RequestPlan` — the name now carries the
+invariant, since "per fetch" is the mistake — and `FetchSlot` gained a
+`chunk_id`. Three things are worth recording:
+
+- **The counting needed no new bookkeeping.** `add_slot` already tallied
+  expected counts as slots were appended, so `expected(L)` becomes the sum
+  over participating chunks purely by building one plan per request. What was
+  actually missing was chunk identity: without it a request-scoped plan cannot
+  be split back into the per-node fetch commands, which is what
+  `slots_for_chunk` is for. Slot indices stay in the request's numbering when
+  they do, which is what keeps two nodes' notifications distinguishable.
+- **No layer needs a group parameter.** A global layer index belongs to
+  exactly one kernel group and therefore exactly one object group, so the
+  window that applies to layer *L* is unambiguous and a single per-layer map
+  suffices. The same fact is why this is correct under CacheBlend without
+  special casing: a layer belongs to one leg, so per-layer counts never mix
+  legs, and where two legs cover different chunks of one layer, summing over
+  participating chunks is the intended answer.
+- **The plan does not assume a rectangular chunks × layers grid**, which is
+  what lets a sliding-window layer be ready on its own window.
+
+The test for this deliberately avoids the fabric — it is bookkeeping, not a
+data path — and was checked against the bug it exists to catch: completing a
+layer when any one chunk lands makes two of its assertions fail.
+
 ### Immediate-data budget
 
 The 32-bit immediate is `generation(16) | slot_index(16)`, capping a request at
@@ -433,7 +515,7 @@ slots ≈ chunks × layers × kv_size × pieces_per_plane
 An 80-layer model over 100 chunks with `kv_size = 2` and one piece per plane is
 16,000 — comfortable, but a 4× margin rather than a 4000× one. A long context
 with small chunks and multi-piece planes could approach the limit, and
-`FetchPlan::add_slot` throws `std::length_error` rather than silently wrapping.
+`RequestPlan::add_slot` throws `std::length_error` rather than silently wrapping.
 If that ceiling is ever reached, the fix is a coarser readiness granularity,
 not more bits.
 
@@ -786,7 +868,9 @@ all. Regions must be enumerated per kernel group and per plane.
   alignment hazard*, and it is load-bearing precisely because hybrid models —
   the common case — use unified block sizes of 544/784/944 tokens, none a power
   of two, so misalignment is the default rather than an edge case. Re-scope
-  AIE-89 to that hint.
+  AIE-89 to that hint. **Done** — see *The alignment hazard* for what was
+  built and for the startup-ordering constraint that decided where the plane
+  size is derived.
 - **AIE-90** (M2 gate, RDMA into CPU L1): the success criterion must not be
   bulk throughput. M0 showed TCP already reaching 98% of line rate, so there is
   almost no throughput headroom to win. RDMA's case is CPU offload and

@@ -3,10 +3,12 @@
 
 #include "../connector_base.h"
 #include "l1_rdma_registration.h"
+#include "shard_plan.h"
 
 #include <aerospike/aerospike.h>
 #include <aerospike/as_policy.h>
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -25,11 +27,6 @@ struct WorkerAerospikeConn {
   as_policy_remove remove_policy;
 };
 
-struct ShardPlan {
-  uint32_t nseg = 1;
-  size_t seg_b = 0;
-};
-
 // Native Aerospike storage backend.
 //
 // Records use a meta + segment layout: every cache key maps to a meta record
@@ -38,6 +35,11 @@ struct ShardPlan {
 // (``<key>|s|<i>``). Payloads that fit a single record are stored inline in
 // the meta record. The connector key is used verbatim as the Aerospike user
 // key base (the framework's ObjectKey-to-string format).
+//
+// `plane_bytes` opts into plane-aligned sharding, which keeps every record
+// confined to one model layer so a layer-pipelined reader can serve one layer
+// without waiting on its neighbours. See shard_plan.h for the rule and what
+// it costs.
 class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
  public:
   AerospikeNativeConnector(
@@ -46,10 +48,21 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
       uint32_t default_ttl_seconds = 86400, size_t target_segment_bytes = 0,
       size_t max_record_bytes = 0, std::string username = "",
       std::string password = "",
-      L1RdmaRegistration l1_rdma_registration = L1RdmaRegistration());
+      L1RdmaRegistration l1_rdma_registration = L1RdmaRegistration(),
+      size_t plane_bytes = 0);
   ~AerospikeNativeConnector() override;
 
   void close() override;
+
+  // Set the size of one K/V plane, in bytes, or 0 to shard by byte count.
+  //
+  // LMCache only knows the layout once a worker has registered its KV cache,
+  // which is after this connector is constructed, so the plane size arrives
+  // here rather than through the constructor. Safe to call while stores are
+  // in flight: each record persists the plane size it was written with, so a
+  // change affects only subsequent writes and never makes an existing record
+  // unreadable.
+  void set_plane_bytes(size_t plane_bytes);
 
  protected:
   WorkerAerospikeConn create_connection() override;
@@ -94,6 +107,10 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
   size_t target_segment_bytes_;
   size_t max_record_bytes_;
   size_t single_record_threshold_bytes_;
+  // Size of one K/V plane, or 0 to shard by byte count. See shard_plan.h.
+  // Atomic because set_plane_bytes() may land while worker threads are
+  // sharding a payload in plan().
+  std::atomic<size_t> plane_bytes_;
 
   // Description of the L1 slab and window pool to register for RDMA
   // reception. Default-constructed (and therefore inert) unless the L2

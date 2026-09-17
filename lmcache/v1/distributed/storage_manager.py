@@ -740,6 +740,23 @@ class StorageManager:
             )
         return found
 
+    def set_kv_plane_bytes(self, plane_bytes: int) -> None:
+        """Pass the K/V plane size on to every L2 adapter.
+
+        Adapters are built before any worker has registered its KV cache, so
+        none of them can derive the layout at construction. This is how they
+        learn it once it exists. Adapters that do not care ignore it; see
+        ``L2AdapterInterface.set_kv_plane_bytes``.
+
+        Args:
+            plane_bytes: Size of one K/V plane in bytes, or 0 when the model's
+                kernel groups disagree and no single plane size describes it.
+        """
+        with self._adapters_lock:
+            adapters = list(self._l2_adapters.values())
+        for adapter in adapters:
+            adapter.set_kv_plane_bytes(plane_bytes)
+
     def touch_l1_keys(self, keys: list[ObjectKey]):
         """
         Touch the keys in L1 storage, marking the keys

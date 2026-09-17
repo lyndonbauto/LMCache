@@ -186,6 +186,26 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     # Store Interface
     # ---------------------------------------------------------------
 
+    def set_kv_plane_bytes(self, plane_bytes: int) -> None:
+        """Forward the K/V plane size to the native client, if it accepts one.
+
+        Only some native backends align their record boundaries to planes, so
+        the call is made only when the client exposes ``set_plane_bytes``.
+
+        Args:
+            plane_bytes: Size of one K/V plane in bytes, or 0 to leave the
+                backend's default byte-count sharding in place.
+        """
+        setter = getattr(self._client, "set_plane_bytes", None)
+        if setter is None:
+            return
+        setter(plane_bytes)
+        logger.debug(
+            "Set K/V plane size to %d bytes on the %s native client",
+            plane_bytes,
+            self._type_name,
+        )
+
     def submit_store_task(
         self,
         keys: list[ObjectKey],

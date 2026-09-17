@@ -379,10 +379,19 @@ the second.
 This is where the layout derivation from `lmcache/v1/kv_layer_groups.py`
 (`group_layers_by_identity`, `_detect_object_groups`) is genuinely needed —
 not as an addition to the L2 interface, which is why AIE-89 was deferred, but
-as input to sharding and offset computation. Note the interaction with the M0
-finding that record size has a **crossover** around 8 MiB rather than "bigger
-is better": layer-aligned sharding constrains the record size, so the two
-have to be tuned together rather than independently.
+as input to sharding and offset computation.
+
+**Implemented**, as plane-aligned sharding: a record is sized from the K/V
+plane rather than from the record cap, so it belongs to exactly one layer. See
+*The alignment hazard* in
+[`layerwise_transfer_data_model.md`](layerwise_transfer_data_model.md). One
+consequence is worth noting here, because it retires a tuning exercise: since
+the record size is now derived from the plane, the record cap stops being a
+knob for any payload whose planes already fit under it, so the M0 crossover
+around 8 MiB no longer needs to be traded off against alignment. The two are
+not in tension after all — and M0 measured smaller records as *faster* at a
+fixed object size, so the extra records this rule produces may be a small gain
+rather than a cost.
 
 **Level 2: a layer to RDMA writes ("slots").** A layer can exceed one RDMA
 write. `efadv_query_device` reports `max_rdma_size`, and the leased window
@@ -415,12 +424,134 @@ rejecting mismatched immediates stops LMCache from *acting* on a late writer.
 It does not prevent the stray write itself — only re-registration does that —
 and that gap is still open. See `ArrivalStatus::kStaleGeneration`.
 
-16 bits of slot index caps a fetch at 65536 slots, far above a 60-layer model
-at a few writes per layer.
+16 bits of slot index caps a request at 65536 slots. That is per *request* and
+not per fetch command, since a request spans every participating chunk:
+`chunks × layers × kv_size × pieces_per_plane`. An 80-layer model over 100
+chunks at `kv_size = 2` and one piece per plane is 16,000 — comfortable, but a
+4× margin rather than a 4000× one.
+
+### Wire format for a pipelined fetch
+
+**Status: the client side is implemented; the server side is proposed.** The
+command builder, reply parser and declined-write handling live in
+`kv_sink_client.h` and `layer_pipeline.h`, and the test mock implements a
+server-shaped `handle_pipelined_fetch` so the codec is exercised over a real
+fabric rather than against hand-written reply strings. The format below is
+still the contract to agree with the Aerospike server team; what exists is one
+end of it, not agreement on it.
+
+The existing `kv-sink-fetch` cannot express this, because it has no per-write
+identifier and its reply *is* the completion.
+
+A new command rather than a flag on the old one, so a server that does not
+implement it fails the command outright instead of silently performing an
+all-or-nothing fetch that LMCache would then wait on forever:
+
+```text
+kv-sink-fetch-pipelined:namespace=<ns>;region=<id>;gen=<generation>;
+  sinks=<digest>@<off>:<len>#<slot>,...
+```
+
+The only addition per sink is `#<slot>`. The generation is sent **once for the
+command**, not per sink, and the server forms the immediate itself:
+
+```text
+immediate = (gen << 16) | slot
+```
+
+That is deliberate. Every fetch command issued for one request carries the
+same generation, so making it a single field means a server cannot get it
+wrong for an individual write, and it makes the request-scoped invariant
+visible on the wire.
+
+Reply:
+
+```text
+n=64;accepted=62;failed=17,42;bytes=32505856
+```
+
+`accepted` is a count of writes the server has undertaken to perform. **It is
+not a completion.** Completion arrives only as immediates on LMCache's receive
+queue.
+
+Nine requirements, each of which exists because violating it produces a hang
+or bad data rather than an error:
+
+1. **One write per sink, one immediate per write.** The server must not
+   coalesce adjacent sinks into a single larger write, however tempting when
+   their offsets happen to abut. A coalesced write raises one immediate, the
+   other slot never completes, and its layer hangs forever.
+2. **`failed` must name every slot the server will not write**, by slot index.
+   A missing record or a read error that is merely *omitted* from the reply is
+   indistinguishable from a write still in flight, so the layer never reaches
+   its expected count and the request hangs until the deadline. With the slot
+   named, LMCache calls `LayerReadiness::note_unservable`, which marks the slot
+   so its layer can never be reported ready — the layer becomes a recompute,
+   and every other layer of the request still completes and is still
+   pipelined. Note the layer is *not* served from the pieces that did arrive:
+   the rest of its buffer holds whatever the window's previous tenant left
+   there.
+3. **Do not fence.** The point of the command is to reply before the writes
+   complete. A server that polls its send queue to completion first has
+   implemented the old command with extra steps.
+4. **Serve in the order given, best effort.** The schedule is layer-major, so
+   the sinks arrive ordered layer 0 first. This is a hint and not a
+   correctness requirement — SRD reorders in flight and independent nodes
+   interleave regardless — but the entire benefit of pipelining is that the
+   earliest layers land first, so a server that reorders freely (by record
+   locality, say) can erase the gain while still being correct.
+5. **Release the record lock per piece**, not across the whole transfer, or
+   concurrent requests for a popular chunk serialise behind each other.
+6. **Never write outside `<off>:<len>`.** LMCache chose every destination and
+   guarantees no two slots of a request overlap; the server must not round,
+   coalesce, or pad. A write past the end lands in another slot's bytes, or
+   outside the registered window.
+7. **Duplicate immediates are safe; missing ones are not.** LMCache
+   distinguishes a duplicate and ignores it, so a retransmit costs nothing. It
+   cannot recover a dropped immediate for a write that did land.
+8. **Do not exceed the slot count in immediates.** LMCache sizes its receive
+   queue from the schedule it built. Extra notifications can exhaust it.
+9. **One sink is one record is one write.** A sink names a record digest, a
+   destination and a length, and nothing else — there is no record-relative
+   source offset — so a sink can only mean "this whole record, there". LMCache
+   therefore sizes slots from the record, not from the device's write limit:
+   the piece size is `plane_segment_bytes(plane, record_cap)`, the same
+   arithmetic the store path used to cut the plane up. A server should never
+   need to split or combine a sink; if a record will not fit in one RDMA
+   write, LMCache refuses to plan the request rather than emitting sinks no
+   server could serve. (The device limit binds only in a pathological config:
+   Aerospike caps a record at 8 MiB, and EFA's `max_rdma_size` is three orders
+   of magnitude above that.)
+
+   Should the format ever need sub-record writes, the extension is a
+   record-relative source offset — `<digest>+<src>@<dst>:<len>#<slot>` — and
+   not silent splitting on either side.
+
+On the LMCache side the schedule comes from `SlotPlanner` in
+`slot_planner.h` — it walks (chunk, layer, K/V plane, record) and produces
+exactly these sinks, layer-major, with the offsets already resolved against
+the leased window. `RequestPlan::slots_for_chunk` then partitions that
+schedule by chunk, so each node receives a command naming only its own
+chunks while the slot indices stay in the request's numbering.
+`build_pipelined_fetch_command` refuses a sink list with a repeated slot index,
+which is the mistake that per-fetch numbering would produce.
+
+Two things this format does **not** yet settle, both needing the server
+team's input:
+
+- **Whether a node can report progress it has not been asked for.** If a
+  server reads a record covering more than the requested slot, may it write
+  and signal the extra? Currently no: an unknown slot index is a protocol
+  violation (`ArrivalStatus::kUnknownSlot`).
+- **What happens to in-flight writes when a request is abandoned.** The
+  generation stops LMCache acting on them, but the writes still land in a
+  window that may have been re-leased. Only re-registration truly prevents
+  that, and its cost is unmeasured. See the open question on registration
+  lifecycle.
 
 ### What the prototype proves, and what it does not
 
-Passing (`make -C tests/v1/distributed/rdma test`, 24 checks):
+Passing (`make -C tests/v1/distributed/rdma test`):
 
 - a layer is reported ready only once *every* piece has landed,
 - its bytes are correct at the moment it is reported ready,
@@ -428,25 +559,35 @@ Passing (`make -C tests/v1/distributed/rdma test`, 24 checks):
   what makes early consumption meaningful rather than a race,
 - a later layer can be ready while an earlier one is not,
 - stale generations, unknown slots, and duplicate immediates are each
-  distinguished rather than silently counted.
+  distinguished rather than silently counted,
+- the whole sequence again driven through the wire format rather than by
+  staged calls: the client builds `kv-sink-fetch-pipelined` from its plan, the
+  mock parses it and pushes without fencing, and a sink naming a record the
+  server does not hold comes back in `failed` so its layer becomes a recompute
+  while every other layer still lands and is still pipelined.
 
 Not proven:
 
 - **Any of it on EFA/SRD.** Soft-RoCE is RC-only and ordered, so the very
   hazard this design guards against cannot be reproduced locally. The extended
   verbs port and the unsolicited-receive negotiation are both untested.
-- **A server that can do this.** Aerospike currently fences and replies once.
-  Per-slot signaling needs the server to issue write-with-immediate per piece
-  and *not* fence, plus release its record lock per piece rather than holding
-  it across the whole transfer.
+- **A server that can do this.** The `handle_pipelined_fetch` above is the
+  test mock, which is a demonstration that the contract is implementable and
+  not evidence that Aerospike implements it: the real server fences and replies
+  once. Per-slot signaling needs it to issue write-with-immediate per piece and
+  *not* fence, plus release its record lock per piece rather than holding it
+  across the whole transfer.
 - **That storage-level pipelining is possible at all.** Slicing an
   already-read record into signaled pieces buys compute overlap. Overlapping
   the *disk read* of layer 1 with the network send of layer 0 needs
   independently readable layers, which is level-1 chunking above and a much
   larger change.
-- **Anything about real layers.** The harness moves synthetic pieces at
-  fabricated offsets. Mapping actual KV layout onto slots — and the fact that
-  a layer is *not* one contiguous range once `kv_size > 1` — is
+- **Anything about real layers *over the fabric*.** The fabric harness still
+  moves synthetic pieces at fabricated offsets. The mapping from actual KV
+  layout onto slots is now implemented in `slot_planner.h` and covered by
+  `tests/v1/distributed/rdma/test_slot_planner.py`, including the fact that a
+  layer is *not* one contiguous range once `kv_size > 1`; what remains untested
+  is driving a planner-produced schedule across a real link. See
   [`layerwise_transfer_data_model.md`](layerwise_transfer_data_model.md).
 
 ## Reproducing the Soft-RoCE test setup

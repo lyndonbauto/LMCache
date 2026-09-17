@@ -110,6 +110,29 @@ class KvSinkMockWriter {
   void push_slot(const std::string& digest_hex, size_t offset, size_t length,
                  uint32_t immediate);
 
+  // Handle a "kv-sink-fetch-pipelined" command.
+  //
+  // Parses `gen` and the `<digest>@<off>:<len>#<slot>` sink list the client
+  // built, pushes each sink with push_slot() in the order given, and replies:
+  //
+  //   n=<count>;accepted=<count>;failed=<slot>,...;bytes=<total>
+  //
+  // Deliberately does **not** fence: the reply is sent while writes are still
+  // in flight, which is what lets the client see layer 0 land before layer 31
+  // is posted. A sink whose digest is unknown, whose length does not match the
+  // record, or which would overrun the client's window has its slot index
+  // named in `failed` and no write posted -- naming it is what stops the
+  // client waiting on it until its deadline.
+  //
+  // This is the server side of the wire format under discussion, implemented
+  // here so the client's codec and readiness tracking are exercised end to end
+  // over a real fabric rather than against a hand-written reply string.
+  //
+  // Throws std::runtime_error if the command is not a kv-sink-fetch-pipelined
+  // command, if it is malformed, if handle_register has not run, or if verbs
+  // fails.
+  std::string handle_pipelined_fetch(const std::string& command);
+
   // Region id handed out by the most recent successful registration.
   uint64_t region() const { return region_; }
 
