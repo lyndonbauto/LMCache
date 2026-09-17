@@ -252,6 +252,28 @@ size_t NodeRegistry::valid_count() const {
   return count;
 }
 
+PeerEndpoint NodeRegistry::peer_endpoint_for(
+    const std::string& node_name) const {
+  const auto it = by_node_.find(node_name);
+  if (it == by_node_.end() || !it->second.valid) {
+    throw std::runtime_error(
+        "no valid kv-sink peer for node '" + node_name +
+        "'; the node was never registered, or its registration was "
+        "invalidated by a slab re-registration or node restart");
+  }
+  return it->second.peer;
+}
+
+std::vector<std::string> NodeRegistry::node_names() const {
+  std::vector<std::string> names;
+  for (const auto& entry : by_node_) {
+    if (entry.second.valid) {
+      names.push_back(entry.first);
+    }
+  }
+  return names;
+}
+
 }  // namespace rdma
 }  // namespace connector
 }  // namespace lmcache

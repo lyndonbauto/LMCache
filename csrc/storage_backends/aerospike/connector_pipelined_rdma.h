@@ -32,45 +32,65 @@ class AerospikePipelinedRdmaDriver {
                                std::string namespace_name,
                                size_t max_record_bytes);
 
-  // Thread safety: safe to call from any thread; serialized internally.
+  // Thread safety: takes `mu_`.
+  //
+  // True when verbs registration succeeded, every node has a connected queue
+  // pair with notifications armed, layouts are configured, and a session
+  // exists.
   bool is_ready() const;
 
-  // Register the L1 slab, open the verbs resources, and fan out
-  // kv-sink-register. Idempotent once ready. Throws on fatal verbs or
-  // cluster-wide info failure.
+  // Last initialization failure, when pipelined fetch is unavailable.
   //
-  // Thread safety: call from one thread during connector startup.
+  // Thread safety: takes `mu_`.
+  std::string init_error_message() const;
+
+  // Register the L1 slab, open verbs resources, and fan out kv-sink-register.
+  //
+  // Thread safety: call from one thread during connector startup. Throws on
+  // fatal verbs failure after recording the reason for init_error_message().
   void initialize(aerospike* client);
 
   // Replace the slot planner used for subsequent requests.
   //
-  // Thread safety: call before begin_request, from one thread.
+  // Thread safety: takes `mu_`. Throws std::runtime_error if a request is
+  // active.
   void set_object_group_layouts(std::vector<rdma::ObjectGroupLayout> layouts);
 
-  // Session API — see PipelinedFetchSession. No-ops or returns empty/false
-  // when not ready().
+  // Thread safety: takes `mu_`. Throws std::runtime_error when not ready or
+  // when begin_request preconditions fail.
   uint16_t begin_request(const std::vector<rdma::ChunkPlacement>& placements,
                          const std::vector<rdma::ChunkNodeBinding>& chunk_nodes,
                          const std::vector<rdma::SlotDigest>& slot_digests);
 
+  // Thread safety: takes `mu_`.
   std::map<std::string, std::string> pipelined_fetch_commands() const;
 
-  void on_node_reply(const std::string& node_name, const std::string& reply);
+  // Thread safety: takes `mu_`.
+  void on_node_reply(const std::string& node_name, const std::string& reply,
+                     uint16_t generation);
 
+  // Thread safety: polls the completion queue outside `mu_`, then takes `mu_`
+  // to feed the session.
   void poll_notifications();
 
+  // Thread safety: takes `mu_`.
   bool has_active_request() const;
 
+  // Thread safety: drains notifications outside `mu_`, then takes `mu_`.
   bool is_layer_ready(uint32_t layer_id) const;
 
+  // Thread safety: takes `mu_`.
   std::vector<uint32_t> unservable_layers() const;
 
+  // Thread safety: takes `mu_`.
   void finish_request();
 
+  // Thread safety: takes `mu_`.
   void abandon_request();
 
  private:
   void ensure_session();
+  uint32_t notification_depth_cap() const;
 
   L1RdmaRegistration registration_;
   std::string namespace_name_;
@@ -78,7 +98,10 @@ class AerospikePipelinedRdmaDriver {
 
   mutable std::mutex mu_;
   bool initialized_ = false;
-  bool ready_ = false;
+  bool fabric_ready_ = false;
+  std::string init_error_;
+
+  uint16_t next_generation_ = 0;
 
   std::unique_ptr<rdma::RdmaContext> context_;
   rdma::NodeRegistry registry_;

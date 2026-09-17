@@ -31,6 +31,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -96,15 +97,19 @@ struct PeerEndpoint {
   uint32_t psn = 0;
 };
 
-// Owns the verbs resources for one L1 slab: device, PD, MR window pool, QP,
-// and the peer AH.
+// Owns the verbs resources for one L1 slab: device, PD, MR window pool, and
+// one queue pair per Aerospike node that may write into the leased window.
+//
+// Pipelined fetches fan out across several nodes, but every immediate lands in
+// one readiness table, so the completion queue is shared while each remote
+// writer gets its own RC (or SRD) queue pair. A single QP wired to one peer
+// cannot receive writes from any other node.
 //
 // Not copyable. All methods throw std::runtime_error on verbs failure, with
 // the failing call and errno in the message.
 //
-// Thread safety: construction, register_l1(), and connect_peer() must be
-// called from a single thread during initialization. local_endpoint() and
-// window() are const and safe to call concurrently afterwards.
+// Thread safety: construction, register_l1(), create_queue_pair*(), and
+// connect_peer*() must run from a single thread during initialization.
 class RdmaContext {
  public:
   // Open `device_name` (empty selects the first device the driver lists) and
@@ -140,24 +145,19 @@ class RdmaContext {
   // is already connected or any verbs call fails.
   void connect_peer(const PeerEndpoint& peer);
 
-  // Return what should be sent to the server in "kv-sink-register".
-  //
-  // Valid after register_l1(); `qpn`/`psn` are only meaningful once the QP
-  // exists, which happens in create_queue_pair().
+  void connect_peer(const std::string& node_name, const PeerEndpoint& peer);
+
   const LocalEndpoint& local_endpoint() const { return local_; }
 
-  // Create the queue pair and move it to INIT, without a peer.
-  //
-  // Split out from connect_peer() because the register/fetch protocol needs
-  // our qpn and psn *in* the register command, but only learns the server's
-  // gid and qpn *from* the reply. So the order is: create_queue_pair(),
-  // send register, then connect_peer() with the parsed reply.
-  //
-  // Throws std::runtime_error if called twice or if verbs fails.
+  LocalEndpoint local_endpoint_for_node(const std::string& node_name) const;
+
   void create_queue_pair();
 
-  // Report whether connect_peer() has completed and the QP is in RTS.
-  bool is_connected() const { return connected_; }
+  void create_queue_pair_for_node(const std::string& node_name);
+
+  bool is_connected() const;
+
+  uint32_t notification_depth() const { return notification_depth_; }
 
   // Number of registered windows, i.e. the max concurrent RDMA fetches.
   uint32_t window_count() const {
@@ -215,8 +215,13 @@ class RdmaContext {
   std::vector<uint32_t> poll_notifications(uint32_t max_events);
 
  private:
-  // Post one receive work request for an incoming write-with-immediate.
-  void post_notification_receive();
+  struct PeerQueue;
+
+  void ensure_completion_queue();
+  PeerQueue& require_peer_queue(const std::string& node_name);
+  const PeerQueue& require_peer_queue(const std::string& node_name) const;
+  void drive_queue_to_rts(PeerQueue& peer, const PeerEndpoint& remote);
+  void post_notification_receive_for_node(const std::string& node_name);
 
   struct Impl;
   std::unique_ptr<Impl> impl_;
@@ -226,10 +231,6 @@ class RdmaContext {
   Transport transport_;
   LocalEndpoint local_;
   bool registered_ = false;
-  bool qp_created_ = false;
-  bool connected_ = false;
-  // Zero means notifications are off and the QP uses the baseline depth of
-  // one, matching the fence-then-reply protocol.
   uint32_t notification_depth_ = 0;
 };
 

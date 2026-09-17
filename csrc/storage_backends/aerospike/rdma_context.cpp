@@ -11,6 +11,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <random>
 #include <sstream>
 #include <stdexcept>
@@ -32,6 +33,18 @@ constexpr uint16_t kPkeyIndex = 0;
 // Shared queue key for SRD. Must match the server's choice; the PoC uses a
 // fixed value rather than negotiating one.
 constexpr uint32_t kSrdQKey = 0x11111111;
+
+constexpr char kDefaultPeerKey[] = "";
+
+}  // namespace
+
+struct RdmaContext::PeerQueue {
+  ibv_qp* qp = nullptr;
+  ibv_ah* ah = nullptr;
+  uint32_t qpn = 0;
+  uint32_t psn = 0;
+  bool connected = false;
+};
 
 // Fail with the verbs call name and errno, which is where verbs puts almost
 // all of its diagnostics.
@@ -108,20 +121,19 @@ struct RdmaContext::Impl {
   ibv_context* ctx = nullptr;
   ibv_pd* pd = nullptr;
   ibv_cq* cq = nullptr;
-  ibv_qp* qp = nullptr;
-  ibv_ah* ah = nullptr;
-  // One MR per window. Registered once in register_l1().
+  std::map<std::string, PeerQueue> peers;
   std::vector<ibv_mr*> mrs;
   ibv_gid local_gid{};
 
   ~Impl() {
-    // Tear down in reverse dependency order; a leaked MR pins host memory
-    // for the process lifetime.
-    if (ah != nullptr) {
-      ibv_destroy_ah(ah);
-    }
-    if (qp != nullptr) {
-      ibv_destroy_qp(qp);
+    for (auto& entry : peers) {
+      PeerQueue& peer = entry.second;
+      if (peer.ah != nullptr) {
+        ibv_destroy_ah(peer.ah);
+      }
+      if (peer.qp != nullptr) {
+        ibv_destroy_qp(peer.qp);
+      }
     }
     for (ibv_mr* mr : mrs) {
       if (mr != nullptr) {
@@ -262,19 +274,32 @@ void RdmaContext::register_l1(void* base, size_t size, const WindowPlan& plan) {
   registered_ = true;
 }
 
-void RdmaContext::create_queue_pair() {
-  if (qp_created_) {
-    throw std::runtime_error("queue pair already created");
+RdmaContext::PeerQueue& RdmaContext::require_peer_queue(
+    const std::string& node_name) {
+  const auto found = impl_->peers.find(node_name);
+  if (found == impl_->peers.end()) {
+    throw std::runtime_error("no queue pair for node '" + node_name + "'");
+  }
+  return found->second;
+}
+
+const RdmaContext::PeerQueue& RdmaContext::require_peer_queue(
+    const std::string& node_name) const {
+  const auto found = impl_->peers.find(node_name);
+  if (found == impl_->peers.end()) {
+    throw std::runtime_error("no queue pair for node '" + node_name + "'");
+  }
+  return found->second;
+}
+
+void RdmaContext::ensure_completion_queue() {
+  if (impl_->cq != nullptr) {
+    return;
   }
   if (!registered_) {
     throw std::runtime_error(
-        "register_l1() must run before create_queue_pair() so the register "
-        "command can publish rkeys alongside the qpn");
+        "register_l1() must run before creating queue pairs");
   }
-
-  // With notifications off the server fences and replies, so no completion
-  // ever lands here and this CQ stays empty by design. With them on it must
-  // hold one entry per unconsumed write-with-immediate.
   const uint32_t queue_depth =
       notification_depth_ == 0 ? 1 : notification_depth_;
   impl_->cq = ibv_create_cq(impl_->ctx, static_cast<int>(queue_depth), nullptr,
@@ -282,6 +307,16 @@ void RdmaContext::create_queue_pair() {
   if (impl_->cq == nullptr) {
     throw_verbs("ibv_create_cq");
   }
+}
+
+void RdmaContext::create_queue_pair_for_node(const std::string& node_name) {
+  if (impl_->peers.count(node_name) != 0) {
+    throw std::runtime_error("queue pair already exists for node '" +
+                             node_name + "'");
+  }
+  ensure_completion_queue();
+  const uint32_t queue_depth =
+      notification_depth_ == 0 ? 1 : notification_depth_;
 
   ibv_qp_init_attr init{};
   init.send_cq = impl_->cq;
@@ -292,10 +327,9 @@ void RdmaContext::create_queue_pair() {
   init.cap.max_recv_sge = 1;
   init.sq_sig_all = 0;
 
+  PeerQueue peer;
   if (transport_ == Transport::kSrd) {
 #ifdef LMCACHE_AEROSPIKE_EFA
-    // EFA exposes SRD only through the device-specific extension; the
-    // portable ibv_create_qp cannot express it.
     ibv_qp_init_attr_ex ex{};
     ex.send_cq = impl_->cq;
     ex.recv_cq = impl_->cq;
@@ -305,9 +339,8 @@ void RdmaContext::create_queue_pair() {
     ex.pd = impl_->pd;
     efadv_qp_init_attr efa_attr{};
     efa_attr.driver_qp_type = EFADV_QP_DRIVER_TYPE_SRD;
-    impl_->qp =
-        efadv_create_qp_ex(impl_->ctx, &ex, &efa_attr, sizeof(efa_attr));
-    if (impl_->qp == nullptr) {
+    peer.qp = efadv_create_qp_ex(impl_->ctx, &ex, &efa_attr, sizeof(efa_attr));
+    if (peer.qp == nullptr) {
       throw_verbs("efadv_create_qp_ex");
     }
 #else
@@ -315,13 +348,12 @@ void RdmaContext::create_queue_pair() {
 #endif
   } else {
     init.qp_type = IBV_QPT_RC;
-    impl_->qp = ibv_create_qp(impl_->pd, &init);
-    if (impl_->qp == nullptr) {
+    peer.qp = ibv_create_qp(impl_->pd, &init);
+    if (peer.qp == nullptr) {
       throw_verbs("ibv_create_qp");
     }
   }
 
-  // INIT. SRD is a datagram type and needs the qkey instead of access flags.
   ibv_qp_attr attr{};
   attr.qp_state = IBV_QPS_INIT;
   attr.pkey_index = kPkeyIndex;
@@ -331,46 +363,48 @@ void RdmaContext::create_queue_pair() {
     attr.qkey = kSrdQKey;
     mask |= IBV_QP_QKEY;
   } else {
-    // The server writes into us, so REMOTE_WRITE must be enabled on the QP
-    // as well as on each MR.
     attr.qp_access_flags = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE;
     mask |= IBV_QP_ACCESS_FLAGS;
   }
-  if (ibv_modify_qp(impl_->qp, &attr, mask) != 0) {
+  if (ibv_modify_qp(peer.qp, &attr, mask) != 0) {
     throw_verbs("ibv_modify_qp(INIT)");
   }
 
-  local_.qpn = impl_->qp->qp_num;
-  local_.psn = random_psn();
-  qp_created_ = true;
+  peer.qpn = peer.qp->qp_num;
+  peer.psn = random_psn();
+  impl_->peers.emplace(node_name, peer);
+  if (node_name == kDefaultPeerKey) {
+    local_.qpn = peer.qpn;
+    local_.psn = peer.psn;
+  }
 }
 
-void RdmaContext::connect_peer(const PeerEndpoint& peer) {
-  if (!qp_created_) {
-    throw std::runtime_error(
-        "create_queue_pair() must run before connect_peer()");
-  }
-  if (connected_) {
+LocalEndpoint RdmaContext::local_endpoint_for_node(
+    const std::string& node_name) const {
+  const PeerQueue& peer = require_peer_queue(node_name);
+  LocalEndpoint endpoint = local_;
+  endpoint.qpn = peer.qpn;
+  endpoint.psn = peer.psn;
+  return endpoint;
+}
+
+void RdmaContext::drive_queue_to_rts(PeerQueue& peer,
+                                     const PeerEndpoint& remote) {
+  if (peer.connected) {
     throw std::runtime_error(
         "queue pair is already connected; a node restart requires a fresh "
         "RdmaContext so the stale region handle is not reused");
   }
-
-  const ibv_gid peer_gid = gid_from_hex(peer.gid_hex);
-
+  const ibv_gid peer_gid = gid_from_hex(remote.gid_hex);
   ibv_qp_attr attr{};
   int mask = 0;
-
-  // RTR.
   attr.qp_state = IBV_QPS_RTR;
   if (transport_ == Transport::kSrd) {
-    // SRD carries addressing per work request via an AH, so RTR needs
-    // nothing beyond the state change.
     mask = IBV_QP_STATE;
   } else {
     attr.path_mtu = IBV_MTU_1024;
-    attr.dest_qp_num = peer.qpn;
-    attr.rq_psn = peer.psn;
+    attr.dest_qp_num = remote.qpn;
+    attr.rq_psn = remote.psn;
     attr.max_dest_rd_atomic = 1;
     attr.min_rnr_timer = 12;
     attr.ah_attr.is_global = 1;
@@ -385,14 +419,12 @@ void RdmaContext::connect_peer(const PeerEndpoint& peer) {
     mask = IBV_QP_STATE | IBV_QP_AV | IBV_QP_PATH_MTU | IBV_QP_DEST_QPN |
            IBV_QP_RQ_PSN | IBV_QP_MAX_DEST_RD_ATOMIC | IBV_QP_MIN_RNR_TIMER;
   }
-  if (ibv_modify_qp(impl_->qp, &attr, mask) != 0) {
+  if (ibv_modify_qp(peer.qp, &attr, mask) != 0) {
     throw_verbs("ibv_modify_qp(RTR)");
   }
-
-  // RTS.
   std::memset(&attr, 0, sizeof(attr));
   attr.qp_state = IBV_QPS_RTS;
-  attr.sq_psn = local_.psn;
+  attr.sq_psn = peer.psn;
   mask = IBV_QP_STATE | IBV_QP_SQ_PSN;
   if (transport_ != Transport::kSrd) {
     attr.timeout = 14;
@@ -402,15 +434,9 @@ void RdmaContext::connect_peer(const PeerEndpoint& peer) {
     mask |= IBV_QP_TIMEOUT | IBV_QP_RETRY_CNT | IBV_QP_RNR_RETRY |
             IBV_QP_MAX_QP_RD_ATOMIC;
   }
-  if (ibv_modify_qp(impl_->qp, &attr, mask) != 0) {
+  if (ibv_modify_qp(peer.qp, &attr, mask) != 0) {
     throw_verbs("ibv_modify_qp(RTS)");
   }
-
-  // The address handle for the server. We only ever receive, so this looks
-  // unnecessary -- it is not. The peer relationship is bidirectional at the
-  // device level, and without an AH for the server its RDMA write fails with
-  // UNKNOWN_PEER, a failure that surfaces on the *sender* and is nearly
-  // invisible from here.
   ibv_ah_attr ah_attr{};
   ah_attr.is_global = 1;
   ah_attr.port_num = kIbPort;
@@ -419,16 +445,41 @@ void RdmaContext::connect_peer(const PeerEndpoint& peer) {
   std::memcpy(&ah_attr.grh.dgid, &peer_gid, sizeof(peer_gid));
   ah_attr.grh.sgid_index = gid_index_;
   ah_attr.grh.hop_limit = 1;
-  impl_->ah = ibv_create_ah(impl_->pd, &ah_attr);
-  if (impl_->ah == nullptr) {
+  peer.ah = ibv_create_ah(impl_->pd, &ah_attr);
+  if (peer.ah == nullptr) {
     throw_verbs("ibv_create_ah");
   }
+  peer.connected = true;
+}
 
-  connected_ = true;
+bool RdmaContext::is_connected() const {
+  if (impl_->peers.empty()) {
+    return false;
+  }
+  for (const auto& entry : impl_->peers) {
+    if (!entry.second.connected) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void RdmaContext::create_queue_pair() {
+  create_queue_pair_for_node(kDefaultPeerKey);
+}
+
+void RdmaContext::connect_peer(const PeerEndpoint& peer) {
+  connect_peer(kDefaultPeerKey, peer);
+}
+
+void RdmaContext::connect_peer(const std::string& node_name,
+                               const PeerEndpoint& peer) {
+  PeerQueue& local_peer = require_peer_queue(node_name);
+  drive_queue_to_rts(local_peer, peer);
 }
 
 void RdmaContext::enable_layer_notifications(uint32_t depth) {
-  if (qp_created_) {
+  if (!impl_->peers.empty()) {
     throw std::runtime_error(
         "enable_layer_notifications() must run before create_queue_pair(); it "
         "sets the receive-queue depth, which is fixed at creation");
@@ -447,12 +498,14 @@ void RdmaContext::arm_notifications() {
         "enable_layer_notifications() was never called, so this queue pair "
         "has no room to receive per-layer signals");
   }
-  if (!connected_) {
+  if (!is_connected()) {
     throw std::runtime_error("arm_notifications() requires a connected peer");
   }
 
-  for (uint32_t i = 0; i < notification_depth_; ++i) {
-    post_notification_receive();
+  for (const auto& entry : impl_->peers) {
+    for (uint32_t i = 0; i < notification_depth_; ++i) {
+      post_notification_receive_for_node(entry.first);
+    }
   }
 }
 
@@ -496,12 +549,22 @@ std::vector<uint32_t> RdmaContext::poll_notifications(uint32_t max_events) {
 
     // Replace the work request this completion consumed, so a long fetch
     // cannot exhaust the receive queue partway through.
-    post_notification_receive();
+    ibv_qp* completed_qp = reinterpret_cast<ibv_qp*>(wc.qp_num);
+    for (const auto& entry : impl_->peers) {
+      if (entry.second.qp != nullptr && entry.second.qp->qp_num == wc.qp_num) {
+        post_notification_receive_for_node(entry.first);
+        completed_qp = entry.second.qp;
+        break;
+      }
+    }
+    (void)completed_qp;
   }
   return immediates;
 }
 
-void RdmaContext::post_notification_receive() {
+void RdmaContext::post_notification_receive_for_node(
+    const std::string& node_name) {
+  PeerQueue& peer = require_peer_queue(node_name);
   // A write-with-immediate consumes a receive work request but scatters no
   // payload into it -- the data went to the RDMA address. So the request
   // needs no buffer, and num_sge stays zero.
@@ -512,7 +575,7 @@ void RdmaContext::post_notification_receive() {
   wr.next = nullptr;
 
   ibv_recv_wr* bad = nullptr;
-  if (ibv_post_recv(impl_->qp, &wr, &bad) != 0) {
+  if (ibv_post_recv(peer.qp, &wr, &bad) != 0) {
     throw_verbs("ibv_post_recv");
   }
 }

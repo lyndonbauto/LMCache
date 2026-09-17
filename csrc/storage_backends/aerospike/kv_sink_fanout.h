@@ -25,6 +25,8 @@ namespace lmcache {
 namespace connector {
 namespace rdma {
 
+class RdmaContext;
+
 // Why a node's registration failed, for reporting and retry decisions.
 struct NodeRegistrationFailure {
   std::string node_name;
@@ -68,6 +70,18 @@ struct ClusterRegistrationResult {
 ClusterRegistrationResult register_all_nodes(aerospike* as,
                                              const as_policy_info* policy,
                                              const LocalEndpoint& local,
+                                             uint32_t window_index,
+                                             NodeRegistry* registry);
+
+// Register using one queue pair per node in `context`.
+//
+// For each cluster node the fanout creates a dedicated queue pair, sends that
+// node's qpn/psn in kv-sink-register, records the reply, and leaves connection
+// to the caller. `window_index` is fixed at 0 today; additional windows are
+// deferred until the driver leases non-zero indices.
+ClusterRegistrationResult register_all_nodes(aerospike* as,
+                                             const as_policy_info* policy,
+                                             RdmaContext* context,
                                              uint32_t window_index,
                                              NodeRegistry* registry);
 

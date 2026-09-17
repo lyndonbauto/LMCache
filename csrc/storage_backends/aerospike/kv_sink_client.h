@@ -176,6 +176,15 @@ class NodeRegistry {
   // Number of nodes holding a valid registration.
   size_t valid_count() const;
 
+  // Peer endpoint learned from kv-sink-register for one node.
+  //
+  // Throws std::runtime_error when the node was never registered or its
+  // registration has been invalidated.
+  PeerEndpoint peer_endpoint_for(const std::string& node_name) const;
+
+  // Names of nodes holding a valid registration.
+  std::vector<std::string> node_names() const;
+
  private:
   std::map<std::string, NodeRegistration> by_node_;
 };

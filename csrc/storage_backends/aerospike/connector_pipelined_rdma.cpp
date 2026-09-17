@@ -6,14 +6,13 @@
 
   #include "kv_sink_fanout.h"
 
+  #include <algorithm>
   #include <stdexcept>
   #include <utility>
 
 namespace lmcache {
 namespace connector {
 namespace {
-
-constexpr uint32_t kDefaultNotificationDepth = 4096;
 
 rdma::WindowPlan window_plan_from_registration(
     const L1RdmaRegistration& registration) {
@@ -34,12 +33,27 @@ AerospikePipelinedRdmaDriver::AerospikePipelinedRdmaDriver(
 
 bool AerospikePipelinedRdmaDriver::is_ready() const {
   std::lock_guard<std::mutex> lock(mu_);
-  return ready_;
+  return fabric_ready_ && session_ != nullptr;
+}
+
+std::string AerospikePipelinedRdmaDriver::init_error_message() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return init_error_;
+}
+
+uint32_t AerospikePipelinedRdmaDriver::notification_depth_cap() const {
+  if (max_record_bytes_ == 0 || registration_.window_bytes == 0) {
+    return 1;
+  }
+  const size_t slots =
+      (registration_.window_bytes + max_record_bytes_ - 1) / max_record_bytes_;
+  return static_cast<uint32_t>(
+      std::min(slots, static_cast<size_t>(rdma::kMaxSlotsPerRequest)));
 }
 
 void AerospikePipelinedRdmaDriver::initialize(aerospike* client) {
   std::lock_guard<std::mutex> lock(mu_);
-  if (ready_) {
+  if (fabric_ready_ && session_ != nullptr) {
     return;
   }
   if (!registration_.is_enabled()) {
@@ -58,45 +72,61 @@ void AerospikePipelinedRdmaDriver::initialize(aerospike* client) {
         "non-zero");
   }
 
-  const rdma::Transport transport =
-      rdma::transport_from_string(registration_.transport);
-  context_ = std::make_unique<rdma::RdmaContext>(
-      registration_.device_name, static_cast<uint8_t>(registration_.gid_index),
-      transport);
-  context_->enable_layer_notifications(kDefaultNotificationDepth);
-  context_->register_l1(reinterpret_cast<void*>(registration_.base),
-                        registration_.size,
-                        window_plan_from_registration(registration_));
-  context_->create_queue_pair();
+  try {
+    const rdma::Transport transport =
+        rdma::transport_from_string(registration_.transport);
+    context_ = std::make_unique<rdma::RdmaContext>(
+        registration_.device_name,
+        static_cast<uint8_t>(registration_.gid_index), transport);
+    context_->enable_layer_notifications(notification_depth_cap());
+    context_->register_l1(reinterpret_cast<void*>(registration_.base),
+                          registration_.size,
+                          window_plan_from_registration(registration_));
 
-  const rdma::ClusterRegistrationResult result = rdma::register_all_nodes(
-      client, nullptr, context_->local_endpoint(), 0, &registry_);
-  if (result.registered == 0) {
-    throw std::runtime_error(
-        "Aerospike pipelined RDMA: kv-sink-register fanout registered no "
-        "nodes");
+    const rdma::ClusterRegistrationResult result = rdma::register_all_nodes(
+        client, nullptr, context_.get(), 0, &registry_);
+    if (result.registered == 0) {
+      throw std::runtime_error(
+          "Aerospike pipelined RDMA: kv-sink-register fanout registered no "
+          "nodes");
+    }
+
+    for (const std::string& node_name : registry_.node_names()) {
+      const rdma::PeerEndpoint peer = registry_.peer_endpoint_for(node_name);
+      context_->connect_peer(node_name, peer);
+    }
+    context_->arm_notifications();
+
+    fabric_ready_ = true;
+    init_error_.clear();
+    initialized_ = true;
+    ensure_session();
+  } catch (const std::exception& e) {
+    init_error_ = e.what();
+    context_.reset();
+    fabric_ready_ = false;
+    session_.reset();
+    throw;
+  } catch (...) {
+    init_error_ = "unknown error during pipelined RDMA initialization";
+    context_.reset();
+    fabric_ready_ = false;
+    session_.reset();
+    throw;
   }
-
-  ready_ = registry_.valid_count() > 0;
-  initialized_ = true;
-  ensure_session();
 }
 
 void AerospikePipelinedRdmaDriver::set_object_group_layouts(
     std::vector<rdma::ObjectGroupLayout> layouts) {
   std::lock_guard<std::mutex> lock(mu_);
+  if (session_ && session_->has_active_request()) {
+    throw std::runtime_error(
+        "Aerospike pipelined RDMA: cannot replace layouts during an active "
+        "fetch");
+  }
+  session_.reset();
   planner_ = std::make_unique<rdma::SlotPlanner>(std::move(layouts));
   ensure_session();
-}
-
-void AerospikePipelinedRdmaDriver::ensure_session() {
-  if (!planner_ || !ready_) {
-    session_.reset();
-    return;
-  }
-  session_ = std::make_unique<rdma::PipelinedFetchSession>(
-      *planner_, registry_, namespace_name_, max_record_bytes_,
-      registration_.window_bytes);
 }
 
 uint16_t AerospikePipelinedRdmaDriver::begin_request(
@@ -121,22 +151,32 @@ AerospikePipelinedRdmaDriver::pipelined_fetch_commands() const {
 }
 
 void AerospikePipelinedRdmaDriver::on_node_reply(const std::string& node_name,
-                                                 const std::string& reply) {
+                                                 const std::string& reply,
+                                                 uint16_t generation) {
   std::lock_guard<std::mutex> lock(mu_);
   if (!session_) {
     return;
   }
-  session_->on_node_reply(node_name, reply);
+  session_->on_node_reply(node_name, reply, generation);
 }
 
 void AerospikePipelinedRdmaDriver::poll_notifications() {
-  std::lock_guard<std::mutex> lock(mu_);
-  if (!session_ || !context_) {
+  rdma::RdmaContext* context = nullptr;
+  rdma::PipelinedFetchSession* session = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    context = context_.get();
+    session = session_.get();
+  }
+  if (context == nullptr || session == nullptr) {
     return;
   }
   const std::vector<uint32_t> events =
-      context_->poll_notifications(kDefaultNotificationDepth);
-  session_->on_notifications(events);
+      context->poll_notifications(context->notification_depth());
+  std::lock_guard<std::mutex> lock(mu_);
+  if (session_) {
+    session_->on_notifications(events);
+  }
 }
 
 bool AerospikePipelinedRdmaDriver::has_active_request() const {
@@ -148,6 +188,19 @@ bool AerospikePipelinedRdmaDriver::has_active_request() const {
 }
 
 bool AerospikePipelinedRdmaDriver::is_layer_ready(uint32_t layer_id) const {
+  rdma::RdmaContext* context = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    context = context_.get();
+  }
+  if (context != nullptr) {
+    const std::vector<uint32_t> events =
+        context->poll_notifications(context->notification_depth());
+    std::lock_guard<std::mutex> lock(mu_);
+    if (session_) {
+      session_->on_notifications(events);
+    }
+  }
   std::lock_guard<std::mutex> lock(mu_);
   if (!session_) {
     return false;
@@ -177,6 +230,16 @@ void AerospikePipelinedRdmaDriver::abandon_request() {
     return;
   }
   session_->abandon_request();
+}
+
+void AerospikePipelinedRdmaDriver::ensure_session() {
+  if (!planner_ || !fabric_ready_) {
+    session_.reset();
+    return;
+  }
+  session_ = std::make_unique<rdma::PipelinedFetchSession>(
+      *planner_, registry_, namespace_name_, max_record_bytes_,
+      max_record_bytes_, registration_.window_bytes, notification_depth_cap());
 }
 
 }  // namespace connector
