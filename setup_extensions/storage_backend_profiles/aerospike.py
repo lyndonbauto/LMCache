@@ -130,6 +130,14 @@ class AerospikeStorageBackend(StorageBackendProfile):
             # pipelining model fails the RDMA build rather than only the test
             # harness. Not yet exposed through pybind.
             sources.append("csrc/storage_backends/aerospike/layer_pipeline.cpp")
+            sources.append("csrc/storage_backends/aerospike/slot_planner.cpp")
+            sources.append("csrc/storage_backends/aerospike/shard_plan.cpp")
+            sources.append(
+                "csrc/storage_backends/aerospike/pipelined_fetch_session.cpp"
+            )
+            sources.append(
+                "csrc/storage_backends/aerospike/connector_pipelined_rdma.cpp"
+            )
             libraries.append("ibverbs")
             macros.append(("LMCACHE_AEROSPIKE_RDMA", "1"))
             rdma_include = os.environ.get("RDMA_CORE_INCLUDE_DIR", "")

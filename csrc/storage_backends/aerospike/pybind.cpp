@@ -54,6 +54,17 @@ PYBIND11_MODULE(lmcache_aerospike, m) {
       .def("set_plane_bytes",
            &lmcache::connector::AerospikeNativeConnector::set_plane_bytes,
            py::arg("plane_bytes"))
+#ifdef LMCACHE_AEROSPIKE_RDMA
+      .def("pipelined_fetch_ready",
+           &lmcache::connector::AerospikeNativeConnector::pipelined_fetch_ready)
+      .def("is_pipelined_layer_ready",
+           &lmcache::connector::AerospikeNativeConnector::
+               is_pipelined_layer_ready,
+           py::arg("layer_id"))
+      .def("poll_pipelined_fetch_notifications",
+           &lmcache::connector::AerospikeNativeConnector::
+               poll_pipelined_fetch_notifications)
+#endif
           LMCACHE_BIND_CONNECTOR_METHODS(
               lmcache::connector::AerospikeNativeConnector);
 }

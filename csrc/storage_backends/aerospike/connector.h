@@ -11,9 +11,14 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
+
+#ifdef LMCACHE_AEROSPIKE_RDMA
+  #include "connector_pipelined_rdma.h"
+#endif
 
 namespace lmcache {
 namespace connector {
@@ -63,6 +68,27 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
   // change affects only subsequent writes and never makes an existing record
   // unreadable.
   void set_plane_bytes(size_t plane_bytes);
+
+#ifdef LMCACHE_AEROSPIKE_RDMA
+  // Report whether pipelined kv-sink-fetch is initialized and at least one
+  // node registered. False when RDMA was not enabled at build time or in
+  // config, or when kv-sink-register has not succeeded.
+  //
+  // Thread safety: safe to call concurrently.
+  bool pipelined_fetch_ready() const;
+
+  // Layer readiness for the active pipelined fetch. False when pipelined
+  // fetch is not ready, no request is active, or the layer is not complete.
+  //
+  // Thread safety: safe to call concurrently.
+  bool is_pipelined_layer_ready(uint32_t layer_id) const;
+
+  // Drain RDMA write-with-immediate notifications into the active session.
+  //
+  // Thread safety: safe to call concurrently; serialized with other pipelined
+  // methods on the internal driver lock.
+  void poll_pipelined_fetch_notifications();
+#endif
 
  protected:
   WorkerAerospikeConn create_connection() override;
@@ -116,6 +142,11 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
   // reception. Default-constructed (and therefore inert) unless the L2
   // adapter factory enabled RDMA.
   L1RdmaRegistration l1_rdma_registration_;
+
+#ifdef LMCACHE_AEROSPIKE_RDMA
+  void try_initialize_pipelined_rdma();
+  std::unique_ptr<AerospikePipelinedRdmaDriver> pipelined_rdma_;
+#endif
 
   aerospike as_;
   std::mutex close_mu_;

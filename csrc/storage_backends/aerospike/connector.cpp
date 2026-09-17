@@ -118,6 +118,14 @@ AerospikeNativeConnector::AerospikeNativeConnector(
             : std::min(target_segment_bytes, max_record_bytes_);
     single_record_threshold_bytes_ = target_segment_bytes_;
 
+#ifdef LMCACHE_AEROSPIKE_RDMA
+    if (l1_rdma_registration_.is_enabled()) {
+      pipelined_rdma_ = std::make_unique<AerospikePipelinedRdmaDriver>(
+          l1_rdma_registration_, ns_, max_record_bytes_);
+      try_initialize_pipelined_rdma();
+    }
+#endif
+
     start_workers();
   } catch (...) {
     if (connected_) {
@@ -399,6 +407,41 @@ void AerospikeNativeConnector::throw_status(const char* op, as_status status,
 void AerospikeNativeConnector::set_plane_bytes(size_t plane_bytes) {
   plane_bytes_.store(plane_bytes, std::memory_order_relaxed);
 }
+
+#ifdef LMCACHE_AEROSPIKE_RDMA
+void AerospikeNativeConnector::try_initialize_pipelined_rdma() {
+  if (!pipelined_rdma_) {
+    return;
+  }
+  try {
+    pipelined_rdma_->initialize(&as_);
+  } catch (...) {
+    // Pipelined fetch stays unavailable; the TCP path is unaffected.
+  }
+}
+
+bool AerospikeNativeConnector::pipelined_fetch_ready() const {
+  if (!pipelined_rdma_) {
+    return false;
+  }
+  return pipelined_rdma_->is_ready();
+}
+
+bool AerospikeNativeConnector::is_pipelined_layer_ready(
+    uint32_t layer_id) const {
+  if (!pipelined_rdma_) {
+    return false;
+  }
+  return pipelined_rdma_->is_layer_ready(layer_id);
+}
+
+void AerospikeNativeConnector::poll_pipelined_fetch_notifications() {
+  if (!pipelined_rdma_) {
+    return;
+  }
+  pipelined_rdma_->poll_notifications();
+}
+#endif
 
 ShardPlan AerospikeNativeConnector::plan(size_t payload_bytes) const {
   return make_shard_plan(payload_bytes, target_segment_bytes_,
