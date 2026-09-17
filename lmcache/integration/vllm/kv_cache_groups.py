@@ -382,3 +382,18 @@ def create_engine_group_infos_from_vllm(
             per_layer_group_idx,
         )
     ]
+
+
+def layer_names_to_global_index(kv_caches: Mapping[str, Any]) -> dict[str, int]:
+    """Map vLLM KV cache layer names to global layer indices.
+
+    Indices follow the registration order of ``kv_caches``, which matches the
+    order LMCache uses when building kernel groups from the registered tensors.
+
+    Args:
+        kv_caches: Registered KV tensors keyed by vLLM layer name.
+
+    Returns:
+        A dict from layer name to global layer index.
+    """
+    return {name: index for index, name in enumerate(kv_caches.keys())}
