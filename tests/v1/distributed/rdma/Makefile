@@ -19,6 +19,7 @@ BIN := $(BUILD_DIR)/rdma_equivalence_test
 PIPELINE_BIN := $(BUILD_DIR)/rdma_pipeline_test
 SHARD_BIN := $(BUILD_DIR)/shard_plan_test
 PLAN_BIN := $(BUILD_DIR)/request_plan_test
+PLANNER_BIN := $(BUILD_DIR)/slot_planner_test
 
 INCLUDES := -I$(SRC_DIR) -I$(CONNECTOR_DIR)
 ifneq ($(RDMA_CORE_INCLUDE_DIR),)
@@ -51,7 +52,11 @@ SHARD_SOURCES := \
 PLAN_SOURCES := \
 	$(SRC_DIR)/request_plan_test.cpp \
 	$(CONNECTOR_DIR)/layer_pipeline.cpp
-LOGIC_BINS := $(SHARD_BIN) $(PLAN_BIN)
+PLANNER_SOURCES := \
+	$(SRC_DIR)/slot_planner_test.cpp \
+	$(CONNECTOR_DIR)/slot_planner.cpp \
+	$(CONNECTOR_DIR)/layer_pipeline.cpp
+LOGIC_BINS := $(SHARD_BIN) $(PLAN_BIN) $(PLANNER_BIN)
 
 .PHONY: all test logic logic-test clean
 all: $(BIN) $(PIPELINE_BIN) $(LOGIC_BINS)
@@ -63,6 +68,7 @@ logic: $(LOGIC_BINS)
 logic-test: $(LOGIC_BINS)
 	$(SHARD_BIN)
 	$(PLAN_BIN)
+	$(PLANNER_BIN)
 
 $(BIN): $(SOURCES) | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
@@ -76,6 +82,9 @@ $(SHARD_BIN): $(SHARD_SOURCES) | $(BUILD_DIR)
 $(PLAN_BIN): $(PLAN_SOURCES) | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(PLAN_SOURCES) -o $@
 
+$(PLANNER_BIN): $(PLANNER_SOURCES) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(PLANNER_SOURCES) -o $@
+
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
@@ -87,6 +96,7 @@ $(BUILD_DIR):
 test: $(BIN) $(PIPELINE_BIN) $(LOGIC_BINS)
 	$(SHARD_BIN)
 	$(PLAN_BIN)
+	$(PLANNER_BIN)
 	$(BIN) $(RDMA_DEVICE) $(RDMA_GID_INDEX)
 	$(PIPELINE_BIN) $(RDMA_DEVICE) $(RDMA_GID_INDEX)
 
