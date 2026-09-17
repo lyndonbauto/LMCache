@@ -51,6 +51,9 @@ PYBIND11_MODULE(lmcache_aerospike, m) {
           py::arg("l1_rdma_registration") =
               lmcache::connector::L1RdmaRegistration(),
           py::arg("plane_bytes") = 0)
+      .def("set_plane_bytes",
+           &lmcache::connector::AerospikeNativeConnector::set_plane_bytes,
+           py::arg("plane_bytes"))
           LMCACHE_BIND_CONNECTOR_METHODS(
               lmcache::connector::AerospikeNativeConnector);
 }

@@ -396,10 +396,14 @@ void AerospikeNativeConnector::throw_status(const char* op, as_status status,
                            status_message(status, err));
 }
 
+void AerospikeNativeConnector::set_plane_bytes(size_t plane_bytes) {
+  plane_bytes_.store(plane_bytes, std::memory_order_relaxed);
+}
+
 ShardPlan AerospikeNativeConnector::plan(size_t payload_bytes) const {
   return make_shard_plan(payload_bytes, target_segment_bytes_,
                          max_record_bytes_, single_record_threshold_bytes_,
-                         plane_bytes_);
+                         plane_bytes_.load(std::memory_order_relaxed));
 }
 
 size_t AerospikeNativeConnector::discover_record_cap() {

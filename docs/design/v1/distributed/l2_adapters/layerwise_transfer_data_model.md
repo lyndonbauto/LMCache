@@ -392,6 +392,54 @@ so `seg_b` lands on plane boundaries, instead of relying on the arithmetic
 happening to work out. The connector currently takes an opaque payload and a
 byte target, so this is a small additive parameter, not a contract change.
 
+**Implemented.** The arithmetic lives in `csrc/storage_backends/aerospike/
+shard_plan.{h,cpp}`, which depends on neither libibverbs nor the Aerospike
+client and is therefore unit-tested with no hardware
+(`tests/v1/distributed/rdma/test_shard_plan.py`). Three details were not
+obvious from the design:
+
+- **`(nseg, seg_b)` is a storage format, not an internal detail.** Both
+  numbers are persisted in the meta record's bins and the reader reconstructs
+  boundaries from them, so variable-length segments would have been a format
+  change. A plane size is persisted alongside them instead (`plane_b`), and
+  the reader resolves a record's position *within its plane*. A plane whose
+  size is not a whole multiple of `seg_b` therefore ends in a short record
+  rather than spilling into the next plane, which keeps the format to three
+  numbers. An absent bin means uniform tiling, so records written before the
+  change stay readable.
+- **The plane rule must be checked before the single-record fast path.** A
+  multi-plane payload small enough to fit one record would otherwise be
+  stored as one record holding several planes — precisely the weaker "either
+  size divides the other" rule rejected above.
+- **The hint is refused unless it divides the payload.** A payload that is not
+  a whole number of planes *is* the non-uniform-plane case, so this doubles as
+  the detection mechanism: no separate predicate, and the refusal is visible
+  to the caller as `plane_b` coming back zero.
+
+### Where the plane size comes from
+
+Not from configuration — the operator should never be computing
+`num_slots × hidden_dim × itemsize` by hand — and not from the L2 adapter
+factory either, which is the natural-looking place and does not work:
+**adapters are constructed before any worker has registered its KV cache**, so
+no geometry exists yet. `StorageManager._build_l2_adapter` has only the
+config and the L1 slab descriptor, and `L1MemoryDesc` carries `ptr`/`size`/
+`align_bytes` and nothing about shapes.
+
+Deriving it from the store path does not work either: `MemoryObjMetadata`
+carries a single "logical" `shape`, which cannot represent the per-kernel-group
+shapes of a hybrid object group.
+
+The authoritative point is `register_kv_cache`, which already builds one
+`MemoryLayoutDesc` per object group via `get_layout_desc`. `uniform_kv_plane_
+bytes` reduces those to one integer — the plane is the innermost two
+dimensions, which holds for both the standard shape and the `NL_X_NB_BS_HS`
+variant — or to 0 when the kernel groups disagree. It travels
+`register_kv_cache` → `StorageManager.set_kv_plane_bytes` → the L2 adapter →
+the native client, and the connector holds it atomically because stores may be
+in flight when it lands. Changing it mid-run is safe: each record persists the
+plane size it was written with.
+
 ## Readiness is request-scoped, not fetch-scoped
 
 vLLM computes layer *L* for the **whole sequence**, so it needs layer *L* of
@@ -786,7 +834,9 @@ all. Regions must be enumerated per kernel group and per plane.
   alignment hazard*, and it is load-bearing precisely because hybrid models —
   the common case — use unified block sizes of 544/784/944 tokens, none a power
   of two, so misalignment is the default rather than an edge case. Re-scope
-  AIE-89 to that hint.
+  AIE-89 to that hint. **Done** — see *The alignment hazard* for what was
+  built and for the startup-ordering constraint that decided where the plane
+  size is derived.
 - **AIE-90** (M2 gate, RDMA into CPU L1): the success criterion must not be
   bulk throughput. M0 showed TCP already reaching 98% of line rate, so there is
   almost no throughput headroom to win. RDMA's case is CPU offload and
