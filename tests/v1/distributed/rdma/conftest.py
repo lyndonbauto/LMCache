@@ -91,6 +91,42 @@ def _harness_build_dir() -> Path:
     return _HARNESS_DIR / "build"
 
 
+@pytest.fixture(scope="session")
+def shard_plan_harness() -> str:
+    """Build and run the device-independent shard-plan harness, returning stdout.
+
+    Kept separate from ``rdma_harness`` because the shard plan is pure
+    arithmetic: it links neither libibverbs nor the Aerospike client, so it
+    must still run on a box with no RDMA toolchain, where the session build
+    for the other harnesses skips.
+
+    Returns:
+        The harness's stdout.
+
+    Raises:
+        pytest.skip.Exception: If ``make`` or a C++ compiler is unavailable.
+    """
+    if shutil.which("make") is None:
+        pytest.skip("make is not available")
+    if shutil.which(os.environ.get("CXX", "g++")) is None:
+        pytest.skip("no C++ compiler available")
+
+    result = subprocess.run(
+        ["make", "--silent", "shard"],
+        cwd=_HARNESS_DIR,
+        capture_output=True,
+        text=True,
+        timeout=_BUILD_TIMEOUT_SECONDS,
+        check=False,
+    )
+    if result.returncode != 0:
+        pytest.fail(
+            "shard_plan_test failed:\n"
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
+    return result.stdout
+
+
 @pytest.fixture
 def rdma_harness(_harness_build_dir: Path) -> Callable[[str], str]:
     """Return a callable that runs a named harness and yields its stdout.
