@@ -432,10 +432,16 @@ chunks at `kv_size = 2` and one piece per plane is 16,000 — comfortable, but a
 
 ### Wire format for a pipelined fetch
 
-**Status: proposed. This is the contract to agree with the Aerospike server
-team before either side builds against it.** The existing `kv-sink-fetch`
-cannot express this, because it has no per-write identifier and its reply *is*
-the completion.
+**Status: the client side is implemented; the server side is proposed.** The
+command builder, reply parser and declined-write handling live in
+`kv_sink_client.h` and `layer_pipeline.h`, and the test mock implements a
+server-shaped `handle_pipelined_fetch` so the codec is exercised over a real
+fabric rather than against hand-written reply strings. The format below is
+still the contract to agree with the Aerospike server team; what exists is one
+end of it, not agreement on it.
+
+The existing `kv-sink-fetch` cannot express this, because it has no per-write
+identifier and its reply *is* the completion.
 
 A new command rather than a flag on the old one, so a server that does not
 implement it fails the command outright instead of silently performing an
@@ -479,7 +485,12 @@ or bad data rather than an error:
    A missing record or a read error that is merely *omitted* from the reply is
    indistinguishable from a write still in flight, so the layer never reaches
    its expected count and the request hangs until the deadline. With the slot
-   named, LMCache can fail the request immediately.
+   named, LMCache calls `LayerReadiness::note_unservable`, which marks the slot
+   so its layer can never be reported ready — the layer becomes a recompute,
+   and every other layer of the request still completes and is still
+   pipelined. Note the layer is *not* served from the pieces that did arrive:
+   the rest of its buffer holds whatever the window's previous tenant left
+   there.
 3. **Do not fence.** The point of the command is to reply before the writes
    complete. A server that polls its send queue to completion first has
    implemented the old command with extra steps.
@@ -511,6 +522,8 @@ exactly these sinks, layer-major, with the offsets already resolved against
 the leased window. `RequestPlan::slots_for_chunk` then partitions that
 schedule by chunk, so each node receives a command naming only its own
 chunks while the slot indices stay in the request's numbering.
+`build_pipelined_fetch_command` refuses a sink list with a repeated slot index,
+which is the mistake that per-fetch numbering would produce.
 
 Two things this format does **not** yet settle, both needing the server
 team's input:
@@ -527,7 +540,7 @@ team's input:
 
 ### What the prototype proves, and what it does not
 
-Passing (`make -C tests/v1/distributed/rdma test`, 24 checks):
+Passing (`make -C tests/v1/distributed/rdma test`):
 
 - a layer is reported ready only once *every* piece has landed,
 - its bytes are correct at the moment it is reported ready,
@@ -535,17 +548,24 @@ Passing (`make -C tests/v1/distributed/rdma test`, 24 checks):
   what makes early consumption meaningful rather than a race,
 - a later layer can be ready while an earlier one is not,
 - stale generations, unknown slots, and duplicate immediates are each
-  distinguished rather than silently counted.
+  distinguished rather than silently counted,
+- the whole sequence again driven through the wire format rather than by
+  staged calls: the client builds `kv-sink-fetch-pipelined` from its plan, the
+  mock parses it and pushes without fencing, and a sink naming a record the
+  server does not hold comes back in `failed` so its layer becomes a recompute
+  while every other layer still lands and is still pipelined.
 
 Not proven:
 
 - **Any of it on EFA/SRD.** Soft-RoCE is RC-only and ordered, so the very
   hazard this design guards against cannot be reproduced locally. The extended
   verbs port and the unsolicited-receive negotiation are both untested.
-- **A server that can do this.** Aerospike currently fences and replies once.
-  Per-slot signaling needs the server to issue write-with-immediate per piece
-  and *not* fence, plus release its record lock per piece rather than holding
-  it across the whole transfer.
+- **A server that can do this.** The `handle_pipelined_fetch` above is the
+  test mock, which is a demonstration that the contract is implementable and
+  not evidence that Aerospike implements it: the real server fences and replies
+  once. Per-slot signaling needs it to issue write-with-immediate per piece and
+  *not* fence, plus release its record lock per piece rather than holding it
+  across the whole transfer.
 - **That storage-level pipelining is possible at all.** Slicing an
   already-read record into signaled pieces buys compute overlap. Overlapping
   the *disk read* of layer 1 with the network send of layer 0 needs

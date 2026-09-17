@@ -127,6 +127,24 @@ ArrivalStatus LayerReadiness::note_arrival(uint32_t immediate) {
   return ArrivalStatus::kAccepted;
 }
 
+bool LayerReadiness::note_unservable(uint16_t slot_index) {
+  if (static_cast<size_t>(slot_index) >= slot_seen_.size()) {
+    return false;
+  }
+  if (slot_seen_[slot_index]) {
+    return false;
+  }
+
+  // Marking the slot seen without incrementing landed_slots_ is what makes
+  // the layer permanently unready: its landed count can now never reach its
+  // expected count, so is_layer_ready and all_ready stay false without
+  // needing to consult the unservable table. The mark also makes a late
+  // arrival for this slot report as a duplicate rather than as progress.
+  slot_seen_[slot_index] = true;
+  ++unservable_per_layer_[slot_layer_[slot_index]];
+  return true;
+}
+
 bool LayerReadiness::is_layer_ready(uint32_t layer_id) const {
   const auto expected = expected_per_layer_.find(layer_id);
   if (expected == expected_per_layer_.end()) {
@@ -144,6 +162,15 @@ std::vector<uint32_t> LayerReadiness::ready_layers() const {
     if (landed != landed_per_layer_.end() && landed->second == entry.second) {
       out.push_back(entry.first);
     }
+  }
+  return out;
+}
+
+std::vector<uint32_t> LayerReadiness::unservable_layers() const {
+  std::vector<uint32_t> out;
+  out.reserve(unservable_per_layer_.size());
+  for (const auto& entry : unservable_per_layer_) {
+    out.push_back(entry.first);
   }
   return out;
 }

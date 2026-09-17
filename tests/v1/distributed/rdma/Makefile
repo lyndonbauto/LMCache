@@ -20,6 +20,7 @@ PIPELINE_BIN := $(BUILD_DIR)/rdma_pipeline_test
 SHARD_BIN := $(BUILD_DIR)/shard_plan_test
 PLAN_BIN := $(BUILD_DIR)/request_plan_test
 PLANNER_BIN := $(BUILD_DIR)/slot_planner_test
+CODEC_BIN := $(BUILD_DIR)/pipelined_fetch_test
 
 INCLUDES := -I$(SRC_DIR) -I$(CONNECTOR_DIR)
 ifneq ($(RDMA_CORE_INCLUDE_DIR),)
@@ -43,8 +44,9 @@ COMMON_SOURCES := \
 SOURCES := $(SRC_DIR)/rdma_equivalence_test.cpp $(COMMON_SOURCES)
 PIPELINE_SOURCES := $(SRC_DIR)/rdma_pipeline_test.cpp $(COMMON_SOURCES)
 
-# These two cover arithmetic and bookkeeping rather than the data path, so
-# they link neither libibverbs nor the Aerospike client and run anywhere.
+# These cover arithmetic, bookkeeping and string codecs rather than the data
+# path, so they link neither libibverbs nor the Aerospike client and run
+# anywhere.
 # Grouped as `logic` so they stay reachable on a box with no RDMA toolchain.
 SHARD_SOURCES := \
 	$(SRC_DIR)/shard_plan_test.cpp \
@@ -56,7 +58,13 @@ PLANNER_SOURCES := \
 	$(SRC_DIR)/slot_planner_test.cpp \
 	$(CONNECTOR_DIR)/slot_planner.cpp \
 	$(CONNECTOR_DIR)/layer_pipeline.cpp
-LOGIC_BINS := $(SHARD_BIN) $(PLAN_BIN) $(PLANNER_BIN)
+# kv_sink_client.cpp includes rdma_context.h for its endpoint types but calls
+# no verbs function, so the codec links here without libibverbs.
+CODEC_SOURCES := \
+	$(SRC_DIR)/pipelined_fetch_test.cpp \
+	$(CONNECTOR_DIR)/kv_sink_client.cpp \
+	$(CONNECTOR_DIR)/layer_pipeline.cpp
+LOGIC_BINS := $(SHARD_BIN) $(PLAN_BIN) $(PLANNER_BIN) $(CODEC_BIN)
 
 .PHONY: all test logic logic-test clean
 all: $(BIN) $(PIPELINE_BIN) $(LOGIC_BINS)
@@ -69,6 +77,7 @@ logic-test: $(LOGIC_BINS)
 	$(SHARD_BIN)
 	$(PLAN_BIN)
 	$(PLANNER_BIN)
+	$(CODEC_BIN)
 
 $(BIN): $(SOURCES) | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
@@ -85,6 +94,9 @@ $(PLAN_BIN): $(PLAN_SOURCES) | $(BUILD_DIR)
 $(PLANNER_BIN): $(PLANNER_SOURCES) | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(PLANNER_SOURCES) -o $@
 
+$(CODEC_BIN): $(CODEC_SOURCES) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(CODEC_SOURCES) -o $@
+
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
@@ -97,6 +109,7 @@ test: $(BIN) $(PIPELINE_BIN) $(LOGIC_BINS)
 	$(SHARD_BIN)
 	$(PLAN_BIN)
 	$(PLANNER_BIN)
+	$(CODEC_BIN)
 	$(BIN) $(RDMA_DEVICE) $(RDMA_GID_INDEX)
 	$(PIPELINE_BIN) $(RDMA_DEVICE) $(RDMA_GID_INDEX)
 

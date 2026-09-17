@@ -2,8 +2,12 @@
 #include "kv_sink_client.h"
 
 #include <cstdlib>
+#include <set>
 #include <sstream>
 #include <stdexcept>
+#include <string>
+
+#include "layer_pipeline.h"
 
 namespace lmcache {
 namespace connector {
@@ -24,6 +28,16 @@ uint64_t require_u64(const std::string& reply, const std::string& key,
   } catch (const std::exception&) {
     throw std::runtime_error(std::string(op) + ": field '" + key +
                              "' is not a number: '" + value + "'");
+  }
+}
+
+// Parse a standalone unsigned token, as found inside a comma-separated list.
+uint64_t parse_u64_token(const std::string& text, const char* op) {
+  try {
+    return std::stoull(text);
+  } catch (const std::exception&) {
+    throw std::runtime_error(std::string(op) + ": '" + text +
+                             "' is not a number");
   }
 }
 
@@ -132,6 +146,37 @@ NodeRegistration parse_register_reply(const std::string& node_name,
   return registration;
 }
 
+std::string build_pipelined_fetch_command(
+    const std::string& ns, uint64_t region, uint16_t generation,
+    const std::vector<SinkRequest>& sinks) {
+  if (sinks.empty()) {
+    throw std::invalid_argument(
+        "kv-sink-fetch-pipelined requires at least one sink");
+  }
+
+  std::set<uint16_t> slots;
+  for (const SinkRequest& sink : sinks) {
+    if (!slots.insert(sink.slot).second) {
+      throw std::invalid_argument(
+          "kv-sink-fetch-pipelined: slot " + std::to_string(sink.slot) +
+          " appears twice; the second arrival would be counted as a "
+          "duplicate and its layer could never complete");
+    }
+  }
+
+  std::ostringstream os;
+  os << "kv-sink-fetch-pipelined:namespace=" << ns << ";region=" << region
+     << ";gen=" << generation << ";sinks=";
+  for (size_t i = 0; i < sinks.size(); ++i) {
+    if (i > 0) {
+      os << ',';
+    }
+    os << sinks[i].digest_hex << '@' << sinks[i].offset << ':'
+       << sinks[i].length << '#' << sinks[i].slot;
+  }
+  return os.str();
+}
+
 FetchReply parse_fetch_reply(const std::string& reply) {
   FetchReply parsed;
   parsed.requested =
@@ -149,6 +194,34 @@ FetchReply parse_fetch_reply(const std::string& reply) {
         static_cast<uint32_t>(require_u64(reply, "in-place", "kv-sink-fetch"));
   }
   parsed.results = split_csv(find_info_field(reply, "results"));
+  return parsed;
+}
+
+PipelinedFetchReply parse_pipelined_fetch_reply(const std::string& reply) {
+  PipelinedFetchReply parsed;
+  parsed.requested =
+      static_cast<uint32_t>(require_u64(reply, "n", "kv-sink-fetch-pipelined"));
+  parsed.accepted = static_cast<uint32_t>(
+      require_u64(reply, "accepted", "kv-sink-fetch-pipelined"));
+
+  const std::string bytes = find_info_field(reply, "bytes");
+  if (!bytes.empty()) {
+    parsed.bytes = require_u64(reply, "bytes", "kv-sink-fetch-pipelined");
+  }
+
+  // Absent or empty both mean "nothing failed". A server with no failures may
+  // reasonably omit the field entirely.
+  for (const std::string& slot : split_csv(find_info_field(reply, "failed"))) {
+    if (slot.empty()) {
+      continue;
+    }
+    const uint64_t value = parse_u64_token(slot, "kv-sink-fetch-pipelined");
+    if (value > kSlotIndexMask) {
+      throw std::runtime_error("kv-sink-fetch-pipelined: failed slot " + slot +
+                               " does not fit the 16-bit slot index");
+    }
+    parsed.failed_slots.push_back(static_cast<uint16_t>(value));
+  }
   return parsed;
 }
 

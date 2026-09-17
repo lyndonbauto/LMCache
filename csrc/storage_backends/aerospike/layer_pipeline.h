@@ -265,12 +265,40 @@ class LayerReadiness {
   // request is reported rather than counted.
   ArrivalStatus note_arrival(uint32_t immediate);
 
+  // Record that the server will never write the slot at `slot_index`.
+  //
+  // A fetch reply names the slots it could not serve -- a missing record, a
+  // read error. Without this the request would wait for them until its
+  // deadline, because a slot that never arrives is indistinguishable from one
+  // still in flight.
+  //
+  // The slot's layer becomes permanently unready rather than being reported
+  // complete on partial data: some of its bytes are absent, and serving a
+  // layer from a partly-written buffer is the failure this whole file exists
+  // to prevent. The caller is expected to treat the affected layers as a
+  // cache miss and recompute them.
+  //
+  // Returns true if this call newly marked the slot, and false if it was
+  // already marked or has in fact already landed. Safe to call with a slot
+  // index outside the plan, which is ignored.
+  bool note_unservable(uint16_t slot_index);
+
   // Report whether every slot of `layer_id` has landed, over every
   // participating chunk.
   //
   // False for a layer that is not in the plan, since nothing guarantees its
-  // bytes are present.
+  // bytes are present, and false for a layer with an unservable slot.
   bool is_layer_ready(uint32_t layer_id) const;
+
+  // Layers that can never complete because a slot of theirs was reported
+  // unservable, ascending.
+  //
+  // Empty unless note_unservable has been called. These are the layers the
+  // caller must recompute.
+  std::vector<uint32_t> unservable_layers() const;
+
+  // Report whether any slot has been marked unservable.
+  bool has_unservable_slots() const { return !unservable_per_layer_.empty(); }
 
   // Layers that have fully landed, ascending.
   //
@@ -279,6 +307,9 @@ class LayerReadiness {
   std::vector<uint32_t> ready_layers() const;
 
   // Report whether every slot in the plan has landed.
+  //
+  // Never true once a slot is unservable: that slot cannot also land, so the
+  // counts can no longer meet.
   bool all_ready() const { return landed_slots_ == expected_slots_; }
 
   // Number of distinct slots counted so far.
@@ -292,6 +323,8 @@ class LayerReadiness {
   std::vector<uint32_t> slot_layer_;
   std::map<uint32_t, uint32_t> expected_per_layer_;
   std::map<uint32_t, uint32_t> landed_per_layer_;
+  // Layers with at least one slot the server will not write, and how many.
+  std::map<uint32_t, uint32_t> unservable_per_layer_;
 };
 
 }  // namespace rdma
