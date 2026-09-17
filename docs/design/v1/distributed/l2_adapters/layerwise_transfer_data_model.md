@@ -525,6 +525,13 @@ group, and make its caller incremental. The difference is only that there are
 two such kernels, so blend is a *second instance* of the change rather than an
 obstacle to it.
 
+That change is now confirmed to be cheap. `multi_layer_block_kv_transfer` is
+already layer-parallel — it launches `dim3 grid(kv_size, total_blocks, nl)` and
+the kernel takes its layer from `blockIdx.z` (`csrc/cuda/mp_mem_kernels.cu:429`
+and `:213`) — so accepting a layer range means narrowing `gridDim.z` and adding
+an offset, with no change to kernel logic. The destination pointers are already
+indexed per layer.
+
 Blend is in fact the more natural fit conceptually. The original CacheBlend
 algorithm is inherently layerwise — it inspects deviation at selected layers
 (`blend_check_layers`) to choose which tokens to recompute — and the in-process
@@ -734,10 +741,26 @@ all. Regions must be enumerated per kernel group and per plane.
    sequence, and a sum of L maxima is worse than one max. With p99 at 1.3–2×
    p50 in the sweep, the per-layer barrier trends toward the tail. The
    transfer-vs-compute ratio must be evaluated at p99, not median.
-4. **Is the H2D copy per layer?** Landing in L1 is only half the journey; the
-   destination is non-contiguous paged GPU blocks. A per-layer readiness signal
-   is only useful if a per-layer H2D copy can be issued, which interacts with
-   the existing batched transfer kernel.
+4. **Is the H2D copy per layer?** **Answered — yes, and cheaply.** MP mode's
+   transfer kernel is already layer-parallel: the launch is
+   `dim3 grid(kv_size, total_blocks, nl)` and the kernel reads
+   `const int layer_idx = blockIdx.z`
+   (`csrc/cuda/mp_mem_kernels.cu:429` and `:213`). Layers are independent
+   blocks with no cross-layer dependency, so restricting a transfer to one
+   layer is a launch-configuration change — narrow `gridDim.z`, add a layer
+   offset — rather than a kernel rewrite. `skip_prefix_n_blocks` is existing
+   precedent for narrowing an axis the same way.
+
+   Two corrections to earlier reasoning here. First, the concern that a
+   per-layer copy would mean many small scattered PCIe transfers was wrong:
+   the destination pointers are already per layer, and the scatter into paged
+   blocks is GPU-local. Second, the in-process
+   `VLLMPagedMemLayerwiseGPUConnector` cannot be reused, but not for a plumbing
+   reason — its generator yields between attention layers in the same address
+   space as the forward pass, whereas in MP mode the model runs in the vLLM
+   worker while the copy is driven by the LMCache server across CUDA IPC. A
+   generator cannot span that boundary, so MP needs a signalling protocol
+   instead. See AIE-102 for the resulting four-part scope.
 5. **Recurrent group semantics**, per above.
 6. **Is blend's sparse leg the better benchmark target?** The arithmetic above
    says yes — `K × (1 + nseg)` round trips for scattered chunks, against a
