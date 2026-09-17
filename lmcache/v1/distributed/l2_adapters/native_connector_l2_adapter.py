@@ -206,6 +206,21 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             self._type_name,
         )
 
+    def is_pipelined_layer_ready(self, layer_id: int) -> bool:
+        """Forward pipelined layer readiness to the native client when supported.
+
+        Args:
+            layer_id: Global layer index in the model.
+
+        Returns:
+            ``True`` when the native client reports the layer ready for the
+            active pipelined fetch, otherwise ``False``.
+        """
+        checker = getattr(self._client, "is_pipelined_layer_ready", None)
+        if checker is None:
+            return False
+        return bool(checker(layer_id))
+
     def submit_store_task(
         self,
         keys: list[ObjectKey],

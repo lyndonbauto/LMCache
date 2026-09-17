@@ -757,6 +757,26 @@ class StorageManager:
         for adapter in adapters:
             adapter.set_kv_plane_bytes(plane_bytes)
 
+    def is_pipelined_layer_ready(self, layer_id: int) -> bool:
+        """Ask each L2 adapter whether a pipelined fetch layer is ready.
+
+        Adapters without pipelined RDMA return ``False``. The result is the
+        logical OR across adapters, matching how a hit on any tier satisfies
+        a load.
+
+        Args:
+            layer_id: Global layer index in the model.
+
+        Returns:
+            ``True`` if any adapter reports the layer ready.
+        """
+        with self._adapters_lock:
+            adapters = list(self._l2_adapters.values())
+        for adapter in adapters:
+            if adapter.is_pipelined_layer_ready(layer_id):
+                return True
+        return False
+
     def touch_l1_keys(self, keys: list[ObjectKey]):
         """
         Touch the keys in L1 storage, marking the keys

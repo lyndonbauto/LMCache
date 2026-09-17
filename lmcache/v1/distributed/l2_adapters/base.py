@@ -405,6 +405,23 @@ class L2AdapterInterface(ABC):
         """
         del plane_bytes
 
+    def is_pipelined_layer_ready(self, layer_id: int) -> bool:
+        """Report whether one layer of the active pipelined fetch has landed.
+
+        Layer-pipelined RDMA fetches signal each write separately; vLLM asks
+        this while decoding. Backends without a pipelined path always return
+        ``False``.
+
+        Args:
+            layer_id: Global layer index in the model.
+
+        Returns:
+            ``True`` when every slot of ``layer_id`` for the active request
+            has landed and no slot of that layer was declined.
+        """
+        del layer_id
+        return False
+
     def _notify_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
         """Update byte accounting and notify listeners that ``keys`` were
         stored. ``sizes[i]`` is the byte size of ``keys[i]``.
