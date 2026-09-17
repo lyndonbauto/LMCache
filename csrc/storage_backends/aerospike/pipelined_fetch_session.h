@@ -115,8 +115,9 @@ class PipelinedFetchSession {
 
   // Layer readiness for the active request.
   //
-  // Thread safety: takes `mu_`.
-  bool is_layer_ready(uint32_t layer_id) const;
+  // Thread safety: takes `mu_`. When ``request_generation`` is non-zero and
+  // does not match the active request, returns false.
+  bool is_layer_ready(uint32_t layer_id, uint16_t request_generation = 0) const;
 
   // Layers marked unservable on the active request.
   //

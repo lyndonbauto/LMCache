@@ -7,6 +7,10 @@
 #include <aerospike/as_config.h>
 #include <aerospike/as_record.h>
 #include <aerospike/as_status.h>
+#ifdef LMCACHE_AEROSPIKE_RDMA
+  #include <aerospike/as_cluster.h>
+  #include <aerospike/as_node.h>
+#endif
 
 #include <algorithm>
 #include <cassert>
@@ -409,6 +413,36 @@ void AerospikeNativeConnector::set_plane_bytes(size_t plane_bytes) {
 }
 
 #ifdef LMCACHE_AEROSPIKE_RDMA
+
+namespace {
+
+std::string send_pipelined_info_command(aerospike* client,
+                                        const std::string& node_name,
+                                        const std::string& command) {
+  as_node* node =
+      as_cluster_get_node_by_name(&client->cluster, node_name.c_str());
+  if (node == nullptr) {
+    throw std::runtime_error("Aerospike pipelined fetch: unknown node '" +
+                             node_name + "'");
+  }
+  as_error err;
+  char* response = nullptr;
+  const as_status status = aerospike_info_node(client, &err, nullptr, node,
+                                               command.c_str(), &response);
+  if (status != AEROSPIKE_OK || response == nullptr) {
+    if (response != nullptr) {
+      std::free(response);
+    }
+    throw std::runtime_error(std::string("Aerospike pipelined fetch info: ") +
+                             err.message);
+  }
+  std::string reply(response);
+  std::free(response);
+  return reply;
+}
+
+}  // namespace
+
 void AerospikeNativeConnector::try_initialize_pipelined_rdma() {
   if (!pipelined_rdma_) {
     return;
@@ -430,12 +464,61 @@ bool AerospikeNativeConnector::pipelined_fetch_ready() const {
   return pipelined_rdma_->is_ready();
 }
 
+std::string AerospikeNativeConnector::pipelined_fetch_init_error() const {
+  if (!pipelined_init_error_.empty()) {
+    return pipelined_init_error_;
+  }
+  if (!pipelined_rdma_) {
+    return {};
+  }
+  return pipelined_rdma_->init_error_message();
+}
+
+void AerospikeNativeConnector::set_object_group_layouts(
+    const std::map<uint32_t, rdma::ObjectGroupLayoutInput>& layouts) {
+  if (!pipelined_rdma_) {
+    return;
+  }
+  const std::vector<rdma::ObjectGroupLayout> converted =
+      rdma::object_group_layouts_from_inputs(layouts);
+  pipelined_rdma_->set_object_group_layouts(converted);
+}
+
+uint16_t AerospikeNativeConnector::issue_pipelined_fetch(
+    const std::vector<rdma::ChunkPlacement>& placements,
+    const std::vector<rdma::ChunkNodeBinding>& chunk_nodes,
+    const std::vector<rdma::SlotDigest>& slot_digests) {
+  if (!pipelined_rdma_) {
+    throw std::runtime_error(
+        "Aerospike pipelined fetch: RDMA path is not enabled");
+  }
+  return pipelined_rdma_->issue_pipelined_fetch(
+      [this](const std::string& node_name, const std::string& command) {
+        return send_pipelined_info_command(&as_, node_name, command);
+      },
+      placements, chunk_nodes, slot_digests);
+}
+
 bool AerospikeNativeConnector::is_pipelined_layer_ready(
-    uint32_t layer_id) const {
+    uint32_t layer_id, uint16_t request_generation) const {
   if (!pipelined_rdma_) {
     return false;
   }
-  return pipelined_rdma_->is_layer_ready(layer_id);
+  return pipelined_rdma_->is_layer_ready(layer_id, request_generation);
+}
+
+void AerospikeNativeConnector::finish_pipelined_fetch() {
+  if (!pipelined_rdma_) {
+    return;
+  }
+  pipelined_rdma_->finish_request();
+}
+
+void AerospikeNativeConnector::abandon_pipelined_fetch() {
+  if (!pipelined_rdma_) {
+    return;
+  }
+  pipelined_rdma_->abandon_request();
 }
 
 void AerospikeNativeConnector::poll_pipelined_fetch_notifications() {

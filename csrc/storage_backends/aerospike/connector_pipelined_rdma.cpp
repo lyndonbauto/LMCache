@@ -129,38 +129,49 @@ void AerospikePipelinedRdmaDriver::set_object_group_layouts(
   ensure_session();
 }
 
-uint16_t AerospikePipelinedRdmaDriver::begin_request(
+uint16_t AerospikePipelinedRdmaDriver::issue_pipelined_fetch(
+    const rdma::PipelinedNodeInfoSender& send_info,
     const std::vector<rdma::ChunkPlacement>& placements,
     const std::vector<rdma::ChunkNodeBinding>& chunk_nodes,
     const std::vector<rdma::SlotDigest>& slot_digests) {
-  std::lock_guard<std::mutex> lock(mu_);
-  if (!session_) {
-    throw std::runtime_error(
-        "Aerospike pipelined RDMA: pipelined fetch is not ready");
+  uint16_t generation = 0;
+  std::map<std::string, std::string> commands;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!session_) {
+      throw std::runtime_error(
+          "Aerospike pipelined RDMA: pipelined fetch is not ready");
+    }
+    generation = session_->begin_request(placements, chunk_nodes, slot_digests);
+    next_generation_ = static_cast<uint16_t>(generation + 1);
+    commands = session_->pipelined_fetch_commands();
   }
-  const uint16_t generation =
-      session_->begin_request(placements, chunk_nodes, slot_digests);
-  next_generation_ = static_cast<uint16_t>(generation + 1);
+
+  try {
+    for (const auto& entry : commands) {
+      const std::string& node_name = entry.first;
+      const std::string& command = entry.second;
+      std::string reply;
+      try {
+        reply = send_info(node_name, command);
+      } catch (...) {
+        reply = rdma::declined_reply_for_command(command);
+      }
+      std::lock_guard<std::mutex> lock(mu_);
+      if (!session_ || !session_->has_active_request()) {
+        throw std::runtime_error(
+            "Aerospike pipelined RDMA: session ended during fetch issue");
+      }
+      session_->on_node_reply(node_name, reply, generation);
+    }
+  } catch (...) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (session_ && session_->has_active_request()) {
+      session_->abandon_request();
+    }
+    throw;
+  }
   return generation;
-}
-
-std::map<std::string, std::string>
-AerospikePipelinedRdmaDriver::pipelined_fetch_commands() const {
-  std::lock_guard<std::mutex> lock(mu_);
-  if (!session_) {
-    return {};
-  }
-  return session_->pipelined_fetch_commands();
-}
-
-void AerospikePipelinedRdmaDriver::on_node_reply(const std::string& node_name,
-                                                 const std::string& reply,
-                                                 uint16_t generation) {
-  std::lock_guard<std::mutex> lock(mu_);
-  if (!session_) {
-    return;
-  }
-  session_->on_node_reply(node_name, reply, generation);
 }
 
 void AerospikePipelinedRdmaDriver::poll_notifications() {
@@ -190,7 +201,8 @@ bool AerospikePipelinedRdmaDriver::has_active_request() const {
   return session_->has_active_request();
 }
 
-bool AerospikePipelinedRdmaDriver::is_layer_ready(uint32_t layer_id) const {
+bool AerospikePipelinedRdmaDriver::is_layer_ready(
+    uint32_t layer_id, uint16_t request_generation) const {
   rdma::RdmaContext* context = nullptr;
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -208,7 +220,7 @@ bool AerospikePipelinedRdmaDriver::is_layer_ready(uint32_t layer_id) const {
   if (!session_) {
     return false;
   }
-  return session_->is_layer_ready(layer_id);
+  return session_->is_layer_ready(layer_id, request_generation);
 }
 
 std::vector<uint32_t> AerospikePipelinedRdmaDriver::unservable_layers() const {

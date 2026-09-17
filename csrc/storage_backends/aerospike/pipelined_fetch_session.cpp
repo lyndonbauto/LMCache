@@ -339,9 +339,13 @@ void PipelinedFetchSession::on_notifications(
   }
 }
 
-bool PipelinedFetchSession::is_layer_ready(uint32_t layer_id) const {
+bool PipelinedFetchSession::is_layer_ready(uint32_t layer_id,
+                                           uint16_t request_generation) const {
   std::lock_guard<std::mutex> lock(mu_);
   if (!has_request_) {
+    return false;
+  }
+  if (request_generation != 0 && request_generation != active_generation_) {
     return false;
   }
   return readiness_.is_layer_ready(layer_id);

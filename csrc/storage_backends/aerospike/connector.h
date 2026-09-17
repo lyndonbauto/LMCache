@@ -18,6 +18,7 @@
 
 #ifdef LMCACHE_AEROSPIKE_RDMA
   #include "connector_pipelined_rdma.h"
+  #include "memory_layout_conversion.h"
 #endif
 
 namespace lmcache {
@@ -77,11 +78,40 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
   // Thread safety: safe to call concurrently.
   bool pipelined_fetch_ready() const;
 
-  // Layer readiness for the active pipelined fetch. False when pipelined
-  // fetch is not ready, no request is active, or the layer is not complete.
+  // Last pipelined RDMA initialization failure, when pipelined fetch is
+  // unavailable. Empty when initialization succeeded or RDMA was not enabled.
   //
   // Thread safety: safe to call concurrently.
-  bool is_pipelined_layer_ready(uint32_t layer_id) const;
+  std::string pipelined_fetch_init_error() const;
+
+  // Replace slot-planner layouts for subsequent pipelined fetches.
+  //
+  // Thread safety: safe to call concurrently; serialized on the driver lock.
+  void set_object_group_layouts(
+      const std::map<uint32_t, rdma::ObjectGroupLayoutInput>& layouts);
+
+  // Begin a pipelined fetch, issue per-node info commands, and return the
+  // request generation for readiness queries.
+  //
+  // Thread safety: info round trips run without the driver lock; see
+  // AerospikePipelinedRdmaDriver::issue_pipelined_fetch.
+  uint16_t issue_pipelined_fetch(
+      const std::vector<rdma::ChunkPlacement>& placements,
+      const std::vector<rdma::ChunkNodeBinding>& chunk_nodes,
+      const std::vector<rdma::SlotDigest>& slot_digests);
+
+  // Layer readiness for a pipelined fetch. False when pipelined fetch is not
+  // ready, the generation does not match, or the layer is not complete.
+  //
+  // Thread safety: safe to call concurrently.
+  bool is_pipelined_layer_ready(uint32_t layer_id,
+                                uint16_t request_generation = 0) const;
+
+  // Finish or abandon the active pipelined fetch.
+  //
+  // Thread safety: safe to call concurrently; serialized on the driver lock.
+  void finish_pipelined_fetch();
+  void abandon_pipelined_fetch();
 
   // Drain RDMA write-with-immediate notifications into the active session.
   //

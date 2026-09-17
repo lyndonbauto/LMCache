@@ -138,6 +138,13 @@ class AerospikeStorageBackend(StorageBackendProfile):
             sources.append(
                 "csrc/storage_backends/aerospike/connector_pipelined_rdma.cpp"
             )
+            sources.append("csrc/storage_backends/aerospike/pipelined_fetch_issue.cpp")
+            sources.append(
+                "csrc/storage_backends/aerospike/memory_layout_conversion.cpp"
+            )
+            sources.append(
+                "csrc/storage_backends/aerospike/aerospike_pipelined_pybind.cpp"
+            )
             libraries.append("ibverbs")
             macros.append(("LMCACHE_AEROSPIKE_RDMA", "1"))
             rdma_include = os.environ.get("RDMA_CORE_INCLUDE_DIR", "")

@@ -10,6 +10,7 @@
 // connector.cpp does not include this header.
 
   #include "l1_rdma_registration.h"
+  #include "pipelined_fetch_issue.h"
   #include "pipelined_fetch_session.h"
   #include "rdma_context.h"
   #include "slot_planner.h"
@@ -56,18 +57,18 @@ class AerospikePipelinedRdmaDriver {
   // active.
   void set_object_group_layouts(std::vector<rdma::ObjectGroupLayout> layouts);
 
-  // Thread safety: takes `mu_`. Throws std::runtime_error when not ready or
-  // when begin_request preconditions fail.
-  uint16_t begin_request(const std::vector<rdma::ChunkPlacement>& placements,
-                         const std::vector<rdma::ChunkNodeBinding>& chunk_nodes,
-                         const std::vector<rdma::SlotDigest>& slot_digests);
-
-  // Thread safety: takes `mu_`.
-  std::map<std::string, std::string> pipelined_fetch_commands() const;
-
-  // Thread safety: takes `mu_`.
-  void on_node_reply(const std::string& node_name, const std::string& reply,
-                     uint16_t generation);
+  // Begin a pipelined fetch, issue each node's info command through
+  // ``send_info``, and feed acknowledgements into the session.
+  //
+  // Thread safety: ``send_info`` runs without holding ``mu_``. When it throws
+  // for a node, that node's slots are marked unservable. Any other failure
+  // after ``begin_request`` abandons the active request before propagating.
+  // Throws std::runtime_error when pipelined fetch is not ready.
+  uint16_t issue_pipelined_fetch(
+      const rdma::PipelinedNodeInfoSender& send_info,
+      const std::vector<rdma::ChunkPlacement>& placements,
+      const std::vector<rdma::ChunkNodeBinding>& chunk_nodes,
+      const std::vector<rdma::SlotDigest>& slot_digests);
 
   // Thread safety: polls the completion queue outside `mu_`, then takes `mu_`
   // to feed the session.
@@ -77,7 +78,7 @@ class AerospikePipelinedRdmaDriver {
   bool has_active_request() const;
 
   // Thread safety: drains notifications outside `mu_`, then takes `mu_`.
-  bool is_layer_ready(uint32_t layer_id) const;
+  bool is_layer_ready(uint32_t layer_id, uint16_t request_generation = 0) const;
 
   // Thread safety: takes `mu_`.
   std::vector<uint32_t> unservable_layers() const;
