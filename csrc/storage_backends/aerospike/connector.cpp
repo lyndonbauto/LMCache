@@ -415,8 +415,11 @@ void AerospikeNativeConnector::try_initialize_pipelined_rdma() {
   }
   try {
     pipelined_rdma_->initialize(&as_);
+  } catch (const std::exception& e) {
+    pipelined_init_error_ = e.what();
   } catch (...) {
-    // Pipelined fetch stays unavailable; the TCP path is unaffected.
+    pipelined_init_error_ =
+        "unknown error during pipelined RDMA initialization";
   }
 }
 

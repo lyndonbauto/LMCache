@@ -146,6 +146,7 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
 #ifdef LMCACHE_AEROSPIKE_RDMA
   void try_initialize_pipelined_rdma();
   std::unique_ptr<AerospikePipelinedRdmaDriver> pipelined_rdma_;
+  std::string pipelined_init_error_;
 #endif
 
   aerospike as_;
