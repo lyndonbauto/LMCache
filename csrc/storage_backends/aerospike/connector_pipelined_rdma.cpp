@@ -138,7 +138,10 @@ uint16_t AerospikePipelinedRdmaDriver::begin_request(
     throw std::runtime_error(
         "Aerospike pipelined RDMA: pipelined fetch is not ready");
   }
-  return session_->begin_request(placements, chunk_nodes, slot_digests);
+  const uint16_t generation =
+      session_->begin_request(placements, chunk_nodes, slot_digests);
+  next_generation_ = static_cast<uint16_t>(generation + 1);
+  return generation;
 }
 
 std::map<std::string, std::string>
@@ -240,6 +243,7 @@ void AerospikePipelinedRdmaDriver::ensure_session() {
   session_ = std::make_unique<rdma::PipelinedFetchSession>(
       *planner_, registry_, namespace_name_, max_record_bytes_,
       max_record_bytes_, registration_.window_bytes, notification_depth_cap());
+  session_->restore_generation_counter(next_generation_);
 }
 
 }  // namespace connector

@@ -388,6 +388,12 @@ void PipelinedFetchSession::abandon_request() {
   digest_per_slot_.clear();
 }
 
+void PipelinedFetchSession::restore_generation_counter(
+    uint16_t next_generation) {
+  std::lock_guard<std::mutex> lock(mu_);
+  next_generation_ = next_generation;
+}
+
 }  // namespace rdma
 }  // namespace connector
 }  // namespace lmcache

@@ -139,6 +139,11 @@ class PipelinedFetchSession {
   // Thread safety: takes `mu_`. Throws std::runtime_error when none is active.
   void abandon_request();
 
+  // Restore the generation counter after the session object is recreated.
+  //
+  // Thread safety: takes `mu_`.
+  void restore_generation_counter(uint16_t next_generation);
+
  private:
   uint16_t allocate_generation();
 
