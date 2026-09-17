@@ -46,6 +46,8 @@ struct RdmaContext::PeerQueue {
   bool connected = false;
 };
 
+namespace {
+
 // Fail with the verbs call name and errno, which is where verbs puts almost
 // all of its diagnostics.
 [[noreturn]] void throw_verbs(const char* call) {
