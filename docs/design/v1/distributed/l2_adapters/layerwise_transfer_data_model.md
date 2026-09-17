@@ -84,17 +84,69 @@ a 288× return.
 pipelining's marginal gain *on top of* caching, measured between two already-
 cached configurations.
 
-**So this work targets configurations where `T` is large relative to `C`:**
+### Only the link moves pipelining's saving
 
-- **Long context.** `T` scales with tokens.
-- **Small and mid-size models**, where `C` is modest.
-- **MoE with a low active parameter count** — `C` follows active parameters, so
-  DeepSeek-V3 computes like a 37 B model. (Its MLA also shrinks `T` by ~7×, so
-  the two partly cancel; worth measuring rather than assuming.)
-- **CacheBlend**, which deletes compute deliberately and is therefore the most
-  transfer-bound case of all. See the CacheBlend section.
+`T(1 − 1/L)` has a consequence worth stating plainly, because it is the single
+most useful fact for planning: **pipelining's saving in milliseconds depends
+only on link speed.** Parameters and GPU throughput do not appear in it. They
+move `C`, which is the denominator the saving gets divided by when it is quoted
+as a percentage.
 
-A dense 405 B model on short prompts is the configuration where this work
+Five operating points, same prompt (32 layers, 2048 tokens, Llama-3-8B KV
+shape), from the interactive model:
+
+| link | GPU | active params | fetch `T` | prefill `C` | caching saves | pipelining | **in ms** |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 12.5 GB/s | 400 TFLOP/s | 8 B | 12.8 ms | 81.9 ms | 84% | 12.8% | **12.1** |
+| 12.5 GB/s | 400 TFLOP/s | 40 B | 12.8 ms | 410 ms | 97% | 2.9% | **12.1** |
+| 12.5 GB/s | 800 TFLOP/s | 40 B | 12.8 ms | 205 ms | 94% | 5.6% | **12.1** |
+| 25 GB/s | 400 TFLOP/s | 40 B | 6.4 ms | 410 ms | 98% | 1.5% | **6.0** |
+| 25 GB/s | 800 TFLOP/s | 40 B | 6.4 ms | 205 ms | 97% | 2.9% | **6.0** |
+
+Rows 2 and 3 differ only in GPU speed. They save an identical 12.1 ms and
+report 2.9% and 5.6%. Nothing about pipelining changed; the faster GPU halved
+the prefill the percentage is measured against. **A percentage improvement here
+is not a measurement of pipelining unless the regime is pinned**, which is why
+every gate in AIE-85 must quote absolute milliseconds alongside any ratio.
+
+### The regime that decides it is hit rate, not context length
+
+`T/C` is invariant to prompt length — tokens cancel. So context length on its
+own does not move the ratio, and an earlier version of this document listed it
+as though it did. What actually moves it is **how much of the prompt still needs
+prefill**:
+
+- **Complete hit.** No prefill remains, so there is nothing to hide transfer
+  behind and pipelining wins ~nothing. Caching has already taken the whole win.
+- **Partial hit.** Some prefix is cached, the rest must be computed. Overlap is
+  greatest when the two lanes balance — when the uncached fraction ≈ `T/C` —
+  and there the saving is `(1 − 1/L)/2` of the cache-hit path, **~48% at 32
+  layers, independent of hardware.**
+- **Complete miss.** Nothing to fetch; the question does not arise.
+
+Long context matters *indirectly and strongly*: it is what makes a large `T`
+coexist with a small remaining `C`, because a long cached prefix with a short
+new suffix is exactly the balanced case. The causal variable is the hit-rate
+distribution of the workload, and it is currently **unmeasured** — see Open
+questions.
+
+**So this work targets:**
+
+- **Partial hits**, which is the regime above and the only one where overlap has
+  anything to work with.
+- **CacheBlend**, which creates that regime on purpose by recomputing a 10–25%
+  subset. See the CacheBlend section.
+- **Low active parameter counts**, where `C` is modest. This is now the
+  mainstream case rather than an exception: production serving is overwhelmingly
+  MoE at 3–6% sparsity, so active parameters run 3–104 B and are usually under
+  50 B (gpt-oss-120b activates 5.1 B; DeepSeek V4.1-Flash activates 8 B at
+  prefill; Kimi K3, the heaviest, 104 B). Nothing served activates the hundreds
+  of billions that would make pipelining pointless.
+- **Fat KV geometry**, which raises `T`. Note MLA cuts the other way, shrinking
+  `T` several-fold, so MLA models are poor pipelining candidates and excellent
+  caching ones.
+
+A dense large model on short prompts with complete hits is where this work
 matters least, and it is worth not benchmarking it as though it were the
 headline.
 
@@ -625,21 +677,29 @@ all. Regions must be enumerated per kernel group and per plane.
 
 ## Open questions
 
-1. **Can one request's fetch reach line rate?** The M0 sweep saw 1.88 GB/s for
+1. **What is the workload's hit-rate distribution?** This is now the first
+   question, ahead of line rate, because it decides whether pipelining has any
+   regime to operate in at all. Pipelining's saving is `T(1 − 1/L)` and it is
+   only realisable where prefill remains to hide behind; a workload of
+   near-complete hits realises none of it however fast the fabric is. We have
+   measured bandwidth and record-size behaviour but never the fraction of a
+   request that is typically already cached. Until that is known, the M3 gate
+   cannot be given a pass/fail threshold that means anything.
+2. **Can one request's fetch reach line rate?** The M0 sweep saw 1.88 GB/s for
    a single object with 8 workers, against a 12.2 GB/s NIC ceiling measured
    with 60 threads and 256 outstanding. Pipelining's value depends on the
    former approaching the latter. Unresolved, and it gates everything.
-2. **Tail amplification.** All-or-nothing waits once for the slowest transfer.
+3. **Tail amplification.** All-or-nothing waits once for the slowest transfer.
    Layer-major waits for the slowest transfer *of each layer*, L times in
    sequence, and a sum of L maxima is worse than one max. With p99 at 1.3–2×
    p50 in the sweep, the per-layer barrier trends toward the tail. The
    transfer-vs-compute ratio must be evaluated at p99, not median.
-3. **Is the H2D copy per layer?** Landing in L1 is only half the journey; the
+4. **Is the H2D copy per layer?** Landing in L1 is only half the journey; the
    destination is non-contiguous paged GPU blocks. A per-layer readiness signal
    is only useful if a per-layer H2D copy can be issued, which interacts with
    the existing batched transfer kernel.
-4. **Recurrent group semantics**, per above.
-5. **Is blend's sparse leg the better benchmark target?** The arithmetic above
+5. **Recurrent group semantics**, per above.
+6. **Is blend's sparse leg the better benchmark target?** The arithmetic above
    says yes — `K × (1 + nseg)` round trips for scattered chunks, against a
    dense prefix path that already reaches 98% of line rate on TCP. If it holds,
    the RDMA value story should be led by blend, not by bulk throughput. Needs
@@ -653,7 +713,32 @@ all. Regions must be enumerated per kernel group and per plane.
   core of it.
 - **AIE-95** (`wait_for_layer_load`): step 1 of the mapping is exactly the
   `layer_name` → kernel group resolution this needs.
-- **AIE-89** (per-layer layout in the L2 contract): remains correctly
-  deferred. Everything here is derived LMCache-side. What layout *does* affect
-  is Aerospike-side record sharding — aligning record boundaries to layer
-  boundaries, traded off against the ~8 MiB record-size crossover from M0.
+- **AIE-89** (per-layer layout in the L2 contract): the original framing —
+  telling Aerospike where each layer goes — stays deferred, because the client
+  chooses every destination offset and Aerospike needs to know nothing about
+  transformer layers. But the ticket should not be closed empty. There *is* one
+  thing only the write path can own, and it is alignment, not layout: record
+  cuts must coincide with plane boundaries or no record belongs to exactly one
+  layer. That is the plane-alignment hint into `plan()` described under *The
+  alignment hazard*, and it is load-bearing precisely because hybrid models —
+  the common case — use unified block sizes of 544/784/944 tokens, none a power
+  of two, so misalignment is the default rather than an edge case. Re-scope
+  AIE-89 to that hint.
+- **AIE-90** (M2 gate, RDMA into CPU L1): the success criterion must not be
+  bulk throughput. M0 showed TCP already reaching 98% of line rate, so there is
+  almost no throughput headroom to win. RDMA's case is CPU offload and
+  per-operation latency, and the gate should be written against those.
+- **AIE-97** (M3 gate, pipelining end to end): must be measured in a pinned
+  partial-hit regime and reported in absolute milliseconds. A percentage
+  measured on complete hits will read ~0% and wrongly kill the work; one
+  measured on complete misses will read ~19% and flatter it. The theoretical
+  ceiling to compare against is `T(1 − 1/L)`, and at the balanced point
+  `(1 − 1/L)/2` of the cache-hit path.
+- **AIE-98** (M4, blend under RDMA): blend shares the L2 → L1 prefetch path via
+  `CB_UNIFIED_LOOKUP`, so it inherits the RDMA win directly. Its L1 → GPU hop is
+  *not* uniquely limited — it has the same all-layers-at-once shape as the dense
+  path, so it is a second instance of the same unbuilt work rather than a
+  separate redesign. Also record the hard incompatibility: blend resolves its
+  read set by finding exactly one "attention" object group, so enabling
+  `--separate-object-groups` on a sliding-window hybrid produces two and raises
+  `RuntimeError`.

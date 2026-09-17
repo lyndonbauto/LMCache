@@ -1,10 +1,12 @@
 # Aerospike RDMA reception into L1
 
-Status: **prototype**. The verbs foundation, the build profile, the adapter
-plumbing, the per-node registration fanout, the mock RDMA writer, and the
-byte-equivalence harness are all implemented and compiling. The data path has
-**not** yet been executed, because no RDMA device is available; see
-[What is not proven yet](#what-is-not-proven-yet).
+Status: **prototype, data path executed.** The verbs foundation, the build
+profile, the adapter plumbing, the per-node registration fanout, the mock RDMA
+writer, and the byte-equivalence and layer-pipelining harnesses are implemented
+and passing over Soft-RoCE (`rxe0` on `lo`, GID index 1). Real RDMA writes land
+in L1 byte-identically, and a layer is provably consumable while later layers
+are still absent. What remains unproven is EFA/SRD and a real Aerospike server;
+see [What is not proven yet](#what-is-not-proven-yet).
 
 This document covers the `kv-sink` wire protocol, the handshake ordering, the
 opt-in build profile, the registration-scope decision, and how to reproduce a
@@ -18,6 +20,22 @@ blocks. Today those bytes travel Aerospike server → Aerospike client library
 buffer → L1, so every byte is copied once more than it needs to be. If the
 Aerospike server can RDMA-WRITE straight into L1, that copy disappears and the
 client library leaves the data path entirely.
+
+**Be precise about what that is worth, because the obvious answer is wrong.**
+The M0 baseline measured the existing TCP path at 98% of 100 GbE line rate, so
+there is essentially no bulk-throughput headroom for RDMA to capture. The case
+for RDMA is the other two axes:
+
+- **CPU offload.** The copy that disappears is CPU work on the serving host,
+  competing with the very process that needs those cycles for prefill.
+- **Per-operation latency.** Scattered small reads pay the round-trip and the
+  library's per-record cost repeatedly. The M0 sweep saw a single object reach
+  only 1.88 GB/s against the 12.2 GB/s NIC ceiling — that gap, not the ceiling,
+  is the target. CacheBlend's sparse leg is the extreme case and is the
+  benchmark most likely to show RDMA's value.
+
+A gate written against aggregate GB/s will therefore show RDMA achieving
+nothing while being perfectly correct. See AIE-90.
 
 ## Protocol
 
