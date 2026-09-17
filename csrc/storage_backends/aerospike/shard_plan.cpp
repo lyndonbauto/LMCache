@@ -22,6 +22,17 @@ uint32_t pieces_per_plane(const ShardPlan& plan) {
   return static_cast<uint32_t>(ceil_div(plan.plane_b, plan.seg_b));
 }
 
+size_t plane_segment_bytes(size_t plane_bytes, size_t max_record_bytes) {
+  if (plane_bytes == 0) {
+    throw std::invalid_argument("plane_segment_bytes: plane_bytes is zero");
+  }
+  if (max_record_bytes == 0) {
+    throw std::invalid_argument(
+        "plane_segment_bytes: max_record_bytes is zero");
+  }
+  return ceil_div(plane_bytes, ceil_div(plane_bytes, max_record_bytes));
+}
+
 ShardPlan make_shard_plan(size_t payload_bytes, size_t target_segment_bytes,
                           size_t max_record_bytes,
                           size_t single_record_threshold_bytes,
@@ -40,7 +51,7 @@ ShardPlan make_shard_plan(size_t payload_bytes, size_t target_segment_bytes,
   if (plane_bytes > 0 && payload_bytes % plane_bytes == 0) {
     uint32_t pieces =
         static_cast<uint32_t>(ceil_div(plane_bytes, max_record_bytes));
-    size_t seg_b = ceil_div(plane_bytes, pieces);
+    size_t seg_b = plane_segment_bytes(plane_bytes, max_record_bytes);
     size_t planes = payload_bytes / plane_bytes;
     size_t nseg = static_cast<size_t>(pieces) * planes;
     if (seg_b <= max_record_bytes &&

@@ -29,6 +29,7 @@
 #include <vector>
 
 #include "layer_pipeline.h"
+#include "shard_plan.h"
 #include "slot_planner.h"
 
 namespace {
@@ -45,7 +46,10 @@ using lmcache::connector::rdma::RequestPlan;
 using lmcache::connector::rdma::SlotPlanner;
 
 constexpr uint16_t kGeneration = 0x51a7;
-constexpr size_t kBigWrite = 1u << 30;  // larger than any plane here
+// Larger than any plane here, so a plane is one record and one write and the
+// slot accounting below is one slot per plane.
+constexpr size_t kBigRecord = 1u << 30;
+constexpr size_t kBigWrite = 1u << 30;
 
 int failures = 0;
 
@@ -164,7 +168,7 @@ void test_a_layer_needs_both_planes_before_it_is_ready() {
   SlotPlanner planner({single_group_layout(4)});
   const size_t object_bytes = object_group_bytes(single_group_layout(4));
   const RequestPlan plan = planner.plan_request(
-      placements_for(0, {0}, object_bytes), kBigWrite, kGeneration);
+      placements_for(0, {0}, object_bytes), kBigRecord, kBigWrite, kGeneration);
 
   check(plan.expected_slots(0) == 2,
         "layer 0 expects two slots for one chunk, one per plane");
@@ -190,30 +194,38 @@ void test_a_layer_needs_both_planes_before_it_is_ready() {
   check(readiness.is_layer_ready(0), "both planes landing completes it");
 }
 
-void test_a_plane_larger_than_one_write_becomes_several_slots() {
-  std::cout << "\na plane larger than the maximum RDMA write\n";
+void test_a_slot_is_exactly_one_record() {
+  std::cout << "\na slot is one record, so the cap on records cuts the plane\n";
 
   SlotPlanner planner({single_group_layout(2)});
   const size_t object_bytes = object_group_bytes(single_group_layout(2));
   const size_t plane = plane_bytes(attention_group(0, 2));
 
-  // Three pieces per plane, the last one short.
-  const size_t max_write = (plane / 3) + 1;
+  // A cap of a third of a plane gives three records per plane. Under the
+  // plane-aligned rule they are equal thirds rather than two full-cap records
+  // and a remainder, so nothing straddles a plane boundary.
+  const size_t record_cap = (plane / 3) + 1;
+  const size_t record_bytes =
+      lmcache::connector::plane_segment_bytes(plane, record_cap);
   const RequestPlan plan = planner.plan_request(
-      placements_for(0, {0}, object_bytes), max_write, kGeneration);
+      placements_for(0, {0}, object_bytes), record_cap, kBigWrite, kGeneration);
 
   check(plan.expected_slots(0) == 2 * 3,
-        "layer 0 needs kv_size x pieces_per_plane slots");
+        "layer 0 needs kv_size x records_per_plane slots");
 
-  // Every slot is within the write cap, and each plane's slots cover it
-  // exactly without crossing into the neighbouring plane.
-  bool bounded = true;
+  // The load-bearing property: every slot is exactly one record, because a
+  // sink names a record digest and a length and can express nothing else.
+  bool record_sized = true;
   size_t total = 0;
   for (uint16_t i = 0; i < plan.slot_count(); ++i) {
-    bounded = bounded && plan.slot(i).length <= max_write;
-    total += plan.slot(i).length;
+    const size_t length = plan.slot(i).length;
+    record_sized = record_sized &&
+                   (length == record_bytes ||
+                    length == plane - (plane / record_bytes) * record_bytes);
+    total += length;
   }
-  check(bounded, "no slot exceeds the maximum write size");
+  check(record_sized,
+        "every slot is a whole record, or the short last record of its plane");
   check(total == object_bytes,
         "the slots together cover the whole object exactly once");
 
@@ -223,6 +235,28 @@ void test_a_plane_larger_than_one_write_becomes_several_slots() {
   }
   check(offsets.size() == plan.slot_count(),
         "no two slots target the same address");
+
+  // The write limit no longer decides the piece size, so a limit between the
+  // record size and the plane size changes nothing.
+  const RequestPlan same =
+      planner.plan_request(placements_for(0, {0}, object_bytes), record_cap,
+                           record_bytes, kGeneration);
+  check(same.slot_count() == plan.slot_count(),
+        "a write limit of exactly one record produces the same schedule, so "
+        "the record cap alone decides how a plane is cut");
+
+  // And a limit below the record size is refused rather than quietly split,
+  // since a sink cannot name part of a record.
+  bool threw = false;
+  try {
+    planner.plan_request(placements_for(0, {0}, object_bytes), record_cap,
+                         record_bytes - 1, kGeneration);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  check(threw,
+        "a record too large for one write is refused, not split into sinks no "
+        "server could serve");
 }
 
 void test_the_schedule_is_layer_major_across_chunks() {
@@ -230,8 +264,9 @@ void test_the_schedule_is_layer_major_across_chunks() {
 
   SlotPlanner planner({single_group_layout(3)});
   const size_t object_bytes = object_group_bytes(single_group_layout(3));
-  const RequestPlan plan = planner.plan_request(
-      placements_for(0, {0, 1, 2}, object_bytes), kBigWrite, kGeneration);
+  const RequestPlan plan =
+      planner.plan_request(placements_for(0, {0, 1, 2}, object_bytes),
+                           kBigRecord, kBigWrite, kGeneration);
 
   // Slot order is the push order hint: layer ids must be non-decreasing, so
   // every chunk's layer 0 precedes any chunk's layer 1.
@@ -330,7 +365,7 @@ void test_a_windowed_group_only_covers_its_window() {
   }
 
   const RequestPlan plan =
-      planner.plan_request(placements, kBigWrite, kGeneration);
+      planner.plan_request(placements, kBigRecord, kBigWrite, kGeneration);
   check(plan.expected_slots(0) == kChunks * 2,
         "the full-attention layer expects every chunk");
   check(plan.expected_slots(2) == 2 * 2,
@@ -364,7 +399,7 @@ void test_a_group_with_no_placements_contributes_nothing() {
   // subset of groups.
   const RequestPlan plan =
       planner.plan_request(placements_for(0, {0}, object_group_bytes(first)),
-                           kBigWrite, kGeneration);
+                           kBigRecord, kBigWrite, kGeneration);
   check(plan.expected_slots(0) == 2, "the placed group's layers are scheduled");
   check(plan.expected_slots(2) == 0,
         "the unplaced group's layers get no slots");
@@ -428,7 +463,8 @@ void test_invalid_layouts_and_requests_are_rejected() {
 
   threw = false;
   try {
-    planner.plan_request(placements_for(0, {0}, object_bytes), 0, kGeneration);
+    planner.plan_request(placements_for(0, {0}, object_bytes), kBigRecord, 0,
+                         kGeneration);
   } catch (const std::invalid_argument&) {
     threw = true;
   }
@@ -438,7 +474,7 @@ void test_invalid_layouts_and_requests_are_rejected() {
   try {
     std::vector<ChunkPlacement> repeated = {ChunkPlacement{0, 0, 0},
                                             ChunkPlacement{0, 0, object_bytes}};
-    planner.plan_request(repeated, kBigWrite, kGeneration);
+    planner.plan_request(repeated, kBigRecord, kBigWrite, kGeneration);
   } catch (const std::invalid_argument&) {
     threw = true;
   }
@@ -462,7 +498,7 @@ int main() {
     test_a_layer_is_several_disjoint_planes();
     test_the_contiguous_layout_variant_needs_no_special_case();
     test_a_layer_needs_both_planes_before_it_is_ready();
-    test_a_plane_larger_than_one_write_becomes_several_slots();
+    test_a_slot_is_exactly_one_record();
     test_the_schedule_is_layer_major_across_chunks();
     test_several_kernel_groups_use_their_own_strides();
     test_a_windowed_group_only_covers_its_window();

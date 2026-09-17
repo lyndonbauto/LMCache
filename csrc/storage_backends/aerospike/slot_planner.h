@@ -28,9 +28,10 @@
 // here, and it is the reason this file computes plane ranges explicitly
 // rather than treating a layer as a range.
 //
-//   slots(layer L, chunk c) = kv_size * ceil(plane_bytes / max_write_bytes)
+//   slots(layer L, chunk c) = kv_size * ceil(plane_bytes / record_bytes)
 //
-// where `plane_bytes = num_slots * hidden_dim * element_size`.
+// where `plane_bytes = num_slots * hidden_dim * element_size` and
+// `record_bytes` is what shard_plan.h cut that plane into.
 //
 // The `NL_X_NB_BS_HS` engine format is the exception: it drops the leading
 // K/V dimension, so the layer dimension is outermost and a layer *is*
@@ -65,8 +66,22 @@
 // unpredictable but that one group's stride gets used for another group's
 // layers, which is why geometry is held per kernel group here and never
 // flattened.
+//
+// == Why a slot is exactly one record ==
+//
+// A sink on the wire is `<digest>@<offset>:<length>` -- it names one record
+// and one destination -- so the piece size here is not a free choice. It has
+// to be the record size shard_plan.h cut the plane into, or the sinks are
+// unservable: too large and a sink asks for more bytes than its record holds,
+// too small and it names no particular part of one, because the format
+// carries no record-relative source offset. Taking the piece size from
+// `plane_segment_bytes()` rules out both. The device's write limit then only
+// has to be large enough to carry one record, which it is by a wide margin in
+// practice -- Aerospike caps a record at 8 MiB while EFA's `max_rdma_size` is
+// three orders of magnitude above that.
 
 #include "layer_pipeline.h"
+#include "shard_plan.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -195,11 +210,27 @@ class SlotPlanner {
   // therefore never reported ready, which is the correct answer for a layer
   // the request is not fetching.
   //
-  // Throws std::invalid_argument if `max_write_bytes` is 0 or if two
-  // placements share a (chunk, object group) pair, and std::length_error if
-  // the schedule exceeds `kMaxSlotsPerRequest`.
+  // A slot is exactly one Aerospike record, so `max_record_bytes` -- the
+  // connector's record cap -- decides how a plane is cut, and
+  // `max_write_bytes` (the device's maximum RDMA transfer, further bounded by
+  // the leased window) only has to be large enough to carry one.
+  //
+  // Sizing slots from the write cap instead would produce sinks a server
+  // cannot serve. A sink names a record digest and a length, so a slot larger
+  // than its record is unservable, and a slot smaller than its record names
+  // no particular part of it -- the wire format has no record-relative source
+  // offset. Deriving the slot size from the record with
+  // plane_segment_bytes() makes both unrepresentable: one sink is one record
+  // is one write.
+  //
+  // Throws std::invalid_argument if either size is 0, if two placements share
+  // a (chunk, object group) pair, or if a record would exceed
+  // `max_write_bytes` -- which cannot be split without that missing wire
+  // field, so it fails loudly here rather than on the server. Throws
+  // std::length_error if the schedule exceeds `kMaxSlotsPerRequest`.
   RequestPlan plan_request(const std::vector<ChunkPlacement>& placements,
-                           size_t max_write_bytes, uint16_t generation) const;
+                           size_t max_record_bytes, size_t max_write_bytes,
+                           uint16_t generation) const;
 
  private:
   // Where a layer sits: which object group, and its plane ranges within that

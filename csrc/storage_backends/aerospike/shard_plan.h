@@ -91,6 +91,24 @@ struct ShardRange {
 // Records per plane, or 1 when `plan` has no plane structure.
 uint32_t pieces_per_plane(const ShardPlan& plan);
 
+// Bytes in one record of a plane that is sharded plane-aligned.
+//
+//   pieces    = ceil(plane_bytes / max_record_bytes)
+//   seg_bytes = ceil(plane_bytes / pieces)
+//
+// Exposed separately from make_shard_plan because the read side needs the
+// same answer without a payload size. A pipelined fetch asks a server for one
+// record per write, so the RDMA slot size has to be this, and deriving it
+// from a copy of the formula is how the two drift.
+//
+// Depends only on the plane and the cap, not on how many planes the payload
+// holds, which is what makes it shareable: the plane-aligned rule is "a record
+// holds one plane, or an equal fraction of one", and that is per-plane by
+// construction.
+//
+// Throws std::invalid_argument if either argument is 0.
+size_t plane_segment_bytes(size_t plane_bytes, size_t max_record_bytes);
+
 // Build a plan for a `payload_bytes` payload.
 //
 // `plane_bytes` is the alignment hint: pass the size of one K/V plane to get a

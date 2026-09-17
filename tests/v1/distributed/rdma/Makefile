@@ -57,7 +57,8 @@ PLAN_SOURCES := \
 PLANNER_SOURCES := \
 	$(SRC_DIR)/slot_planner_test.cpp \
 	$(CONNECTOR_DIR)/slot_planner.cpp \
-	$(CONNECTOR_DIR)/layer_pipeline.cpp
+	$(CONNECTOR_DIR)/layer_pipeline.cpp \
+	$(CONNECTOR_DIR)/shard_plan.cpp
 # kv_sink_client.cpp includes rdma_context.h for its endpoint types but calls
 # no verbs function, so the codec links here without libibverbs.
 CODEC_SOURCES := \

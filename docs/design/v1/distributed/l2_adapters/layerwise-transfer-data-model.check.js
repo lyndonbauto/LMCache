@@ -441,14 +441,29 @@ assert($$("#rec-order-lm .ord.hot").length === 2,
   "exactly the two reads that complete layer 0 are highlighted");
 setArch("sw");
 
-// --- slot count scales with max write size ---
+// --- a slot is one record, so the record cap sets the slot count ---
 go("Slots");
 const before = $$("#slotlist .slot").length;
+const rc = $("#c-reccap");
+const rcWas = rc.value;
+rc.value = "18";
+rc.dispatchEvent(new window.Event("input", { bubbles: true }));
+const after = $$("#slotlist .slot").length;
+assert(after > before, `a smaller record cap splits into more slots (${before} -> ${after})`);
+// The write limit no longer decides the piece size: a sink names a whole
+// record, so shrinking the limit cannot subdivide one.
+rc.value = rcWas;
+rc.dispatchEvent(new window.Event("input", { bubbles: true }));
+const atRecordCap = $$("#slotlist .slot").length;
 const mw = $("#c-maxwrite");
 mw.value = "14";
 mw.dispatchEvent(new window.Event("input", { bubbles: true }));
-const after = $$("#slotlist .slot").length;
-assert(after > before, `smaller max write splits into more slots (${before} -> ${after})`);
+assert($$("#slotlist .slot").length === atRecordCap,
+  `the write limit does not subdivide a record (${atRecordCap})`);
+assert(/unplannable/.test($("#slots-sub").innerHTML),
+  "a record too large for one write is called out as unplannable");
+mw.value = "20";
+mw.dispatchEvent(new window.Event("input", { bubbles: true }));
 mw.value = "20";
 mw.dispatchEvent(new window.Event("input", { bubbles: true }));
 

@@ -511,13 +511,24 @@ or bad data rather than an error:
    cannot recover a dropped immediate for a write that did land.
 8. **Do not exceed the slot count in immediates.** LMCache sizes its receive
    queue from the schedule it built. Extra notifications can exhaust it.
-9. **`max_rdma_size` is the server's cap too.** LMCache splits planes by the
-   smaller of the device limit and the leased window, so no sink should ever
-   need splitting again; if one would, that is a disagreement about the device
-   limit and should fail loudly rather than be split silently.
+9. **One sink is one record is one write.** A sink names a record digest, a
+   destination and a length, and nothing else — there is no record-relative
+   source offset — so a sink can only mean "this whole record, there". LMCache
+   therefore sizes slots from the record, not from the device's write limit:
+   the piece size is `plane_segment_bytes(plane, record_cap)`, the same
+   arithmetic the store path used to cut the plane up. A server should never
+   need to split or combine a sink; if a record will not fit in one RDMA
+   write, LMCache refuses to plan the request rather than emitting sinks no
+   server could serve. (The device limit binds only in a pathological config:
+   Aerospike caps a record at 8 MiB, and EFA's `max_rdma_size` is three orders
+   of magnitude above that.)
+
+   Should the format ever need sub-record writes, the extension is a
+   record-relative source offset — `<digest>+<src>@<dst>:<len>#<slot>` — and
+   not silent splitting on either side.
 
 On the LMCache side the schedule comes from `SlotPlanner` in
-`slot_planner.h` — it walks (chunk, layer, K/V plane, piece) and produces
+`slot_planner.h` — it walks (chunk, layer, K/V plane, record) and produces
 exactly these sinks, layer-major, with the offsets already resolved against
 the leased window. `RequestPlan::slots_for_chunk` then partitions that
 schedule by chunk, so each node receives a command naming only its own

@@ -248,12 +248,22 @@ range. The local side can gather from multiple buffers via several SGEs, but
 the remote side cannot scatter. Therefore:
 
 ```text
-slots(layer L, chunk c) = kv_size × ceil(plane_bytes(L) / max_write_bytes)
+slots(layer L, chunk c) = kv_size × ceil(plane_bytes(L) / record_bytes)
 ```
 
 where `plane_bytes(L) = num_slots × hidden_dim × element_size` and
-`max_write_bytes` is the smaller of EFA's `max_rdma_size` and the leased
-window.
+`record_bytes` is the size of one Aerospike record holding part of that plane,
+`plane_segment_bytes(plane_bytes, record_cap)` from the plane-aligned sharding
+rule below.
+
+The piece size is the record size and **not** the device's write limit,
+because a sink on the wire is `<digest>@<offset>:<length>` — one record, one
+destination, and no record-relative source offset. A slot larger than its
+record asks for bytes the record does not hold; a slot smaller than its record
+names no particular part of it. So one slot is one record is one write, and
+the device limit (the smaller of EFA's `max_rdma_size` and the leased window)
+only has to be large enough to carry one record — which it is by three orders
+of magnitude, since Aerospike caps a record at 8 MiB.
 
 **A layer is ready only when all `kv_size` of its planes have landed, for
 every participating chunk.** A design that assumed one slot per layer per
@@ -273,7 +283,7 @@ Given global layer index *L* from vLLM's `layer_name`:
 3. Within *k*'s tensor, for each `kv` plane in `range(kv_size)`, the plane's
    byte range for position *p* is at
    `((kv × num_layers) + p) × num_slots × hidden_dim × element_size`.
-4. Split each plane by `max_write_bytes` into slots.
+4. Split each plane into slots of `record_bytes`, one slot per record.
 5. Repeat for every participating chunk *c*.
 
 Steps 1–3 are pure arithmetic over existing structures. Step 5 is where the

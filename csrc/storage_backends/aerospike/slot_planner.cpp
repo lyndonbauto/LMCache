@@ -13,6 +13,8 @@ namespace connector {
 namespace rdma {
 namespace {
 
+using lmcache::connector::plane_segment_bytes;
+
 size_t ceil_div(size_t numerator, size_t denominator) {
   return (numerator + denominator - 1) / denominator;
 }
@@ -136,8 +138,13 @@ std::vector<uint32_t> SlotPlanner::layer_ids() const {
 }
 
 RequestPlan SlotPlanner::plan_request(
-    const std::vector<ChunkPlacement>& placements, size_t max_write_bytes,
-    uint16_t generation) const {
+    const std::vector<ChunkPlacement>& placements, size_t max_record_bytes,
+    size_t max_write_bytes, uint16_t generation) const {
+  if (max_record_bytes == 0) {
+    throw std::invalid_argument(
+        "SlotPlanner: max_record_bytes is zero, so a plane could not be cut "
+        "into records");
+  }
   if (max_write_bytes == 0) {
     throw std::invalid_argument(
         "SlotPlanner: max_write_bytes is zero, so no write could carry any "
@@ -174,13 +181,23 @@ RequestPlan SlotPlanner::plan_request(
     for (const ChunkPlacement* placement : group_placements->second) {
       for (const ByteRange& plane : location.planes) {
         const size_t base = placement->dest_offset + plane.offset;
-        // One plane can exceed a single RDMA write, so it becomes several
-        // slots. The last is short when the plane is not a whole multiple.
-        const size_t pieces = ceil_div(plane.length, max_write_bytes);
+        // One plane is one or more records, and a slot is one of them. The
+        // last is short when the plane is not a whole multiple.
+        const size_t record_bytes =
+            plane_segment_bytes(plane.length, max_record_bytes);
+        if (record_bytes > max_write_bytes) {
+          throw std::invalid_argument(
+              "SlotPlanner: a record of " + std::to_string(record_bytes) +
+              " bytes exceeds the maximum RDMA write of " +
+              std::to_string(max_write_bytes) +
+              ", and a sink cannot name part of a record, so lower the "
+              "record cap");
+        }
+        const size_t pieces = ceil_div(plane.length, record_bytes);
         for (size_t piece = 0; piece < pieces; ++piece) {
-          const size_t piece_offset = piece * max_write_bytes;
+          const size_t piece_offset = piece * record_bytes;
           const size_t piece_length =
-              std::min(max_write_bytes, plane.length - piece_offset);
+              std::min(record_bytes, plane.length - piece_offset);
           plan.add_slot(layer_id, placement->chunk_id, base + piece_offset,
                         piece_length);
         }
