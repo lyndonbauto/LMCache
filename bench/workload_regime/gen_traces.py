@@ -13,8 +13,10 @@ pipelining can pay -- the fraction of a prompt that still needs prefill:
 ``chat``
     Multi-turn conversation. Each turn replays the entire conversation so far
     and appends a new message, so the cached fraction rises with turn count.
-    This is the canonical LMCache workload and it trends toward the
-    *complete-hit* regime, where pipelining wins least.
+    This is the canonical LMCache workload. It does *not* trend toward the
+    complete-hit regime as we first assumed: each turn appends roughly one
+    chunk of new tokens while the cached prefix grows, so the uncached
+    fraction settles around 10-30% -- the band where pipelining pays most.
 
 ``rag``
     A shared system prompt and document prefix, then a per-request question.

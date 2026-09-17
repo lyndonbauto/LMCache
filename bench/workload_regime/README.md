@@ -91,9 +91,10 @@ per token), 12.2 GB/s, 400 TFLOP/s, 8B active, 64 GiB cache:
 
 Three things are worth pulling out.
 
-**Multi-turn chat lands in the pipelining sweet spot, which contradicts what
-our own design doc predicted.** The doc assumed chat trends toward the
-complete-hit regime where pipelining wins least. It does not. Each turn appends
+**Multi-turn chat lands in the pipelining sweet spot, contrary to our starting
+assumption.** We expected chat to trend toward the complete-hit regime where
+pipelining wins least; the design doc simply left the distribution unmeasured.
+It does not trend that way. Each turn appends
 roughly one chunk of new tokens while the cached prefix grows, so the uncached
 fraction settles around 10-30% — precisely the band where the saving peaks. In
 the run above, 75% of chat requests landed in that band. Sweeping message size
