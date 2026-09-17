@@ -758,7 +758,9 @@ class StorageManager:
             adapter.set_kv_plane_bytes(plane_bytes)
 
     def set_object_group_layouts(
-        self, group_layout_descs: dict[int, MemoryLayoutDesc]
+        self,
+        group_layout_descs: dict[int, MemoryLayoutDesc],
+        group_kernel_layer_indices: dict[int, list[list[int]]] | None = None,
     ) -> None:
         """Pass per-object-group layouts on to every L2 adapter.
 
@@ -769,11 +771,50 @@ class StorageManager:
 
         Args:
             group_layout_descs: One ``MemoryLayoutDesc`` per object group id.
+            group_kernel_layer_indices: Optional global layer indices per
+                kernel group, keyed by object group id.
         """
         with self._adapters_lock:
             adapters = list(self._l2_adapters.values())
         for adapter in adapters:
-            adapter.set_object_group_layouts(group_layout_descs)
+            adapter.set_object_group_layouts(
+                group_layout_descs, group_kernel_layer_indices
+            )
+
+    def begin_pipelined_fetch(
+        self,
+        placements: list[object],
+        chunk_nodes: list[object],
+        slot_digests: list[object],
+    ) -> int:
+        """Ask L2 adapters to start a pipelined fetch.
+
+        Returns the first non-zero generation reported by an adapter, or ``0``
+        when no adapter supports pipelined fetch.
+        """
+        with self._adapters_lock:
+            adapters = list(self._l2_adapters.values())
+        for adapter in adapters:
+            generation = adapter.begin_pipelined_fetch(
+                placements, chunk_nodes, slot_digests
+            )
+            if generation != 0:
+                return generation
+        return 0
+
+    def finish_pipelined_fetch(self) -> None:
+        """Finish the active pipelined fetch on every adapter."""
+        with self._adapters_lock:
+            adapters = list(self._l2_adapters.values())
+        for adapter in adapters:
+            adapter.finish_pipelined_fetch()
+
+    def abandon_pipelined_fetch(self) -> None:
+        """Abandon the active pipelined fetch on every adapter."""
+        with self._adapters_lock:
+            adapters = list(self._l2_adapters.values())
+        for adapter in adapters:
+            adapter.abandon_pipelined_fetch()
 
     def is_pipelined_layer_ready(
         self, layer_id: int, request_generation: int = 0

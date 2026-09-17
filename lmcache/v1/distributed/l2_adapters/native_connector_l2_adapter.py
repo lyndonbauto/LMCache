@@ -41,6 +41,22 @@ from lmcache.v1.platform import create_event_notifier
 logger = init_logger(__name__)
 
 
+def _native_object_group_layouts(
+    group_layout_descs: dict[int, MemoryLayoutDesc],
+    group_kernel_layer_indices: dict[int, list[list[int]]] | None,
+) -> dict[int, dict[str, object]]:
+    """Build the native layout map consumed by ``set_object_group_layouts``."""
+    native: dict[int, dict[str, object]] = {}
+    for group_id, layout_desc in group_layout_descs.items():
+        layer_indices = (group_kernel_layer_indices or {}).get(group_id, [])
+        native[group_id] = {
+            "shapes": [tuple(shape) for shape in layout_desc.shapes],
+            "dtypes": [str(dtype) for dtype in layout_desc.dtypes],
+            "layer_indices": layer_indices,
+        }
+    return native
+
+
 # Key separator — kept in sync with fs_l2_adapter.py and
 # csrc/storage_backends/fs/connector.cpp. Both ``@`` in ``model_name``
 # and ``@`` in ``cache_salt`` are rejected by ObjectKey.__post_init__
@@ -207,13 +223,56 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         )
 
     def set_object_group_layouts(
-        self, group_layout_descs: dict[int, MemoryLayoutDesc]
+        self,
+        group_layout_descs: dict[int, MemoryLayoutDesc],
+        group_kernel_layer_indices: dict[int, list[list[int]]] | None = None,
     ) -> None:
         """Forward object-group layouts to the native client when supported."""
         setter = getattr(self._client, "set_object_group_layouts", None)
         if setter is None:
             return
-        setter(group_layout_descs)
+        setter(
+            _native_object_group_layouts(group_layout_descs, group_kernel_layer_indices)
+        )
+
+    def pipelined_fetch_init_error(self) -> str:
+        """Return the native client's pipelined RDMA initialization error."""
+        getter = getattr(self._client, "pipelined_fetch_init_error", None)
+        if getter is None:
+            return ""
+        return str(getter())
+
+    def begin_pipelined_fetch(
+        self,
+        placements: list[object],
+        chunk_nodes: list[object],
+        slot_digests: list[object],
+    ) -> int:
+        """Issue a pipelined fetch through the native client when supported."""
+        issuer = getattr(self._client, "issue_pipelined_fetch", None)
+        if issuer is None:
+            return 0
+        return int(
+            issuer(
+                placements,
+                chunk_nodes,
+                slot_digests,
+            )
+        )
+
+    def finish_pipelined_fetch(self) -> None:
+        """Finish the active pipelined fetch on the native client."""
+        finisher = getattr(self._client, "finish_pipelined_fetch", None)
+        if finisher is None:
+            return
+        finisher()
+
+    def abandon_pipelined_fetch(self) -> None:
+        """Abandon the active pipelined fetch on the native client."""
+        abandoner = getattr(self._client, "abandon_pipelined_fetch", None)
+        if abandoner is None:
+            return
+        abandoner()
 
     def is_pipelined_layer_ready(
         self, layer_id: int, request_generation: int = 0

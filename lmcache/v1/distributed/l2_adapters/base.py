@@ -406,7 +406,9 @@ class L2AdapterInterface(ABC):
         del plane_bytes
 
     def set_object_group_layouts(
-        self, group_layout_descs: dict[int, "MemoryLayoutDesc"]
+        self,
+        group_layout_descs: dict[int, "MemoryLayoutDesc"],
+        group_kernel_layer_indices: dict[int, list[list[int]]] | None = None,
     ) -> None:
         """Tell the adapter the memory layout per object group.
 
@@ -415,8 +417,37 @@ class L2AdapterInterface(ABC):
 
         Args:
             group_layout_descs: Maps object group id to that group's layout.
+            group_kernel_layer_indices: Optional global layer indices per
+                kernel group, parallel to ``MemoryLayoutDesc.shapes``.
         """
-        del group_layout_descs
+        del group_layout_descs, group_kernel_layer_indices
+
+    def pipelined_fetch_init_error(self) -> str:
+        """Return the last pipelined-fetch initialization error, if any."""
+        return ""
+
+    def begin_pipelined_fetch(
+        self,
+        placements: list[object],
+        chunk_nodes: list[object],
+        slot_digests: list[object],
+    ) -> int:
+        """Start a pipelined fetch when the backend supports one.
+
+        Returns:
+            Request generation for ``is_pipelined_layer_ready``, or ``0`` when
+            pipelined fetch is unavailable.
+        """
+        del placements, chunk_nodes, slot_digests
+        return 0
+
+    def finish_pipelined_fetch(self) -> None:
+        """Release the active pipelined fetch."""
+        return None
+
+    def abandon_pipelined_fetch(self) -> None:
+        """Abandon the active pipelined fetch without waiting."""
+        return None
 
     def is_pipelined_layer_ready(
         self, layer_id: int, request_generation: int = 0

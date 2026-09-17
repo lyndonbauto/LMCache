@@ -504,6 +504,16 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
             for gid in range(num_object_groups)
         }
+        kv_groups = cache_context.kv_layer_groups_manager
+        group_kernel_layer_indices = {
+            gid: [
+                list(kv_groups.kernel_groups[kernel_group_idx].layer_indices)
+                for kernel_group_idx in kv_groups.object_groups[
+                    gid
+                ].kernel_group_indices
+            ]
+            for gid in range(num_object_groups)
+        }
         attn_desc = kv_groups_manager.get_attn_desc()
         self._ctx.layout_desc_registry.register(
             model_name,
@@ -520,7 +530,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         self._ctx.storage_manager.set_kv_plane_bytes(
             uniform_kv_plane_bytes(group_layout_descs.values())
         )
-        self._ctx.storage_manager.set_object_group_layouts(group_layout_descs)
+        self._ctx.storage_manager.set_object_group_layouts(
+            group_layout_descs, group_kernel_layer_indices
+        )
 
         with self._lock:
             self._cache_contexts[instance_id] = ContextEntry(
