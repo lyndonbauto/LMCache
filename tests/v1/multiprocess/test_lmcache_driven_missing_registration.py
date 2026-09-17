@@ -172,7 +172,7 @@ def test_tp_failed_worker_releases_only_its_reader_share_once(mla: bool) -> None
         end=4,
     )
 
-    args = (failed_key, 101, [[0]], b"producer-event")
+    args = (failed_key, 101, [[0]], b"producer-event", 0, 0)
     assert module.retrieve(*args) == (b"", False)
     assert module.retrieve(*args) == (b"", False)
 

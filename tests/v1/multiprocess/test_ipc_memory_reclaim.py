@@ -89,6 +89,7 @@ def _register(
             engine_type=MagicMock(name="engine_type"),
             layout_hints=MagicMock(name="layout_hints"),
             engine_group_infos=[],
+            layer_event_ipc_handles=[],
         )
     finally:
         if age_s:

@@ -28,6 +28,13 @@ from lmcache.v1.gpu_connector.gpu_ops import (
     lmcache_memcpy_async_h2d,
 )
 from lmcache.v1.gpu_connector.utils import LayoutHints
+from lmcache.v1.multiprocess.layer_progress import (
+    DaemonLayerLaunchEventPool,
+    LayerProgressRecord,
+    layer_progress_shm_name,
+)
+from lmcache.v1.multiprocess.layerwise_schedule import LayerwiseSchedule
+from lmcache.v1.multiprocess.object_group_transfer import transfer_kv_layerwise_h2d
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
@@ -665,6 +672,9 @@ class ContextEntry:
             PING. Selects the reap window (timeout vs registration grace).
             Latched only by PING, never by traffic.
         event_backend: Cached event backend selected for this context's device.
+        layerwise_schedule: Per-layer launch order when layerwise MP load is enabled.
+        layer_progress: Shared progress record for layerwise retrieve waits.
+        daemon_layer_event_pool: IPC events recorded once per launch ordinal.
     """
 
     cache_context: BaseCacheContext
@@ -673,6 +683,9 @@ class ContextEntry:
     last_seen: float = 0.0
     has_liveness_signal: bool = False
     event_backend: EventIPCBackend | None = None
+    layerwise_schedule: LayerwiseSchedule | None = None
+    layer_progress: LayerProgressRecord | None = None
+    daemon_layer_event_pool: DaemonLayerLaunchEventPool | None = None
 
 
 class LMCacheDrivenTransferModule(InstanceLivenessTarget):
@@ -931,6 +944,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         engine_type: EngineType,
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
+        layer_event_ipc_handles: list[bytes] | None = None,
     ) -> None:
         """Register the KV cache tensors for a given GPU instance ID.
 
@@ -946,6 +960,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 GPUCacheContext for GPU KV format detection.
             engine_group_infos: Engine-neutral KV cache group metadata
                 (already msgspec-decoded by the message queue).
+            layer_event_ipc_handles: Exported worker IPC event handles for
+                layerwise retrieve, one per launch ordinal. Empty when
+                layerwise mode is disabled on the server.
         """
         now = time.monotonic()
         # NOOP-register: an already-registered instance (e.g. a recovering
@@ -996,6 +1013,40 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             group_layout_descs=group_layout_descs,
         )
 
+        layerwise_schedule: LayerwiseSchedule | None = None
+        layer_progress: LayerProgressRecord | None = None
+        daemon_layer_event_pool: DaemonLayerLaunchEventPool | None = None
+        handles = layer_event_ipc_handles or []
+        if getattr(self._ctx, "use_layerwise", False) is True:
+            if not handles:
+                raise ValueError(
+                    "use_layerwise is enabled on the MP server but the worker "
+                    "sent no layer_event_ipc_handles at registration"
+                )
+            layerwise_schedule = LayerwiseSchedule.from_kernel_groups(
+                kv_groups_manager.kernel_groups
+            )
+            if len(handles) != layerwise_schedule.launch_count():
+                raise ValueError(
+                    "layer_event_ipc_handles length "
+                    f"({len(handles)}) must equal launch count "
+                    f"({layerwise_schedule.launch_count()})"
+                )
+            # Standard
+            from multiprocessing import shared_memory
+
+            shm = shared_memory.SharedMemory(
+                name=layer_progress_shm_name(instance_id),
+            )
+            layer_progress = LayerProgressRecord(shm.buf)
+            imported_events = [
+                event_backend.import_event(handle, cache_context.device)
+                for handle in handles
+            ]
+            daemon_layer_event_pool = DaemonLayerLaunchEventPool(
+                imported_events, event_backend
+            )
+
         with self._lock:
             self._cache_contexts[instance_id] = ContextEntry(
                 cache_context=cache_context,
@@ -1004,6 +1055,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 last_seen=now,
                 has_liveness_signal=False,
                 event_backend=event_backend,
+                layerwise_schedule=layerwise_schedule,
+                layer_progress=layer_progress,
+                daemon_layer_event_pool=daemon_layer_event_pool,
             )
 
         logger.info(
@@ -1291,6 +1345,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         gpu_block_ids: list[list[int]],
         event_ipc_handle: bytes,
         skip_first_n_tokens: int = 0,
+        retrieve_generation: int = 0,
     ) -> tuple[bytes, bool]:
         """Retrieve the CPU KV cache and put into GPU blocks.
 
@@ -1305,6 +1360,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 the start of the retrieve range. This avoids overwriting
                 APC-shared GPU blocks that may be read concurrently by other
                 requests.
+            retrieve_generation: Worker-assigned generation tag for layerwise
+                progress; ignored when layerwise mode is disabled.
 
         Returns:
             A tuple where the first element is the IPC handle of the event
@@ -1444,6 +1501,15 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             prefetched_keys: list[ObjectKey] = []
             total_bytes = 0
             retrieve_succeeded = True
+            memory_objs_by_group: list[list[MemoryObj | None]] = [
+                [] for _ in range(num_object_groups)
+            ]
+            layerwise_active = (
+                getattr(self._ctx, "use_layerwise", False) is True
+                and entry.layerwise_schedule is not None
+                and entry.layer_progress is not None
+                and entry.daemon_layer_event_pool is not None
+            )
             try:
                 for obj_group_id in range(num_object_groups):
                     if obj_group_id in skipped_groups:
@@ -1460,27 +1526,41 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
 
                         total_bytes += sum(mo.get_size() for mo in window_objs)
 
-                        # None-pad the skipped prefix to full length so the
-                        # transfer's ``num_objects_to_skip`` and block-id slicing
-                        # line up unchanged; the None entries are never read.
                         memory_objs: list[MemoryObj | None] = [None] * skip + list(
                             window_objs
                         )
+                        memory_objs_by_group[obj_group_id] = memory_objs
 
-                        transfer_kv_per_object_group(
-                            cache_context,
-                            block_ids_per_group_gpu,
-                            memory_objs,
-                            object_group_id=obj_group_id,
-                            batch_size=cache_context.max_batch_size,
-                            skip_first_n_tokens=skip_first_n_tokens,
-                            direction=lmcache_native.TransferDirection.H2D,
-                            transfer_key=transfer_key,
-                        )
-                        # Extend only after the copy is enqueued: on exception,
-                        # read_prefetched_results releases this group's locks
-                        # itself, and a key must not be released twice.
+                        if not layerwise_active:
+                            transfer_kv_per_object_group(
+                                cache_context,
+                                block_ids_per_group_gpu,
+                                memory_objs,
+                                object_group_id=obj_group_id,
+                                batch_size=cache_context.max_batch_size,
+                                skip_first_n_tokens=skip_first_n_tokens,
+                                direction=lmcache_native.TransferDirection.H2D,
+                                transfer_key=transfer_key,
+                            )
                         prefetched_keys.extend(in_window_keys)
+
+                if layerwise_active and retrieve_succeeded:
+                    if retrieve_generation <= 0:
+                        raise ValueError(
+                            "layerwise retrieve requires a positive "
+                            "retrieve_generation from the worker"
+                        )
+                    transfer_kv_layerwise_h2d(
+                        cache_context,
+                        block_ids_per_group_gpu,
+                        memory_objs_by_group,
+                        skip_first_n_tokens,
+                        entry.layerwise_schedule,
+                        entry.layer_progress,
+                        entry.daemon_layer_event_pool,
+                        retrieve_generation,
+                        transfer_key=transfer_key,
+                    )
             except Exception:
                 logger.exception("Cannot retrieve keys due to exception")
                 retrieve_succeeded = False

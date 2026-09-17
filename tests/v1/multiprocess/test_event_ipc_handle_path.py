@@ -158,7 +158,7 @@ def test_worker_exports_events_through_platform_backend(
     assert isinstance(store_future, DeviceMessagingFuture)
     assert isinstance(retrieve_future, DeviceMessagingFuture)
     client.store.assert_called_once_with("key", 1, [[0]], b"completion-handle")
-    client.retrieve.assert_called_once_with("key", 1, [[0]], b"completion-handle", 2)
+    client.retrieve.assert_called_once_with("key", 1, [[0]], b"completion-handle", 2, 0)
     assert [call[0] for call in backend.calls] == [
         "check",
         "create",
@@ -267,7 +267,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         b"completion-handle",
         True,
     )
-    assert module.retrieve(key, 1, [[]], b"retrieve-producer") == (
+    assert module.retrieve(key, 1, [[]], b"retrieve-producer", 0, 0) == (
         b"completion-handle",
         False,
     )

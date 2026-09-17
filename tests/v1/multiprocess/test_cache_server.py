@@ -230,7 +230,7 @@ def retrieve_keys(
         start = i * BLOCKS_PER_KEY
         end = start + BLOCKS_PER_KEY
         block_ids = gpu_block_ids[start:end]
-        future = client.retrieve(key, instance_id, [block_ids], event_handle, 0)
+        future = client.retrieve(key, instance_id, [block_ids], event_handle, 0, 0)
         result = future.to_device_future().result(timeout=timeout)
         results.append(result)
     return results
@@ -346,6 +346,7 @@ def registered_instance(
         EngineType.VLLM,
         {},
         [],
+        [],
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
     assert result is None, "Register should return None"
@@ -390,6 +391,7 @@ def test_register_unregister_kv_cache(
         1,
         EngineType.VLLM,
         {},
+        [],
         [],
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)

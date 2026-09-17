@@ -19,6 +19,13 @@ from lmcache.v1.gpu_connector.utils import LayoutHints, get_device
 from lmcache.v1.multiprocess.custom_types import RegisterEngineDrivenContextPayload
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.multiprocess.layer_progress import (
+    LayerProgressRecord,
+    LayerProgressWaiter,
+    WorkerComputeLayerLaunchEventPool,
+    layer_progress_shm_name,
+)
+from lmcache.v1.multiprocess.layerwise_schedule import LayerwiseSchedule
 from lmcache.v1.multiprocess.protocols.engine import RegisterEngineDrivenContextResponse
 from lmcache.v1.multiprocess.transfer_context.base import (
     EngineDrivenContext,
@@ -418,6 +425,10 @@ class LMCacheDrivenTransferContext(TransferContext):
         self._req_client: RequestClient | None = None
         self._device: torch.device | None = None
         self._event_backend: EventIPCBackend | None = None
+        self._layerwise_schedule: LayerwiseSchedule | None = None
+        self._layer_progress_waiter: LayerProgressWaiter | None = None
+        self._retrieve_generation: int = 0
+        self._active_retrieve_generation: int = 0
 
     def register(
         self,
@@ -431,6 +442,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
+        use_layerwise: bool = False,
     ) -> None:
         """Register the worker KV cache with the LMCache server.
 
@@ -445,6 +457,8 @@ class LMCacheDrivenTransferContext(TransferContext):
             layout_hints: Optional KV-layout metadata.
             engine_group_infos: Optional engine KV-group metadata.
             engine_type: Serving engine that produced the caches.
+            use_layerwise: When True, create shared progress state and export
+                per-layer IPC events for the server to record.
 
         Raises:
             RuntimeError: If event IPC is unsupported for the KV-cache device.
@@ -455,6 +469,41 @@ class LMCacheDrivenTransferContext(TransferContext):
         event_backend.check_event_support(device)
 
         self._req_client = req_client
+        layer_event_ipc_handles: list[bytes] = []
+        if use_layerwise:
+            launch_count = _layerwise_launch_count(engine_group_infos)
+            if launch_count <= 0:
+                raise ValueError(
+                    "use_layerwise requires at least one layer in engine_group_infos"
+                )
+            # Standard
+            from multiprocessing import shared_memory
+
+            shm = shared_memory.SharedMemory(
+                create=True,
+                size=LayerProgressRecord.RECORD_SIZE,
+                name=layer_progress_shm_name(instance_id),
+            )
+            progress_record = LayerProgressRecord(shm.buf)
+            compute_stream = torch_dev.current_stream()
+            events: list[object] = []
+            for _ in range(launch_count):
+                event = event_backend.create_event(device)
+                event_backend.record_event(event, compute_stream)
+                events.append(event)
+                layer_event_ipc_handles.append(
+                    event_backend.export_event(event, device)
+                )
+            kernel_group_layers = [
+                list(group.layer_indices) for group in engine_group_infos
+            ]
+            self._layerwise_schedule = LayerwiseSchedule(kernel_group_layers)
+            event_pool = WorkerComputeLayerLaunchEventPool(
+                events, event_backend, compute_stream
+            )
+            self._layer_progress_waiter = LayerProgressWaiter(
+                progress_record, event_pool
+            )
         future = req_client.register_kv_cache(
             instance_id,
             wrap_kv_caches(kv_caches),
@@ -463,6 +512,7 @@ class LMCacheDrivenTransferContext(TransferContext):
             engine_type,
             layout_hints,
             list(engine_group_infos),
+            layer_event_ipc_handles,
         )
         future.result(timeout=mq_timeout)
         self._device = device
@@ -628,12 +678,18 @@ class LMCacheDrivenTransferContext(TransferContext):
         if event is None:
             raise RuntimeError("LMCache-driven transfer requires an IPC event.")
         event_ipc_handle = self._event_backend.export_event(event, self._device)
+        retrieve_generation = 0
+        if self._layer_progress_waiter is not None:
+            self._retrieve_generation += 1
+            retrieve_generation = self._retrieve_generation
+            self._active_retrieve_generation = retrieve_generation
         return self._req_client.retrieve(
             key,
             instance_id,
             block_ids,
             event_ipc_handle,
             skip_first_n_tokens,
+            retrieve_generation,
         ).to_device_future(
             device=self._device,
             event_backend=self._event_backend,
@@ -644,9 +700,39 @@ class LMCacheDrivenTransferContext(TransferContext):
         self._req_client = None
         self._device = None
         self._event_backend = None
+        self._layerwise_schedule = None
+        self._layer_progress_waiter = None
+
+    def wait_for_layer_load(self, layer_id: int) -> None:
+        """Block the compute stream until ``layer_id`` has landed on the GPU.
+
+        Args:
+            layer_id: Global layer index vLLM is about to compute.
+
+        Raises:
+            RuntimeError: If :meth:`register` has not completed or layerwise mode
+                is disabled.
+        """
+        if self._layer_progress_waiter is None or self._layerwise_schedule is None:
+            return
+        if layer_id not in self._layerwise_schedule:
+            return
+        self._layer_progress_waiter.wait_for_layer(
+            self._active_retrieve_generation,
+            layer_id,
+            self._layerwise_schedule,
+        )
 
     def flush_inflight_stores(self) -> None:
         pass
+
+
+def _layerwise_launch_count(engine_group_infos: Sequence[EngineGroupInfo]) -> int:
+    """Return how many global layers participate in engine_group_infos."""
+    layers: set[int] = set()
+    for group in engine_group_infos:
+        layers.update(group.layer_indices)
+    return len(layers)
 
 
 class EngineDrivenTransferContext(TransferContext):

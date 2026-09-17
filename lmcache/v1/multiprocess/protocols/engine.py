@@ -83,6 +83,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
                 EngineType,
                 LayoutHints,
                 list[EngineGroupInfo],
+                list[bytes],
             ],
             response_class=None,
             handler_type=HandlerType.SYNC,
@@ -156,7 +157,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Returns: tuple[bytes, bool] - (device event handle, success flag).
         #   The handle is empty when the server submitted no device work.
         "RETRIEVE": ProtocolDefinition(
-            payload_classes=[KeyType, int, list[list[int]], bytes, int],
+            payload_classes=[KeyType, int, list[list[int]], bytes, int, int],
             response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
         ),

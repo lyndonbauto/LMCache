@@ -42,6 +42,7 @@ def register_kv_cache_handler(
     engine_type: EngineType,
     layout_hints: LayoutHints,
     engine_group_infos: list[EngineGroupInfo],
+    layer_event_ipc_handles: list[bytes],
 ) -> None:
     """
     Dummy handler for REGISTER_KV_CACHE requests.
@@ -149,6 +150,7 @@ def retrieve_handler(
     gpu_block_ids: list[list[int]],
     event_handler: bytes,
     skip_first_n_tokens: int = 0,
+    retrieve_generation: int = 0,
 ) -> tuple[bytes, bool]:
     """
     Dummy handler for RETRIEVE requests.

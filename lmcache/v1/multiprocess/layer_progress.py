@@ -19,10 +19,19 @@ import struct
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 # First Party
 from lmcache.v1.multiprocess.layerwise_schedule import LayerwiseSchedule
+
+if TYPE_CHECKING:
+    from lmcache.v1.platform.base.event_ipc import EventIPCBackend
+
+
+class _EventIPCBackendLike(Protocol):
+    def wait_event(self, event: object, stream: object) -> None: ...
+
+    def record_event(self, event: object, stream: object) -> None: ...
 
 _RECORD_STRUCT = struct.Struct("<QQI")
 """Layout: generation (uint64), watermark (uint64), flags (uint32)."""
@@ -274,7 +283,7 @@ class WorkerComputeLayerLaunchEventPool:
     def __init__(
         self,
         events: list[object],
-        event_backend: object,
+        event_backend: _EventIPCBackendLike,
         compute_stream: object,
     ) -> None:
         """Hold imported IPC events indexed by launch ordinal.
@@ -309,7 +318,7 @@ class DaemonLayerLaunchEventPool:
     def __init__(
         self,
         events: list[object],
-        event_backend: object,
+        event_backend: _EventIPCBackendLike,
     ) -> None:
         """Hold IPC-imported worker events for recording on the transfer stream.
 
