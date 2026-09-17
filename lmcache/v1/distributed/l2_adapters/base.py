@@ -405,7 +405,22 @@ class L2AdapterInterface(ABC):
         """
         del plane_bytes
 
-    def is_pipelined_layer_ready(self, layer_id: int) -> bool:
+    def set_object_group_layouts(
+        self, group_layout_descs: dict[int, "MemoryLayoutDesc"]
+    ) -> None:
+        """Tell the adapter the memory layout per object group.
+
+        Pipelined Aerospike RDMA uses this to build slot schedules. The
+        default implementation ignores the hint.
+
+        Args:
+            group_layout_descs: Maps object group id to that group's layout.
+        """
+        del group_layout_descs
+
+    def is_pipelined_layer_ready(
+        self, layer_id: int, request_generation: int = 0
+    ) -> bool:
         """Report whether one layer of the active pipelined fetch has landed.
 
         Layer-pipelined RDMA fetches signal each write separately; vLLM asks
@@ -414,12 +429,14 @@ class L2AdapterInterface(ABC):
 
         Args:
             layer_id: Global layer index in the model.
+            request_generation: Pipelined fetch handle from the adapter, or
+                ``0`` to query whichever request the adapter currently tracks.
 
         Returns:
-            ``True`` when every slot of ``layer_id`` for the active request
-            has landed and no slot of that layer was declined.
+            ``True`` when every slot of ``layer_id`` for the identified
+            request has landed and no slot of that layer was declined.
         """
-        del layer_id
+        del layer_id, request_generation
         return False
 
     def _notify_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:

@@ -206,20 +206,36 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             self._type_name,
         )
 
-    def is_pipelined_layer_ready(self, layer_id: int) -> bool:
+    def set_object_group_layouts(
+        self, group_layout_descs: dict[int, MemoryLayoutDesc]
+    ) -> None:
+        """Forward object-group layouts to the native client when supported."""
+        setter = getattr(self._client, "set_object_group_layouts", None)
+        if setter is None:
+            return
+        setter(group_layout_descs)
+
+    def is_pipelined_layer_ready(
+        self, layer_id: int, request_generation: int = 0
+    ) -> bool:
         """Forward pipelined layer readiness to the native client when supported.
 
         Args:
             layer_id: Global layer index in the model.
+            request_generation: Fetch handle from ``begin_pipelined_fetch``, or
+                ``0`` to query the adapter's active request.
 
         Returns:
-            ``True`` when the native client reports the layer ready for the
-            active pipelined fetch, otherwise ``False``.
+            ``True`` when the native client reports the layer ready for that
+            request, otherwise ``False``.
         """
         checker = getattr(self._client, "is_pipelined_layer_ready", None)
         if checker is None:
             return False
-        return bool(checker(layer_id))
+        try:
+            return bool(checker(layer_id, request_generation))
+        except TypeError:
+            return bool(checker(layer_id))
 
     def submit_store_task(
         self,

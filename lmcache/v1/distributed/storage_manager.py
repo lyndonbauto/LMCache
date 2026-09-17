@@ -757,23 +757,47 @@ class StorageManager:
         for adapter in adapters:
             adapter.set_kv_plane_bytes(plane_bytes)
 
-    def is_pipelined_layer_ready(self, layer_id: int) -> bool:
-        """Ask each L2 adapter whether a pipelined fetch layer is ready.
+    def set_object_group_layouts(
+        self, group_layout_descs: dict[int, MemoryLayoutDesc]
+    ) -> None:
+        """Pass per-object-group layouts on to every L2 adapter.
 
-        Adapters without pipelined RDMA return ``False``. The result is the
-        logical OR across adapters, matching how a hit on any tier satisfies
-        a load.
+        Adapters are built before any worker has registered its KV cache, so
+        none of them can derive the layout at construction. This is how they
+        learn it once it exists. Adapters that do not care ignore it; see
+        ``L2AdapterInterface.set_object_group_layouts``.
 
         Args:
-            layer_id: Global layer index in the model.
-
-        Returns:
-            ``True`` if any adapter reports the layer ready.
+            group_layout_descs: One ``MemoryLayoutDesc`` per object group id.
         """
         with self._adapters_lock:
             adapters = list(self._l2_adapters.values())
         for adapter in adapters:
-            if adapter.is_pipelined_layer_ready(layer_id):
+            adapter.set_object_group_layouts(group_layout_descs)
+
+    def is_pipelined_layer_ready(
+        self, layer_id: int, request_generation: int = 0
+    ) -> bool:
+        """Ask L2 adapters whether a pipelined fetch layer has landed.
+
+        Each adapter tracks its own active pipelined request. ``False`` when
+        no adapter owns ``request_generation`` or the layer is not complete on
+        that adapter.
+
+        Args:
+            layer_id: Global layer index in the model.
+            request_generation: Handle returned by ``begin_pipelined_fetch`` on
+                the adapter that issued the fetch. ``0`` means "whichever
+                request the adapter currently considers active".
+
+        Returns:
+            ``True`` when an adapter reports the layer ready for the given
+            request generation.
+        """
+        with self._adapters_lock:
+            adapters = list(self._l2_adapters.values())
+        for adapter in adapters:
+            if adapter.is_pipelined_layer_ready(layer_id, request_generation):
                 return True
         return False
 

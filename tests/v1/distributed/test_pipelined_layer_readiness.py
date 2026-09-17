@@ -1,18 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for pipelined layer readiness threading through the L2 stack."""
 
-# Standard
-from typing import cast
-
-# Third Party
-import pytest
-
 # First Party
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
+from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
+    MockL2Adapter,
+    MockL2AdapterConfig,
+)
 from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
     NativeConnectorL2Adapter,
 )
-from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.platform import create_event_notifier
 
 
@@ -26,7 +23,10 @@ class _PipelinedReadyClient:
     def event_fd(self) -> int:
         return self._efd.fileno()
 
-    def is_pipelined_layer_ready(self, layer_id: int) -> bool:
+    def is_pipelined_layer_ready(
+        self, layer_id: int, request_generation: int = 0
+    ) -> bool:
+        del request_generation
         return layer_id in self._ready_layers
 
 
@@ -42,12 +42,8 @@ class _PlainClient:
 
 def test_default_l2_adapter_reports_not_ready() -> None:
     """Backends without pipelined fetch must not claim layers are ready."""
-
-    class _Dummy:
-        is_pipelined_layer_ready = L2AdapterInterface.is_pipelined_layer_ready
-
-    dummy = cast(L2AdapterInterface, _Dummy())
-    assert dummy.is_pipelined_layer_ready(0) is False
+    adapter = MockL2Adapter(MockL2AdapterConfig(max_size_gb=1.0, mock_bandwidth_gb=1.0))
+    assert adapter.is_pipelined_layer_ready(0) is False
 
 
 def test_native_adapter_forwards_when_client_supports_it() -> None:
@@ -69,22 +65,48 @@ def test_native_adapter_without_binding_returns_false() -> None:
     assert adapter.is_pipelined_layer_ready(0) is False
 
 
-def test_storage_manager_or_across_adapters(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Any adapter reporting ready satisfies the storage manager query."""
-    manager = StorageManager.__new__(StorageManager)
-    manager._adapters_lock = __import__("threading").Lock()
-    adapters: dict[int, L2AdapterInterface] = {
-        0: NativeConnectorL2Adapter(
-            native_client=_PlainClient(),
-            type_name="a",
-        ),
-        1: NativeConnectorL2Adapter(
-            native_client=_PipelinedReadyClient({7}),
-            type_name="b",
-        ),
-    }
-    manager._l2_adapters = adapters
-    assert manager.is_pipelined_layer_ready(7) is True
-    assert manager.is_pipelined_layer_ready(0) is False
+def test_readiness_is_scoped_to_request_generation() -> None:
+    """The base contract accepts a generation handle for pipelined queries."""
+
+    class _Scoped(L2AdapterInterface):
+        def is_pipelined_layer_ready(
+            self, layer_id: int, request_generation: int = 0
+        ) -> bool:
+            return request_generation == 3 and layer_id == 7
+
+        def get_store_event_fd(self) -> int:
+            return 0
+
+        def get_lookup_and_lock_event_fd(self) -> int:
+            return 0
+
+        def get_load_event_fd(self) -> int:
+            return 0
+
+        def submit_store_task(self, keys, objects):
+            raise NotImplementedError
+
+        def pop_completed_store_tasks(self):
+            raise NotImplementedError
+
+        def submit_lookup_and_lock_task(self, keys):
+            raise NotImplementedError
+
+        def query_lookup_and_lock_result(self, task_id):
+            raise NotImplementedError
+
+        def submit_load_task(self, keys, memory_objs):
+            raise NotImplementedError
+
+        def query_load_result(self, task_id):
+            raise NotImplementedError
+
+        def submit_unlock(self, keys):
+            raise NotImplementedError
+
+        def close(self) -> None:
+            return None
+
+    adapter = _Scoped()
+    assert adapter.is_pipelined_layer_ready(7, request_generation=3) is True
+    assert adapter.is_pipelined_layer_ready(7, request_generation=2) is False

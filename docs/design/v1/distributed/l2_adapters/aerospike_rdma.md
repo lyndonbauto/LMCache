@@ -276,17 +276,33 @@ write-lock TTL at startup.
 
 ## Per-node registration fanout
 
-`register_all_nodes` in `kv_sink_fanout.{h,cpp}` sends the register command to
-every node with `aerospike_info_foreach` and records each node's own `region`
-handle in a `NodeRegistry`. The command text is identical for every node — it
-describes *our* endpoint — but each reply carries that node's own region id,
-peer GID, and peer QPN.
+`register_all_nodes` in `kv_sink_fanout.{h,cpp}` registers LMCache on every
+cluster node and records each node's own `region` handle in a `NodeRegistry`.
+
+**Multi-node queue pairs.** A pipelined request pulls chunks from several
+Aerospike nodes, but every `RDMA_WRITE_WITH_IMM` must land in one readiness
+table on the client. That requires a **shared completion queue** and **one RC
+(or SRD) queue pair per node**, each with its own `qpn`/`psn` published in
+that node's `kv-sink-register` command. Broadcasting a single `qpn` to every
+node leaves at most one remote writer connected; the others fail at the fabric
+with missing immediates and the request hangs. The RdmaContext overload that
+takes `RdmaContext*` creates a dedicated queue pair per node before issuing
+`aerospike_info_node` with that node's endpoint.
+
+**Window index.** Registration always publishes window `0` today. Additional
+windows in the pool are reserved for concurrent requests but are not yet leased
+by the driver; treating `window_index` as configurable would imply multi-window
+operation that is still deferred.
+
+The legacy overload that accepts a single `LocalEndpoint` remains for baseline
+tests that exercise one mock node with `create_queue_pair()` /
+`connect_peer()`.
 
 It is a separate translation unit from `kv_sink_client.{h,cpp}` so the codec
 stays free of any Aerospike SDK dependency and remains trivially unit-testable;
 only the fanout needs `libaerospike`.
 
-Two things `aerospike_info_foreach` forces, both easy to get wrong:
+Two things the fanout callback forces, both easy to get wrong:
 
 - **The reply string must not be freed.** The SDK documents that for
   `aerospike_info_foreach` "the caller should not free this string", which is
@@ -731,7 +747,7 @@ Being precise about this, because the gap matters:
 | `kv_sink_client.{h,cpp}` codec | **Verified.** Register and fetch commands round-trip against the mock writer. |
 | Per-node `kv-sink-register` fanout | **Implemented and compiling** via `aerospike_info_foreach`. Never run against a cluster. |
 | `PipelinedFetchSession` driver | **Implemented** and covered by `pipelined_fetch_session_test` (no device). |
-| Connector + Python layer readiness | **Implemented** (`connector_pipelined_rdma`, `is_pipelined_layer_ready`). Not exercised against a cluster or on EFA. |
+| Connector + Python pipelined path | **Partially wired.** `PipelinedFetchSession` and `connector_pipelined_rdma` implement multi-QP register/connect, slot-major commands, generation-scoped replies, and notification draining inside `is_pipelined_layer_ready`. Python receives layouts via `StorageManager.set_object_group_layouts` at KV registration; native pybind for the full fetch lifecycle is still outstanding in this branch, so end-to-end MP load cannot drive a pipelined fetch until those bindings land. |
 | Adapter plumbing, descriptor, window plan | **Implemented and unit-tested.** |
 | Write-lock TTL invariant | **Implemented and unit-tested** (startup check). |
 | Mock RDMA writer | **Verified.** Posts real `ibv_post_send` writes and fences on its own send CQ. |

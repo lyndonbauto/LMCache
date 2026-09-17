@@ -520,6 +520,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         self._ctx.storage_manager.set_kv_plane_bytes(
             uniform_kv_plane_bytes(group_layout_descs.values())
         )
+        self._ctx.storage_manager.set_object_group_layouts(group_layout_descs)
 
         with self._lock:
             self._cache_contexts[instance_id] = ContextEntry(
