@@ -81,7 +81,10 @@ per-layer wait from running.
 
 Tradeoff: the forward pass starts while KV is still arriving. If the daemon cannot
 keep ahead of vLLM, the stall happens **inside** attention (holding GPU execution
-resources) instead of cleanly outside the forward pass.
+resources) instead of cleanly outside the forward pass. A scheduler step that
+mixes one loading request with several already-running ones can stall the whole
+batch inside attention, because every request in the step executes the same
+forward pass.
 
 Config (must match on worker and server):
 
@@ -97,8 +100,10 @@ following were **not** compiled or executed here:
 
 - CUDA changes to `multi_layer_block_kv_transfer` (`layer_offset`, `n_layers`)
 - End-to-end layerwise retrieve with real IPC events and overlap measurements
-- Hybrid models where worker `LayerwiseSchedule` built from `EngineGroupInfo` must
-  exactly match the daemon schedule from `kernel_groups` (mis-match would cause
-  wrong waits without crashing)
+- Hybrid schedule invariant: at registration the daemon asserts that
+  ``LayerwiseSchedule`` built from worker ``EngineGroupInfo`` matches the schedule
+  from registered ``kernel_groups`` (ordinal ranks in globally sorted layer order).
+  ``KVLayerGroupsManager`` already rejects kernel/engine group layer mismatches at
+  context creation.
 
 CI with CUDA remains the authority for kernel and integration correctness.

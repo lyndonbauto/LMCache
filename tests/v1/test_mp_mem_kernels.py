@@ -744,9 +744,7 @@ def test_block_transfer_layer_subrange(engine_kv_format, nl, nh, hs, is_mla, dty
 
     transferred_layers = range(layer_offset, layer_offset + n_layers)
     untouched_layers = [
-        layer_idx
-        for layer_idx in range(nl)
-        if layer_idx not in transferred_layers
+        layer_idx for layer_idx in range(nl) if layer_idx not in transferred_layers
     ]
 
     for i in range(TOTAL_BLOCKS):

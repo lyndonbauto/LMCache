@@ -139,8 +139,8 @@ PYBIND11_MODULE(cuda_ops, m) {
             paged_buffer_ptrs_tensor, std::move(lmcache_objects_ptrs),
             block_ids, device, static_cast<TransferDirection>(direction),
             shape_desc, lmcache_chunk_size,
-            static_cast<EngineKVFormat>(engine_kv_format),
-            skip_prefix_n_blocks, layer_offset, n_layers);
+            static_cast<EngineKVFormat>(engine_kv_format), skip_prefix_n_blocks,
+            layer_offset, n_layers);
       },
       py::arg("paged_buffer_ptrs_tensor"), py::arg("lmcache_objects_ptrs"),
       py::arg("block_ids"), py::arg("device"), py::arg("direction"),

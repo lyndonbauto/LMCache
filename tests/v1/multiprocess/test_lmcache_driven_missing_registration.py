@@ -93,6 +93,7 @@ def test_missing_registration_returns_terminal_false(method_name: str) -> None:
         return_value=None
     )
     module._ctx = MagicMock()
+    module._ctx.use_layerwise = False
     module._ctx.session_manager.get.return_value = None
     producer_event = b"worker-producer-event"
     key = _cache_key(world_size=1, worker_id=0, request_id="request")

@@ -116,7 +116,15 @@ def test_worker_exports_events_through_platform_backend(
     )
 
     client = MagicMock()
-    client.register_kv_cache.return_value = _resolved_future(True)
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import RegisterKvCacheResponse
+
+    client.register_kv_cache.return_value = _resolved_future(
+        RegisterKvCacheResponse(
+            server_use_layerwise=False,
+            layer_event_ipc_handles=[],
+        )
+    )
     client.store.return_value = MessagingFuture()
     client.retrieve.return_value = MessagingFuture()
 

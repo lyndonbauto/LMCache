@@ -209,7 +209,7 @@ __device__ void multi_layer_block_transfer_single_block(
   const int head_idx = threadIdx.y;
   const int init_token_offset = threadIdx.z;
   const int token_stride = blockDim.z;
-    const int k_or_v = blockIdx.x;
+  const int k_or_v = blockIdx.x;
   const int layer_idx = blockIdx.z + layer_offset;
 
   const size_t engine_global_offset =
@@ -379,12 +379,11 @@ void multi_layer_block_kv_transfer_templated(
     EngineKVFormat engine_kv_format, int skip_prefix_n_blocks, int layer_offset,
     int n_layers) {
   // --- Validation ---
-  const int n_layers_effective =
-      (n_layers < 0) ? shape_desc.nl : n_layers;
-  TORCH_CHECK(n_layers_effective > 0,
-              "n_layers must be positive, got ", n_layers_effective);
-  TORCH_CHECK(layer_offset >= 0,
-              "layer_offset must be non-negative, got ", layer_offset);
+  const int n_layers_effective = (n_layers < 0) ? shape_desc.nl : n_layers;
+  TORCH_CHECK(n_layers_effective > 0, "n_layers must be positive, got ",
+              n_layers_effective);
+  TORCH_CHECK(layer_offset >= 0, "layer_offset must be non-negative, got ",
+              layer_offset);
   TORCH_CHECK(layer_offset + n_layers_effective <= shape_desc.nl,
               "layer range [", layer_offset, ", ",
               layer_offset + n_layers_effective,
