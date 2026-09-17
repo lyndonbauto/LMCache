@@ -434,11 +434,20 @@ chunks at `kv_size = 2` and one piece per plane is 16,000 — comfortable, but a
 
 **Status: the client side is implemented; the server side is proposed.** The
 command builder, reply parser and declined-write handling live in
-`kv_sink_client.h` and `layer_pipeline.h`, and the test mock implements a
-server-shaped `handle_pipelined_fetch` so the codec is exercised over a real
-fabric rather than against hand-written reply strings. The format below is
-still the contract to agree with the Aerospike server team; what exists is one
-end of it, not agreement on it.
+`kv_sink_client.h` and `layer_pipeline.h`. `PipelinedFetchSession` in
+`pipelined_fetch_session.{h,cpp}` is the **implemented** driver that ties
+them together: it allocates a per-request generation, builds a `RequestPlan`
+via `SlotPlanner`, fans out one `kv-sink-fetch-pipelined` command per node,
+feeds declined slots from each reply into `LayerReadiness::note_unservable`,
+and drains `RdmaContext::poll_notifications` into the same tracker. It
+performs no I/O itself — the connector issues the info calls and forwards
+reply strings. `AerospikeNativeConnector` exposes this path only when
+`BUILD_WITH_AEROSPIKE_RDMA` is enabled and `kv-sink-register` has succeeded;
+the TCP get/set path is unchanged otherwise. Python reaches per-layer
+readiness through `StorageManager.is_pipelined_layer_ready`, mirroring
+`set_kv_plane_bytes`. The test mock implements a server-shaped
+`handle_pipelined_fetch` so the codec is exercised over a real fabric; the
+format below is still the contract to agree with the Aerospike server team.
 
 The existing `kv-sink-fetch` cannot express this, because it has no per-write
 identifier and its reply *is* the completion.
@@ -536,6 +545,11 @@ chunks while the slot indices stay in the request's numbering.
 `build_pipelined_fetch_command` refuses a sink list with a repeated slot index,
 which is the mistake that per-fetch numbering would produce.
 
+**Device-free verification:** `pipelined_fetch_session_test` (via
+`make -C tests/v1/distributed/rdma logic-test`) covers multi-node slot
+numbering, declined-slot handling, stale generations, and abandon — without
+libibverbs or a cluster. That is **implemented** logic, not fabric proof.
+
 Two things this format does **not** yet settle, both needing the server
 team's input:
 
@@ -584,10 +598,12 @@ Not proven:
   larger change.
 - **Anything about real layers *over the fabric*.** The fabric harness still
   moves synthetic pieces at fabricated offsets. The mapping from actual KV
-  layout onto slots is now implemented in `slot_planner.h` and covered by
-  `tests/v1/distributed/rdma/test_slot_planner.py`, including the fact that a
-  layer is *not* one contiguous range once `kv_size > 1`; what remains untested
-  is driving a planner-produced schedule across a real link. See
+  layout onto slots is implemented in `slot_planner.h` and covered by
+  `test_slot_planner.py`; `PipelinedFetchSession` is covered by
+  `pipelined_fetch_session_test` without a device. What remains **unverified
+  over a fabric** is an end-to-end load that builds digests and placements from
+  a real prefetch, issues commands through `AerospikeNativeConnector`, and
+  consumes layers while bytes are still landing. See
   [`layerwise_transfer_data_model.md`](layerwise_transfer_data_model.md).
 
 ## Reproducing the Soft-RoCE test setup
@@ -714,6 +730,8 @@ Being precise about this, because the gap matters:
 | `rdma_context.{h,cpp}` | **Verified on RC.** QP reaches RTS and the data path executes over Soft-RoCE. The EFA/SRD path compiles but has never run. |
 | `kv_sink_client.{h,cpp}` codec | **Verified.** Register and fetch commands round-trip against the mock writer. |
 | Per-node `kv-sink-register` fanout | **Implemented and compiling** via `aerospike_info_foreach`. Never run against a cluster. |
+| `PipelinedFetchSession` driver | **Implemented** and covered by `pipelined_fetch_session_test` (no device). |
+| Connector + Python layer readiness | **Implemented** (`connector_pipelined_rdma`, `is_pipelined_layer_ready`). Not exercised against a cluster or on EFA. |
 | Adapter plumbing, descriptor, window plan | **Implemented and unit-tested.** |
 | Write-lock TTL invariant | **Implemented and unit-tested** (startup check). |
 | Mock RDMA writer | **Verified.** Posts real `ibv_post_send` writes and fences on its own send CQ. |

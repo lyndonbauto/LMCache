@@ -35,7 +35,6 @@
 
 namespace {
 
-using lmcache::connector::rdma::ArrivalStatus;
 using lmcache::connector::rdma::ChunkNodeBinding;
 using lmcache::connector::rdma::ChunkPlacement;
 using lmcache::connector::rdma::encode_immediate;
