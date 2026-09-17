@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """``lmcache tool cache-simulator`` command group.
 
-Sub-subcommands (simulate, sweep, gen-dataset) are auto-discovered from
+Sub-subcommands (simulate, sweep, gen-dataset, hash-trace) are auto-discovered from
 modules in this package.  To add a new action, create a module defining
 a concrete :class:`BaseCommand` subclass — no edits to this file are
 required.
