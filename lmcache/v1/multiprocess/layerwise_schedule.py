@@ -111,8 +111,7 @@ class LayerwiseSchedule:
 
         if not launches:
             raise ValueError(
-                "no kernel group holds any layer, so there is nothing to "
-                "schedule"
+                "no kernel group holds any layer, so there is nothing to schedule"
             )
 
         # Global layer order, not group order. See the module docstring: this
@@ -204,3 +203,36 @@ class LayerwiseSchedule:
         any per-layer progress bookkeeping.
         """
         return len(self._launches)
+
+
+def assert_registration_schedules_agree(
+    engine_group_layers: Sequence[Sequence[int]],
+    kernel_groups: Sequence["KernelGroupInfo"],
+) -> None:
+    """Verify worker engine groups and daemon kernel groups yield one schedule.
+
+    Ordinals are ranks in globally sorted layer order, so matching layer sets
+    with consistent per-group layer order must produce identical schedules.
+
+    Args:
+        engine_group_layers: Layer indices per engine group from registration.
+        kernel_groups: Kernel groups from the daemon cache context.
+
+    Raises:
+        ValueError: If the two construction paths diverge.
+    """
+    from_engine = LayerwiseSchedule(engine_group_layers)
+    from_kernels = LayerwiseSchedule.from_kernel_groups(kernel_groups)
+    if from_engine.launch_count() != from_kernels.launch_count():
+        raise ValueError(
+            "engine_group_infos and registered kernel groups disagree on "
+            f"launch count ({from_engine.launch_count()} vs "
+            f"{from_kernels.launch_count()})"
+        )
+    for left, right in zip(from_engine.launches, from_kernels.launches, strict=True):
+        if left != right:
+            raise ValueError(
+                "engine_group_infos and registered kernel groups yield "
+                f"different schedules at layer {left.layer_id}: "
+                f"{left} vs {right}"
+            )

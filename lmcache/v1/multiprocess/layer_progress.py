@@ -9,34 +9,39 @@ and watermark) plus a pool of IPC events indexed by launch ordinal.
 
 The generation plays the same role as in the RDMA layer pipeline: it tags one
 retrieve so a worker never waits on an event that still holds a previous
-retrieve's recording. The watermark counts how many ordinals have been enqueued
-and recorded; on a single transfer stream, that count is a tight bound for
-layer-order waits when launches follow :class:`LayerwiseSchedule`.
+retrieve's recording. The watermark counts how many launch ordinals have been
+enqueued and recorded; on a single transfer stream, that count is a tight bound
+for layer-order waits when launches follow :class:`LayerwiseSchedule`. An ordinal
+may be reported with no transfer when its kernel group is not served by this
+retrieve.
+
+Publication invariant (seqlock on the legacy three-field layout):
+    Writers reset ``flags`` and ``watermark`` before publishing a new
+    ``generation`` in :meth:`begin_retrieve`. :meth:`report_launch_recorded`
+    updates only ``watermark`` while holding the same generation.
+    Readers load ``generation``, then ``watermark`` and ``flags``, then
+    ``generation`` again; if the two generation reads differ, the snapshot is
+    retried. This prevents a waiter from observing a new generation paired
+    with a previous retrieve's watermark.
+
+Concurrent retrieves on one worker instance are serialized by the MP server's
+affinity pool (one in-flight blocking retrieve per worker identity). The shared
+record therefore tracks a single active retrieve generation at a time.
 """
 
 # Standard
-import struct
-import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+import struct
+import time
+
+# Third Party
+import torch
 
 # First Party
+from lmcache import torch_dev
 from lmcache.v1.multiprocess.layerwise_schedule import LayerwiseSchedule
-
-if TYPE_CHECKING:
-    from lmcache.v1.platform.base.event_ipc import EventIPCBackend
-
-
-class _EventIPCBackendLike(Protocol):
-    def wait_event(self, event: object, stream: object) -> None: ...
-
-    def record_event(self, event: object, stream: object) -> None: ...
-
-_RECORD_STRUCT = struct.Struct("<QQI")
-"""Layout: generation (uint64), watermark (uint64), flags (uint32)."""
-
-_FLAG_RETRIEVE_FAILED = 1 << 0
+from lmcache.v1.platform.base.event_ipc import EventIPCBackend
 
 
 class LayerProgressError(Exception):
@@ -44,23 +49,33 @@ class LayerProgressError(Exception):
 
 
 class LayerProgressRetrieveFailedError(LayerProgressError):
-    """The daemon reported that the retrieve failed before this layer landed.
+    """The daemon reported that the retrieve failed before this layer landed."""
 
-    Waiters raise this after a bounded poll when the failure flag is set, or
-    when the watermark cannot reach the required ordinal within the timeout.
-    """
+
+class LayerProgressRetrieveGenerationTimeoutError(LayerProgressError):
+    """Timed out waiting for the daemon to publish this retrieve's generation."""
+
+
+class LayerProgressRetrieveProgressTimeoutError(LayerProgressError):
+    """Timed out waiting for the watermark to reach the required launch ordinal."""
 
 
 class LayerProgressStaleGenerationError(LayerProgressError):
-    """Shared memory carries a generation that does not match this wait.
-
-    This prevents acting on progress from a different retrieve after a timeout,
-    cancellation, or a newly started load reused the same worker slot.
-    """
+    """Shared memory carries a generation newer than this wait (superseded)."""
 
 
 class LayerProgressLayerNotScheduledError(LayerProgressError):
     """``wait_for_layer`` was called for a layer the schedule does not cover."""
+
+
+class LayerProgressIncompatibleWithCudaGraphError(LayerProgressError):
+    """Layerwise MP load cannot run under CUDA graph capture."""
+
+
+_RECORD_STRUCT = struct.Struct("<QQI")
+"""Layout: generation (uint64), watermark (uint64), flags (uint32)."""
+
+_FLAG_RETRIEVE_FAILED = 1 << 0
 
 
 @dataclass(frozen=True)
@@ -86,35 +101,47 @@ class LayerProgressRecord:
 
     RECORD_SIZE: int = _RECORD_STRUCT.size
 
-    def __init__(self, buffer: memoryview | bytearray | bytes) -> None:
+    def __init__(self, buffer: memoryview | bytearray) -> None:
         """Attach to a fixed-size shared progress buffer.
 
         Args:
             buffer: At least :attr:`RECORD_SIZE` bytes, writable for writers.
 
         Raises:
-            ValueError: If ``buffer`` is too short or not writable when writes
-                are attempted.
+            ValueError: If ``buffer`` is too short.
+            TypeError: If ``buffer`` is not writable (for example plain ``bytes``).
         """
         if len(buffer) < self.RECORD_SIZE:
             raise ValueError(
                 f"layer progress record requires {self.RECORD_SIZE} bytes, "
                 f"got {len(buffer)}"
             )
+        if isinstance(buffer, bytes):
+            raise TypeError(
+                "layer progress buffer must be writable; got immutable bytes"
+            )
+        if isinstance(buffer, memoryview) and buffer.readonly:
+            raise TypeError("layer progress buffer must be writable")
         self._buffer = buffer
 
     def read(self) -> LayerProgressSnapshot:
-        """Return the current generation, watermark, and failure flag.
+        """Return a consistent generation, watermark, and failure flag.
 
         Returns:
             A snapshot of the shared record.
         """
-        generation, watermark, flags = _RECORD_STRUCT.unpack_from(self._buffer, 0)
-        return LayerProgressSnapshot(
-            generation=generation,
-            watermark=watermark,
-            retrieve_failed=bool(flags & _FLAG_RETRIEVE_FAILED),
-        )
+        while True:
+            generation, watermark, flags = _RECORD_STRUCT.unpack_from(self._buffer, 0)
+            generation_check, _, flags_check = _RECORD_STRUCT.unpack_from(
+                self._buffer, 0
+            )
+            if generation != generation_check or flags != flags_check:
+                continue
+            return LayerProgressSnapshot(
+                generation=generation,
+                watermark=watermark,
+                retrieve_failed=bool(flags & _FLAG_RETRIEVE_FAILED),
+            )
 
     def begin_retrieve(self, generation: int) -> None:
         """Start a new retrieve generation and reset progress.
@@ -128,10 +155,16 @@ class LayerProgressRecord:
         """
         if generation <= 0:
             raise ValueError("generation must be positive")
+        # Reset watermark and flags before generation (publication invariant).
+        _RECORD_STRUCT.pack_into(self._buffer, 0, 0, 0, 0)
         _RECORD_STRUCT.pack_into(self._buffer, 0, generation, 0, 0)
 
     def report_launch_recorded(self, watermark: int) -> None:
         """Publish that launches through ``watermark`` are enqueued and recorded.
+
+        The watermark counts ordinals *enqueued and recorded*, not merely
+        launched. An ordinal may advance with no transfer when its group is
+        not served by this retrieve.
 
         Args:
             watermark: Count of completed launch ordinals (inclusive), matching
@@ -152,16 +185,14 @@ class LayerProgressRecord:
         _RECORD_STRUCT.pack_into(self._buffer, 0, generation, watermark, flags)
 
 
-class LayerLaunchEventPool(Protocol):
+class LayerLaunchEventPool:
     """CUDA IPC events indexed by launch ordinal (injectable in tests)."""
 
-    def wait_on_ordinal(self, ordinal: int, wait_ordinal: int) -> None:
-        """Make the worker compute stream wait through ``wait_ordinal``.
+    def wait_on_ordinal(self, ordinal: int) -> None:
+        """Make the worker compute stream wait through ``ordinal``.
 
         Args:
             ordinal: Zero-based launch ordinal whose recording must be waited on.
-            wait_ordinal: Inclusive count from the schedule; equals
-                ``ordinal + 1`` for a tight wait on that ordinal alone.
 
         Raises:
             LayerProgressError: If the underlying event wait fails.
@@ -177,7 +208,7 @@ class LayerProgressWaiter:
         event_pool: LayerLaunchEventPool,
         *,
         poll_interval_seconds: float = 0.0001,
-        wait_timeout_seconds: float = 600.0,
+        wait_timeout_seconds: float = 5.0,
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -189,7 +220,7 @@ class LayerProgressWaiter:
             poll_interval_seconds: Sleep between shared-memory polls while
                 waiting for the watermark.
             wait_timeout_seconds: Maximum time to wait for progress before
-                raising :class:`LayerProgressRetrieveFailedError`.
+                raising a timeout error.
             monotonic: Clock for timeout measurement (injectable in tests).
             sleep: Sleep callable (injectable in tests).
         """
@@ -218,25 +249,42 @@ class LayerProgressWaiter:
 
         Args:
             generation: Retrieve generation the worker received with this load.
+                When zero or negative, the call returns immediately (no load in
+                flight for this step).
             layer_id: Global layer index vLLM is about to compute.
             schedule: Launch order for this model layout.
 
         Raises:
             LayerProgressLayerNotScheduledError: If ``layer_id`` is not in
                 ``schedule``.
-            LayerProgressStaleGenerationError: If shared memory shows a
-                different generation while this wait is in progress.
-            LayerProgressRetrieveFailedError: If the retrieve failed or progress
-                stalled beyond ``wait_timeout_seconds``.
+            LayerProgressStaleGenerationError: If shared memory shows a newer
+                generation while this wait is in progress.
+            LayerProgressRetrieveFailedError: If the daemon set the failure flag.
+            LayerProgressRetrieveGenerationTimeoutError: If the daemon never
+                published this generation before the timeout.
+            LayerProgressRetrieveProgressTimeoutError: If the watermark stalled.
+            LayerProgressIncompatibleWithCudaGraphError: Under CUDA graph capture.
         """
+        if generation <= 0:
+            return
         if layer_id not in schedule:
             raise LayerProgressLayerNotScheduledError(
                 f"layer {layer_id} is not covered by the layerwise schedule"
             )
+        is_capturing = None
+        if torch.cuda.is_available():
+            is_capturing = getattr(torch.cuda, "is_current_stream_capturing", None)
+        if is_capturing is not None and is_capturing():
+            raise LayerProgressIncompatibleWithCudaGraphError(
+                "MP layerwise load uses host-side progress polling and "
+                "cudaStreamWaitEvent inside attention; disable vLLM "
+                "full_cuda_graph (or set lmcache.mp.use_layerwise=false) "
+                "when using this feature"
+            )
         wait_ordinal = schedule.wait_ordinal(layer_id)
         launch_ordinal = wait_ordinal - 1
         self._wait_for_watermark(generation, wait_ordinal)
-        self._event_pool.wait_on_ordinal(launch_ordinal, wait_ordinal)
+        self._event_pool.wait_on_ordinal(launch_ordinal)
 
     def _wait_for_watermark(self, generation: int, wait_ordinal: int) -> None:
         deadline = self._monotonic() + self._wait_timeout_seconds
@@ -247,15 +295,29 @@ class LayerProgressWaiter:
                     "retrieve failed before layer data was reported complete; "
                     "check daemon logs for the transfer error"
                 )
-            if snapshot.generation != generation:
+            if snapshot.generation > generation:
                 raise LayerProgressStaleGenerationError(
                     f"expected retrieve generation {generation}, "
                     f"shared memory shows {snapshot.generation}"
                 )
-            if snapshot.watermark >= wait_ordinal:
-                return
+            if snapshot.generation == generation:
+                if snapshot.watermark >= wait_ordinal:
+                    return
+            elif snapshot.generation < generation:
+                pass
+            else:
+                raise LayerProgressStaleGenerationError(
+                    f"expected retrieve generation {generation}, "
+                    f"shared memory shows {snapshot.generation}"
+                )
             if self._monotonic() >= deadline:
-                raise LayerProgressRetrieveFailedError(
+                if snapshot.generation < generation:
+                    raise LayerProgressRetrieveGenerationTimeoutError(
+                        f"timed out after {self._wait_timeout_seconds}s waiting "
+                        f"for retrieve generation {generation} (shared memory "
+                        f"shows {snapshot.generation})"
+                    )
+                raise LayerProgressRetrieveProgressTimeoutError(
                     f"timed out after {self._wait_timeout_seconds}s waiting for "
                     f"launch ordinal {wait_ordinal} (watermark "
                     f"{snapshot.watermark})"
@@ -277,57 +339,63 @@ def layer_progress_shm_name(instance_id: int) -> str:
     return f"lmcache_mp_layer_progress_{instance_id}"
 
 
-class WorkerComputeLayerLaunchEventPool:
+class WorkerComputeLayerLaunchEventPool(LayerLaunchEventPool):
     """Worker-side IPC event pool waited on from the compute stream."""
 
     def __init__(
         self,
         events: list[object],
-        event_backend: _EventIPCBackendLike,
-        compute_stream: object,
+        event_backend: EventIPCBackend,
+        expected_count: int,
     ) -> None:
         """Hold imported IPC events indexed by launch ordinal.
 
         Args:
-            events: Imported events, length ``schedule.launch_count()``.
+            events: Imported events from the daemon registration response.
             event_backend: Platform :class:`EventIPCBackend` instance.
-            compute_stream: Stream vLLM uses for attention (worker compute).
+            expected_count: Expected pool size from :meth:`LayerwiseSchedule.launch_count`.
         """
-        if not events:
-            raise ValueError("events must be non-empty for layerwise mode")
+        if expected_count <= 0:
+            raise ValueError("expected_count must be positive for layerwise mode")
+        if len(events) != expected_count:
+            raise ValueError(
+                f"event pool size {len(events)} != expected {expected_count}"
+            )
         self._events = events
         self._event_backend = event_backend
-        self._compute_stream = compute_stream
 
-    def wait_on_ordinal(self, ordinal: int, wait_ordinal: int) -> None:
-        """Wait on the event recorded for ``ordinal``."""
+    def wait_on_ordinal(self, ordinal: int) -> None:
+        """Wait on the event recorded for ``ordinal`` on the current compute stream."""
         if ordinal < 0 or ordinal >= len(self._events):
             raise ValueError(
                 f"ordinal {ordinal} out of range for pool size {len(self._events)}"
             )
-        if wait_ordinal != ordinal + 1:
-            raise ValueError(
-                "wait_ordinal must equal ordinal + 1 for a tight layer wait"
-            )
-        self._event_backend.wait_event(self._events[ordinal], self._compute_stream)
+        stream = torch_dev.current_stream()
+        self._event_backend.wait_event(self._events[ordinal], stream)
 
 
 class DaemonLayerLaunchEventPool:
-    """Daemon-side pool that re-records ordinals on each retrieve."""
+    """Daemon-side pool that records ordinals on each retrieve."""
 
     def __init__(
         self,
         events: list[object],
-        event_backend: _EventIPCBackendLike,
+        event_backend: EventIPCBackend,
+        expected_count: int,
     ) -> None:
-        """Hold IPC-imported worker events for recording on the transfer stream.
+        """Hold daemon-owned IPC events for recording on the transfer stream.
 
         Args:
-            events: Events imported from the worker export at registration.
+            events: Events created on the daemon at registration.
             event_backend: Platform :class:`EventIPCBackend` instance.
+            expected_count: Expected pool size from :meth:`LayerwiseSchedule.launch_count`.
         """
-        if not events:
-            raise ValueError("events must be non-empty for layerwise mode")
+        if expected_count <= 0:
+            raise ValueError("expected_count must be positive for layerwise mode")
+        if len(events) != expected_count:
+            raise ValueError(
+                f"event pool size {len(events)} != expected {expected_count}"
+            )
         self._events = events
         self._event_backend = event_backend
 
@@ -339,7 +407,8 @@ class DaemonLayerLaunchEventPool:
             )
         self._event_backend.record_event(self._events[ordinal], stream)
 
-    @property
-    def launch_capacity(self) -> int:
-        """Return how many ordinals this pool can record."""
-        return len(self._events)
+    def export_handles(self, device: object) -> list[bytes]:
+        """Return IPC handles for all events (registration response)."""
+        return [
+            self._event_backend.export_event(event, device) for event in self._events
+        ]

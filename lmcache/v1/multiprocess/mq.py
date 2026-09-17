@@ -311,15 +311,15 @@ class MessageQueueClient:
                             type(payload).__name__
                             for payload in wrapped_request.request_payloads
                         ]
+                        request_type_name = wrapped_request.request_type.name
                         raise ValueError(
-                            f"Payload count mismatch for request "
-                            f"{wrapped_request.request_type}: "
+                            f"Payload count mismatch for {request_type_name}: "
                             f"expected {len(payload_classes)} payloads "
                             f"{expected_classes}, "
                             f"got {len(wrapped_request.request_payloads)} payloads "
                             f"{actual_classes}. "
-                            f"This is likely caused by a version mismatch between "
-                            f"the lmcache client and lmcache server."
+                            "Upgrade the LMCache MP server and all workers together "
+                            "when REGISTER_KV_CACHE or RETRIEVE payload shapes change."
                         )
 
                     b_payloads = [

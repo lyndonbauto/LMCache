@@ -5,6 +5,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from enum import Enum
+from multiprocessing import shared_memory
 from typing import Any, Protocol, cast
 import os
 
@@ -16,10 +17,14 @@ from lmcache import torch_dev
 from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints, get_device
-from lmcache.v1.multiprocess.custom_types import RegisterEngineDrivenContextPayload
+from lmcache.v1.multiprocess.custom_types import (
+    RegisterEngineDrivenContextPayload,
+    RegisterKvCacheResponse,
+)
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.layer_progress import (
+    LayerProgressError,
     LayerProgressRecord,
     LayerProgressWaiter,
     WorkerComputeLayerLaunchEventPool,
@@ -225,6 +230,8 @@ class TransferContext(ABC):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
+        use_layerwise: bool = False,
+        layerwise_wait_timeout_seconds: float = 5.0,
     ) -> None:
         """Register KV caches with the server and wait for ACK.
 
@@ -427,8 +434,10 @@ class LMCacheDrivenTransferContext(TransferContext):
         self._event_backend: EventIPCBackend | None = None
         self._layerwise_schedule: LayerwiseSchedule | None = None
         self._layer_progress_waiter: LayerProgressWaiter | None = None
+        self._layer_progress_shm: shared_memory.SharedMemory | None = None
         self._retrieve_generation: int = 0
         self._active_retrieve_generation: int = 0
+        self._layerwise_wait_timeout_seconds: float = 5.0
 
     def register(
         self,
@@ -443,6 +452,7 @@ class LMCacheDrivenTransferContext(TransferContext):
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
         use_layerwise: bool = False,
+        layerwise_wait_timeout_seconds: float = 5.0,
     ) -> None:
         """Register the worker KV cache with the LMCache server.
 
@@ -457,8 +467,10 @@ class LMCacheDrivenTransferContext(TransferContext):
             layout_hints: Optional KV-layout metadata.
             engine_group_infos: Optional engine KV-group metadata.
             engine_type: Serving engine that produced the caches.
-            use_layerwise: When True, create shared progress state and export
-                per-layer IPC events for the server to record.
+            use_layerwise: When True, create shared progress state and import
+                per-layer IPC events from the server registration response.
+            layerwise_wait_timeout_seconds: Max seconds to wait per layer when
+                layerwise mode is enabled.
 
         Raises:
             RuntimeError: If event IPC is unsupported for the KV-cache device.
@@ -469,41 +481,23 @@ class LMCacheDrivenTransferContext(TransferContext):
         event_backend.check_event_support(device)
 
         self._req_client = req_client
-        layer_event_ipc_handles: list[bytes] = []
+        self._layerwise_wait_timeout_seconds = layerwise_wait_timeout_seconds
+        progress_record: LayerProgressRecord | None = None
+        launch_count = 0
         if use_layerwise:
-            launch_count = _layerwise_launch_count(engine_group_infos)
-            if launch_count <= 0:
-                raise ValueError(
-                    "use_layerwise requires at least one layer in engine_group_infos"
-                )
-            # Standard
-            from multiprocessing import shared_memory
-
-            shm = shared_memory.SharedMemory(
-                create=True,
-                size=LayerProgressRecord.RECORD_SIZE,
-                name=layer_progress_shm_name(instance_id),
-            )
-            progress_record = LayerProgressRecord(shm.buf)
-            compute_stream = torch_dev.current_stream()
-            events: list[object] = []
-            for _ in range(launch_count):
-                event = event_backend.create_event(device)
-                event_backend.record_event(event, compute_stream)
-                events.append(event)
-                layer_event_ipc_handles.append(
-                    event_backend.export_event(event, device)
-                )
             kernel_group_layers = [
                 list(group.layer_indices) for group in engine_group_infos
             ]
             self._layerwise_schedule = LayerwiseSchedule(kernel_group_layers)
-            event_pool = WorkerComputeLayerLaunchEventPool(
-                events, event_backend, compute_stream
-            )
-            self._layer_progress_waiter = LayerProgressWaiter(
-                progress_record, event_pool
-            )
+            launch_count = self._layerwise_schedule.launch_count()
+            shm = _open_or_create_layer_progress_shm(instance_id)
+            try:
+                progress_record = LayerProgressRecord(shm.buf)
+                self._layer_progress_shm = shm
+            except Exception:
+                shm.close()
+                shm.unlink()
+                raise
         future = req_client.register_kv_cache(
             instance_id,
             wrap_kv_caches(kv_caches),
@@ -512,9 +506,50 @@ class LMCacheDrivenTransferContext(TransferContext):
             engine_type,
             layout_hints,
             list(engine_group_infos),
-            layer_event_ipc_handles,
+            [],
         )
-        future.result(timeout=mq_timeout)
+        raw_response = future.result(timeout=mq_timeout)
+        if raw_response is None:
+            register_response = RegisterKvCacheResponse(
+                server_use_layerwise=False,
+                layer_event_ipc_handles=[],
+            )
+        elif isinstance(raw_response, RegisterKvCacheResponse):
+            register_response = raw_response
+        else:
+            register_response = RegisterKvCacheResponse(
+                server_use_layerwise=False,
+                layer_event_ipc_handles=[],
+            )
+        if use_layerwise != register_response.server_use_layerwise:
+            raise ValueError(
+                "layerwise config mismatch: worker use_layerwise="
+                f"{use_layerwise}, server use_layerwise="
+                f"{register_response.server_use_layerwise}"
+            )
+        if use_layerwise:
+            if progress_record is None or self._layerwise_schedule is None:
+                raise RuntimeError("layerwise registration state incomplete")
+            if len(register_response.layer_event_ipc_handles) != launch_count:
+                raise ValueError(
+                    "layer_event_ipc_handles length "
+                    f"({len(register_response.layer_event_ipc_handles)}) must "
+                    f"equal launch count ({launch_count})"
+                )
+            imported_events = [
+                event_backend.import_event(handle, device)
+                for handle in register_response.layer_event_ipc_handles
+            ]
+            event_pool = WorkerComputeLayerLaunchEventPool(
+                imported_events,
+                event_backend,
+                launch_count,
+            )
+            self._layer_progress_waiter = LayerProgressWaiter(
+                progress_record,
+                event_pool,
+                wait_timeout_seconds=layerwise_wait_timeout_seconds,
+            )
         self._device = device
         self._event_backend = event_backend
 
@@ -697,11 +732,16 @@ class LMCacheDrivenTransferContext(TransferContext):
 
     def close(self) -> None:
         """Release the message queue and cached event-backend state."""
+        if self._layer_progress_shm is not None:
+            self._layer_progress_shm.close()
+            self._layer_progress_shm.unlink()
+            self._layer_progress_shm = None
         self._req_client = None
         self._device = None
         self._event_backend = None
         self._layerwise_schedule = None
         self._layer_progress_waiter = None
+        self._active_retrieve_generation = 0
 
     def wait_for_layer_load(self, layer_id: int) -> None:
         """Block the compute stream until ``layer_id`` has landed on the GPU.
@@ -717,22 +757,45 @@ class LMCacheDrivenTransferContext(TransferContext):
             return
         if layer_id not in self._layerwise_schedule:
             return
-        self._layer_progress_waiter.wait_for_layer(
-            self._active_retrieve_generation,
-            layer_id,
-            self._layerwise_schedule,
-        )
+        if self._active_retrieve_generation <= 0:
+            return
+        try:
+            self._layer_progress_waiter.wait_for_layer(
+                self._active_retrieve_generation,
+                layer_id,
+                self._layerwise_schedule,
+            )
+        except LayerProgressError:
+            self._active_retrieve_generation = 0
+            raise
+        if (
+            self._layerwise_schedule.wait_ordinal(layer_id)
+            == self._layerwise_schedule.launch_count()
+        ):
+            self._active_retrieve_generation = 0
 
     def flush_inflight_stores(self) -> None:
         pass
 
 
-def _layerwise_launch_count(engine_group_infos: Sequence[EngineGroupInfo]) -> int:
-    """Return how many global layers participate in engine_group_infos."""
-    layers: set[int] = set()
-    for group in engine_group_infos:
-        layers.update(group.layer_indices)
-    return len(layers)
+def _open_or_create_layer_progress_shm(instance_id: int) -> shared_memory.SharedMemory:
+    """Create the worker-owned progress segment, replacing a stale name if needed."""
+    name = layer_progress_shm_name(instance_id)
+    try:
+        return shared_memory.SharedMemory(
+            create=True,
+            size=LayerProgressRecord.RECORD_SIZE,
+            name=name,
+        )
+    except FileExistsError:
+        stale = shared_memory.SharedMemory(name=name)
+        stale.close()
+        stale.unlink()
+        return shared_memory.SharedMemory(
+            create=True,
+            size=LayerProgressRecord.RECORD_SIZE,
+            name=name,
+        )
 
 
 class EngineDrivenTransferContext(TransferContext):
@@ -773,6 +836,8 @@ class EngineDrivenTransferContext(TransferContext):
         layout_hints: LayoutHints | None = None,
         engine_group_infos: Sequence[EngineGroupInfo] = (),
         engine_type: EngineType = EngineType.VLLM,
+        use_layerwise: bool = False,
+        layerwise_wait_timeout_seconds: float = 5.0,
     ) -> None:
         """Register KV caches with the non-GPU context server.
 
@@ -783,6 +848,7 @@ class EngineDrivenTransferContext(TransferContext):
         ``_single_group_block_ids``).
         """
         del engine_type  # unused on the engine-driven path
+        del use_layerwise, layerwise_wait_timeout_seconds
         # TODO: per-group compression (EngineGroupInfo.tokens_per_block vs
         # the tensor-detected slot count, e.g. DeepSeek V4) is only handled
         # on the CUDA path. The non-CUDA path is yet to be implemented.

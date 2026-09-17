@@ -114,6 +114,11 @@ if TYPE_CHECKING:
 
 logger = lmcache_init_logger(__name__)
 
+# First Party
+from lmcache.v1.multiprocess.layer_progress import (
+    LayerProgressRetrieveGenerationTimeoutError,
+)
+
 _DCP_LAYOUT_NAMESPACE = "##lmcache-dcp-layout-v1-"
 _MAX_LCM_EXPANSION_FACTOR = 4
 
@@ -587,6 +592,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         self.lazy_offload = vllm_config.kv_transfer_config.get_from_extra_config(
             "lmcache.mp.lazy_offload", False
         )
+        self.use_layerwise = bool(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.use_layerwise", False
+            )
+        )
 
         if self.role == KVConnectorRole.SCHEDULER:
             # Banner from the scheduler role only, so tensor-parallel
@@ -627,7 +637,6 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 parallel_strategy=parallel_strategy,
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
-            self.use_layerwise = self.worker_adapter._use_layerwise
             self._layer_name_to_index: dict[str, int] = {}
             if self.transfer_intermediate_tensors:
                 # First Party
@@ -803,12 +812,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         Args:
             layer_name: vLLM KV cache layer name from the forward pass.
         """
-        if not getattr(self, "use_layerwise", False):
+        if not self.use_layerwise:
             return
         layer_id = self._layer_name_to_index.get(layer_name)
         if layer_id is None:
             return
-        self.worker_adapter.wait_for_layer_load(layer_id)
+        try:
+            self.worker_adapter.wait_for_layer_load(layer_id)
+        except LayerProgressRetrieveGenerationTimeoutError:
+            return
 
     def save_kv_layer(
         self,
@@ -1119,7 +1131,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         logger.debug(
             "vLLM hit is: %d, Need to load is %d", num_computed_tokens, need_to_load
         )
-        load_async = need_to_load > 0 and not getattr(self, "use_layerwise", False)
+        load_async = need_to_load > 0 and not self.use_layerwise
         return need_to_load, load_async
 
     def on_new_request(self, request: "Request") -> None:

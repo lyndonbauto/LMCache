@@ -188,6 +188,19 @@ class RegisterEngineDrivenContextResponse:
     pool_size: int = 0
 
 
+class RegisterKvCacheResponse(msgspec.Struct, frozen=True):
+    """Response for REGISTER_KV_CACHE.
+
+    Attributes:
+        server_use_layerwise: Whether the MP server has layerwise load enabled.
+        layer_event_ipc_handles: Daemon-owned IPC events (one per launch ordinal)
+            when layerwise is enabled on both sides; empty otherwise.
+    """
+
+    server_use_layerwise: bool = False
+    layer_event_ipc_handles: list[bytes] = []
+
+
 @dataclass
 class PrepareStoreResponse:
     """Shared response for an engine-driven store preparation."""

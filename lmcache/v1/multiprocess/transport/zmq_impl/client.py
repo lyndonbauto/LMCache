@@ -113,7 +113,7 @@ class ZmqMultiprocessClient(RequestClient):
         instance_id: int,
         block_ids: list[list[int]],
         event_ipc_handle: bytes,
-        skip_first_n_tokens: int,
+        skip_first_n_tokens: int = 0,
         retrieve_generation: int = 0,
     ) -> MessagingFuture[Any]:
         """Retrieve KV-cache blocks."""
