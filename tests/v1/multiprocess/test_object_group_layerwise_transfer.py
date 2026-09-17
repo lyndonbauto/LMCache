@@ -3,7 +3,7 @@
 
 # Standard
 from types import SimpleNamespace
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock
 
 # Third Party
 import pytest
