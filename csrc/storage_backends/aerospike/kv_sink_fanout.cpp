@@ -149,8 +149,13 @@ bool register_one_node_callback(const as_error* err, const as_node* node,
 
     as_error node_err;
     char* response = nullptr;
+    // The foreach callback hands out a const as_node* while
+    // aerospike_info_node() takes a mutable one. The client does not modify
+    // the node for an info request, so the cast is the C API's own
+    // inconsistency rather than ours.
     const as_status status = aerospike_info_node(
-        state->as, &node_err, state->policy, node, command.c_str(), &response);
+        state->as, &node_err, state->policy, const_cast<as_node*>(node),
+        command.c_str(), &response);
     if (status != AEROSPIKE_OK || response == nullptr) {
       state->result->failures.push_back(NodeRegistrationFailure{
           node_name,

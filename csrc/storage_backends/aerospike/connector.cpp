@@ -416,19 +416,38 @@ void AerospikeNativeConnector::set_plane_bytes(size_t plane_bytes) {
 
 namespace {
 
+// The C client offers no public lookup from a node name to an as_node, so we
+// hold the cluster's node array for the duration of the call and search it.
+// The reservation is what keeps the node alive: a cluster tend that drops the
+// node mid-call would otherwise free it under aerospike_info_node().
 std::string send_pipelined_info_command(aerospike* client,
                                         const std::string& node_name,
                                         const std::string& command) {
-  as_node* node =
-      as_cluster_get_node_by_name(&client->cluster, node_name.c_str());
+  as_nodes* nodes = as_nodes_reserve(client->cluster);
+  if (nodes == nullptr) {
+    throw std::runtime_error("Aerospike pipelined fetch: cluster has no nodes");
+  }
+
+  as_node* node = nullptr;
+  for (uint32_t i = 0; i < nodes->size; ++i) {
+    if (node_name == nodes->array[i]->name) {
+      node = nodes->array[i];
+      break;
+    }
+  }
+
   if (node == nullptr) {
+    as_nodes_release(nodes);
     throw std::runtime_error("Aerospike pipelined fetch: unknown node '" +
                              node_name + "'");
   }
+
   as_error err;
   char* response = nullptr;
   const as_status status = aerospike_info_node(client, &err, nullptr, node,
                                                command.c_str(), &response);
+  as_nodes_release(nodes);
+
   if (status != AEROSPIKE_OK || response == nullptr) {
     if (response != nullptr) {
       std::free(response);
