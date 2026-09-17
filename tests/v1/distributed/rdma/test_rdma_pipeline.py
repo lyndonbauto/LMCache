@@ -15,7 +15,7 @@ def test_a_layer_is_consumable_before_later_layers_arrive(
 
     This is the property the pipelining work depends on. The C++ harness
     stages ``RDMA_WRITE_WITH_IMM`` pushes through a mock Aerospike server and
-    checks, against the production ``FetchPlan`` and ``LayerReadiness``, that:
+    checks, against the production ``RequestPlan`` and ``LayerReadiness``, that:
 
     - a layer is reported ready only once every one of its pieces has landed,
     - its bytes are correct at the moment it is reported ready,

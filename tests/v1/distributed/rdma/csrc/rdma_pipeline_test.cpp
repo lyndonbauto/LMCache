@@ -26,7 +26,7 @@
 //      KV as though it were cache.
 //
 // The data path is a genuine RDMA_WRITE_WITH_IMM across the fabric, driven
-// through the production RdmaContext and the production FetchPlan /
+// through the production RdmaContext and the production RequestPlan /
 // LayerReadiness. Only the Aerospike control plane is mocked.
 //
 // Requires a working RDMA device; exits 77 (the automake "skip" convention)
@@ -56,11 +56,11 @@
 namespace {
 
 using lmcache::connector::rdma::ArrivalStatus;
-using lmcache::connector::rdma::FetchPlan;
 using lmcache::connector::rdma::LayerReadiness;
 using lmcache::connector::rdma::LocalEndpoint;
 using lmcache::connector::rdma::NodeRegistration;
 using lmcache::connector::rdma::RdmaContext;
+using lmcache::connector::rdma::RequestPlan;
 using lmcache::connector::rdma::Transport;
 using lmcache::test::KvSinkMockWriter;
 using lmcache::test::MockRecord;
@@ -78,6 +78,10 @@ constexpr uint32_t kLayerCount = 4;
 constexpr uint32_t kPiecesPerLayer = 2;
 constexpr size_t kPieceBytes = 8 * 1024;
 constexpr uint16_t kGeneration = 0x2a2a;
+// This harness drives the data path over a real fabric, so it uses a single
+// chunk to keep the mock server simple. Request-scoped bookkeeping across
+// several chunks and nodes is covered by request_plan_test.cpp.
+constexpr uint32_t kChunkId = 0;
 
 constexpr int kPollAttempts = 2000000;
 
@@ -177,12 +181,12 @@ int main(int argc, char** argv) {
 
   try {
     // ---- The plan. LMCache chooses every destination offset. ----
-    FetchPlan plan(kGeneration);
+    RequestPlan plan(kGeneration);
     for (uint32_t layer = 0; layer < kLayerCount; ++layer) {
       for (uint32_t piece = 0; piece < kPiecesPerLayer; ++piece) {
         const size_t offset =
             static_cast<size_t>(slot_index_of(layer, piece)) * kPieceBytes;
-        plan.add_slot(layer, offset, kPieceBytes);
+        plan.add_slot(layer, kChunkId, offset, kPieceBytes);
       }
     }
     check(plan.slot_count() == kLayerCount * kPiecesPerLayer,

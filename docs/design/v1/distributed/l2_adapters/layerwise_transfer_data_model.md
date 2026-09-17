@@ -3,7 +3,7 @@
 How a real KV payload maps onto per-layer RDMA delivery and per-layer
 readiness. This is the missing half of the pipelining prototype:
 [`aerospike_rdma.md`](aerospike_rdma.md) covers the *signaling* mechanism
-(`RDMA_WRITE_WITH_IMM`, `FetchPlan`, `LayerReadiness`) and proves it works,
+(`RDMA_WRITE_WITH_IMM`, `RequestPlan`, `LayerReadiness`) and proves it works,
 but it moves synthetic layers with fabricated offsets. This document defines
 the mapping from actual LMCache layout to those slots.
 
@@ -195,7 +195,7 @@ Pipelining has to reconcile four namespaces that do not line up:
 | vLLM | `layer_name` → global layer index | `wait_for_layer_load(layer_name)` |
 | Kernel dispatch | kernel group + position in `layer_indices` | `KVLayerGroupsManager.kernel_groups` |
 | Storage | `ObjectKey(chunk_hash, …, object_group_id)` | one object per *(chunk, object group)* |
-| RDMA | slot = one write's worth, named by immediate data | `FetchPlan` in `layer_pipeline.h` |
+| RDMA | slot = one write's worth of one layer of one chunk, named by immediate data | `RequestPlan` in `layer_pipeline.h` |
 
 The awkward part is that **storage has no layer coordinate at all**.
 `ObjectKey` carries `object_group_id` and nothing finer, so "layer 7 arrived"
@@ -447,8 +447,7 @@ every chunk. Chunks are distinct keys distributed across cluster nodes by
 digest, so one layer's data arrives from several nodes, via several fetch
 commands, in an order nobody controls.
 
-`LayerReadiness` as prototyped is per-fetch. It needs to become
-request-scoped:
+`LayerReadiness` as prototyped was per-fetch. It is now request-scoped:
 
 ```text
 expected(L) = Σ over participating chunks c of slots(L, c)
@@ -469,6 +468,31 @@ covers a window of chunks (`ObjectGroupInfo.sw_size_chunks`,
 wait forever. `expected(L)` must be computed from the group's own window, not
 from the request's chunk count.
 
+**Implemented.** `FetchPlan` became `RequestPlan` — the name now carries the
+invariant, since "per fetch" is the mistake — and `FetchSlot` gained a
+`chunk_id`. Three things are worth recording:
+
+- **The counting needed no new bookkeeping.** `add_slot` already tallied
+  expected counts as slots were appended, so `expected(L)` becomes the sum
+  over participating chunks purely by building one plan per request. What was
+  actually missing was chunk identity: without it a request-scoped plan cannot
+  be split back into the per-node fetch commands, which is what
+  `slots_for_chunk` is for. Slot indices stay in the request's numbering when
+  they do, which is what keeps two nodes' notifications distinguishable.
+- **No layer needs a group parameter.** A global layer index belongs to
+  exactly one kernel group and therefore exactly one object group, so the
+  window that applies to layer *L* is unambiguous and a single per-layer map
+  suffices. The same fact is why this is correct under CacheBlend without
+  special casing: a layer belongs to one leg, so per-layer counts never mix
+  legs, and where two legs cover different chunks of one layer, summing over
+  participating chunks is the intended answer.
+- **The plan does not assume a rectangular chunks × layers grid**, which is
+  what lets a sliding-window layer be ready on its own window.
+
+The test for this deliberately avoids the fabric — it is bookkeeping, not a
+data path — and was checked against the bug it exists to catch: completing a
+layer when any one chunk lands makes two of its assertions fail.
+
 ### Immediate-data budget
 
 The 32-bit immediate is `generation(16) | slot_index(16)`, capping a request at
@@ -481,7 +505,7 @@ slots ≈ chunks × layers × kv_size × pieces_per_plane
 An 80-layer model over 100 chunks with `kv_size = 2` and one piece per plane is
 16,000 — comfortable, but a 4× margin rather than a 4000× one. A long context
 with small chunks and multi-piece planes could approach the limit, and
-`FetchPlan::add_slot` throws `std::length_error` rather than silently wrapping.
+`RequestPlan::add_slot` throws `std::length_error` rather than silently wrapping.
 If that ceiling is ever reached, the fix is a coarser readiness granularity,
 not more bits.
 

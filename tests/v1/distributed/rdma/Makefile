@@ -18,6 +18,7 @@ BUILD_DIR := build
 BIN := $(BUILD_DIR)/rdma_equivalence_test
 PIPELINE_BIN := $(BUILD_DIR)/rdma_pipeline_test
 SHARD_BIN := $(BUILD_DIR)/shard_plan_test
+PLAN_BIN := $(BUILD_DIR)/request_plan_test
 
 INCLUDES := -I$(SRC_DIR) -I$(CONNECTOR_DIR)
 ifneq ($(RDMA_CORE_INCLUDE_DIR),)
@@ -41,19 +42,27 @@ COMMON_SOURCES := \
 SOURCES := $(SRC_DIR)/rdma_equivalence_test.cpp $(COMMON_SOURCES)
 PIPELINE_SOURCES := $(SRC_DIR)/rdma_pipeline_test.cpp $(COMMON_SOURCES)
 
-# The shard plan is pure arithmetic, so this one links neither libibverbs nor
-# the Aerospike client and runs anywhere. Kept as its own target so it is
-# still reachable on a box with no RDMA toolchain at all.
+# These two cover arithmetic and bookkeeping rather than the data path, so
+# they link neither libibverbs nor the Aerospike client and run anywhere.
+# Grouped as `logic` so they stay reachable on a box with no RDMA toolchain.
 SHARD_SOURCES := \
 	$(SRC_DIR)/shard_plan_test.cpp \
 	$(CONNECTOR_DIR)/shard_plan.cpp
+PLAN_SOURCES := \
+	$(SRC_DIR)/request_plan_test.cpp \
+	$(CONNECTOR_DIR)/layer_pipeline.cpp
+LOGIC_BINS := $(SHARD_BIN) $(PLAN_BIN)
 
-.PHONY: all test shard clean
-all: $(BIN) $(PIPELINE_BIN) $(SHARD_BIN)
+.PHONY: all test logic logic-test clean
+all: $(BIN) $(PIPELINE_BIN) $(LOGIC_BINS)
+
+# Build the device-independent harnesses without running them.
+logic: $(LOGIC_BINS)
 
 # Build and run only the device-independent checks.
-shard: $(SHARD_BIN)
+logic-test: $(LOGIC_BINS)
 	$(SHARD_BIN)
+	$(PLAN_BIN)
 
 $(BIN): $(SOURCES) | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(SOURCES) $(LDFLAGS) $(LDLIBS) -o $@
@@ -64,6 +73,9 @@ $(PIPELINE_BIN): $(PIPELINE_SOURCES) | $(BUILD_DIR)
 $(SHARD_BIN): $(SHARD_SOURCES) | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(SHARD_SOURCES) -o $@
 
+$(PLAN_BIN): $(PLAN_SOURCES) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(PLAN_SOURCES) -o $@
+
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
@@ -72,8 +84,9 @@ $(BUILD_DIR):
 # RDMA_DEVICE to be set too since the two are positional. Soft-RoCE on `lo`
 # needs the IPv4-mapped entry, usually index 1:
 #   make test RDMA_DEVICE=rxe0 RDMA_GID_INDEX=1
-test: $(BIN) $(PIPELINE_BIN) $(SHARD_BIN)
+test: $(BIN) $(PIPELINE_BIN) $(LOGIC_BINS)
 	$(SHARD_BIN)
+	$(PLAN_BIN)
 	$(BIN) $(RDMA_DEVICE) $(RDMA_GID_INDEX)
 	$(PIPELINE_BIN) $(RDMA_DEVICE) $(RDMA_GID_INDEX)
 

@@ -1,12 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """Pytest wrapper for the plane-aligned sharding harness.
 
-Build plumbing lives in ``conftest.py``. Unlike the other harnesses here this
-one needs no RDMA device and no Aerospike cluster.
+Build plumbing lives in ``conftest.py``. Unlike the data-path harnesses here
+this one needs no RDMA device and no Aerospike cluster.
 """
 
+# Standard
+from collections.abc import Callable
 
-def test_a_record_never_spans_two_model_layers(shard_plan_harness: str) -> None:
+
+def test_a_record_never_spans_two_model_layers(
+    logic_harness: Callable[[str], str],
+) -> None:
     """Records stay confined to one K/V plane, so each maps to one layer.
 
     This is what lets a layer-pipelined reader serve layer 0 without waiting
@@ -29,7 +34,6 @@ def test_a_record_never_spans_two_model_layers(shard_plan_harness: str) -> None:
       rather than applied to a layout it does not fit.
 
     Args:
-        shard_plan_harness: Fixture that builds and runs the harness, yielding
-            its stdout.
+        logic_harness: Fixture that builds and runs a named harness.
     """
-    assert "PASS" in shard_plan_harness
+    assert "PASS" in logic_harness("shard_plan_test")
