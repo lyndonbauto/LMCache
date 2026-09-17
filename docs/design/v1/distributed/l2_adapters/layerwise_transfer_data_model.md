@@ -127,8 +127,44 @@ prefill**:
 Long context matters *indirectly and strongly*: it is what makes a large `T`
 coexist with a small remaining `C`, because a long cached prefix with a short
 new suffix is exactly the balanced case. The causal variable is the hit-rate
-distribution of the workload, and it is currently **unmeasured** — see Open
-questions.
+distribution of the workload.
+
+#### What the distribution looks like (simulated)
+
+That distribution is now measurable without hardware. `lmcache tool
+cache-simulator hash-trace` replays a request trace through LMCache's real
+rolling chunk hashing, and the harness in the benchmarking repo prices the
+result. On **synthetic** traces at Llama-3-8B geometry (128 KiB of KV per
+token), 12.2 GB/s and 8 B active parameters:
+
+| workload | hit rate | `T` | `C_rem` | saving | saving % |
+|---|---|---|---|---|---|
+| multi-turn chat | 84.5% | 15.0 ms | 10.3 ms | 9.3 ms | 36.8% |
+| RAG | 94.2% | 47.3 ms | 10.8 ms | 2.7 ms | 4.6% |
+| scattered reuse | 21.3% | 10.5 ms | 145.0 ms | 10.2 ms | 6.6% |
+| no reuse | 0% | 0 ms | 163.8 ms | 0 ms | 0% |
+
+Two results are worth carrying forward.
+
+**Multi-turn chat sits in the sweet spot, which we did not expect.** Each turn
+appends roughly one chunk of new tokens while the cached prefix grows, so the
+uncached fraction settles at 10–30%. Sweeping message size 64→1024 tokens and
+turn count 8→24, the saving stayed within **21–39%** of the cache-hit path, so
+this is structural rather than a single parameter choice. The most common
+LMCache workload is therefore a good pipelining candidate.
+
+**A higher hit rate can mean a smaller saving.** RAG hits 94% — better than
+chat — yet saves 8× less, because a large cached document with a short question
+is transfer-bound and leaves almost no prefill to hide behind. This is the
+concrete reason the aggregate hit rate must not be used as the gate metric;
+only the distribution of the *uncached fraction* predicts the outcome.
+
+These are synthetic traces with parameters we chose, so they establish
+magnitudes and the shape of the dependence, not the answer. Real hit rates will
+be lower: synthetic reuse is exact or absent, whereas real traffic has
+near-misses that diverge mid-chunk, and rolling hashing treats everything after
+a divergence as a miss. Sourcing a production trace is the remaining part of
+the gate — see Open questions.
 
 **So this work targets:**
 
@@ -681,10 +717,14 @@ all. Regions must be enumerated per kernel group and per plane.
    question, ahead of line rate, because it decides whether pipelining has any
    regime to operate in at all. Pipelining's saving is `T(1 − 1/L)` and it is
    only realisable where prefill remains to hide behind; a workload of
-   near-complete hits realises none of it however fast the fabric is. We have
-   measured bandwidth and record-size behaviour but never the fraction of a
-   request that is typically already cached. Until that is known, the M3 gate
-   cannot be given a pass/fail threshold that means anything.
+   near-complete hits realises none of it however fast the fabric is.
+   **Partially answered.** Simulated traces now put multi-turn chat at 21–39%
+   of the cache-hit path and RAG at ~5% (see "What the distribution looks
+   like"), which is enough to set a provisional M3 threshold and enough to say
+   the work is not pointless. What remains is a *production* trace: synthetic
+   reuse is exact or absent, while real traffic diverges mid-chunk and rolling
+   hashing discards everything after the divergence, so real hit rates will be
+   lower than simulated ones by an unknown margin.
 2. **Can one request's fetch reach line rate?** The M0 sweep saw 1.88 GB/s for
    a single object with 8 workers, against a 12.2 GB/s NIC ceiling measured
    with 60 threads and 256 outstanding. Pipelining's value depends on the
