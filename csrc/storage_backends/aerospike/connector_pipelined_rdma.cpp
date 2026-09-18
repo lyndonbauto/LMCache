@@ -133,7 +133,7 @@ uint16_t AerospikePipelinedRdmaDriver::issue_pipelined_fetch(
     const std::vector<rdma::ChunkNodeBinding>& chunk_nodes,
     const std::vector<rdma::SlotDigest>& slot_digests) {
   uint16_t generation = 0;
-  std::map<std::string, std::string> commands;
+  std::vector<std::pair<std::string, std::string>> commands;
   {
     std::lock_guard<std::mutex> lock(mu_);
     if (!session_) {
@@ -160,7 +160,7 @@ uint16_t AerospikePipelinedRdmaDriver::issue_pipelined_fetch(
         throw std::runtime_error(
             "Aerospike pipelined RDMA: session ended during fetch issue");
       }
-      session_->on_node_reply(node_name, reply, generation);
+      session_->on_node_reply(node_name, command, reply, generation);
     }
   } catch (...) {
     std::lock_guard<std::mutex> lock(mu_);

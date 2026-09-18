@@ -261,7 +261,7 @@ uint16_t PipelinedFetchSession::begin_request(
   return active_generation_;
 }
 
-std::map<std::string, std::string>
+std::vector<std::pair<std::string, std::string>>
 PipelinedFetchSession::pipelined_fetch_commands() const {
   std::lock_guard<std::mutex> lock(mu_);
   if (!has_request_) {
@@ -289,16 +289,26 @@ PipelinedFetchSession::pipelined_fetch_commands() const {
               });
   }
 
-  std::map<std::string, std::string> commands;
+  std::vector<std::pair<std::string, std::string>> commands;
   for (const auto& entry : sinks_by_node) {
     const uint64_t region = registry_.region_for(entry.first);
-    commands[entry.first] = build_pipelined_fetch_command(
-        namespace_name_, region, active_generation_, entry.second);
+    const uint32_t limit = registry_.max_sinks_per_command_for(entry.first);
+    const std::vector<SinkRequest>& sinks = entry.second;
+    for (size_t offset = 0; offset < sinks.size(); offset += limit) {
+      const size_t end =
+          std::min(offset + static_cast<size_t>(limit), sinks.size());
+      const std::vector<SinkRequest> chunk(sinks.begin() + offset,
+                                           sinks.begin() + end);
+      commands.emplace_back(
+          entry.first, build_pipelined_fetch_command(
+                           namespace_name_, region, active_generation_, chunk));
+    }
   }
   return commands;
 }
 
 void PipelinedFetchSession::on_node_reply(const std::string& node_name,
+                                          const std::string& command,
                                           const std::string& reply,
                                           uint16_t generation) {
   std::lock_guard<std::mutex> lock(mu_);
@@ -306,7 +316,16 @@ void PipelinedFetchSession::on_node_reply(const std::string& node_name,
     return;
   }
 
+  const std::vector<uint16_t> command_slots =
+      pipelined_command_slot_indices(command);
   const PipelinedFetchReply parsed = parse_pipelined_fetch_reply(reply);
+  if (parsed.requested != command_slots.size()) {
+    throw std::runtime_error(
+        "PipelinedFetchSession: node '" + node_name + "' reply requested " +
+        std::to_string(parsed.requested) + " slots but the command carried " +
+        std::to_string(command_slots.size()));
+  }
+
   const size_t accounted =
       static_cast<size_t>(parsed.accepted) + parsed.failed_slots.size();
   if (accounted != parsed.requested) {
@@ -320,7 +339,15 @@ void PipelinedFetchSession::on_node_reply(const std::string& node_name,
   const std::set<uint16_t>* owned_slots =
       owned == slots_by_node_.end() ? nullptr : &owned->second;
 
+  const std::set<uint16_t> command_slot_set(command_slots.begin(),
+                                            command_slots.end());
   for (const uint16_t failed_slot : parsed.failed_slots) {
+    if (command_slot_set.find(failed_slot) == command_slot_set.end()) {
+      throw std::runtime_error(
+          "PipelinedFetchSession: node '" + node_name + "' declined slot " +
+          std::to_string(failed_slot) +
+          " which is not listed in the pipelined command that was sent");
+    }
     if (owned_slots == nullptr ||
         owned_slots->find(failed_slot) == owned_slots->end()) {
       throw std::runtime_error(

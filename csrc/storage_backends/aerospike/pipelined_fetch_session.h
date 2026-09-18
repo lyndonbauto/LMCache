@@ -91,21 +91,28 @@ class PipelinedFetchSession {
                          const std::vector<ChunkNodeBinding>& chunk_nodes,
                          const std::vector<SlotDigest>& slot_digests);
 
-  // One kv-sink-fetch-pipelined command per node that owns a chunk in the
-  // active plan. Empty when no request is active.
+  // kv-sink-fetch-pipelined commands for the active plan. A node may appear
+  // more than once when its sink count exceeds that node's
+  // max_sinks_per_command from registration. Empty when no request is active.
   //
   // Thread safety: takes `mu_`.
-  std::map<std::string, std::string> pipelined_fetch_commands() const;
+  std::vector<std::pair<std::string, std::string>> pipelined_fetch_commands()
+      const;
 
-  // Feed one node's acknowledgement string from aerospike_info_node.
+  // Feed one command's acknowledgement string from aerospike_info_node.
+  //
+  // `command` must be the exact string that was sent; reply accounting is
+  // checked against the sinks that command carried, not every sink the node
+  // owns in the request.
   //
   // Thread safety: takes `mu_`. Ignores the reply when `generation` does not
   // match the active request, when no request is active, or when the request
   // was finished or abandoned after that generation was issued. Throws
   // std::runtime_error if the reply is malformed, if accepted plus failed does
-  // not equal requested, or if a failed slot is not owned by `node_name`.
-  void on_node_reply(const std::string& node_name, const std::string& reply,
-                     uint16_t generation);
+  // not equal requested, if requested does not match the command's sink count,
+  // or if a failed slot is not listed in that command.
+  void on_node_reply(const std::string& node_name, const std::string& command,
+                     const std::string& reply, uint16_t generation);
 
   // Feed immediate data from RdmaContext::poll_notifications.
   //
