@@ -145,3 +145,83 @@ def test_transfer_kv_layerwise_records_before_watermark(
         assert record_index < watermark_index, (
             "event must be recorded before the watermark reaches that ordinal"
         )
+
+
+def test_transfer_kv_layerwise_batch_setup_once_per_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Per-batch setup must not scale with layer count."""
+    schedule = LayerwiseSchedule([[0, 2], [1, 3]])
+    buf = bytearray(LayerProgressRecord.RECORD_SIZE)
+    progress = LayerProgressRecord(buf)
+    pool = _RecordingEventPool(schedule.launch_count())
+
+    monkeypatch.setattr(
+        object_group_transfer.device_ops,
+        "multi_layer_block_kv_transfer",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        object_group_transfer, "lmcache_memcpy_async_h2d", lambda *a, **k: None
+    )
+
+    num_blocks_calls = 0
+    temp_og_buffer_calls = 0
+
+    def counting_calculate_num_blocks(tokens: int, _gid: int) -> int:
+        nonlocal num_blocks_calls
+        num_blocks_calls += 1
+        return max(1, tokens // 16)
+
+    def counting_temp_og_buffer(slot: int, _og: int) -> object:
+        nonlocal temp_og_buffer_calls
+        temp_og_buffer_calls += 1
+        return object()
+
+    cache_context = MagicMock()
+    cache_context.lmcache_tokens_per_chunk = 16
+    cache_context.max_batch_size = 4
+    cache_context.device = torch.device("cpu")
+    cache_context.stream = object()
+    cache_context.calculate_num_blocks = counting_calculate_num_blocks
+    cache_context.get_temp_object_group_buffer = counting_temp_og_buffer
+    cache_context.get_temp_kernel_group_buffer = MagicMock(
+        return_value=SimpleNamespace(data_ptr=lambda: 0)
+    )
+    cache_context.get_kernel_group_kv_pointers = MagicMock(return_value=[])
+    cache_context.get_shape_desc = MagicMock()
+    cache_context.get_slots_per_chunk_in_sw = MagicMock(return_value=16)
+    cache_context.get_engine_kv_format = MagicMock(return_value=0)
+
+    kg_manager = MagicMock()
+    kg_manager.object_groups = [
+        SimpleNamespace(kernel_group_indices=[0, 1]),
+    ]
+    attn = MagicMock()
+    attn.is_full_attention = MagicMock(return_value=True)
+    attn.num_chunks_in_sw = [-1]
+    kg_manager.get_attn_desc = MagicMock(return_value=attn)
+    kg_manager.get_subchunk_sw_size_tokens = MagicMock(return_value=16)
+    cache_context.kv_layer_groups_manager = kg_manager
+
+    memory_obj = MagicMock()
+    memory_objs = [[memory_obj]]
+    block_ids = [torch.tensor([0, 1]), torch.tensor([0, 1])]
+
+    object_group_transfer.transfer_kv_layerwise_h2d(
+        cache_context,
+        block_ids,
+        memory_objs,
+        0,
+        schedule,
+        progress,
+        pool,
+        1,
+        transfer_key="k",
+    )
+
+    num_kernel_groups = 2
+    num_batches = 1
+    assert temp_og_buffer_calls == num_batches
+    assert num_blocks_calls == 3 * num_kernel_groups * num_batches
+    assert schedule.launch_count() == 4
