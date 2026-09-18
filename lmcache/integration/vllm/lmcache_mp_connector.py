@@ -1381,6 +1381,28 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         return pending_store is not None and pending_store.has_inflight_store_work()
 
     @classmethod
+    def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
+        """Tell vLLM to use piecewise CUDA graphs when MP layerwise load is on.
+
+        Each layer wait polls shared memory and issues ``cudaStreamWaitEvent``
+        from the host inside attention. That synchronization cannot be captured
+        into a full CUDA graph: on replay the wait would be skipped and the
+        worker could compute on KV that has not landed yet.
+
+        When this returns True and the operator requested full CUDA graphs,
+        vLLM downgrades to ``CUDAGraphMode.PIECEWISE`` so attention runs in
+        an eager segment where the wait is legal—the same mechanism as the
+        non-multiprocess LMCache connector uses for ``use_layerwise``.
+
+        Args:
+            extra_config: vLLM ``kv_connector_extra_config`` dict.
+
+        Returns:
+            True when ``lmcache.mp.use_layerwise`` is enabled in extra_config.
+        """
+        return bool(extra_config.get("lmcache.mp.use_layerwise", False))
+
+    @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
         """Defer to vLLM; a connector preference is unsafe for now.
 

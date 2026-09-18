@@ -50,3 +50,18 @@ def test_scheduler_reports_synchronous_load_when_layerwise_enabled() -> None:
 
     assert need_to_load is not None and need_to_load > 0
     assert load_async is False
+
+
+def test_mp_connector_requires_piecewise_when_layerwise_enabled() -> None:
+    pytest.importorskip("vllm")
+
+    # First Party
+    from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
+
+    assert not LMCacheMPConnector.requires_piecewise_for_cudagraph({})
+    assert not LMCacheMPConnector.requires_piecewise_for_cudagraph(
+        {"lmcache.mp.use_layerwise": False}
+    )
+    assert LMCacheMPConnector.requires_piecewise_for_cudagraph(
+        {"lmcache.mp.use_layerwise": True}
+    )

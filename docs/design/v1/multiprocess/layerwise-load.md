@@ -95,6 +95,34 @@ Config (must match on worker and server):
 
 When the flag is off, layerwise code paths are inert.
 
+## CUDA graphs
+
+Layerwise load calls ``wait_for_layer_load`` from inside attention. That path
+polls shared memory and enqueues ``cudaStreamWaitEvent`` on the compute stream
+from the host. Full CUDA graph capture cannot record that host-side
+synchronization; on graph replay the wait would be elided and attention could
+run before the daemon finished the matching layer transfer.
+
+vLLM resolves this at config time: connectors implement
+``KVConnectorBase_V1.requires_piecewise_for_cudagraph``. When it returns
+``True`` and the deployment asked for full CUDA graphs, vLLM logs a warning and
+sets ``cudagraph_mode`` to ``PIECEWISE``. In piecewise mode the attention op is
+a graph split point, so the per-layer wait runs in an eager segment and remains
+correct.
+
+``LMCacheMPConnector.requires_piecewise_for_cudagraph`` returns True when
+``lmcache.mp.use_layerwise`` is set—the same spelling as the rest of this
+feature. That mirrors the non-multiprocess ``LMCacheConnectorV1`` hook, which
+returns True when ``use_layerwise`` is enabled in extra config.
+
+Trade-off: piecewise graphs retain most decode-graph wins but not the last
+slice of performance a single full graph would give. Layerwise overlap (attention
+on layer *L* while layer *L+1* transfers) is the intended win; forcing full
+graphs would silently break correctness.
+
+``LayerProgressWaiter`` still raises if the compute stream is capturing when a
+wait runs; that is an invariant backstop, not operator configuration advice.
+
 ## Unverified on this machine
 
 This development environment has **no GPU** and a CPU-only PyTorch build. The

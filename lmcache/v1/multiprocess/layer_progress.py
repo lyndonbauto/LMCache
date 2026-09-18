@@ -66,7 +66,12 @@ class LayerProgressLayerNotScheduledError(LayerProgressError):
 
 
 class LayerProgressIncompatibleWithCudaGraphError(LayerProgressError):
-    """Layerwise MP load cannot run under CUDA graph capture."""
+    """Layerwise wait ran during CUDA graph capture (should not happen).
+
+    vLLM normally downgrades to piecewise CUDA graphs when the connector
+    reports :meth:`requires_piecewise_for_cudagraph`; this error is a
+    backstop when capture is still active.
+    """
 
 
 _RECORD_STRUCT = struct.Struct("<QQI")
@@ -260,7 +265,8 @@ class LayerProgressWaiter:
             LayerProgressRetrieveGenerationTimeoutError: If the daemon never
                 published this generation before the timeout.
             LayerProgressRetrieveProgressTimeoutError: If the watermark stalled.
-            LayerProgressIncompatibleWithCudaGraphError: Under CUDA graph capture.
+            LayerProgressIncompatibleWithCudaGraphError: If the compute stream
+                is still under CUDA graph capture (invariant violation).
         """
         if generation <= 0:
             return
@@ -273,10 +279,12 @@ class LayerProgressWaiter:
             is_capturing = getattr(torch_dev, "is_current_stream_capturing", None)
         if is_capturing is not None and is_capturing():
             raise LayerProgressIncompatibleWithCudaGraphError(
-                "MP layerwise load uses host-side progress polling and "
-                "cudaStreamWaitEvent inside attention; disable vLLM "
-                "full_cuda_graph (or set lmcache.mp.use_layerwise=false) "
-                "when using this feature"
+                "invariant violation: wait_for_layer ran while the compute "
+                "stream is under CUDA graph capture; MP layerwise load "
+                "requires host-side progress polling and cudaStreamWaitEvent "
+                "in an eager segment (vLLM should select piecewise CUDA "
+                "graphs via requires_piecewise_for_cudagraph when "
+                "lmcache.mp.use_layerwise is enabled)"
             )
         wait_ordinal = schedule.wait_ordinal(layer_id)
         launch_ordinal = wait_ordinal - 1
