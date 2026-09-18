@@ -275,6 +275,36 @@ void test_register_reply_default_max_sinks_when_omitted() {
         "max_sinks token overrides the default");
 }
 
+void test_the_server_reply_is_parsed_verbatim() {
+  std::cout << "register reply as the server actually emits it\n";
+
+  // == Why these two strings are quoted literally ==
+  //
+  // The server appends max_sinks immediately after region=, before the
+  // transport's own handshake tokens. Every other test here writes the token
+  // last, so all of them would still pass if the lookup silently depended on
+  // position. These two are copied from what as_kv_sink_register_cmd emits
+  // for each transport, and exist so that a change on either side of the
+  // wire fails here rather than on a fabric nobody can run locally.
+  const NodeRegistration verbs = parse_register_reply(
+      "n1",
+      "region=7;max_sinks=256;transport=verbs;qp=srd;qpn=42;psn=9;gid=fe80");
+  check(verbs.region == 7u, "region survives a token following it");
+  check(verbs.peer.qpn == 42u, "qpn is not confused by the preceding qp=srd");
+  check(verbs.peer.psn == 9u, "psn is read from the verbs handshake");
+  check(verbs.peer.gid_hex == "fe80", "gid is the last token");
+  check(verbs.max_sinks_per_command == 256u,
+        "max_sinks is read from the middle of the reply, not just the end");
+
+  // The local transport has no describe hook, so max_sinks ends the reply.
+  // It still has to carry qpn and gid for the parser, which the pipelined
+  // path only ever reaches over verbs.
+  const NodeRegistration local =
+      parse_register_reply("n2", "region=8;qpn=1;gid=aa;max_sinks=256");
+  check(local.max_sinks_per_command == 256u,
+        "max_sinks is read when it terminates the reply");
+}
+
 }  // namespace
 
 int main() {
@@ -287,6 +317,7 @@ int main() {
     test_a_late_write_for_a_refused_slot_is_not_progress();
     test_a_plan_becomes_sinks_for_one_node();
     test_register_reply_default_max_sinks_when_omitted();
+    test_the_server_reply_is_parsed_verbatim();
   } catch (const std::exception& e) {
     std::cerr << "EXCEPTION: " << e.what() << "\n";
     return 1;
