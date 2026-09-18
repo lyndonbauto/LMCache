@@ -14,6 +14,7 @@
 
 #include "kv_sink_client.h"
 #include "layer_pipeline.h"
+#include "pipelined_fetch_issue.h"
 #include "pipelined_fetch_session.h"
 #include "shard_plan.h"
 #include "slot_planner.h"
@@ -71,10 +72,11 @@ ObjectGroupLayout single_group_layout(uint32_t layers, uint32_t kv_size = 1,
 }
 
 void register_node(NodeRegistry& registry, const std::string& name,
-                   uint64_t region) {
+                   uint64_t region, uint32_t max_sinks_per_command = 256) {
   NodeRegistration reg;
   reg.node_name = name;
   reg.region = region;
+  reg.max_sinks_per_command = max_sinks_per_command;
   reg.valid = true;
   registry.set(reg);
 }
@@ -155,6 +157,29 @@ std::vector<uint16_t> slot_indices_in_command(const std::string& command) {
   return slots;
 }
 
+std::vector<std::string> commands_for_node(
+    const std::vector<std::pair<std::string, std::string>>& commands,
+    const std::string& node_name) {
+  std::vector<std::string> out;
+  for (const auto& entry : commands) {
+    if (entry.first == node_name) {
+      out.push_back(entry.second);
+    }
+  }
+  return out;
+}
+
+std::set<uint16_t> all_slots_in_commands(
+    const std::vector<std::string>& commands) {
+  std::set<uint16_t> slots;
+  for (const std::string& command : commands) {
+    for (const uint16_t slot : slot_indices_in_command(command)) {
+      slots.insert(slot);
+    }
+  }
+  return slots;
+}
+
 void test_multi_node_request_shares_one_slot_index_space() {
   std::cout << "multi-node request shares one slot index space\n";
 
@@ -183,14 +208,14 @@ void test_multi_node_request_shares_one_slot_index_space() {
       placements, nodes,
       digests_for_plan(planner, expected_plan, placements, kRecordCap, "aa"));
 
-  const std::map<std::string, std::string> commands =
+  const std::vector<std::pair<std::string, std::string>> commands =
       session.pipelined_fetch_commands();
   check(commands.size() == 2, "two nodes each receive one command");
 
   const std::vector<uint16_t> slots_a =
-      slot_indices_in_command(commands.at("node-a"));
+      slot_indices_in_command(commands_for_node(commands, "node-a").at(0));
   const std::vector<uint16_t> slots_b =
-      slot_indices_in_command(commands.at("node-b"));
+      slot_indices_in_command(commands_for_node(commands, "node-b").at(0));
   check(slots_a == std::vector<uint16_t>({0, 2}),
         "node-a carries slots 0 and 2 from the shared numbering");
   check(slots_b == std::vector<uint16_t>({1, 3}),
@@ -221,8 +246,8 @@ void test_one_node_two_chunks_orders_sinks_by_slot() {
       placements, nodes,
       digests_for_plan(planner, plan, placements, kRecordCap, "bb"));
 
-  const std::vector<uint16_t> slots =
-      slot_indices_in_command(session.pipelined_fetch_commands().at("node-a"));
+  const std::vector<uint16_t> slots = slot_indices_in_command(
+      commands_for_node(session.pipelined_fetch_commands(), "node-a").at(0));
   check(std::is_sorted(slots.begin(), slots.end()),
         "sink slot suffixes are ascending");
   session.finish_request();
@@ -249,7 +274,10 @@ void test_failed_slot_makes_one_layer_recompute() {
       placements, nodes,
       digests_for_plan(planner, plan, placements, kRecordCap, "dd"));
 
-  session.on_node_reply("node-a", "n=2;accepted=1;failed=0;bytes=1", gen);
+  const std::string command =
+      commands_for_node(session.pipelined_fetch_commands(), "node-a").at(0);
+  session.on_node_reply("node-a", command, "n=2;accepted=1;failed=0;bytes=1",
+                        gen);
 
   check(!session.is_layer_ready(0),
         "layer 0 is not ready when one of its slots was declined");
@@ -326,7 +354,7 @@ void test_abandon_makes_late_reply_harmless() {
           placements, kRecordCap, "d"));
   check(session.has_active_request(), "a new request can start after abandon");
 
-  session.on_node_reply("node-a", "n=1;accepted=0;failed=0;bytes=0",
+  session.on_node_reply("node-a", "ignored", "n=1;accepted=0;failed=0;bytes=0",
                         abandoned_gen);
   check(session.unservable_layers().empty(),
         "a late reply after the next begin_request does not poison readiness");
@@ -404,6 +432,190 @@ void test_begin_request_rejects_second_active() {
   session.finish_request();
 }
 
+void test_chunking_splits_at_exact_multiple_of_limit() {
+  std::cout << "chunking splits at exact multiple of limit\n";
+
+  constexpr uint32_t kLimit = 64;
+  const ObjectGroupLayout layout = single_group_layout(128);
+  const SlotPlanner planner({layout});
+  NodeRegistry registry;
+  register_node(registry, "node-a", 1, kLimit);
+  PipelinedFetchSession session = make_session(planner, registry);
+
+  const std::vector<ChunkPlacement> placements = {ChunkPlacement{0, 0, 0}};
+  const std::vector<ChunkNodeBinding> nodes = {{0, "node-a"}};
+  const auto plan = planner.plan_request(placements, kRecordCap, kWriteCap, 0);
+  session.begin_request(
+      placements, nodes,
+      digests_for_plan(planner, plan, placements, kRecordCap, "em"));
+
+  const std::vector<std::string> node_commands =
+      commands_for_node(session.pipelined_fetch_commands(), "node-a");
+  check(node_commands.size() == 2,
+        "128 sinks at limit 64 produce exactly two commands");
+  check(slot_indices_in_command(node_commands[0]).size() == kLimit,
+        "first command is full");
+  check(slot_indices_in_command(node_commands[1]).size() == kLimit,
+        "second command is full");
+  session.finish_request();
+}
+
+void test_chunking_splits_with_remainder() {
+  std::cout << "chunking splits with remainder\n";
+
+  constexpr uint32_t kLimit = 64;
+  const ObjectGroupLayout layout = single_group_layout(100);
+  const SlotPlanner planner({layout});
+  NodeRegistry registry;
+  register_node(registry, "node-a", 1, kLimit);
+  PipelinedFetchSession session = make_session(planner, registry);
+
+  const std::vector<ChunkPlacement> placements = {ChunkPlacement{0, 0, 0}};
+  const std::vector<ChunkNodeBinding> nodes = {{0, "node-a"}};
+  const auto plan = planner.plan_request(placements, kRecordCap, kWriteCap, 0);
+  session.begin_request(
+      placements, nodes,
+      digests_for_plan(planner, plan, placements, kRecordCap, "rm"));
+
+  const std::vector<std::string> node_commands =
+      commands_for_node(session.pipelined_fetch_commands(), "node-a");
+  check(node_commands.size() == 2,
+        "100 sinks at limit 64 produce two commands");
+  check(slot_indices_in_command(node_commands[0]).size() == kLimit,
+        "first command carries a full chunk");
+  check(slot_indices_in_command(node_commands[1]).size() == 36,
+        "second command carries the remainder");
+  session.finish_request();
+}
+
+void test_chunking_union_covers_every_node_sink_once() {
+  std::cout << "chunking union covers every node sink once\n";
+
+  constexpr uint32_t kLimit = 30;
+  const ObjectGroupLayout layout = single_group_layout(95);
+  const SlotPlanner planner({layout});
+  NodeRegistry registry;
+  register_node(registry, "node-a", 1, kLimit);
+  PipelinedFetchSession session = make_session(planner, registry);
+
+  const std::vector<ChunkPlacement> placements = {ChunkPlacement{0, 0, 0}};
+  const std::vector<ChunkNodeBinding> nodes = {{0, "node-a"}};
+  const auto plan = planner.plan_request(placements, kRecordCap, kWriteCap, 0);
+  session.begin_request(
+      placements, nodes,
+      digests_for_plan(planner, plan, placements, kRecordCap, "un"));
+
+  std::set<uint16_t> expected;
+  for (const uint16_t slot : plan.slots_for_chunk(0)) {
+    expected.insert(slot);
+  }
+  const std::set<uint16_t> got = all_slots_in_commands(
+      commands_for_node(session.pipelined_fetch_commands(), "node-a"));
+  check(got == expected, "command slots equal the unchunked set");
+  check(got.size() == plan.slot_count(), "no duplicate slot indices");
+  session.finish_request();
+}
+
+void test_chunking_preserves_ascending_slot_order_across_commands() {
+  std::cout << "chunking preserves ascending slot order across commands\n";
+
+  constexpr uint32_t kLimit = 40;
+  const ObjectGroupLayout layout = single_group_layout(125);
+  const SlotPlanner planner({layout});
+  NodeRegistry registry;
+  register_node(registry, "node-a", 1, kLimit);
+  PipelinedFetchSession session = make_session(planner, registry);
+
+  const std::vector<ChunkPlacement> placements = {ChunkPlacement{0, 0, 0}};
+  const std::vector<ChunkNodeBinding> nodes = {{0, "node-a"}};
+  const auto plan = planner.plan_request(placements, kRecordCap, kWriteCap, 0);
+  session.begin_request(
+      placements, nodes,
+      digests_for_plan(planner, plan, placements, kRecordCap, "ord"));
+
+  std::vector<uint16_t> sequence;
+  for (const std::string& command :
+       commands_for_node(session.pipelined_fetch_commands(), "node-a")) {
+    const std::vector<uint16_t> slots = slot_indices_in_command(command);
+    check(std::is_sorted(slots.begin(), slots.end()),
+          "each command keeps sinks sorted by slot");
+    sequence.insert(sequence.end(), slots.begin(), slots.end());
+  }
+  check(std::is_sorted(sequence.begin(), sequence.end()),
+        "concatenated command order is globally ascending");
+  check(!sequence.empty() && sequence.front() == 0,
+        "first command still holds the earliest slots");
+  session.finish_request();
+}
+
+void test_two_nodes_chunk_with_independent_limits() {
+  std::cout << "two nodes chunk with independent limits\n";
+
+  const ObjectGroupLayout layout = single_group_layout(35);
+  const SlotPlanner planner({layout});
+  const size_t object_bytes = object_group_bytes(layout);
+  NodeRegistry registry;
+  register_node(registry, "node-a", 10, 30);
+  register_node(registry, "node-b", 20, 10);
+  PipelinedFetchSession session = make_session(planner, registry);
+
+  const std::vector<ChunkPlacement> placements = {
+      ChunkPlacement{0, 0, 0},
+      ChunkPlacement{1, 0, object_bytes},
+  };
+  const std::vector<ChunkNodeBinding> nodes = {{0, "node-a"}, {1, "node-b"}};
+  const auto plan = planner.plan_request(placements, kRecordCap, kWriteCap, 0);
+  session.begin_request(
+      placements, nodes,
+      digests_for_plan(planner, plan, placements, kRecordCap, "ind"));
+
+  const auto commands = session.pipelined_fetch_commands();
+  check(commands_for_node(commands, "node-a").size() == 2,
+        "node-a limit 30 splits 35 sinks into two commands");
+  check(commands_for_node(commands, "node-b").size() == 4,
+        "node-b limit 10 splits 35 sinks into four commands");
+  session.finish_request();
+}
+
+void test_rejected_second_command_marks_unservable() {
+  std::cout << "rejected second command marks unservable\n";
+
+  constexpr uint32_t kLimit = 256;
+  const ObjectGroupLayout layout = single_group_layout(300);
+  const SlotPlanner planner({layout});
+  NodeRegistry registry;
+  register_node(registry, "node-a", 1, kLimit);
+  PipelinedFetchSession session = make_session(planner, registry);
+
+  const std::vector<ChunkPlacement> placements = {ChunkPlacement{0, 0, 0}};
+  const std::vector<ChunkNodeBinding> nodes = {{0, "node-a"}};
+  const auto plan = planner.plan_request(placements, kRecordCap, kWriteCap, 0);
+  const uint16_t gen = session.begin_request(
+      placements, nodes,
+      digests_for_plan(planner, plan, placements, kRecordCap, "rej"));
+
+  const std::vector<std::string> node_commands =
+      commands_for_node(session.pipelined_fetch_commands(), "node-a");
+  check(node_commands.size() == 2, "300 sinks split at 256");
+
+  session.on_node_reply("node-a", node_commands[0],
+                        "n=256;accepted=256;bytes=1", gen);
+  session.on_node_reply(
+      "node-a", node_commands[1],
+      lmcache::connector::rdma::declined_reply_for_command(node_commands[1]),
+      gen);
+
+  check(session.unservable_layers().size() == 44,
+        "declined second command marks its layers unservable");
+  check(!session.is_layer_ready(299),
+        "a layer whose slots were declined is not ready");
+  check(std::find(session.unservable_layers().begin(),
+                  session.unservable_layers().end(),
+                  256) != session.unservable_layers().end(),
+        "a slot from the rejected command appears among unservable layers");
+  session.finish_request();
+}
+
 }  // namespace
 
 int main() {
@@ -416,6 +628,12 @@ int main() {
     test_kv_size_two_requires_both_planes();
     test_begin_request_rejects_missing_digest();
     test_begin_request_rejects_second_active();
+    test_chunking_splits_at_exact_multiple_of_limit();
+    test_chunking_splits_with_remainder();
+    test_chunking_union_covers_every_node_sink_once();
+    test_chunking_preserves_ascending_slot_order_across_commands();
+    test_two_nodes_chunk_with_independent_limits();
+    test_rejected_second_command_marks_unservable();
   } catch (const std::exception& e) {
     std::cerr << "EXCEPTION: " << e.what() << "\n";
     return 1;

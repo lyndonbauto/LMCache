@@ -40,8 +40,11 @@ namespace {
 using lmcache::connector::rdma::ArrivalStatus;
 using lmcache::connector::rdma::build_pipelined_fetch_command;
 using lmcache::connector::rdma::encode_immediate;
+using lmcache::connector::rdma::kDefaultMaxSinksPerPipelinedCommand;
 using lmcache::connector::rdma::LayerReadiness;
+using lmcache::connector::rdma::NodeRegistration;
 using lmcache::connector::rdma::parse_pipelined_fetch_reply;
+using lmcache::connector::rdma::parse_register_reply;
 using lmcache::connector::rdma::PipelinedFetchReply;
 using lmcache::connector::rdma::RequestPlan;
 using lmcache::connector::rdma::SinkRequest;
@@ -257,6 +260,21 @@ void test_a_plan_becomes_sinks_for_one_node() {
         "the other node's slots are absent");
 }
 
+void test_register_reply_default_max_sinks_when_omitted() {
+  std::cout << "register reply default max_sinks when omitted\n";
+
+  const NodeRegistration without_token =
+      parse_register_reply("n1", "region=1;qpn=2;gid=aa");
+  check(without_token.max_sinks_per_command ==
+            kDefaultMaxSinksPerPipelinedCommand,
+        "missing max_sinks falls back to the historical 256 cap");
+
+  const NodeRegistration with_token =
+      parse_register_reply("n2", "region=1;qpn=2;gid=bb;max_sinks=512");
+  check(with_token.max_sinks_per_command == 512u,
+        "max_sinks token overrides the default");
+}
+
 }  // namespace
 
 int main() {
@@ -268,6 +286,7 @@ int main() {
     test_a_refused_slot_does_not_hang_its_layer();
     test_a_late_write_for_a_refused_slot_is_not_progress();
     test_a_plan_becomes_sinks_for_one_node();
+    test_register_reply_default_max_sinks_when_omitted();
   } catch (const std::exception& e) {
     std::cerr << "EXCEPTION: " << e.what() << "\n";
     return 1;

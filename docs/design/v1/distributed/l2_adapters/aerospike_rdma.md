@@ -54,8 +54,17 @@ kv-sink-register:transport=verbs;gid=<32 hex>;qpn=<u32>;psn=<u32>;
 Reply:
 
 ```text
-region=4;transport=verbs;qp=srd;qpn=49152;psn=..;gid=..
+region=4;transport=verbs;qp=srd;qpn=49152;psn=..;gid=..;max_sinks=256
 ```
+
+`max_sinks` is the maximum number of sinks this node accepts in one
+`kv-sink-fetch-pipelined` command. It is **per node**: a cluster mid-upgrade
+may advertise different values, and the client chunks each node's fanout
+against that node's own limit, never a cluster-wide minimum. When the token is
+absent — servers built before the field existed — the client assumes
+**256**, the historical fixed parse buffer on the server, rather than treating
+omission as unlimited. An unlimited default would rebuild the single oversized
+command every node already rejects.
 
 The reply hands back a `region` handle **scoped to the node that answered**, so
 registration is inherently per-node. `aerospike_info_any()` sends to an
@@ -453,11 +462,11 @@ command builder, reply parser and declined-write handling live in
 `kv_sink_client.h` and `layer_pipeline.h`. `PipelinedFetchSession` in
 `pipelined_fetch_session.{h,cpp}` is the **implemented** driver that ties
 them together: it allocates a per-request generation, builds a `RequestPlan`
-via `SlotPlanner`, fans out one `kv-sink-fetch-pipelined` command per node,
-feeds declined slots from each reply into `LayerReadiness::note_unservable`,
-and drains `RdmaContext::poll_notifications` into the same tracker. It
-performs no I/O itself — the connector issues the info calls and forwards
-reply strings. `AerospikeNativeConnector` exposes this path only when
+via `SlotPlanner`, fans out one or more `kv-sink-fetch-pipelined` commands per
+node (each carrying at most that node's advertised `max_sinks`), feeds declined
+slots from each reply into `LayerReadiness::note_unservable`, and drains
+`RdmaContext::poll_notifications` into the same tracker. It performs no I/O
+itself — the connector issues the info calls and forwards reply strings. `AerospikeNativeConnector` exposes this path only when
 `BUILD_WITH_AEROSPIKE_RDMA` is enabled and `kv-sink-register` has succeeded;
 the TCP get/set path is unchanged otherwise. Python reaches per-layer
 readiness through `StorageManager.is_pipelined_layer_ready`, mirroring
@@ -556,10 +565,37 @@ On the LMCache side the schedule comes from `SlotPlanner` in
 `slot_planner.h` — it walks (chunk, layer, K/V plane, record) and produces
 exactly these sinks, layer-major, with the offsets already resolved against
 the leased window. `RequestPlan::slots_for_chunk` then partitions that
-schedule by chunk, so each node receives a command naming only its own
-chunks while the slot indices stay in the request's numbering.
+schedule by chunk, so each node receives commands naming only its own
+chunks while the slot indices stay in the request's numbering. Sinks for one
+node are sorted by slot (layer-major order from the plan) and sliced into
+segments of at most `max_sinks_per_command`; the first command holds the
+earliest slots so the server still sees low layers first across the sequence.
 `build_pipelined_fetch_command` refuses a sink list with a repeated slot index,
 which is the mistake that per-fetch numbering would produce.
+
+#### Multiple commands per node vs splitting a request
+
+**Status: implemented in the client.**
+
+When a node owns more sinks than its advertised `max_sinks`, the session emits
+`ceil(count / max_sinks)` pipelined commands for that node alone. This is safe
+in a way that splitting the **request** would not be: slot indices and the
+generation in each immediate are scoped to one request, so every command for
+that request carries the **same** `gen`, and `LayerReadiness` cannot tell — and
+does not need to know — how many commands delivered the slots that filled a
+layer. Splitting a request would require several generations, several readiness
+tables, and a cross-request rule before a layer may be consumed; none of that
+exists on the wire or in the vLLM integration, and reporting a layer ready while
+part of it is still in flight on another sub-request is exactly the failure this
+design exists to prevent.
+
+Reply accounting is **per command**: each acknowledgement is checked against the
+sinks that specific command carried (`accepted + failed == n`, and `n` matches
+the command), not against every sink the node owns in the request. A partial
+failure across commands for one node — the first command accepted, the second
+rejected outright — marks the second command's slots via `note_unservable` so
+the request reaches a defined state instead of waiting forever on writes nobody
+will perform.
 
 #### Receive queue depth and device limits
 

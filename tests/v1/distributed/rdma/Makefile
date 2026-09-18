@@ -71,6 +71,7 @@ CODEC_SOURCES := \
 SESSION_SOURCES := \
 	$(SRC_DIR)/pipelined_fetch_session_test.cpp \
 	$(CONNECTOR_DIR)/pipelined_fetch_session.cpp \
+	$(CONNECTOR_DIR)/pipelined_fetch_issue.cpp \
 	$(CONNECTOR_DIR)/kv_sink_client.cpp \
 	$(CONNECTOR_DIR)/layer_pipeline.cpp \
 	$(CONNECTOR_DIR)/slot_planner.cpp \
