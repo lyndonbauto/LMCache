@@ -227,11 +227,14 @@ uint16_t PipelinedFetchSession::begin_request(
   RequestPlan plan = planner_.plan_request(placements, max_record_bytes_,
                                            max_write_bytes_, generation);
   if (plan.slot_count() > max_notification_slots_) {
-    throw std::runtime_error("PipelinedFetchSession: plan requires " +
-                             std::to_string(plan.slot_count()) +
-                             " notification slots but the "
-                             "queue pair was built for at most " +
-                             std::to_string(max_notification_slots_));
+    throw std::runtime_error(
+        "PipelinedFetchSession: plan requires " +
+        std::to_string(plan.slot_count()) + " notification slots but at most " +
+        std::to_string(max_notification_slots_) +
+        " can be posted on this device's queue pair (each pipelined write "
+        "consumes one receive work request). Use fewer chunks in one request, "
+        "raise the record cap so each K/V plane needs fewer pieces, or use "
+        "hardware that reports a higher max_recv_wr");
   }
   validate_slots_in_window(plan, window_bytes_);
 

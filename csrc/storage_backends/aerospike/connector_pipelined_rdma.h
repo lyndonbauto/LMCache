@@ -91,7 +91,7 @@ class AerospikePipelinedRdmaDriver {
 
  private:
   void ensure_session();
-  uint32_t notification_depth_cap() const;
+  uint32_t desired_notification_depth() const;
 
   L1RdmaRegistration registration_;
   std::string namespace_name_;
@@ -108,6 +108,8 @@ class AerospikePipelinedRdmaDriver {
   rdma::NodeRegistry registry_;
   std::unique_ptr<rdma::SlotPlanner> planner_;
   std::unique_ptr<rdma::PipelinedFetchSession> session_;
+
+  uint32_t max_notification_slots_ = 0;
 };
 
 }  // namespace connector

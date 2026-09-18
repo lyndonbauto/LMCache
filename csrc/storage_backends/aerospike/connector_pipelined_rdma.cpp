@@ -5,8 +5,8 @@
   #include "connector_pipelined_rdma.h"
 
   #include "kv_sink_fanout.h"
+  #include "notification_depth.h"
 
-  #include <algorithm>
   #include <stdexcept>
   #include <utility>
 
@@ -41,14 +41,9 @@ std::string AerospikePipelinedRdmaDriver::init_error_message() const {
   return init_error_;
 }
 
-uint32_t AerospikePipelinedRdmaDriver::notification_depth_cap() const {
-  if (max_record_bytes_ == 0 || registration_.window_bytes == 0) {
-    return 1;
-  }
-  const size_t slots =
-      (registration_.window_bytes + max_record_bytes_ - 1) / max_record_bytes_;
-  return static_cast<uint32_t>(
-      std::min(slots, static_cast<size_t>(rdma::kMaxSlotsPerRequest)));
+uint32_t AerospikePipelinedRdmaDriver::desired_notification_depth() const {
+  return rdma::desired_notification_depth(registration_.window_bytes,
+                                          max_record_bytes_);
 }
 
 void AerospikePipelinedRdmaDriver::initialize(aerospike* client) {
@@ -78,7 +73,8 @@ void AerospikePipelinedRdmaDriver::initialize(aerospike* client) {
     context_ = std::make_unique<rdma::RdmaContext>(
         registration_.device_name,
         static_cast<uint8_t>(registration_.gid_index), transport);
-    context_->enable_layer_notifications(notification_depth_cap());
+    context_->enable_layer_notifications(desired_notification_depth());
+    max_notification_slots_ = context_->notification_depth();
     context_->register_l1(reinterpret_cast<void*>(registration_.base),
                           registration_.size,
                           window_plan_from_registration(registration_));
@@ -104,12 +100,14 @@ void AerospikePipelinedRdmaDriver::initialize(aerospike* client) {
   } catch (const std::exception& e) {
     init_error_ = e.what();
     context_.reset();
+    max_notification_slots_ = 0;
     fabric_ready_ = false;
     session_.reset();
     throw;
   } catch (...) {
     init_error_ = "unknown error during pipelined RDMA initialization";
     context_.reset();
+    max_notification_slots_ = 0;
     fabric_ready_ = false;
     session_.reset();
     throw;
@@ -254,7 +252,7 @@ void AerospikePipelinedRdmaDriver::ensure_session() {
   }
   session_ = std::make_unique<rdma::PipelinedFetchSession>(
       *planner_, registry_, namespace_name_, max_record_bytes_,
-      max_record_bytes_, registration_.window_bytes, notification_depth_cap());
+      max_record_bytes_, registration_.window_bytes, max_notification_slots_);
   session_->restore_generation_counter(next_generation_);
 }
 

@@ -83,10 +83,10 @@ class PipelinedFetchSession {
   // Build a new request plan and readiness tracker.
   //
   // Thread safety: takes `mu_`. Throws std::runtime_error if a request is
-  // already active, if `slot_count()` exceeds `max_notification_slots_`, if a
-  // planned slot falls outside `window_bytes_`, if a digest is missing, or if
-  // any exception SlotPlanner::plan_request may throw. Throws
-  // std::invalid_argument if a chunk lacks a node binding.
+  // already active, if `slot_count()` exceeds the device-derived
+  // `max_notification_slots_`, if a planned slot falls outside `window_bytes_`,
+  // if a digest is missing, or if any exception SlotPlanner::plan_request may
+  // throw. Throws std::invalid_argument if a chunk lacks a node binding.
   uint16_t begin_request(const std::vector<ChunkPlacement>& placements,
                          const std::vector<ChunkNodeBinding>& chunk_nodes,
                          const std::vector<SlotDigest>& slot_digests);

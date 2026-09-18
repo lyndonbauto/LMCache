@@ -124,6 +124,7 @@ class AerospikeStorageBackend(StorageBackendProfile):
             # Only now do we take a hard dependency on rdma-core. Everything
             # above must keep working on a host without libibverbs.
             sources.append("csrc/storage_backends/aerospike/rdma_context.cpp")
+            sources.append("csrc/storage_backends/aerospike/notification_depth.cpp")
             sources.append("csrc/storage_backends/aerospike/kv_sink_client.cpp")
             sources.append("csrc/storage_backends/aerospike/kv_sink_fanout.cpp")
             # No verbs dependency of its own, but built here so a break in the

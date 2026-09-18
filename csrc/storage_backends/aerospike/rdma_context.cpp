@@ -211,6 +211,18 @@ RdmaContext::RdmaContext(const std::string& device_name, uint8_t gid_index,
     throw_verbs("ibv_open_device");
   }
 
+  ibv_device_attr device_attr{};
+  if (ibv_query_device(impl_->ctx, &device_attr) != 0) {
+    throw_verbs("ibv_query_device");
+  }
+  if (device_attr.max_qp_wr <= 0 || device_attr.max_cq <= 0) {
+    throw std::runtime_error(
+        "ibv_query_device returned non-positive max_qp_wr or max_cq");
+  }
+  device_caps_.max_recv_wr_per_qp =
+      static_cast<uint32_t>(device_attr.max_qp_wr);
+  device_caps_.max_cq_entries = static_cast<uint32_t>(device_attr.max_cq);
+
   impl_->pd = ibv_alloc_pd(impl_->ctx);
   if (impl_->pd == nullptr) {
     throw_verbs("ibv_alloc_pd");
@@ -491,7 +503,25 @@ void RdmaContext::enable_layer_notifications(uint32_t depth) {
         "notification depth must be positive; pass the slot count of the "
         "largest planned fetch");
   }
+  notification_depth_requested_ = depth;
   notification_depth_ = depth;
+  if (device_caps_.max_recv_wr_per_qp != 0) {
+    notification_depth_ =
+        std::min(notification_depth_, device_caps_.max_recv_wr_per_qp);
+  }
+  if (device_caps_.max_cq_entries != 0) {
+    notification_depth_ =
+        std::min(notification_depth_, device_caps_.max_cq_entries);
+  }
+  if (notification_depth_ == 0) {
+    notification_depth_ = 1;
+  }
+  std::fprintf(stderr,
+               "LMCache Aerospike RDMA: device '%s' reports max_recv_wr=%u "
+               "max_cq=%u; notification depth requested=%u effective=%u\n",
+               device_name_.c_str(), device_caps_.max_recv_wr_per_qp,
+               device_caps_.max_cq_entries, notification_depth_requested_,
+               notification_depth_);
 }
 
 void RdmaContext::arm_notifications() {

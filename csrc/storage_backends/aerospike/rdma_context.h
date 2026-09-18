@@ -29,6 +29,8 @@
 // an AH for the server the server's RDMA write fails with UNKNOWN_PEER, which
 // is very hard to diagnose from the receiving side.
 
+#include "notification_depth.h"
+
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -159,6 +161,16 @@ class RdmaContext {
 
   uint32_t notification_depth() const { return notification_depth_; }
 
+  // Depth passed to enable_layer_notifications() before device clamping.
+  //
+  // Zero when notifications were never enabled.
+  uint32_t notification_depth_requested() const {
+    return notification_depth_requested_;
+  }
+
+  // Receive-path limits from ibv_query_device at device open time.
+  const RdmaDeviceCaps& device_caps() const { return device_caps_; }
+
   // Number of registered windows, i.e. the max concurrent RDMA fetches.
   uint32_t window_count() const {
     return static_cast<uint32_t>(local_.windows.size());
@@ -231,6 +243,8 @@ class RdmaContext {
   Transport transport_;
   LocalEndpoint local_;
   bool registered_ = false;
+  RdmaDeviceCaps device_caps_;
+  uint32_t notification_depth_requested_ = 0;
   uint32_t notification_depth_ = 0;
 };
 
