@@ -115,6 +115,17 @@ correct.
 feature. That mirrors the non-multiprocess ``LMCacheConnectorV1`` hook, which
 returns True when ``use_layerwise`` is enabled in extra config.
 
+This hook only fires for the connector class vLLM actually loads, and that is
+not always this one. vLLM vendors a fallback copy of the multiprocess connector
+(``LMCacheMPConnectorUpstream``) and, at import time, prefers the external class
+from ``lmcache.integration.vllm.lmcache_mp_connector`` whenever ``lmcache`` is
+importable. So an LMCache deployment gets this implementation, but a deployment
+that sets ``LMCACHE_USE_UPSTREAM_MP`` or runs an LMCache too old to ship the
+submodule falls back to vLLM's copy, which has no layerwise support and does not
+override the hook. There ``lmcache.mp.use_layerwise`` is silently ignored: no
+layerwise load, and no piecewise downgrade either. That is safe—the feature is
+simply off—but it means the flag alone is not evidence that layerwise is running.
+
 Trade-off: piecewise graphs retain most decode-graph wins but not the last
 slice of performance a single full graph would give. Layerwise overlap (attention
 on layer *L* while layer *L+1* transfers) is the intended win; forcing full
