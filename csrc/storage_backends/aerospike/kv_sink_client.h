@@ -76,6 +76,11 @@ struct PipelinedFetchReply {
   }
 };
 
+// Historical server cap on sinks per kv-sink-fetch-pipelined command, used when
+// a register reply omits max_sinks. Treating absence as unlimited would rebuild
+// the single-command fanout that every node rejected before the token existed.
+constexpr uint32_t kDefaultMaxSinksPerPipelinedCommand = 256;
+
 // Per-node registration state. The region id is connection-lifetime: it must
 // be invalidated when the slab is re-registered or the node restarts, because
 // a stale id points at memory the server still believes it may write.
@@ -83,6 +88,9 @@ struct NodeRegistration {
   std::string node_name;
   uint64_t region = 0;
   PeerEndpoint peer;
+  // From kv-sink-register `max_sinks`, or kDefaultMaxSinksPerPipelinedCommand
+  // when the server omits the field (pre-advertisement builds).
+  uint32_t max_sinks_per_command = kDefaultMaxSinksPerPipelinedCommand;
   bool valid = false;
 };
 
@@ -132,8 +140,10 @@ std::string find_info_field(const std::string& reply, const std::string& key);
 
 // Parse a "kv-sink-register" reply into a node registration.
 //
-// Throws std::runtime_error if the reply omits `region`, `qpn`, or `gid`, or
-// if a numeric field does not parse; the caller cannot proceed without them.
+// `max_sinks` is optional; when absent, max_sinks_per_command is set to
+// kDefaultMaxSinksPerPipelinedCommand. Throws std::runtime_error if the reply
+// omits `region`, `qpn`, or `gid`, or if a numeric field does not parse; the
+// caller cannot proceed without them.
 NodeRegistration parse_register_reply(const std::string& node_name,
                                       const std::string& reply);
 
@@ -154,6 +164,11 @@ FetchReply parse_fetch_reply(const std::string& reply);
 // field does not parse, or if a failed slot index does not fit 16 bits.
 PipelinedFetchReply parse_pipelined_fetch_reply(const std::string& reply);
 
+// Slot indices encoded in a built kv-sink-fetch-pipelined command, in wire
+// order (the order sinks appear in the sinks= field).
+std::vector<uint16_t> pipelined_command_slot_indices(
+    const std::string& command);
+
 // Holds one region handle per node for the lifetime of a connection.
 //
 // Thread safety: not synchronized. Register during initialization from a
@@ -169,6 +184,12 @@ class NodeRegistry {
   // registration has been invalidated, rather than returning a sentinel that
   // could be mistaken for region 0.
   uint64_t region_for(const std::string& node_name) const;
+
+  // Maximum sinks this node accepts in one kv-sink-fetch-pipelined command.
+  //
+  // Throws std::runtime_error when the node was never registered or its
+  // registration has been invalidated.
+  uint32_t max_sinks_per_command_for(const std::string& node_name) const;
 
   // Drop every registration, e.g. after the slab is re-registered.
   void invalidate_all();

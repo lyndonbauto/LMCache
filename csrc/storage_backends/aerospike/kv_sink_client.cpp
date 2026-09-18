@@ -142,6 +142,21 @@ NodeRegistration parse_register_reply(const std::string& node_name,
         static_cast<uint32_t>(require_u64(reply, "psn", "kv-sink-register"));
   }
 
+  // == Why absence of max_sinks defaults to 256, not unlimited ==
+  //
+  // The pipelined server parses sinks into a fixed stack buffer. Until it
+  // advertises a limit in this reply, the safe assumption is the cap that
+  // already rejected oversized commands. Defaulting to "no limit" would fan
+  // out one command per node again and reproduce the rejection on every
+  // realistic fetch.
+  const std::string max_sinks = find_info_field(reply, "max_sinks");
+  if (max_sinks.empty()) {
+    registration.max_sinks_per_command = kDefaultMaxSinksPerPipelinedCommand;
+  } else {
+    registration.max_sinks_per_command = static_cast<uint32_t>(
+        require_u64(reply, "max_sinks", "kv-sink-register"));
+  }
+
   registration.valid = true;
   return registration;
 }
@@ -225,6 +240,31 @@ PipelinedFetchReply parse_pipelined_fetch_reply(const std::string& reply) {
   return parsed;
 }
 
+std::vector<uint16_t> pipelined_command_slot_indices(
+    const std::string& command) {
+  const std::string sinks = find_info_field(command, "sinks");
+  std::vector<uint16_t> slots;
+  for (const std::string& sink : split_csv(sinks)) {
+    if (sink.empty()) {
+      continue;
+    }
+    const size_t slot_pos = sink.rfind('#');
+    if (slot_pos == std::string::npos || slot_pos + 1 >= sink.size()) {
+      throw std::runtime_error("kv-sink-fetch-pipelined: sink entry '" + sink +
+                               "' in command is missing a #<slot> suffix");
+    }
+    const uint64_t value =
+        parse_u64_token(sink.substr(slot_pos + 1), "kv-sink-fetch-pipelined");
+    if (value > kSlotIndexMask) {
+      throw std::runtime_error(
+          "kv-sink-fetch-pipelined: slot index in command does not fit 16 "
+          "bits");
+    }
+    slots.push_back(static_cast<uint16_t>(value));
+  }
+  return slots;
+}
+
 void NodeRegistry::set(const NodeRegistration& registration) {
   by_node_[registration.node_name] = registration;
 }
@@ -238,6 +278,18 @@ uint64_t NodeRegistry::region_for(const std::string& node_name) const {
         "invalidated by a slab re-registration or node restart");
   }
   return it->second.region;
+}
+
+uint32_t NodeRegistry::max_sinks_per_command_for(
+    const std::string& node_name) const {
+  const auto it = by_node_.find(node_name);
+  if (it == by_node_.end() || !it->second.valid) {
+    throw std::runtime_error(
+        "no valid kv-sink registration for node '" + node_name +
+        "'; the node was never registered, or its registration was "
+        "invalidated by a slab re-registration or node restart");
+  }
+  return it->second.max_sinks_per_command;
 }
 
 void NodeRegistry::invalidate_all() { by_node_.clear(); }
