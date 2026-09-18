@@ -561,6 +561,46 @@ chunks while the slot indices stay in the request's numbering.
 `build_pipelined_fetch_command` refuses a sink list with a repeated slot index,
 which is the mistake that per-fetch numbering would produce.
 
+#### Receive queue depth and device limits
+
+**Status: implemented in the client; not verified on EFA/SRD fabric.**
+
+On the RC path each `RDMA_WRITE_WITH_IMM` consumes one posted receive work
+request, so the queue pair's `max_recv_wr` must be at least the slot count of
+the largest request LMCache will plan. `RdmaContext` queries `ibv_query_device`
+when the device is opened and records `max_qp_wr` and `max_cq`. At init,
+`enable_layer_notifications()` clamps the depth derived from the leased window
+and record cap to those limits, logs the device-reported numbers next to the
+requested and effective depths, and sizes both the completion queue and the
+receive queue to the effective value. `PipelinedFetchSession::begin_request`
+rejects a plan whose `slot_count()` exceeds that effective depth with an error
+that names both counts and tells the operator to use fewer chunks per request,
+raise the record cap so each plane needs fewer pieces, or choose hardware with a
+higher `max_recv_wr`.
+
+A request whose plan exceeds the device-derived limit is **not** split into
+several smaller requests. Slot indices and the generation in each immediate are
+scoped to one request; `LayerReadiness` counts arrivals against a single plan.
+Splitting would require several generations, several readiness tables, and a
+rule that a layer is consumable only when every sub-request's pieces have
+landed — none of which exists in the wire contract or the vLLM integration
+today. Reporting a layer ready while part of it is still in flight on another
+sub-request is exactly the failure this design exists to prevent, so oversize
+plans fail loudly at `begin_request` instead.
+
+**Still unknown without EFA hardware:** whether SRD actually charges a receive
+work request per immediate when the unsolicited-write-receive queue-pair feature
+is negotiated. The `efadv.h` available in this tree exposes no runtime knob to
+enable that feature on the client side; if EFA turns out not to consume receive
+work requests on that path, the `max_recv_wr` clamp documented here becomes a
+conservative no-op rather than a binding limit. That has not been measured on a
+real EFA instance.
+
+**Device-free verification:** `notification_depth_test` (via `make -C
+tests/v1/distributed/rdma logic-test`) injects device caps and checks clamping,
+the derived slot limit, and `begin_request` acceptance/rejection — without
+libibverbs.
+
 **Device-free verification:** `pipelined_fetch_session_test` and
 `pipelined_fetch_issue_test` (via `make -C tests/v1/distributed/rdma
 logic-test`) cover multi-node slot numbering, declined-slot handling, stale
