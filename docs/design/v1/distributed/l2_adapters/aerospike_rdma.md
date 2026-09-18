@@ -708,6 +708,27 @@ supports RC but **not** SRD, which is why RC is the portable path.
 
 All of the following needs **root**.
 
+If you have Docker but not an interactive `sudo` — a common state on a shared
+or managed workstation — a privileged container is enough, because both steps
+act on the host kernel rather than on the container. `rdma_rxe` is a kernel
+module, so loading it inside the container loads it for the machine, and with
+`--network host` the RDMA link is created in the host's namespace and shows up
+in `ibv_devinfo` outside the container:
+
+```bash
+docker run --rm --privileged -v /lib/modules:/lib/modules:ro ubuntu:22.04 \
+  sh -c "apt-get update -qq && apt-get install -y -qq kmod && modprobe rdma_rxe"
+
+docker run --rm --privileged --network host ubuntu:22.04 \
+  sh -c "apt-get update -qq && apt-get install -y -qq rdma-core && \
+         rdma link add rxe0 type rxe netdev lo"
+```
+
+The device does not survive a reboot, so expect to redo this. Note that being
+able to run privileged containers is equivalent to root on the host; this is a
+convenience on a machine you already administer, not a way around a restriction
+someone else imposed.
+
 ```bash
 # 1. Install userspace tooling and headers.
 sudo apt-get install -y rdma-core libibverbs-dev ibverbs-utils \
