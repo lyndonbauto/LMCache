@@ -1,0 +1,2659 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>LMCache: layer-wise transfer data model</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel-2: #1c2330;
+    --line: #2d3644;
+    --text: #e6edf3;
+    --dim: #8b949e;
+    --dimmer: #5c6673;
+
+    --attn:  #58a6ff;   /* full attention group */
+    --sw:    #d29922;   /* sliding window group */
+    --rec:   #bc8cff;   /* recurrent / Mamba group */
+    --kplane:#1f6feb;
+    --vplane:#39d3c3;
+    --hit:   #3fb950;
+    --miss:  #21262d;
+    --warn:  #f85149;
+    --gen:   #7c5a3c;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+  header { padding: 22px 28px 16px; border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0 0 4px; font-size: 20px; font-weight: 650; letter-spacing: -0.2px; }
+  header p { margin: 0; color: var(--dim); font-size: 13px; max-width: 940px; }
+  header p a { color: #58a6ff; }
+
+  .shell { display: grid; grid-template-columns: 290px minmax(0, 1fr); align-items: start; }
+
+  aside {
+    border-right: 1px solid var(--line);
+    padding: 18px 18px 60px;
+    position: sticky; top: 0; max-height: 100vh; overflow-y: auto;
+  }
+  main { padding: 18px 24px 90px; min-width: 0; }
+
+  h2.sec {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.9px;
+    color: var(--dimmer); margin: 22px 0 10px; font-weight: 650;
+  }
+  h2.sec:first-child { margin-top: 0; }
+
+  .field { margin-bottom: 11px; }
+  .field label {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 12px; color: var(--dim); margin-bottom: 3px;
+  }
+  .field label b { color: var(--text); font-weight: 600; font-family: ui-monospace, monospace; }
+  input[type=range] { width: 100%; accent-color: var(--attn); }
+  select {
+    width: 100%; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; padding: 5px 7px; font-size: 12px;
+  }
+  .toggle {
+    display: flex; align-items: flex-start; gap: 9px;
+    padding: 7px 9px; border: 1px solid var(--line); border-radius: 7px;
+    background: var(--panel-2); margin-bottom: 7px; cursor: pointer;
+    font-size: 12.5px; user-select: none;
+  }
+  .toggle input { accent-color: var(--hit); margin: 2px 0 0; }
+  .toggle span small { display: block; color: var(--dimmer); font-size: 11px; line-height: 1.35; }
+
+  .stepper { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  .step {
+    border: 1px solid var(--line); background: var(--panel);
+    color: var(--dim); border-radius: 999px; padding: 5px 12px;
+    font-size: 12px; cursor: pointer; white-space: nowrap;
+  }
+  .step:hover { border-color: var(--dimmer); color: var(--text); }
+  .step.on { background: #1f6feb22; border-color: #1f6feb; color: #cfe3ff; }
+  .step .n { color: var(--dimmer); margin-right: 5px; font-family: ui-monospace, monospace; }
+  .step.on .n { color: #6ea8ff; }
+
+  .navrow { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; }
+  button.nav {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 7px; padding: 6px 13px; font-size: 12.5px; cursor: pointer;
+  }
+  button.nav:hover { border-color: var(--dimmer); }
+  button.nav:disabled { opacity: 0.35; cursor: default; }
+  button.nav.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 14px 16px; margin-bottom: 14px;
+  }
+  .card.hidden { display: none; }
+  .card > h3 {
+    margin: 0 0 3px; font-size: 13.5px; font-weight: 640;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  }
+  .card > h3 .tag {
+    font-size: 10.5px; font-weight: 600; letter-spacing: 0.4px;
+    padding: 1.5px 7px; border-radius: 999px; border: 1px solid var(--line);
+    color: var(--dim); text-transform: uppercase;
+  }
+  .card > .sub { margin: 0 0 12px; color: var(--dim); font-size: 12px; }
+
+  .narr { border-left: 3px solid #1f6feb; padding-left: 13px; }
+  .narr h3 { margin: 0 0 6px; font-size: 15.5px; }
+  .narr p { margin: 0 0 9px; }
+  .narr p:last-child { margin-bottom: 0; }
+  .narr b.key { color: #cfe3ff; }
+  .narr .cites {
+    color: var(--dimmer); font-size: 11.5px;
+    font-family: ui-monospace, monospace; margin-top: 10px;
+  }
+
+  .danger { border-left-color: var(--warn); }
+  .danger h3 { color: #ffb4ae; }
+
+  /* ---- shape panel ---- */
+  .shapebox { display: flex; flex-wrap: wrap; align-items: stretch; gap: 6px; }
+  .dim {
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 11px; min-width: 76px; text-align: center;
+  }
+  .dim .dv { font-family: ui-monospace, monospace; font-size: 15px; font-weight: 650; }
+  .dim .dn { font-size: 10.5px; color: var(--dim); text-transform: uppercase; letter-spacing: .4px; }
+  .dim.lead { border-color: var(--warn); background: #f8514916; }
+  .dim.lead .dv { color: #ffb4ae; }
+  .dim.layerdim { border-color: var(--attn); background: #58a6ff16; }
+  .dim.layerdim .dv { color: #9ecbff; }
+  .dim.sep { border: none; background: none; display: flex; align-items: center; color: var(--dimmer); min-width: 14px; padding: 0; }
+  .shapemeta { margin-top: 10px; font-size: 12px; color: var(--dim); }
+  .shapemeta b { color: var(--text); font-family: ui-monospace, monospace; }
+
+  /* ---- generic strips ---- */
+  .strip { display: flex; gap: 2px; flex-wrap: wrap; }
+  .cell {
+    height: 26px; min-width: 20px; flex: 1 1 20px;
+    border-radius: 3px; background: var(--miss);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 9.5px; font-family: ui-monospace, monospace; color: #ffffffbb;
+    transition: background-color .25s, opacity .25s;
+  }
+  .cell.attn { background: var(--attn); color: #05233f; }
+  .cell.sw   { background: var(--sw);   color: #2b1d00; }
+  .cell.rec  { background: var(--rec);  color: #2a0f45; }
+  .cell.sel  { outline: 2px solid #fff; outline-offset: 1px; z-index: 2; }
+  .cell.dimmed { opacity: .25; }
+
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 10px; font-size: 11.5px; color: var(--dim); }
+  .legend i { display: inline-block; width: 11px; height: 11px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+
+  /* ---- payload bar ---- */
+  .payload { display: flex; width: 100%; height: 66px; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .plane { display: flex; flex-direction: column; min-width: 0; }
+  .plane-hd {
+    font-size: 10px; letter-spacing: .5px; text-transform: uppercase;
+    padding: 3px 6px; color: #ffffffcc; font-weight: 650;
+    border-bottom: 1px solid #00000055; white-space: nowrap; overflow: hidden;
+  }
+  .plane-body { display: flex; flex: 1; min-width: 0; }
+  .plane.k .plane-hd { background: var(--kplane); }
+  .plane.v .plane-hd { background: var(--vplane); color: #04302c; }
+  .lslice {
+    flex: 1 1 0; min-width: 0; border-right: 1px solid #00000055;
+    background: #1b2430; transition: background-color .25s;
+  }
+  .lslice:last-child { border-right: none; }
+  .lslice.sel { background: #fff; }
+  .payload-axis { display: flex; justify-content: space-between; margin-top: 6px; font-size: 11px; color: var(--dimmer); font-family: ui-monospace, monospace; }
+
+  .callout {
+    margin-top: 12px; padding: 10px 12px; border-radius: 8px;
+    background: #f8514914; border: 1px solid #f8514944; font-size: 12.5px;
+  }
+  .callout.ok { background: #3fb95014; border-color: #3fb95044; }
+  .callout b { color: #ffb4ae; }
+  .callout.ok b { color: #7ee787; }
+
+  /* ---- slot chopping ---- */
+  .slots { display: flex; gap: 3px; flex-wrap: wrap; }
+  .slot {
+    padding: 5px 9px; border-radius: 5px; font-size: 11px;
+    font-family: ui-monospace, monospace; border: 1px solid var(--line);
+    background: var(--panel-2);
+  }
+  .slot.k { border-color: var(--kplane); color: #9ecbff; }
+  .slot.v { border-color: var(--vplane); color: #8ff0e6; }
+
+  /* ---- 32-bit immediate ---- */
+  .bits { display: flex; gap: 2px; margin-top: 4px; }
+  .bit {
+    flex: 1 1 0; height: 34px; border-radius: 3px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-family: ui-monospace, monospace;
+  }
+  .bit.g { background: var(--gen); color: #ffd9b0; }
+  .bit.s { background: #1f4f8f; color: #cfe3ff; }
+  .bitlabels { display: flex; margin-top: 5px; font-size: 11px; color: var(--dim); }
+  .bitlabels div { text-align: center; }
+
+  /* ---- Aerospike segment map ---- */
+  .segs { display: flex; flex-wrap: wrap; gap: 3px; }
+  .seg2 {
+    min-width: 32px; height: 30px; padding: 0 4px; border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 9.5px; font-family: ui-monospace, monospace;
+    background: #1b2430; color: var(--dimmer); border: 1px solid transparent;
+  }
+  .seg2.k { background: #173a63; color: #9ecbff; }
+  .seg2.v { background: #134b45; color: #8ff0e6; }
+  .seg2.need { outline: 2px solid #fff; outline-offset: 1px; color: #fff; font-weight: 700; }
+  .seg2.faint { opacity: .32; }
+  .seg2.partial {
+    background-image: repeating-linear-gradient(45deg, #0000, #0000 4px, #ffffff2e 4px, #ffffff2e 8px);
+  }
+  .planebar { display: flex; gap: 3px; margin-bottom: 5px; font-size: 10px; color: var(--dim); }
+  .planebar span {
+    padding: 2px 8px; border-radius: 4px; font-family: ui-monospace, monospace;
+  }
+  .planebar .pk { background: #173a63; color: #9ecbff; }
+  .planebar .pv { background: #134b45; color: #8ff0e6; }
+
+  .order { display: flex; gap: 3px; flex-wrap: wrap; align-items: center; }
+  .ord {
+    padding: 3px 7px; border-radius: 4px; font-size: 10px;
+    font-family: ui-monospace, monospace; background: var(--panel-2);
+    border: 1px solid var(--line); color: var(--dim);
+  }
+  .ord.hot { border-color: #3fb95066; color: #7ee787; background: #3fb95012; }
+  .ord.ell { border: none; background: none; color: var(--dimmer); }
+
+  /* ---- pipeline timeline ---- */
+  .track { margin-bottom: 9px; }
+  .track-hd {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 11px; color: var(--dim); margin-bottom: 4px;
+  }
+  .track-hd b { color: var(--text); font-family: ui-monospace, monospace; font-weight: 600; }
+  .lane {
+    position: relative; height: 30px; border-radius: 6px;
+    background: #12171f; border: 1px solid var(--line); overflow: hidden;
+  }
+  .blk {
+    position: absolute; top: 0; bottom: 0;
+    border-right: 1px solid #0008; overflow: hidden;
+    font-size: 9px; font-family: ui-monospace, monospace;
+    display: flex; align-items: center; justify-content: center;
+    color: #ffffffcc;
+  }
+  .blk.net { background: var(--kplane); }
+  .blk.net.alt { background: #1a5bbf; }
+  .blk.cpu { background: var(--hit); color: #04240d; }
+  .blk.cpu.alt { background: #35a047; }
+  .blk.stall { background: repeating-linear-gradient(45deg, #3a1d1d, #3a1d1d 5px, #2a1414 5px, #2a1414 10px); }
+  .blk.sel { outline: 2px solid #fff; outline-offset: -2px; z-index: 3; }
+
+  .tl-axis {
+    position: relative; height: 16px; margin-top: 3px;
+    font-size: 10px; color: var(--dimmer); font-family: ui-monospace, monospace;
+  }
+  .tl-axis span { position: absolute; transform: translateX(-50%); }
+
+  .compare { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 9px; margin-top: 14px; }
+  .kpi { background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px; }
+  .kpi .k { font-size: 10.5px; text-transform: uppercase; letter-spacing: .4px; color: var(--dim); }
+  .kpi .val { font-size: 20px; font-weight: 650; font-family: ui-monospace, monospace; margin-top: 2px; }
+  .kpi.good { border-color: #3fb95055; background: #3fb95010; }
+  .kpi.good .val { color: #7ee787; }
+  .kpi.bad { border-color: #f8514955; background: #f8514910; }
+  .kpi.bad .val { color: #ffb4ae; }
+
+  /* ---- readiness matrix ---- */
+  .matrix-wrap { display: grid; grid-template-columns: auto minmax(0,1fr); gap: 8px; align-items: start; }
+  .rowlabels { display: grid; gap: 2px; font-size: 10px; color: var(--dimmer); font-family: ui-monospace, monospace; }
+  .rowlabels div { height: 18px; display: flex; align-items: center; justify-content: flex-end; }
+  .matrix { display: grid; gap: 2px; }
+  .mcell { height: 18px; border-radius: 2px; background: var(--miss); transition: background-color .2s; }
+  .mcell.part { background: #2f5d38; }
+  .mcell.full { background: var(--hit); }
+  .mcell.na   { background: #16181d; }
+  .colhdr { display: grid; gap: 2px; margin-bottom: 4px; }
+  .ch {
+    height: 16px; border-radius: 2px; background: #1b2430;
+    font-size: 8.5px; display: flex; align-items: center; justify-content: center;
+    color: var(--dimmer); font-family: ui-monospace, monospace;
+  }
+  .ch.ready { background: var(--hit); color: #04240d; font-weight: 700; }
+  .readout { margin-top: 12px; font-size: 12.5px; }
+  .readout .pill {
+    display: inline-block; padding: 2px 9px; border-radius: 999px;
+    font-family: ui-monospace, monospace; font-size: 11.5px; margin-right: 6px;
+    border: 1px solid var(--line); background: var(--panel-2); color: var(--dim);
+  }
+  .readout .pill.on { background: #3fb95022; border-color: #3fb95066; color: #7ee787; }
+
+  table.facts { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  table.facts td { padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.facts tr:last-child td { border-bottom: none; }
+  table.facts td:first-child { color: var(--dim); white-space: nowrap; width: 1%; padding-right: 18px; }
+  table.facts b { font-family: ui-monospace, monospace; }
+
+  /* --- CacheBlend --- */
+  .crow { display: flex; align-items: center; gap: 10px; margin-bottom: 7px; }
+  .crow .clab {
+    width: 122px; flex: none; font-size: 11.5px; color: var(--dim); text-align: right;
+  }
+  .crow .clab b { display: block; color: var(--text); font-size: 12px; font-weight: 650; }
+  .cstrip { display: flex; gap: 3px; flex-wrap: wrap; }
+  .chunk {
+    width: 40px; height: 38px; border-radius: 5px; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; font-size: 10px; line-height: 1.25;
+    font-family: ui-monospace, monospace; background: var(--miss); color: var(--dimmer);
+    border: 1px solid var(--line);
+  }
+  .chunk .cn { font-size: 11px; font-weight: 650; }
+  .chunk.hit { background: #3fb95026; border-color: #3fb95077; color: #7ee787; }
+  .chunk.blendhit { background: #d2992226; border-color: #d2992288; color: #f2cc60; }
+  .chunk.blendhit .was { color: #d29922; font-size: 9px; }
+  .chunk.recomp { background: #f8514922; border-color: #f8514977; color: #ffb4ae; }
+
+  .flows { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 900px) { .flows { grid-template-columns: 1fr; } }
+  .flow { border: 1px solid var(--line); border-radius: 8px; padding: 12px 13px; background: var(--panel-2); }
+  .flow > h4 {
+    margin: 0 0 10px; font-size: 12.5px; font-weight: 650; color: var(--text);
+    display: flex; align-items: baseline; gap: 8px;
+  }
+  .flow > h4 em { font-style: normal; font-size: 11px; color: var(--dim); font-weight: 400; }
+  .fstep {
+    border-left: 3px solid var(--line); padding: 5px 0 5px 10px; margin-bottom: 3px;
+    font-size: 12px; position: relative;
+  }
+  .fstep code { font-size: 11.5px; }
+  .fstep .fnote { display: block; font-size: 10.5px; color: var(--dimmer); margin-top: 2px; }
+  .fstep.shared { border-left-color: var(--hit); }
+  .fstep.shared .fnote { color: #7ee787; }
+  .fstep.diverge { border-left-color: var(--sw); }
+  .fstep.diverge .fnote { color: #e3b341; }
+  .fstep.alllayers { border-left-color: var(--warn); }
+  .fstep.alllayers .fnote { color: #ffb4ae; }
+  .fstep .farrow { color: var(--dimmer); margin-right: 5px; font-family: ui-monospace, monospace; }
+  .smat { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+  .smat th {
+    text-align: right; font-weight: 600; color: var(--dimmer); font-size: 10.5px;
+    padding: 0 8px 5px; border-bottom: 1px solid var(--line); white-space: nowrap;
+  }
+  .smat th:first-child, .smat td:first-child { text-align: left; }
+  .smat td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  .smat tbody tr:hover { background: var(--panel-2); }
+  .smat tr.here td { background: rgba(88,166,255,.10); }
+  .smat td.cfg { color: var(--dim); font-variant-numeric: tabular-nums; }
+  .smat td.big { color: var(--hit); font-weight: 650; }
+  .smat td.small { color: var(--warn); }
+  .smat .tag {
+    display: inline-block; font-size: 9.5px; color: var(--dimmer);
+    border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; margin-left: 6px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Layer-wise transfer data model</h1>
+  <p>
+    How a real KV payload becomes per-layer RDMA deliveries, and what shape the data
+    has at every step. Companion to
+    <code>layerwise_transfer_data_model.md</code> and <code>aerospike_rdma.md</code>.
+    Move the controls on the left; every panel is derived, nothing is hard-coded.
+  </p>
+</header>
+
+<div class="shell">
+<aside>
+  <h2 class="sec">Model</h2>
+  <div class="field">
+    <label>Layers <b id="v-layers">32</b></label>
+    <input type="range" id="c-layers" min="8" max="128" step="1" value="32" />
+  </div>
+  <div class="field">
+    <label>KV heads (GQA) <b id="v-kvheads">8</b></label>
+    <input type="range" id="c-kvheads" min="1" max="32" step="1" value="8" />
+  </div>
+  <div class="field">
+    <label>Head dim <b id="v-headdim">128</b></label>
+    <input type="range" id="c-headdim" min="64" max="256" step="16" value="128" />
+  </div>
+  <div class="field">
+    <label>Bytes per element <b id="v-dtype">2</b></label>
+    <select id="c-dtype">
+      <option value="2" selected>2 &mdash; fp16 / bf16</option>
+      <option value="1">1 &mdash; fp8</option>
+    </select>
+  </div>
+
+  <h2 class="sec">Layout</h2>
+  <div class="field">
+    <label>Payload format</label>
+    <select id="c-format">
+      <option value="kv_outer" selected>(kv, layers, slots, hidden) &mdash; standard</option>
+      <option value="layer_outer">(layers, slots, hidden) &mdash; NL_X_NB_BS_HS</option>
+    </select>
+  </div>
+  <div class="field">
+    <label>Architecture</label>
+    <select id="c-arch">
+      <option value="sw" selected>Sliding-window hybrid &mdash; Gemma 3, gpt-oss</option>
+      <option value="linear">Linear-attention hybrid &mdash; Qwen3.5, Kimi</option>
+      <option value="uniform">Uniform &mdash; Llama, Qwen3 dense, Mistral</option>
+    </select>
+  </div>
+  <label class="toggle">
+    <input type="checkbox" id="t-separate" />
+    <span><code>--separate-object-groups</code>
+      <small>One object group per attention window. Off by default in LMCache;
+        required for Mamba/GDN hybrids.</small>
+    </span>
+  </label>
+
+  <h2 class="sec">Request</h2>
+  <div class="field">
+    <label>Chunks in prompt <b id="v-chunks">8</b></label>
+    <input type="range" id="c-chunks" min="2" max="16" step="1" value="8" />
+  </div>
+  <div class="field">
+    <label>Tokens per chunk <b id="v-tokens">256</b></label>
+    <input type="range" id="c-tokens" min="64" max="1024" step="16" value="256" />
+  </div>
+  <div class="field">
+    <label>Aerospike record cap <b id="v-reccap">1 MiB</b></label>
+    <input type="range" id="c-reccap" min="18" max="23" step="1" value="20" />
+  </div>
+  <label class="toggle">
+    <input type="checkbox" id="t-aligned" checked />
+    <span>Plane-aligned records
+      <small>A record never holds pieces of two planes &mdash; undersize it
+        instead. Off shows plain byte-count sharding, which is what
+        <code>plan()</code> implements.</small>
+    </span>
+  </label>
+  <div class="field">
+    <label>Max RDMA write <b id="v-maxwrite">1 MiB</b></label>
+    <input type="range" id="c-maxwrite" min="14" max="24" step="1" value="20" />
+  </div>
+
+  <h2 class="sec">Pipeline</h2>
+  <div class="field">
+    <label>Blend recompute <b id="v-recomp">15%</b></label>
+    <input type="range" id="c-recomp" min="5" max="100" step="5" value="15" />
+  </div>
+  <div class="field">
+    <label>Network delivery <b id="v-net">12.2 GB/s</b></label>
+    <input type="range" id="c-net" min="10" max="250" step="2" value="122" />
+  </div>
+  <div class="field">
+    <label>GPU prefill <b id="v-gpu">400 TFLOP/s</b></label>
+    <input type="range" id="c-gpu" min="40" max="900" step="20" value="400" />
+  </div>
+  <div class="field">
+    <label>Model size <b id="v-params">8 B</b></label>
+    <input type="range" id="c-params" min="1" max="450" step="1" value="8" />
+    <small style="display:block;color:var(--dimmer);font-size:11px;line-height:1.35;margin-top:4px">
+      Total parameters, in billions. Drives <i>compute only</i> &mdash; prefill at
+      ~2 FLOPs per parameter per token, split evenly across <i>Layers</i>. It does not
+      affect KV size, which comes from <i>Layers</i> &times; <i>KV heads</i> &times;
+      <i>Head dim</i>. The defaults are a consistent pair (8 B, 32 layers, 8 GQA
+      heads, 128 dim &mdash; a Llama-3-8B shape); set them apart and the ratio
+      describes no real model.
+      <br><b>Set the <i>active</i> parameter count, not the total.</b> Serving is
+      overwhelmingly MoE now, at 3&ndash;6% sparsity, so the two differ by 20&times;
+      or more &mdash; only the routed experts run per token.
+    </small>
+    <div style="margin-top:8px;font-size:11px;color:var(--dim);line-height:1.45">
+      <b style="color:var(--text)">Active parameters, real models</b>
+      <table style="width:100%;border-collapse:collapse;margin-top:4px;font-size:10.5px">
+        <tr style="color:var(--dimmer)"><td></td><td>total</td><td>active</td></tr>
+        <tr><td>Qwen3-Next 80B-A3B</td><td>80 B</td><td><b>3</b></td></tr>
+        <tr><td>gpt-oss-20b</td><td>20.9 B</td><td><b>3.6</b></td></tr>
+        <tr><td>gpt-oss-120b</td><td>116.8 B</td><td><b>5.1</b></td></tr>
+        <tr><td>DeepSeek V4.1-Flash</td><td>552 B</td><td><b>8</b> prefill / 16 decode</td></tr>
+        <tr><td>Qwen3.5 397B</td><td>397 B</td><td><b>17</b></td></tr>
+        <tr><td>MiniMax M3</td><td>428 B</td><td><b>23</b></td></tr>
+        <tr><td>Kimi K2.6</td><td>1 T</td><td><b>32</b></td></tr>
+        <tr><td>GLM-5.3</td><td>753 B</td><td><b>40</b></td></tr>
+        <tr><td>DeepSeek V4 Pro</td><td>1.6 T</td><td><b>49</b></td></tr>
+        <tr><td>Qwen3.8</td><td>2.4 T</td><td><b>95</b></td></tr>
+        <tr><td>Kimi K3</td><td>2.8 T</td><td><b>104</b></td></tr>
+      </table>
+      <b style="color:var(--text)">The realistic band is 3&ndash;104, usually under 50.</b>
+      Nothing served activates hundreds of billions per token, and prefill can activate
+      less than decode. Values far above ~104 describe a dense model nobody runs &mdash;
+      useful as a limit, not a target.
+      <br><br>KV geometry is per model too: gpt-oss is 8&times;64 over 36 layers
+      (72 KiB/token), Llama 3.1 405B is 8&times;128 over 126 (504 KiB/token). For MLA
+      switch <i>Payload format</i> to <code>NL_X_NB_BS_HS</code> and set 9&times;64 &mdash;
+      one 576-wide latent per token per layer, no separate K and V.
+    </div>
+  </div>
+
+  <h2 class="sec">Focus</h2>
+  <div class="field">
+    <label>Inspect layer <b id="v-sel">0</b></label>
+    <input type="range" id="c-sel" min="0" max="31" step="1" value="0" />
+  </div>
+</aside>
+
+<main>
+  <div class="stepper" id="stepper"></div>
+  <div class="navrow">
+    <button class="nav" id="btn-prev">&larr; Back</button>
+    <button class="nav primary" id="btn-next">Next &rarr;</button>
+    <span style="color:var(--dimmer);font-size:12px" id="phase-counter"></span>
+  </div>
+
+  <div class="card narr" id="narr">
+    <h3 id="narr-title"></h3>
+    <div id="narr-body"></div>
+    <div class="cites" id="narr-cites"></div>
+  </div>
+
+  <!-- persistent shape panel -->
+  <div class="card">
+    <h3>Shape at this point <span class="tag" id="shape-tag"></span></h3>
+    <p class="sub" id="shape-sub"></p>
+    <div class="shapebox" id="shapebox"></div>
+    <div class="shapemeta" id="shapemeta"></div>
+  </div>
+
+  <!-- P1/P2: layer strip -->
+  <div class="card hidden" id="p-layers">
+    <h3>The model's layers</h3>
+    <p class="sub" id="layers-sub"></p>
+    <div class="strip" id="layerstrip"></div>
+    <div class="legend" id="layerlegend"></div>
+  </div>
+
+  <!-- P3: grouping -->
+  <div class="card hidden" id="p-groups">
+    <h3>Kernel groups bundle into object groups</h3>
+    <p class="sub">An object group is what actually gets stored and keyed. It contains one or more kernel groups, laid out back to back in <code>kernel_group_indices</code> order.</p>
+    <div id="grouptree"></div>
+  </div>
+
+  <!-- P4: key grid -->
+  <div class="card hidden" id="p-keys">
+    <h3>One object per (chunk, object group)</h3>
+    <p class="sub" id="keys-sub"></p>
+    <div class="matrix-wrap">
+      <div class="rowlabels" id="keys-rows"></div>
+      <div><div class="matrix" id="keys-grid"></div></div>
+    </div>
+    <div class="callout"><b>No layer coordinate exists here.</b> <code>ObjectKey</code> carries
+      <code>object_group_id</code> and nothing finer, so &ldquo;layer 7 arrived&rdquo; can never be
+      answered by a key. It has to be derived from byte ranges inside a payload.</div>
+
+  </div>
+
+  <div class="card hidden" id="p-blend">
+    <h3>CacheBlend <span class="tag">what changes, and what does not</span></h3>
+    <p class="sub">Which chunks of the prompt each route can reuse. Green is a plain cache hit;
+      gold is a chunk that was cached at a <i>different</i> position and had its keys re-rotated
+      to fit this one.</p>
+    <div id="blend-chunks"></div>
+
+    <h3 style="margin-top:20px">The two data paths</h3>
+    <p class="sub">Green steps are shared code, so the RDMA work reaches them with no
+      blend-specific effort. Red steps move every layer of a kernel group in one operation
+      &mdash; note that <b>both</b> routes are red there.</p>
+    <div class="flows" id="blend-flows"></div>
+
+    <h3 style="margin-top:20px">So does pipelining actually help blend?</h3>
+    <p class="sub"><b>&ldquo;Recompute&rdquo; is the fraction of tokens the GPU calculates from
+      scratch instead of taking from cache</b> &mdash; so it measures how much of the prompt blend
+      <i>failed</i> to reuse. Blend picks the tokens where cached KV would hurt most and
+      recomputes only those. Lower is better: 15% is the published operating point, and 100%
+      means nothing was reused, which is just a full prefill. Re-RoPE is not recompute &mdash;
+      rotating a reused key is cheap, and it applies to the tokens we <i>keep</i>.</p>
+    <p class="sub">Same bytes on the wire either way, less compute to hide them behind, because
+      deleting compute is the entire point of blend. Drag <i>Blend recompute</i> in the
+      sidebar.</p>
+    <div id="blend-payoff"></div>
+
+    <h3 style="margin-top:20px">Blend reads its object groups in two legs</h3>
+    <p class="sub">It issues two prefetches, and they ask for different object groups. This is
+      driven by <i>Architecture</i> and <code>--separate-object-groups</code> in the sidebar.</p>
+    <div id="blend-legs"></div>
+    <div id="blend-callout"></div>
+  </div>
+
+  <!-- P5/P6: payload bar -->
+  <div class="card hidden" id="p-payload">
+    <h3>Inside one object <span class="tag" id="payload-tag"></span></h3>
+    <p class="sub" id="payload-sub"></p>
+    <div class="payload" id="payload"></div>
+    <div class="payload-axis"><span>byte 0</span><span id="payload-end"></span></div>
+    <div id="payload-callout"></div>
+  </div>
+
+  <!-- P7: Aerospike records -->
+  <div class="card hidden" id="p-records">
+    <h3>Where those bytes actually live <span class="tag" id="rec-tag"></span></h3>
+    <p class="sub" id="rec-sub"></p>
+    <div class="planebar" id="rec-planes"></div>
+    <div class="segs" id="rec-segs"></div>
+    <div class="shapemeta" id="rec-meta"></div>
+    <div id="rec-callout"></div>
+
+    <h3 style="margin-top:18px">Read order is the only thing that has to change</h3>
+    <p class="sub">Same records, same keys. The connector reads
+      <code>i = 0 … nseg-1</code> if read naively; serving a layer-major push means reading in the
+      order the schedule asks for. The reads stay independent, so they still fan out
+      across devices.</p>
+    <div class="shapemeta" style="margin:0 0 5px">Naive &mdash; sequential by segment index</div>
+    <div class="order" id="rec-order-seq"></div>
+    <div class="shapemeta" style="margin:11px 0 5px">Layer-major &mdash; first read yields layer 0</div>
+    <div class="order" id="rec-order-lm"></div>
+  </div>
+
+  <!-- P8: slots -->
+  <div class="card hidden" id="p-slots">
+    <h3>Cutting a layer into RDMA writes</h3>
+    <p class="sub" id="slots-sub"></p>
+    <div class="slots" id="slotlist"></div>
+    <div class="shapemeta" id="slotmeta"></div>
+  </div>
+
+  <!-- P8: immediate -->
+  <div class="card hidden" id="p-imm">
+    <h3>Naming a slot in 32 bits</h3>
+    <p class="sub">The completion notification carries exactly 32 bits of immediate data. That is the entire vocabulary the server has for telling us what just landed.</p>
+    <div class="bits" id="bits"></div>
+    <div class="bitlabels"><div style="flex:1">generation (16) &mdash; which request</div><div style="flex:1">slot index (16) &mdash; which write</div></div>
+    <div class="shapemeta" id="immmeta"></div>
+  </div>
+
+  <!-- P9: the pipeline timeline, the actual payoff -->
+  <div class="card hidden" id="p-timeline">
+    <h3>Transfer hiding behind compute <span class="tag" id="tl-tag"></span></h3>
+    <p class="sub" id="tl-sub"></p>
+
+    <div class="track">
+      <div class="track-hd"><span>Network &mdash; Aerospike pushes layer by layer</span><span id="tl-net-meta"></span></div>
+      <div class="lane" id="lane-net"></div>
+    </div>
+    <div class="track">
+      <div class="track-hd"><span>GPU &mdash; computes each layer as it lands</span><span id="tl-cpu-meta"></span></div>
+      <div class="lane" id="lane-cpu"></div>
+      <div class="tl-axis" id="tl-axis"></div>
+    </div>
+
+    <div class="track" style="margin-top:16px">
+      <div class="track-hd"><span>The alternative protocol shape &mdash; all-or-nothing: server fences, replies once, then compute</span><span id="tl-base-meta"></span></div>
+      <div class="lane" id="lane-base"></div>
+    </div>
+
+    <div class="compare" id="tl-kpis"></div>
+    <div id="tl-callout"></div>
+    <div id="tl-scope"></div>
+    <div id="tl-matrix"></div>
+  </div>
+
+  <!-- P10: readiness matrix -->
+  <div class="card hidden" id="p-ready">
+    <h3>What &ldquo;layer i has landed&rdquo; actually requires</h3>
+    <p class="sub" id="ready-sub"></p>
+    <div class="navrow">
+      <button class="nav primary" id="btn-play">Push layers</button>
+      <button class="nav" id="btn-reset">Reset</button>
+      <label class="toggle" style="margin:0"><input type="checkbox" id="t-jitter" checked />
+        <span>SRD jitter<small>Reordering at the frontier</small></span></label>
+      <span style="color:var(--dimmer);font-size:12px" id="ready-counter"></span>
+    </div>
+    <div class="matrix-wrap">
+      <div class="rowlabels" id="ready-rows"></div>
+      <div>
+        <div class="colhdr" id="ready-cols"></div>
+        <div class="matrix" id="ready-grid"></div>
+      </div>
+    </div>
+    <div class="readout" id="ready-readout"></div>
+  </div>
+
+  <!-- P10: caveats -->
+  <div class="card hidden" id="p-caveats">
+    <h3>What still has to be got right</h3>
+    <table class="facts" id="caveats"></table>
+  </div>
+</main>
+</div>
+
+<script>
+"use strict";
+
+// ---------- state ----------
+const S = {
+  layers: 32, kvheads: 8, headdim: 128, dtype: 2,
+  format: "kv_outer", arch: "sw", separate: false, recomp: 15, aligned: true,
+  chunks: 8, tokens: 256, maxwritePow: 20, reccapPow: 20,
+  net: 122, gpu: 400, params: 8, jitter: true,
+  sel: 0, phase: 0,
+};
+
+const IMM_BUDGET = 65536;
+
+// ---------- helpers ----------
+function bytes(n) {
+  if (n < 1024) return n + " B";
+  if (n < 1048576) return (n / 1024).toFixed(n < 10240 ? 1 : 0) + " KiB";
+  if (n < 1073741824) return (n / 1048576).toFixed(n < 10485760 ? 2 : 1) + " MiB";
+  return (n / 1073741824).toFixed(2) + " GiB";
+}
+function el(tag, cls, txt) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (txt !== undefined) e.textContent = txt;
+  return e;
+}
+
+// ---------- derived model ----------
+// Assign every layer to a kernel group, following the two hybrid families
+// LMCache actually validates (docs/source/mp/hybrid_models.rst):
+//
+//   sw      — interleaved sliding-window + full attention, ~5:1. Gemma 3,
+//             gpt-oss. All layers are still paged KV.
+//   linear  — interleaved Mamba/GDN + full attention, ~3:1. Qwen3.5/3.6/3.8,
+//             Kimi-Linear, Kimi K3. The linear layers hold a recurrent state
+//             snapshot rather than per-token KV, and LMCache *requires*
+//             --separate-object-groups for them.
+//   uniform — one attention type throughout. Llama, dense Qwen3, Mistral.
+//
+// Object-group assignment follows the real flag: off by default, so a hybrid's
+// kernel groups share one object group unless asked otherwise.
+function kernelGroups() {
+  if (S.arch === "uniform") {
+    return [{ id: 0, kind: "attn", label: "full attention", layers: range(S.layers), og: 0 }];
+  }
+  const period = S.arch === "sw" ? 6 : 4;       // 5:1 sliding, 3:1 linear
+  const otherKind = S.arch === "sw" ? "sw" : "rec";
+  const otherLabel = S.arch === "sw" ? "sliding window" : "recurrent state (Mamba/GDN)";
+
+  const attn = [], other = [];
+  for (let i = 0; i < S.layers; i++) (i % period === 0 ? attn : other).push(i);
+
+  const separate = separateObjectGroups();
+  const gs = [];
+  if (attn.length) {
+    gs.push({ id: gs.length, kind: "attn", label: "full attention", layers: attn, og: 0 });
+  }
+  if (other.length) {
+    gs.push({ id: gs.length, kind: otherKind, label: otherLabel, layers: other,
+              og: separate ? 1 : 0 });
+  }
+  return gs;
+}
+
+// Mamba/GDN hybrids cannot share an object group with full attention, so the
+// flag is forced on for them regardless of the checkbox.
+function separateObjectGroups() {
+  return S.arch === "linear" ? true : S.separate;
+}
+
+function range(n) { return Array.from({ length: n }, (_, i) => i); }
+
+function derive() {
+  const kgs = kernelGroups();
+  const hidden = S.kvheads * S.headdim;
+  const kvSize = S.format === "layer_outer" ? 1 : 2;
+  const maxWrite = Math.pow(2, S.maxwritePow);
+  const recordCap = Math.pow(2, S.reccapPow);
+
+  // one physical slot per token here; a compressed group would differ, which is
+  // exactly why real code must ask get_slots_per_chunk_in_sw rather than assume.
+  const slotsPerChunk = S.tokens;
+
+  for (const g of kgs) {
+    // sliding-window groups only cover a window of the request's chunks
+    g.chunks = g.kind === "sw" ? Math.min(S.chunks, 4) : S.chunks;
+    g.planeBytes = slotsPerChunk * hidden * S.dtype;
+    // A slot is exactly one record, because a sink names a record digest and a
+    // length and cannot name part of one. So the record cap cuts the plane and
+    // the write limit only has to be able to carry one record.
+    g.recordBytes = Math.ceil(g.planeBytes / Math.ceil(g.planeBytes / recordCap));
+    g.piecesPerPlane = Math.ceil(g.planeBytes / g.recordBytes);
+    g.recordOverWrite = g.recordBytes > maxWrite;
+    g.slotsPerLayerPerChunk = kvSize * g.piecesPerPlane;
+    g.layerBytes = kvSize * g.planeBytes;
+    g.groupBytes = g.layers.length * g.layerBytes;
+  }
+
+  const byLayer = new Map();
+  for (const g of kgs) g.layers.forEach((L, pos) => byLayer.set(L, { g, pos }));
+
+  const objectGroups = new Map();
+  for (const g of kgs) {
+    if (!objectGroups.has(g.og)) objectGroups.set(g.og, []);
+    objectGroups.get(g.og).push(g);
+  }
+
+  let totalSlots = 0;
+  for (const g of kgs) totalSlots += g.chunks * g.layers.length * g.slotsPerLayerPerChunk;
+
+  const d = { kgs, byLayer, objectGroups, hidden, kvSize, maxWrite, recordCap,
+              slotsPerChunk, totalSlots };
+  d.timing = schedule(d);
+  return d;
+}
+
+// Object-group kind labels, as kv_layer_groups.py:617 derives them:
+//   "aux" if g.aux else ("recurrent" if g.recurrent else "attention")
+// Note what that means for a sliding-window group -- it is neither aux nor
+// recurrent, so it is labelled "attention". That is the whole reason splitting
+// a sliding-window hybrid breaks blend.
+function objectGroupKinds(d) {
+  return [...d.objectGroups.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, gs]) => (gs.every(g => g.kind === "rec") ? "recurrent" : "attention"));
+}
+
+// Mirror of blend's _classify_cb_read_groups.
+//
+// The prefix leg loads contiguous history, so it may read recurrent state.
+// The blend leg relocates chunks to new positions, and a recurrent snapshot is
+// the result of a sequential scan at one position -- it cannot be moved -- so
+// that leg reads attention (and aux) only.
+function blendLegs(d) {
+  const kinds = objectGroupKinds(d);
+  const attn = kinds.map((k, i) => (k === "attention" ? i : -1)).filter(i => i >= 0);
+  const recurrent = kinds.map((k, i) => (k === "recurrent" ? i : -1)).filter(i => i >= 0);
+  return {
+    kinds,
+    attn,
+    recurrent,
+    // "Blend supports exactly one attention object group and at most one aux"
+    valid: attn.length === 1,
+    blendGids: attn,
+    prefixGids: [...attn, ...recurrent].sort((a, b) => a - b),
+  };
+}
+
+// Byte ranges of one layer within its object-group payload, one per kv plane.
+//
+// The payload is the object group's kernel groups concatenated in
+// kernel_group_indices order; within a kernel group the planes are outermost,
+// so plane p of layer position `pos` sits at (p * num_layers + pos) strides in.
+function layerRanges(d, layer) {
+  const { g: kg, pos } = d.byLayer.get(layer);
+  const groups = d.objectGroups.get(kg.og);
+
+  let base = 0;
+  for (const g of groups) {
+    if (g === kg) break;
+    base += g.groupBytes;
+  }
+  const objectBytes = groups.reduce((a, g) => a + g.groupBytes, 0);
+
+  const ranges = [];
+  for (let p = 0; p < d.kvSize; p++) {
+    ranges.push({
+      plane: d.kvSize > 1 ? (p === 0 ? "K" : "V") : "KV",
+      start: base + (p * kg.layers.length + pos) * kg.planeBytes,
+      length: kg.planeBytes,
+    });
+  }
+  return { ranges, objectBytes, planeBytes: kg.planeBytes, kg };
+}
+
+// Reproduces AerospikeNativeConnector::plan(): shard purely by byte count.
+// The object group's byte layout, region by region, in the order they are
+// concatenated.
+//
+// This is the detail that makes a flat "first half K, second half V" reading
+// wrong: an object group holds its kernel groups back to back, and the planes
+// are outermost *within* each kernel group. So a two-kernel-group object is
+//
+//   [kg0 K][kg0 V][kg1 K][kg1 V]
+//
+// not [all K][all V]. With a sliding-window hybrid and groups merged -- the
+// default -- that is exactly the shape, and assuming the flat one puts a
+// layer's V plane in the region labelled K.
+function planeMap(d, og) {
+  const regions = [];
+  let at = 0;
+  for (const g of d.objectGroups.get(og)) {
+    for (let p = 0; p < d.kvSize; p++) {
+      const length = g.layers.length * g.planeBytes;
+      regions.push({
+        kind: g.kind,
+        plane: d.kvSize > 1 ? (p === 0 ? "K" : "V") : "KV",
+        start: at,
+        length,
+        kg: g,
+      });
+      at += length;
+    }
+  }
+  return regions;
+}
+
+// How the object is cut into segment records.
+//
+// Two policies. `plan()` currently implements the first: divide by byte count
+// to get the fewest records under the cap, knowing nothing about planes. The
+// second is the rule we want -- a record never holds pieces of more than one
+// plane, so it is either exactly one plane or an equal fraction of one.
+//
+// The aligned policy makes records *smaller* than the cap allows, and that is
+// deliberate rather than a concession. It removes every straddle by
+// construction, so there is no half-record case to handle anywhere downstream:
+// a record maps to exactly one layer, a write maps to exactly one slot, and
+// FetchSlot's single layer_id is always well defined. The M0 sweep also found
+// smaller records *faster* at a fixed object size -- 1 MiB records reached
+// 1880 MB/s against 8 MiB records at 1659 MB/s -- because a larger record
+// coarsens the unit of concurrency and reduces device fanout.
+function shardPlan(objectBytes, planeBytes) {
+  const cap = Math.pow(2, S.reccapPow);
+
+  if (S.aligned && planeBytes) {
+    // Cut within a plane, never across one. If the plane fits, the record *is*
+    // the plane; otherwise split it into equal pieces that each fit.
+    const piecesPerPlane = Math.ceil(planeBytes / cap);
+    const segBytes = planeBytes / piecesPerPlane;
+    return { nseg: Math.ceil(objectBytes / segBytes), segBytes, cap, aligned: true };
+  }
+
+  if (objectBytes <= cap) return { nseg: 1, segBytes: objectBytes, cap, aligned: false };
+  const nseg = Math.ceil(objectBytes / cap);
+  return { nseg, segBytes: Math.ceil(objectBytes / nseg), cap, aligned: false };
+}
+
+// Segment indices covering [start, start+length), and whether the range starts
+// or ends mid-segment (a straddle, which forces the reader to pull bytes it
+// does not want).
+function segmentsFor(start, length, segBytes) {
+  const first = Math.floor(start / segBytes);
+  const last = Math.floor((start + length - 1) / segBytes);
+  const list = [];
+  for (let i = first; i <= last; i++) list.push(i);
+  return {
+    list,
+    straddles: (start % segBytes !== 0) || ((start + length) % segBytes !== 0),
+  };
+}
+
+// Simulate the layer-major push against the GPU walking layers in order.
+//
+// Network: the server saturates the link, sending layer 0 (every chunk of it),
+// then layer 1, and so on. Layer i is deliverable at the moment its last byte
+// lands, which is just the running sum.
+//
+// GPU: cannot start layer i until that layer has landed AND it has finished
+// layer i-1. Any gap between those is the GPU idle, which is the failure this
+// whole design is trying to avoid.
+// `computeScale` shrinks the per-layer compute without touching the transfer.
+// CacheBlend is exactly that case: it recomputes only a fraction of the tokens
+// and reads the rest from cache, so it has the same bytes to move and less
+// compute to move them behind.
+function schedule(d, computeScale = 1) {
+  const netBps = (S.net / 10) * 1e9;          // slider is tenths of a GB/s
+  const gpuFlops = S.gpu * 1e12;
+  const tokensTotal = S.chunks * S.tokens;
+  // Standard prefill approximation: ~2 FLOPs per parameter per token.
+  const flopsPerTokLayer = 2 * (S.params * 1e9 / S.layers);
+  const cpuPerLayerMs =
+    (tokensTotal * flopsPerTokLayer / gpuFlops) * 1000 * computeScale;
+
+  const rows = [];
+  let netDone = 0, cpuDone = 0, stalled = 0;
+  for (let L = 0; L < S.layers; L++) {
+    const g = d.byLayer.get(L).g;
+    // this layer's bytes across every chunk that actually carries it
+    const netMs = (g.layerBytes * g.chunks / netBps) * 1000;
+    const netStart = netDone;
+    netDone += netMs;
+
+    const cpuStart = Math.max(netDone, cpuDone);
+    stalled += Math.max(0, netDone - cpuDone);
+    cpuDone = cpuStart + cpuPerLayerMs;
+
+    rows.push({ L, netStart, netEnd: netDone, cpuStart, cpuEnd: cpuDone, netMs, cpuMs: cpuPerLayerMs });
+  }
+
+  const transferAll = netDone;
+  const computeAll = cpuPerLayerMs * S.layers;
+  // The all-or-nothing alternative: the server fences its send queue and the
+  // reply *is* the completion, so nothing can start until everything has landed.
+  const allOrNothing = transferAll + computeAll;
+  const pipelined = cpuDone;
+
+  const avgNet = transferAll / S.layers;
+  return {
+    rows, transferAll, computeAll, allOrNothing, pipelined, stalled,
+    saved: allOrNothing - pipelined,
+    savedPct: allOrNothing > 0 ? (allOrNothing - pipelined) / allOrNothing * 100 : 0,
+    hiddenPct: transferAll > 0 ? Math.max(0, transferAll - stalled) / transferAll * 100 : 0,
+    avgNet, avgCpu: cpuPerLayerMs,
+    ratio: cpuPerLayerMs > 0 ? avgNet / cpuPerLayerMs : Infinity,
+  };
+}
+
+// ---------- narrative ----------
+const PHASES = [
+  {
+    name: "The ask",
+    title: "vLLM asks one very simple question",
+    body: `<p>During prefill the model walks its layers in order. Before it can compute
+      layer <i>i</i> it calls <code>wait_for_layer_load("...layers.i...")</code> and expects that
+      to block until layer <i>i</i>'s cached KV is actually present.</p>
+      <p>That function <b class="key">returns immediately and does nothing</b> &mdash; with an
+      all-or-nothing fetch the whole chunk arrives up front, so there is never anything to wait for. Pipelining means
+      making that question answerable. Everything that follows exists only to answer
+      <i>&ldquo;has layer i arrived?&rdquo;</i></p>
+      <p>The catch that shapes the entire design: the model computes layer <i>i</i> for the
+      <b class="key">whole prompt at once</b>. So the answer is not about one piece of data,
+      it is about every piece of layer <i>i</i> from every part of the prompt.</p>`,
+    cites: "lmcache/integration/vllm/lmcache_mp_connector.py:786",
+    panels: ["p-layers"],
+  },
+  {
+    name: "Layers differ",
+    title: "Layers are not all the same shape",
+    body: `<p>It would be convenient if a model were 32 identical layers. Modern ones are not.
+      Some use full attention, some use a sliding window, some are recurrent (Mamba-style) and
+      store a state snapshot rather than per-token keys and values.</p>
+      <p>This is now the <b class="key">normal case, not an exotic one</b>. LMCache validates nine
+      hybrid architectures by name &mdash; Gemma 3/4, gpt-oss, Qwen3.5/3.6/3.8, Kimi-Linear, Kimi K3,
+      DeepSeek-V4-Flash, GLM 5.1/5.2, MiniMax-M3 &mdash; against a single catch-all row for
+      everything uniform. Switch <i>Architecture</i> to <i>Uniform</i> to see the older, simpler
+      shape.</p>
+      <p>LMCache handles this by sorting layers into <b class="key">kernel groups</b>, where a group
+      is a set of layers that share one identical shape descriptor.</p>
+      <p>This is better news than it sounds. Layers are not irregular in some unmanageable way
+      &mdash; they are sorted so that <b class="key">each group is internally uniform by
+      construction</b>. Offsets inside a group are simple arithmetic. The trap is using one
+      group's stride on another group's layers.</p>`,
+    cites: "lmcache/v1/kv_layer_groups.py:181 — KernelGroupInfo.layer_indices / shape_desc",
+    panels: ["p-layers"],
+  },
+  {
+    name: "Grouping",
+    title: "Kernel groups bundle into object groups",
+    body: `<p>A kernel group is a <i>compute</i> unit. The <i>storage</i> unit is one level up: the
+      <b class="key">object group</b>, which holds one or more kernel groups laid out back to back.</p>
+      <p>That distinction is the root of the problem. The thing we store is coarser than the thing
+      we want to signal about. We want to say &ldquo;layer 7 is here&rdquo;; storage only knows
+      about a bundle that happens to contain layer 7 along with several others.</p>`,
+    cites: "lmcache_driven_transfer.build_memory_layout_desc — one shape per kernel group, in kernel_group_indices order",
+    panels: ["p-groups"],
+  },
+  {
+    name: "Keys",
+    title: "The key has no layer in it",
+    body: `<p>A prompt is split into fixed-size chunks of tokens. Each chunk, for each object group,
+      becomes one stored object. So a request is a grid: chunks across, object groups down.</p>
+      <p>Those objects are spread over the cluster by digest, so <b class="key">one layer's data
+      lives on several different machines</b> and arrives via several independent fetches in an
+      order nobody controls.</p>
+      order nobody controls.</p>`,
+    cites: "ObjectKey(chunk_hash, model_name, kv_rank, object_group_id, cache_salt)",
+    panels: ["p-keys"],
+  },
+  {
+    name: "CacheBlend",
+    title: "One feature reads this grid differently",
+    body: `<p>Ordinary caching only reuses a <b class="key">prefix</b>: it matches from the first
+      token and stops at the first difference. For a RAG prompt &mdash;
+      <code>[system][doc A][doc B][question]</code> &mdash; if you have seen doc B before but in
+      a different slot, a prefix cache cannot touch it.</p>
+      <p>CacheBlend reuses it anyway. Position is encoded as a rotation of the key vectors, so
+      it <b class="key">re-rotates them</b> to the new position (re-RoPE) and scatters them in.
+      The payoff is cache hits where a prefix cache gets none.</p>
+      <p>Two consequences for us, and they pull in opposite directions.</p>
+      <p><b class="key">It is the best case for the RDMA work.</b> A prefix fetch reads a
+      contiguous run of chunks; a blend fetch reads chunks from wherever they happened to be
+      stored, scattered across the cluster by digest. On the classic batch-read path each one
+      costs a metadata read and
+      then serial segment reads, so the cost is round trips rather than bandwidth &mdash; which
+      is exactly what a server-side push removes. Our M0 benchmark measured the contiguous case,
+      where plain TCP already reached 98% of line rate. <b class="key">We benchmarked the case
+      where RDMA helps least.</b></p>
+      <p><b class="key">It is not the reason the GPU hop isn't pipelined.</b> Blend's copy
+      kernel takes every layer of a kernel group at once &mdash; but so does the ordinary one.
+      Nothing here pipelines to the GPU yet. Blend is a second instance of the same unbuilt
+      change, not an obstacle to it.</p>
+      <p>Whether pipelining <i>pays off</i> for blend is a separate question from whether it
+      fits, and the panel below answers both. The short version:
+      <b class="key">pipelining hides transfer behind compute, and deleting compute is the
+      whole point of blend</b> &mdash; so blend has the same bytes to move and less shadow to
+      move them under.</p>`,
+    cites: "blend/read_set.py:39 · blend/lookup.py:203 · blend/retrieve.py:215 · lmcache_driven_transfer.py:623",
+    panels: ["p-blend"],
+  },
+  {
+    name: "The payload",
+    title: "What one stored object actually looks like",
+    body: `<p>Now we open one object and look at the bytes. Its layout is not something to guess at
+      from model config &mdash; LMCache already defines it, one shape per kernel group.</p>
+      <p>For the standard format that shape is
+      <code>(kv_size, num_layers, num_slots, hidden_dim)</code>. Read the order of those dimensions
+      carefully, because the next step depends entirely on it.</p>`,
+    cites: "cache_context.get_kernel_group_shape_dtype",
+    panels: ["p-payload"],
+  },
+  {
+    name: "The trap",
+    title: "A layer is not one contiguous block of bytes",
+    danger: true,
+    body: `<p><b class="key">kv_size is the outermost dimension, not the layer.</b> That means all the
+      keys for every layer come first, and then all the values. Layer 7's keys and layer 7's values
+      sit at opposite ends of the payload, separated by everything else.</p>
+      <p>Look at the bar: the layer you selected is highlighted, and it lights up in
+      <b class="key">two separate places</b>.</p>
+      <p>This matters because an RDMA write lands in one continuous stretch of memory at the far end.
+      It cannot scatter. So a layer needs <b class="key">at least two writes</b>, not one.</p>
+      <p>Get this wrong and the failure is quiet and nasty: you deliver the keys, announce the layer
+      as ready, and hand the model a cache whose values are still uninitialised. No error, no crash
+      &mdash; just a model that has mysteriously become stupid. Switch the format to
+      <code>NL_X_NB_BS_HS</code> to see the one case where a layer <i>is</i> contiguous.</p>`,
+    cites: "torch.Size((sd.kv_size, group.num_layers, num_slots, group.hidden_dim_size))",
+    panels: ["p-payload"],
+  },
+  {
+    name: "Records",
+    title: "Where those bytes actually live",
+    body: `<p>That object does not sit on disk as one piece. Aerospike caps how big a single
+      record can be, so LMCache splits the payload into numbered <b class="key">segment
+      records</b> &mdash; and it splits purely by byte count, with no idea that layers exist.</p>
+      <p>It turns out it does not need to. Work out where a layer's two regions land and the
+      answer is clean: <b class="key">each segment holds a whole number of layer planes</b>, so
+      reading two segments yields two complete layers. The highlighted boxes are the records
+      needed for the layer you selected.</p>
+      <p>So the surprise here is a pleasant one. <b class="key">Nothing about the storage has to
+      change</b> &mdash; not the keys, not the shard plan, not the record sizes we tuned. The only
+      thing that changes is the <i>order</i> the server reads them in, shown at the bottom.</p>
+      <p>One thing to watch, though. That clean mapping is luck: it holds because chunk sizes and
+      record caps are both powers of two. Drag <i>Tokens per chunk</i> to 784 &mdash; a real
+      unified block size for a Mamba hybrid &mdash; and every layer starts straddling a record
+      boundary.</p>`,
+    cites: "connector.cpp:387 plan() — nseg = ceil(payload / target), seg_b = ceil(payload / nseg)",
+    panels: ["p-records"],
+  },
+  {
+    name: "Slots",
+    title: "Chopping a layer into writes",
+    body: `<p>This is a <b class="key">second, independent</b> cut. Records are how the data is
+      stored; slots are how it crosses the wire. They are the <b>same size</b>, and that is a
+      constraint rather than a coincidence.</p>
+      <p>A sink on the wire reads <code>&lt;digest&gt;@&lt;offset&gt;:&lt;length&gt;</code>: it names
+      one record and one destination, with no way to say "the second half of that record". So a
+      slot larger than its record asks for bytes the record does not hold, and a slot smaller than
+      its record names no particular part of it. One slot is one record is one write.</p>
+      <p>We call that a <b class="key">slot</b>. Drag the <i>Record cap</i> slider to watch the
+      count change; the <i>Max RDMA write</i> slider now only has to be large enough to carry one
+      record, which in practice it always is &mdash; Aerospike caps a record at 8 MiB and EFA
+      allows roughly a gigabyte per write.</p>
+      <p>A layer counts as arrived only when <b class="key">every one of its slots</b> has landed
+      &mdash; both planes, all pieces.</p>`,
+    cites: "csrc/storage_backends/aerospike/layer_pipeline.h — FetchSlot",
+    panels: ["p-slots"],
+  },
+  {
+    name: "32 bits",
+    title: "The whole vocabulary is 32 bits",
+    body: `<p>When a write completes, the hardware hands us 32 bits chosen by the sender. That is the
+      entire channel for saying what just landed, so it has to be spent carefully: 16 bits naming
+      the request, 16 bits naming the slot.</p>
+      <p>The generation half exists to defend against a specific hazard. A write belonging to a
+      fetch that already timed out can still land later, into memory since handed to a different
+      request. The registration is still valid, so the hardware performs it happily. Tagging the
+      request and rejecting mismatches is what stops a ghost write from being counted as progress.</p>
+      <p>The slot half has to be numbered <b class="key">per request, not per fetch</b>. Every
+      machine reports into the same table, so if each numbered its slots from zero we could not tell
+      one machine's slot 5 from another's.</p>`,
+    cites: "encode_immediate(generation, slot_index) — generation << 16 | slot",
+    panels: ["p-imm"],
+  },
+  {
+    name: "The payoff",
+    title: "Why any of this is worth building",
+    body: `<p>Here is the entire point. Aerospike pushes <b class="key">layer 0 first, then layer 1,
+      then layer 2</b>, keeping the link saturated throughout. The GPU starts computing layer 0 the
+      moment it lands, while layer 1 is still crossing the wire.</p>
+      <p>The bar underneath is the alternative shape the protocol could take, and the one the
+      Aerospike PoC currently has: the server fences its send queue and replies once, so the reply
+      <i>is</i> the completion and nothing can start until every byte has landed. Pipelining turns
+      that addition into an overlap, so you pay for <b class="key">one layer's transfer instead of
+      all of them</b>. That is the decision this page exists to inform.</p>
+      <p>Whether it works comes down to one race, per layer: can the network deliver layer
+      <i>i+1</i> in the time the GPU spends on layer <i>i</i>? Drag <i>Network delivery</i> down, or
+      <i>GPU prefill</i> up, until the green lane develops hatched gaps &mdash; those are the GPU
+      sitting idle, and they are the shape of the whole thing failing.</p>`,
+    cites: "ratio = (KV bytes per token per layer / FLOPs per token per layer) × (GPU FLOP/s / network B/s)",
+    panels: ["p-timeline"],
+  },
+  {
+    name: "The barrier",
+    title: "One layer means every chunk of that layer",
+    body: `<p>The staircase above hides something. A &ldquo;layer&rdquo; is not one delivery &mdash;
+      the prompt was split into chunks living on different machines, and the GPU computes layer
+      <i>i</i> for the <b class="key">whole prompt at once</b>. So a pipeline step only advances when
+      every chunk's copy of that layer has landed, from every machine.</p>
+      <p>Press <i>Push layers</i>. The green wavefront sweeps left to right, because that is the order
+      the servers send in. Each column completes only when its entire row of chunks is filled.</p>
+      <p>Now the ordering caveat, in proportion. The schedule is deliberately layer-major, so this is
+      not a free-for-all. Toggle <i>SRD jitter</i> off and exactly one column is ever partially
+      filled &mdash; a clean wavefront. Toggle it on and <b class="key">two or three adjacent columns
+      are in flight at once</b>, because AWS's network reorders packets among the writes that are
+      airborne together.</p>
+      <p>So the honest version of the out-of-order story is narrower than &ldquo;layer 30 beats layer
+      2&rdquo;, which cannot happen &mdash; layer 30 has not been sent yet. What actually happens is
+      that <b class="key">the individual writes making up a layer land in no particular order</b>,
+      and neighbouring layers overlap at the edge. That is why arrivals are counted rather than
+      assumed, and why readiness is a set: it costs nothing and it cannot be fooled by a straggler.</p>
+      <p>The barrier is the real risk, not the ordering. Waiting on the slowest chunk, once per
+      layer, exposes every single pipeline step to tail latency rather than the median &mdash; and a
+      sum of maxima is worse than one maximum.</p>`,
+    cites: "expected(L) = Σ over participating chunks of slots(L, c)",
+    panels: ["p-ready"],
+  },
+  {
+    name: "Caveats",
+    title: "The parts that can still bite",
+    body: `<p>The mapping above is arithmetic over structures that already exist, so it is cheap.
+      The risks are elsewhere.</p>`,
+    cites: "docs/design/v1/distributed/l2_adapters/layerwise_transfer_data_model.md",
+    panels: ["p-caveats"],
+  },
+];
+
+// shape description per phase
+function shapeFor(d) {
+  const p = S.phase;
+  const hidden = d.hidden;
+  const kg = d.byLayer.get(S.sel) ? d.byLayer.get(S.sel).g : d.kgs[0];
+
+  if (p <= 1) {
+    return {
+      tag: "as vLLM holds it",
+      sub: "Paged KV on the GPU: one tensor per layer, indexed by block. The cache is scattered across blocks, not one run of memory.",
+      dims: [
+        { v: 2, n: "K / V" },
+        { v: "blocks", n: "num_blocks" },
+        { v: 16, n: "block size" },
+        { v: S.kvheads, n: "kv heads" },
+        { v: S.headdim, n: "head dim" },
+      ],
+      meta: `Per layer, per token: <b>${bytes(2 * hidden * S.dtype)}</b> &nbsp;&middot;&nbsp;
+             whole model, per token: <b>${bytes(2 * hidden * S.dtype * S.layers)}</b>`,
+    };
+  }
+  if (p >= 2 && p <= 4) {
+    return {
+      tag: "as LMCache stores it",
+      sub: "Gathered off the GPU into one packed buffer per kernel group. This is the shape that gets keyed and written to the backend.",
+      dims: [
+        { v: d.kvSize, n: "kv_size", lead: d.kvSize > 1 },
+        { v: kg.layers.length, n: "num_layers", layerdim: true },
+        { v: d.slotsPerChunk, n: "num_slots" },
+        { v: hidden, n: "hidden_dim" },
+      ],
+      meta: `One object = <b>${bytes(kg.groupBytes)}</b> &nbsp;&middot;&nbsp;
+             request total = <b>${bytes(d.kgs.reduce((a, g) => a + g.groupBytes * g.chunks, 0))}</b>`,
+    };
+  }
+  if (p === 5 || p === 6) {
+    return {
+      tag: "one layer inside it",
+      sub: S.format === "kv_outer"
+        ? "Slicing out a single layer leaves the kv dimension intact — which is precisely why it is not contiguous."
+        : "With the layer dimension outermost, a single layer is one clean contiguous run.",
+      dims: [
+        { v: d.kvSize, n: "kv_size", lead: d.kvSize > 1 },
+        { v: 1, n: "this layer", layerdim: true },
+        { v: d.slotsPerChunk, n: "num_slots" },
+        { v: hidden, n: "hidden_dim" },
+      ],
+      meta: `Layer ${S.sel}, one chunk: <b>${bytes(kg.layerBytes)}</b> in
+             <b>${d.kvSize}</b> region${d.kvSize > 1 ? "s" : ""} of <b>${bytes(kg.planeBytes)}</b>`,
+    };
+  }
+  if (p === 7) {
+    const { objectBytes, planeBytes } = layerRanges(d, S.sel);
+    const { nseg, segBytes } = shardPlan(objectBytes, planeBytes);
+    return {
+      tag: "as Aerospike stores it",
+      sub: "Split by byte count into numbered segment records, each within the server's record cap. The split knows nothing about layers — it does not need to.",
+      dims: [
+        { v: nseg, n: "records" },
+        { v: bytes(segBytes), n: "each" },
+      ],
+      meta: `Object <b>${bytes(objectBytes)}</b> &nbsp;&middot;&nbsp; one layer plane is
+             <b>${bytes(kg.planeBytes)}</b>, so a record holds
+             <b>${(segBytes / kg.planeBytes).toFixed(2)}</b> of them`,
+    };
+  }
+  if (p === 8 || p === 9) {
+    return {
+      tag: "on the wire",
+      sub: "A slot is flat. All structure has been flattened away — the receiver knows only an address, a length, and 32 bits of label.",
+      dims: [
+        { v: kg.recordBytes, n: "bytes" },
+      ],
+      meta: `<b>${kg.slotsPerLayerPerChunk}</b> slots per layer per chunk &nbsp;&middot;&nbsp;
+             <b>${d.totalSlots.toLocaleString()}</b> slots for the whole request`,
+    };
+  }
+  if (p === 10) {
+    const t = d.timing;
+    return {
+      tag: "one pipeline stage",
+      sub: "The unit that moves per step of the pipeline: one layer, but across every chunk of the prompt at once, because that is what the GPU consumes.",
+      dims: [
+        { v: d.kvSize, n: "kv_size", lead: d.kvSize > 1 },
+        { v: 1, n: "this layer", layerdim: true },
+        { v: d.slotsPerChunk * kg.chunks, n: "slots × chunks" },
+        { v: hidden, n: "hidden_dim" },
+      ],
+      meta: `Per stage: <b>${bytes(kg.layerBytes * kg.chunks)}</b> to move,
+             <b>${t.avgNet.toFixed(2)} ms</b> to deliver vs <b>${t.avgCpu.toFixed(2)} ms</b> to
+             compute &mdash; ratio <b>${t.ratio.toFixed(2)}</b>`,
+    };
+  }
+  return {
+    tag: "what we track",
+    sub: "Readiness collapses all of it back to one question per layer. The bytes are wherever they were written; this is only bookkeeping.",
+    dims: [
+      { v: S.layers, n: "layers" },
+      { v: "set", n: "ready or not", layerdim: true },
+    ],
+    meta: `Counting <b>${d.totalSlots.toLocaleString()}</b> arrivals into
+           <b>${S.layers}</b> yes/no answers`,
+  };
+}
+
+// ---------- rendering ----------
+function renderStepper() {
+  const s = document.getElementById("stepper");
+  s.innerHTML = "";
+  PHASES.forEach((ph, i) => {
+    const b = el("button", "step" + (i === S.phase ? " on" : ""));
+    b.appendChild(el("span", "n", String(i + 1)));
+    b.appendChild(document.createTextNode(ph.name));
+    b.onclick = () => { S.phase = i; render(); };
+    s.appendChild(b);
+  });
+  document.getElementById("phase-counter").textContent =
+    `${S.phase + 1} of ${PHASES.length}`;
+  document.getElementById("btn-prev").disabled = S.phase === 0;
+  document.getElementById("btn-next").disabled = S.phase === PHASES.length - 1;
+}
+
+function renderNarrative() {
+  const ph = PHASES[S.phase];
+  document.getElementById("narr-title").textContent = ph.title;
+  document.getElementById("narr-body").innerHTML = ph.body;
+  document.getElementById("narr-cites").textContent = ph.cites || "";
+  document.getElementById("narr").className = "card narr" + (ph.danger ? " danger" : "");
+}
+
+function renderShape(d) {
+  const sp = shapeFor(d);
+  document.getElementById("shape-tag").textContent = sp.tag;
+  document.getElementById("shape-sub").textContent = sp.sub;
+  const box = document.getElementById("shapebox");
+  box.innerHTML = "";
+  sp.dims.forEach((dm, i) => {
+    if (i > 0) { const s = el("div", "dim sep", "×"); box.appendChild(s); }
+    const cls = "dim" + (dm.lead ? " lead" : "") + (dm.layerdim ? " layerdim" : "");
+    const e = el("div", cls);
+    e.appendChild(el("div", "dv", typeof dm.v === "number" ? dm.v.toLocaleString() : dm.v));
+    e.appendChild(el("div", "dn", dm.n));
+    box.appendChild(e);
+  });
+  document.getElementById("shapemeta").innerHTML = sp.meta;
+}
+
+function renderLayerStrip(d) {
+  const strip = document.getElementById("layerstrip");
+  strip.innerHTML = "";
+  for (let i = 0; i < S.layers; i++) {
+    const info = d.byLayer.get(i);
+    const c = el("div", "cell " + info.g.kind + (i === S.sel ? " sel" : ""), String(i));
+    c.title = `layer ${i} — ${info.g.label} (kernel group ${info.g.id})`;
+    c.onclick = () => { S.sel = i; document.getElementById("c-sel").value = i; render(); };
+    strip.appendChild(c);
+  }
+  const ratio = d.kgs.length > 1
+    ? `${d.kgs[1].layers.length}:${d.kgs[0].layers.length} ` +
+      `${d.kgs[1].kind === "sw" ? "local" : "linear"}-to-full`
+    : "";
+  document.getElementById("layers-sub").textContent = d.kgs.length > 1
+    ? `${S.layers} layers across ${d.kgs.length} kernel groups, interleaved ${ratio}. ` +
+      `Click a layer to inspect it.`
+    : `${S.layers} identical full-attention layers, one kernel group. Click a layer to inspect it.`;
+
+  const lg = document.getElementById("layerlegend");
+  lg.innerHTML = "";
+  d.kgs.forEach(g => {
+    const w = el("span");
+    const sw = el("i"); sw.style.background = `var(--${g.kind})`;
+    w.appendChild(sw);
+    w.appendChild(document.createTextNode(
+      `${g.label} — ${g.layers.length} layers, object group ${g.og}` +
+      (g.kind === "sw" ? `, only ${g.chunks} of ${S.chunks} chunks` : "")));
+    lg.appendChild(w);
+  });
+}
+
+function renderGroupTree(d) {
+  const t = document.getElementById("grouptree");
+  t.innerHTML = "";
+  for (const [og, gs] of [...d.objectGroups.entries()].sort((a, b) => a[0] - b[0])) {
+    const wrap = el("div");
+    wrap.style.cssText = "border:1px solid var(--line);border-radius:9px;padding:11px 13px;margin-bottom:9px;background:var(--panel-2)";
+    const hd = el("div");
+    hd.style.cssText = "font-size:12.5px;font-weight:640;margin-bottom:8px";
+    hd.innerHTML = `Object group ${og} <span style="color:var(--dim);font-weight:400">` +
+      `— one stored object per chunk, ${bytes(gs.reduce((a, g) => a + g.groupBytes, 0))} each</span>`;
+    wrap.appendChild(hd);
+    gs.forEach(g => {
+      const row = el("div");
+      row.style.cssText = "display:flex;align-items:center;gap:9px;margin-bottom:5px";
+      const chip = el("span", null, g.label);
+      chip.style.cssText = `background:var(--${g.kind});color:#06121f;border-radius:5px;padding:2px 9px;font-size:11px;font-weight:650;white-space:nowrap`;
+      row.appendChild(chip);
+      const txt = el("span");
+      txt.style.cssText = "font-size:12px;color:var(--dim);font-family:ui-monospace,monospace";
+      txt.textContent = `layers [${g.layers.slice(0, 6).join(", ")}${g.layers.length > 6 ? ", …" : ""}] · ${bytes(g.layerBytes)} per layer`;
+      row.appendChild(txt);
+      wrap.appendChild(row);
+    });
+    t.appendChild(wrap);
+  }
+}
+
+function renderKeys(d) {
+  const ogs = [...d.objectGroups.keys()].sort((a, b) => a - b);
+  document.getElementById("keys-sub").textContent =
+    `${S.chunks} chunks × ${ogs.length} object group${ogs.length > 1 ? "s" : ""} = ` +
+    `${ogs.reduce((a, og) => a + Math.max(...d.objectGroups.get(og).map(g => g.chunks)), 0)} stored objects for this one request.`;
+
+  const rows = document.getElementById("keys-rows");
+  const grid = document.getElementById("keys-grid");
+  rows.innerHTML = ""; grid.innerHTML = "";
+  rows.style.gridTemplateRows = `repeat(${ogs.length}, 18px)`;
+  grid.style.gridTemplateColumns = `repeat(${S.chunks}, minmax(0,1fr))`;
+
+  ogs.forEach(og => {
+    rows.appendChild(el("div", null, `og ${og}`));
+    const maxChunks = Math.max(...d.objectGroups.get(og).map(g => g.chunks));
+    for (let c = 0; c < S.chunks; c++) {
+      const cell = el("div", "mcell " + (c < maxChunks ? "full" : "na"));
+      cell.title = c < maxChunks
+        ? `ObjectKey(chunk ${c}, object_group ${og})`
+        : `chunk ${c} outside this group's sliding window`;
+      grid.appendChild(cell);
+    }
+  });
+}
+
+// Which chunks each route reuses.
+//
+// The blend hits are fixed positions rather than random so the picture is
+// stable while the sidebar is being driven; the point being made is the shape
+// of the access pattern, not any particular hit set.
+function renderBlendChunks(d) {
+  const wrap = document.getElementById("blend-chunks");
+  wrap.innerHTML = "";
+  const n = Math.max(8, S.chunks);
+  const prefixHits = Math.min(2, n);
+  // chunk index -> the position it was originally cached at
+  const blendHits = new Map(
+    [[3, 41], [4, 42], [6, 17], [9, 8]].filter(([i]) => i < n)
+  );
+
+  const row = (labelTop, labelSub, build) => {
+    const r = el("div", "crow");
+    const lab = el("div", "clab");
+    lab.innerHTML = `<b>${labelTop}</b>${labelSub}`;
+    r.appendChild(lab);
+    const strip = el("div", "cstrip");
+    for (let i = 0; i < n; i++) strip.appendChild(build(i));
+    r.appendChild(strip);
+    wrap.appendChild(r);
+  };
+
+  row("prefix cache", "the default", i => {
+    const c = el("div", "chunk" + (i < 4 && i < n ? " hit" : ""));
+    c.innerHTML = `<span class="cn">${i}</span>` +
+      (i < 4 ? "<span>hit</span>" : "<span>&mdash;</span>");
+    c.title = i < 4
+      ? `chunk ${i}: matches the cached prefix`
+      : `chunk ${i}: past the first mismatch, so unusable however well it is cached`;
+    return c;
+  });
+
+  row("CacheBlend", "prefix + relocated", i => {
+    const was = blendHits.get(i);
+    const isPrefix = i < prefixHits;
+    const cls = isPrefix ? " hit" : was !== undefined ? " blendhit" : " recomp";
+    const c = el("div", "chunk" + cls);
+    c.innerHTML = `<span class="cn">${i}</span>` +
+      (isPrefix ? "<span>hit</span>"
+        : was !== undefined ? `<span class="was">was ${was}</span>`
+        : "<span>calc</span>");
+    c.title = isPrefix
+      ? `chunk ${i}: ordinary prefix hit`
+      : was !== undefined
+        ? `chunk ${i}: found in cache at position ${was}; keys re-rotated from ${was} to ${i}`
+        : `chunk ${i}: no cache entry, recomputed`;
+    return c;
+  });
+
+  const lg = el("div", "legend");
+  lg.innerHTML =
+    `<span><i style="background:#3fb95066"></i>prefix hit</span>` +
+    `<span><i style="background:#d2992288"></i>relocated hit — re-RoPE'd from another position</span>` +
+    `<span><i style="background:#f8514977"></i>recomputed</span>`;
+  wrap.appendChild(lg);
+
+  // Round trips the scattered leg costs on the classic batch-read path.
+  const { objectBytes, planeBytes } = layerRanges(d, S.sel);
+  const { nseg } = shardPlan(objectBytes, planeBytes);
+  const k = blendHits.size;
+  const co = el("div", "callout");
+  co.innerHTML = `<b>Why the scattered hits are expensive without a push.</b> Those
+    ${k} relocated chunks live on up to ${k} different nodes, and each needs a metadata read
+    then <code>${nseg}</code> segment read${nseg === 1 ? "" : "s"}, issued one after another
+    &mdash; <code>${k} × (1 + ${nseg}) = ${k * (1 + nseg)}</code> round trips. A server-side
+    push replaces all of them with one info command and
+    <code>${k * nseg}</code> unacknowledged writes. The saving is round trips, not bandwidth.`;
+  wrap.appendChild(co);
+}
+
+// The two routes from Aerospike to the GPU, step by step.
+function renderBlendFlows() {
+  const wrap = document.getElementById("blend-flows");
+  wrap.innerHTML = "";
+
+  const build = (title, sub, steps) => {
+    const f = el("div", "flow");
+    f.innerHTML = `<h4>${title} <em>${sub}</em></h4>`;
+    steps.forEach(([cls, html, note]) => {
+      const s = el("div", "fstep" + (cls ? " " + cls : ""));
+      s.innerHTML = `<span class="farrow">&darr;</span>${html}` +
+        (note ? `<span class="fnote">${note}</span>` : "");
+      f.appendChild(s);
+    });
+    wrap.appendChild(f);
+  };
+
+  build("Ordinary caching", "one prefetch", [
+    ["", "<code>LOOKUP</code>", "contiguous run of chunks"],
+    ["shared", "<code>submit_prefetch_task</code>", "shared code — RDMA push lands here"],
+    ["shared", "L1, pinned host DRAM", "the RDMA destination window"],
+    ["alllayers", "<code>multi_layer_block_kv_transfer</code>",
+      "every layer of a kernel group, one operation"],
+    ["", "paged GPU blocks", ""],
+  ]);
+
+  build("CacheBlend", "two prefetches", [
+    ["", "<code>CB_UNIFIED_LOOKUP</code>", "prefix match + non-prefix fingerprint match"],
+    ["shared", "<code>submit_prefetch_task</code> &times;2",
+      "same call, twice — prefix leg and scattered blend leg"],
+    ["shared", "L1, pinned host DRAM", "same destination, same RDMA benefit, no extra work"],
+    ["diverge", "waits for <i>both</i> legs",
+      "returns None until each has landed — waits on the slower of two"],
+    ["alllayers", "<code>CB_RETRIEVE_PRE_COMPUTED</code>: re-RoPE + scatter",
+      "every layer at once too — its own kernel, because it re-rotates while copying"],
+    ["", "paged GPU blocks", ""],
+  ]);
+
+  const co = el("div", "callout");
+  co.style.gridColumn = "1 / -1";
+  co.innerHTML = `<b>Read the red rows together.</b> Both routes move a whole kernel group's
+    layers in a single operation, and <code>wait_for_layer_load</code> is an empty stub for
+    both. <b>Nothing in multiprocess mode pipelines to the GPU yet.</b> Per-layer delivery is
+    the same unbuilt change in two different kernels &mdash; do the ordinary one first, since it
+    is simpler and it is the one we benchmarked, then port it across. Blend is arguably the more
+    natural fit: the original algorithm inspects deviation at selected layers
+    (<code>blend_check_layers</code>) and the in-process implementation already requires
+    <code>use_layerwise=True</code>.`;
+  wrap.appendChild(co);
+}
+
+// Does pipelining pay off for blend? Two compact lanes, dense vs blend, with
+// identical transfer and blend's compute scaled by the recompute ratio.
+function renderBlendPayoff(d) {
+  const wrap = document.getElementById("blend-payoff");
+  wrap.innerHTML = "";
+
+  const r = S.recomp / 100;
+  const dense = d.timing;                 // computeScale 1
+  const blend = schedule(d, r);
+  const span = Math.max(dense.pipelined, blend.pipelined) * 1.02;
+  const pct = v => (v / span * 100) + "%";
+
+  const lane = (label, meta, t) => {
+    const tr = el("div", "track");
+    const hd = el("div", "track-hd");
+    hd.innerHTML = `<b>${label}</b><span>${meta}</span>`;
+    tr.appendChild(hd);
+    const ln = el("div", "lane");
+    t.rows.forEach(row => {
+      const priorEnd = row.L === 0 ? 0 : t.rows[row.L - 1].cpuEnd;
+      if (row.cpuStart - priorEnd > span * 0.002) {
+        const s = el("div", "blk stall");
+        s.style.left = pct(priorEnd);
+        s.style.width = pct(row.cpuStart - priorEnd);
+        s.title = `GPU idle ${ms(row.cpuStart - priorEnd)} waiting on layer ${row.L}`;
+        ln.appendChild(s);
+      }
+      const c = el("div", "blk cpu" + (row.L % 2 ? " alt" : ""));
+      c.style.left = pct(row.cpuStart);
+      c.style.width = pct(row.cpuMs);
+      c.title = `layer ${row.L} computing — ${ms(row.cpuMs)}`;
+      ln.appendChild(c);
+    });
+    tr.appendChild(ln);
+    wrap.appendChild(tr);
+  };
+
+  const verdict = t => t.ratio < 1 ? "compute bound — transfer hides" : "network bound — GPU waits";
+  // Named "reference" rather than "dense": the compute term is a full prefill
+  // of every token, which is the cost of computing a layer from scratch. A pure
+  // cache hit does far less than that, so this lane is the optimistic bound on
+  // how much compute is available to hide transfer behind.
+  lane("Full prefill (reference)", `${ms(dense.pipelined)} · ${verdict(dense)}`, dense);
+  lane(`Blend, ${S.recomp}% of tokens recomputed`,
+    `${ms(blend.pipelined)} · ${verdict(blend)}`, blend);
+
+  const ro = el("div", "readout");
+  ro.innerHTML =
+    `<span class="pill${dense.ratio < 1 ? " on" : ""}">reference ratio ${dense.ratio.toFixed(2)}</span>` +
+    `<span class="pill${blend.ratio < 1 ? " on" : ""}">blend ratio ${blend.ratio.toFixed(2)}</span>` +
+    `<span class="pill${blend.hiddenPct > 90 ? " on" : ""}">blend ${blend.hiddenPct.toFixed(0)}% hidden</span>`;
+  wrap.appendChild(ro);
+
+  // The ratio answers "can transfer be hidden", which is NOT the same question
+  // as "is caching worth it". Without this comparison the ratio reads as a
+  // score, and at r = 1 it cheerfully reports "transfer hides" for a
+  // configuration that fetched a whole cache and then ignored it.
+  const noCache = dense.computeAll;                 // full prefill, nothing fetched
+  const serial = blend.allOrNothing;                // every byte lands, then compute
+  const piped = blend.pipelined;                    // overlapped
+  const worst = Math.max(noCache, serial, piped) * 1.02;
+  const bpct = v => (v / worst * 100) + "%";
+
+  wrap.appendChild(el("div", null, "")).style.height = "6px";
+  const h = el("div", "track-hd");
+  h.innerHTML = `<b>Is the cache even worth fetching?</b><span>end-to-end, same request</span>`;
+  wrap.appendChild(h);
+
+  const bar = (label, segs, total, note) => {
+    const tr = el("div", "track");
+    const hd = el("div", "track-hd");
+    hd.innerHTML = `<b>${label}</b><span>${ms(total)}${note ? " · " + note : ""}</span>`;
+    tr.appendChild(hd);
+    const ln = el("div", "lane");
+    let at = 0;
+    segs.forEach(([cls, len, txt]) => {
+      if (len <= 0) return;
+      const b = el("div", "blk " + cls, len / worst > 0.08 ? txt : "");
+      b.style.left = bpct(at);
+      b.style.width = bpct(len);
+      b.title = `${txt} — ${ms(len)}`;
+      ln.appendChild(b);
+      at += len;
+    });
+    tr.appendChild(ln);
+    wrap.appendChild(tr);
+  };
+
+  bar("No cache at all", [["cpu", noCache, "full prefill"]], noCache, "nothing fetched");
+  bar("Blend on an all-or-nothing fetch",
+    [["net", blend.transferAll, "fetch"], ["cpu", blend.computeAll, "recompute"]],
+    serial, serial > noCache ? "worse than not caching" : "still ahead");
+  // Layer 0's transfer is the one piece that can never be overlapped: there is
+  // no earlier compute to hide it behind. So the pipelined worst case is not
+  // break-even, it is break-even plus one layer.
+  const floor = blend.rows[0].netMs;
+  bar("Blend pipelined", [["net", floor, "L0"], ["cpu", piped - floor, "overlapped"]],
+    piped, piped - noCache <= floor * 1.05 ? "worst case: one layer's transfer" : "");
+
+  // r* where serial blend stops beating no cache at all: T + r*C = C.
+  const breakEven = Math.max(0, 1 - dense.ratio) * 100;
+  const co2 = el("div", "callout" + (serial > noCache ? "" : " ok"));
+  co2.innerHTML = `<b>This is the part that looks paradoxical.</b> A high recompute ratio is
+    close to a cache miss, so you would expect the cache to stop helping &mdash; and on an
+    all-or-nothing fetch it does. The fetch costs
+    <code>${ms(blend.transferAll)}</code> whether or not you then throw the data away, so that
+    shape loses to not caching at all above about
+    <b>${breakEven.toFixed(0)}% recompute</b> (where <code>transfer + r×compute &gt; compute</code>,
+    i.e. <code>r &gt; 1 − ${dense.ratio.toFixed(2)}</code>). At
+    ${S.recomp}% it is <b>${serial > noCache
+      ? `${ms(serial - noCache)} slower than not caching</b>`
+      : `${ms(noCache - serial)} faster than not caching</b>`}.
+    <br><br><b>Pipelining is what removes that cliff.</b> Overlapped, the fetch hides inside
+    compute you were doing anyway &mdash; all of it except layer 0, which has no earlier compute
+    to hide behind. So the worst case shrinks from <i>the whole transfer</i> to
+    <i>one layer's transfer</i>, a factor of ${S.layers}:
+    <code>${ms(piped)}</code> against <code>${ms(noCache)}</code> for no cache, a penalty of
+    <code>${ms(Math.max(0, piped - noCache))}</code> versus serial's
+    <code>${ms(Math.max(0, serial - noCache))}</code>.
+    <br><br>That reframes the earlier point rather than contradicting it. Pipelining's value for
+    blend is less about raw speedup and more about <b>making a bad hit nearly harmless</b> &mdash;
+    it is what lets you leave the cache switched on when reuse turns out poor, instead of it
+    costing you. RDMA is still the bigger win for blend's good case; pipelining is what protects
+    its bad case.`;
+  wrap.appendChild(co2);
+
+  // The honest answer, stated from whichever regime the sliders land in.
+  const co = el("div", "callout" + (blend.ratio < 1 ? " ok" : ""));
+  const structural = `<b>Structurally, yes — better than dense, in fact.</b> Blend's algorithm is
+    already per-layer: <code>process_qkv(..., layer_id)</code> calls
+    <code>get_kv(layer_id)</code> for one layer at a time, and the in-process implementation
+    requires <code>use_layerwise=True</code>. It wants layer <i>i</i>'s cached KV before it can
+    decide which tokens to recompute at layer <i>i</i>. Per-layer delivery is what it would
+    ask for if asked.`;
+  const economic = blend.ratio < 1
+    ? `<br><br><b>And at ${S.recomp}% recompute the economics still work here</b> &mdash; ratio
+       ${blend.ratio.toFixed(2)}, so transfer still fits inside compute. But notice how much
+       less headroom there is than dense's ${dense.ratio.toFixed(2)}: pull the recompute ratio
+       down, or the link speed down, and blend crosses into network-bound well before dense
+       does.`
+    : `<br><br><b>But at ${S.recomp}% recompute the economics do not.</b> Blend's ratio is
+       ${blend.ratio.toFixed(2)} against dense's ${dense.ratio.toFixed(2)} &mdash; the GPU sits
+       idle ${ms(blend.stalled)} waiting on the wire, and only
+       ${blend.hiddenPct.toFixed(0)}% of transfer is hidden versus
+       ${dense.hiddenPct.toFixed(0)}% for dense. Pipelining still starts layer 0 sooner, but the
+       ceiling is now bandwidth, not compute, so the win is capped.`;
+  const degenerate = S.recomp >= 100
+    ? `<br><br><b>Note that 100% is a sanity check, not an operating point.</b> The two lanes
+       coincide because recomputing every token costs exactly a full prefill &mdash; and in
+       reality you would not fetch the KV at all, so the transfer would be pure waste. Blend
+       only earns its keep below 100%.`
+    : "";
+  co.innerHTML = structural + economic + degenerate +
+    `<br><br><b>Careful with this ratio though.</b> It answers &ldquo;can the transfer be
+     hidden?&rdquo;, which is not the same question as &ldquo;is the cache worth
+     fetching?&rdquo; &mdash; see the bars below, because the two come apart badly at high
+     recompute.`;
+  wrap.appendChild(co);
+}
+
+function renderBlend(d) {
+  renderBlendChunks(d);
+  renderBlendFlows();
+  renderBlendPayoff(d);
+
+  const legs = blendLegs(d);
+  const wrap = document.getElementById("blend-legs");
+  wrap.innerHTML = "";
+
+  const row = (name, gids, note) => {
+    const e = el("div");
+    e.style.cssText = "display:flex;align-items:baseline;gap:10px;margin-bottom:7px;flex-wrap:wrap";
+    const tag = el("span", null, name);
+    tag.style.cssText = "background:var(--panel-2);border:1px solid var(--line);" +
+      "border-radius:5px;padding:2px 9px;font-size:11px;font-weight:650;white-space:nowrap";
+    e.appendChild(tag);
+    const g = el("span");
+    g.style.cssText = "font-family:ui-monospace,monospace;font-size:12px;color:var(--text)";
+    g.textContent = gids.length ? `object groups {${gids.join(", ")}}` : "nothing to read";
+    e.appendChild(g);
+    const n = el("span");
+    n.style.cssText = "font-size:12px;color:var(--dim)";
+    n.textContent = note;
+    e.appendChild(n);
+    wrap.appendChild(e);
+  };
+
+  row("prefix leg", legs.prefixGids, "contiguous history — attention + recurrent state");
+  row("blend leg", legs.blendGids, "relocatable chunks — attention only, never recurrent");
+
+  const co = document.getElementById("blend-callout");
+  if (!legs.valid) {
+    co.innerHTML = `<div class="callout"><b>This configuration does not run.</b> Blend resolves its
+      read set by group kind, and a sliding-window group is labelled
+      <code>"attention"</code> — it is neither aux nor recurrent. Splitting the hybrid therefore
+      produces ${legs.attn.length} attention groups, and
+      <code>_classify_cb_read_groups</code> raises:
+      <br><code style="color:#ffb4ae">Blend supports exactly one attention object group and at
+      most one aux (fused-aux) object group; got ${JSON.stringify(legs.kinds)}.</code>
+      <br>Turn <code>--separate-object-groups</code> off, or accept that this model cannot use
+      blend.</div>`;
+  } else if (legs.recurrent.length) {
+    co.innerHTML = `<div class="callout ok"><b>Valid, and the split is required here.</b> One
+      attention group plus ${legs.recurrent.length} recurrent group, which is exactly what blend
+      expects. The recurrent state is position-bound, so only the prefix leg reads it — a chunk
+      cannot be relocated if its state is the result of a scan ending at a fixed position.</div>`;
+  } else {
+    co.innerHTML = `<div class="callout ok"><b>Valid.</b> A single attention object group, which
+      is what blend requires. Both legs read the same group; they differ in <i>which chunks</i>
+      they ask for, not which groups.</div>`;
+  }
+}
+
+function renderPayload(d) {
+  const kg = d.byLayer.get(S.sel).g;
+  const pos = d.byLayer.get(S.sel).pos;
+  const n = kg.layers.length;
+
+  document.getElementById("payload-tag").textContent =
+    `object group ${kg.og} · ${kg.label}`;
+  document.getElementById("payload-sub").innerHTML = S.format === "kv_outer"
+    ? `The payload for one chunk, drawn to scale. Keys for every layer first, then values for every layer. Layer <b>${S.sel}</b> is highlighted in white.`
+    : `The payload for one chunk. The layer dimension is outermost, so each layer's keys and values sit together. Layer <b>${S.sel}</b> is highlighted in white.`;
+
+  const bar = document.getElementById("payload");
+  bar.innerHTML = "";
+
+  const planes = S.format === "kv_outer"
+    ? [{ cls: "k", label: "K — keys, all layers" }, { cls: "v", label: "V — values, all layers" }]
+    : [{ cls: "k", label: "all layers, K and V interleaved" }];
+
+  planes.forEach(p => {
+    const pl = el("div", "plane " + p.cls);
+    pl.style.flex = "1 1 0";
+    pl.appendChild(el("div", "plane-hd", p.label));
+    const body = el("div", "plane-body");
+    for (let i = 0; i < n; i++) {
+      const sl = el("div", "lslice" + (i === pos ? " sel" : ""));
+      sl.title = `layer ${kg.layers[i]}`;
+      body.appendChild(sl);
+    }
+    pl.appendChild(body);
+    bar.appendChild(pl);
+  });
+
+  document.getElementById("payload-end").textContent = bytes(kg.groupBytes);
+
+  const co = document.getElementById("payload-callout");
+  if (S.phase >= 6) {
+    if (S.format === "kv_outer") {
+      co.innerHTML = `<div class="callout"><b>Two regions, not one.</b> Layer ${S.sel} occupies
+        ${bytes(kg.planeBytes)} in the K plane and another ${bytes(kg.planeBytes)} in the V plane,
+        ${bytes((n - 1) * kg.planeBytes)} apart. An RDMA write cannot span that gap, so this layer
+        needs at least 2 separate writes.</div>`;
+    } else {
+      co.innerHTML = `<div class="callout ok"><b>One contiguous region.</b> In this format layer
+        ${S.sel} is a single ${bytes(kg.layerBytes)} run, so one write can cover it. This is the
+        exception, not the norm — do not design for it.</div>`;
+    }
+  } else {
+    co.innerHTML = "";
+  }
+}
+
+function renderRecords(d) {
+  const { ranges, objectBytes, planeBytes, kg } = layerRanges(d, S.sel);
+  const { nseg, segBytes, cap } = shardPlan(objectBytes, planeBytes);
+
+  const aligned = segBytes % planeBytes === 0 || planeBytes % segBytes === 0;
+  document.getElementById("rec-tag").textContent =
+    S.aligned ? "plane aligned by construction" : (aligned ? "aligned by luck" : "straddling");
+  const ogKgs = d.objectGroups.get(kg.og);
+  document.getElementById("rec-sub").innerHTML =
+    `Object group ${kg.og} is <b>${bytes(objectBytes)}</b> per chunk. At a
+     <b>${bytes(Math.pow(2, S.reccapPow))}</b> record cap that is
+     <b>${nseg}</b> record${nseg > 1 ? "s" : ""} of <b>${bytes(segBytes)}</b>.` +
+    (ogKgs.length > 1
+      ? ` It holds <b>${ogKgs.length} kernel groups</b> back to back, and the planes are
+         outermost <i>within</i> each one — so the layout is
+         <code>${ogKgs.map(g => `[${g.kind} K][${g.kind} V]`).join("")}</code>, not one K half
+         and one V half. Layer ${S.sel} lives in the <b>${kg.kind}</b> group, so the
+         ${ogKgs.length > 1 ? "faded" : ""} segments belonging to the other group can never
+         serve it, however the records are cut.`
+      : "");
+
+  // Which segments this layer needs. A record is only a *wasteful* read when
+  // the two sizes do not divide into each other -- a plane that is an exact
+  // half of a record shares that record with the next layer, which wants it
+  // anyway, so nothing is thrown away.
+  const need = new Map();
+  ranges.forEach(r => {
+    segmentsFor(r.start, r.length, segBytes).list.forEach(i => need.set(i, r.plane));
+  });
+  const straddles = !aligned;
+
+  // Regions are per kernel group *and* per plane, so name them that way rather
+  // than pretending the object is one K half and one V half.
+  const regions = planeMap(d, kg.og);
+  const regionOf = byteOffset =>
+    regions.find(r => byteOffset >= r.start && byteOffset < r.start + r.length) ||
+    regions[regions.length - 1];
+  const multiKg = d.objectGroups.get(kg.og).length > 1;
+  const label = r => (multiKg ? `${r.kind} ${r.plane}` : `${r.plane} plane`);
+
+  const planesEl = document.getElementById("rec-planes");
+  planesEl.innerHTML = "";
+  regions.forEach(r => {
+    const first = Math.floor(r.start / segBytes);
+    const last = Math.floor((r.start + r.length - 1) / segBytes);
+    const sp = el("span", r.plane === "V" ? "pv" : "pk",
+      `${label(r)} — segment${first === last ? " " + first : `s ${first}…${last}`}`);
+    sp.style.opacity = r.kg === kg ? "1" : "0.5";
+    planesEl.appendChild(sp);
+  });
+
+  const segsEl = document.getElementById("rec-segs");
+  segsEl.innerHTML = "";
+  const shown = Math.min(nseg, 96);
+  for (let i = 0; i < shown; i++) {
+    // Colour by the region the segment starts in. A segment that spans two
+    // regions takes the colour of the first; that only happens when the sizes
+    // do not divide, which the straddling callout already flags.
+    const r = regionOf(i * segBytes);
+    const box = el("div", "seg2 " + (r.plane === "V" ? "v" : "k") +
+      (r.kg === kg ? "" : " faint") +
+      (need.has(i) ? " need" : "") + (need.has(i) && straddles ? " partial" : ""), String(i));
+    box.title = need.has(i)
+      ? `segment ${i} — holds part of layer ${S.sel}'s ${need.get(i)} plane`
+      : `segment ${i} — ${label(r)}` +
+        (r.kg === kg ? "" : `, a different kernel group, so it can never serve layer ${S.sel}`);
+    segsEl.appendChild(box);
+  }
+  if (nseg > shown) segsEl.appendChild(el("div", "seg2", `+${nseg - shown}`));
+
+  const needed = ranges.reduce((a, r) => a + r.length, 0);
+  const read = need.size * segBytes;
+  document.getElementById("rec-meta").innerHTML =
+    ranges.map(r => `<b>${r.plane}</b> at ${bytes(r.start)}, ${bytes(r.length)}`).join(" &nbsp;&middot;&nbsp; ") +
+    ` &nbsp;&rarr;&nbsp; segments <b>{${[...need.keys()].join(", ")}}</b>` +
+    ` &nbsp;&middot;&nbsp; <b>${bytes(read)}</b> must land for this layer's` +
+    ` <b>${bytes(needed)}</b> to be complete`;
+
+  const co = document.getElementById("rec-callout");
+  if (S.aligned) {
+    const naive = shardPlan(objectBytes, 0);
+    const perPlane = planeBytes / segBytes;
+    co.innerHTML = `<div class="callout ok"><b>One plane per record, by construction.</b> The
+      record size is derived from the plane size rather than from the cap, so
+      ${perPlane > 1
+        ? `each plane is cut into ${perPlane} equal pieces of ${bytes(segBytes)}`
+        : `a record <i>is</i> a plane, ${bytes(segBytes)}`} and a record can never hold pieces of
+      two planes. No straddles are possible at any chunk size &mdash; drag <i>Tokens per chunk</i>
+      to 784 and nothing degrades.
+      <br><br><b>What it costs:</b> ${nseg} records instead of ${naive.nseg}, because
+      ${bytes(segBytes)} is under the ${bytes(cap)} cap and the spare capacity goes unused.
+      That is the intended trade. It buys away every half-record case downstream: a record maps
+      to exactly one layer, a write maps to exactly one slot, and <code>FetchSlot</code>'s single
+      <code>layer_id</code> is always well defined. The M0 sweep also measured smaller records as
+      <i>faster</i> at a fixed object size &mdash; 1880 MB/s at 1 MiB against 1659 MB/s at 8 MiB
+      &mdash; since a larger record coarsens the unit of concurrency.
+      <br><br>Uncheck <i>Plane-aligned records</i> to see what byte-count sharding gives
+      instead.</div>`;
+  } else if (nseg === 1) {
+    co.innerHTML = `<div class="callout ok"><b>One record.</b> The whole object fits under the cap,
+      so every layer is served by a single read. Raise the chunk count or lower the cap to see it
+      shard.</div>`;
+  } else if (aligned) {
+    // One record covers `perSeg` planes of one plane-type, so reading the
+    // matching record from each plane completes `perSeg` whole layers.
+    const perSeg = segBytes / planeBytes;
+    const yielded = perSeg >= 1
+      ? `${perSeg} complete layer${perSeg > 1 ? "s" : ""}`
+      : `this one layer, which spans ${1 / perSeg} records per plane`;
+    co.innerHTML = `<div class="callout ok"><b>Clean mapping, but only by luck.</b> Each record holds
+      ${perSeg >= 1 ? `${perSeg} whole layer plane${perSeg > 1 ? "s" : ""}` :
+        `part of a single plane`}, so a layer's bytes never straddle a record boundary.
+      Reading ${bytes(read)} yields ${yielded} — nothing wasted, since the layers sharing a
+      record are the next ones the schedule wants anyway.
+      This holds because both sizes are powers of two, not because anything enforces it.</div>`;
+  } else {
+    const waste = (read - needed) / needed * 100;
+    co.innerHTML = `<div class="callout"><b>Every layer straddles a record boundary.</b> A plane is
+      ${bytes(planeBytes)} against ${bytes(segBytes)} records, and they divide into each other
+      unevenly, so no record belongs to exactly one layer &mdash; each one carries the tail of
+      one and the head of the next.
+      <br><br><b>The cost is not wasted bandwidth.</b> Fetching the whole object, every record is
+      used by <i>some</i> layer, so the aggregate bytes read are the bytes needed. The cost is
+      that serving this layer needs <b>${bytes(read)}</b> to land before its
+      <b>${bytes(needed)}</b> is complete &mdash; ${waste.toFixed(0)}% more than its own size,
+      because it must wait for a record that mostly belongs to its neighbour. That delays the
+      <i>first</i> layer, which is the one cost pipelining can never hide, so misalignment taxes
+      the irreducible part.
+      <br><br>It also breaks the one-layer-per-slot assumption: a natural record-sized write
+      would span two layers, so the client has to cut writes at layer boundaries and the server
+      reads a whole record to serve a partial one.
+      <br><br>This is the Mamba-hybrid case &mdash; unified block sizes are 544, 784 and 944
+      tokens, none of them powers of two. The fix is for LMCache to pass a plane-size alignment
+      hint into <code>plan()</code> rather than relying on the arithmetic happening to work
+      out.</div>`;
+  }
+
+  // read order: sequential vs layer-major
+  const seqEl = document.getElementById("rec-order-seq");
+  const lmEl = document.getElementById("rec-order-lm");
+  seqEl.innerHTML = ""; lmEl.innerHTML = "";
+  const cut = 14;
+
+  for (let i = 0; i < Math.min(nseg, cut); i++) seqEl.appendChild(el("div", "ord", String(i)));
+  if (nseg > cut) seqEl.appendChild(el("div", "ord ell", `… +${nseg - cut}`));
+  seqEl.appendChild(el("div", "ord ell",
+    `— layer 0 complete only after segment ${[...need.keys()].sort((a, b) => a - b).pop()}`));
+
+  const seen = new Set();
+  const lmOrder = [];
+  for (let L = 0; L < S.layers && lmOrder.length < cut; L++) {
+    const lr = layerRanges(d, L);
+    lr.ranges.forEach(r => {
+      segmentsFor(r.start, r.length, segBytes).list.forEach(i => {
+        if (!seen.has(i)) { seen.add(i); lmOrder.push({ i, layer: L }); }
+      });
+    });
+  }
+  lmOrder.slice(0, cut).forEach(o => {
+    const e = el("div", "ord" + (o.layer === 0 ? " hot" : ""), String(o.i));
+    e.title = `first needed by layer ${o.layer}`;
+    lmEl.appendChild(e);
+  });
+  lmEl.appendChild(el("div", "ord ell", "— layer 0 complete after the highlighted reads"));
+}
+
+function renderSlots(d) {
+  const kg = d.byLayer.get(S.sel).g;
+  const list = document.getElementById("slotlist");
+  list.innerHTML = "";
+
+  document.getElementById("slots-sub").innerHTML =
+    `Layer <b>${S.sel}</b>, one chunk. A slot is one record of <b>${bytes(kg.recordBytes)}</b>` +
+    (kg.recordOverWrite
+      ? `, which does <b>not</b> fit the ${bytes(d.maxWrite)} write limit &mdash; unplannable.`
+      : `, which fits the ${bytes(d.maxWrite)} write limit.`);
+
+  const planeNames = S.format === "kv_outer" ? ["K", "V"] : ["KV"];
+  let idx = 0;
+  planeNames.forEach((pn, pi) => {
+    for (let piece = 0; piece < kg.piecesPerPlane; piece++) {
+      const len = Math.min(kg.recordBytes, kg.planeBytes - piece * kg.recordBytes);
+      const s = el("div", "slot " + (pi === 0 ? "k" : "v"),
+        `slot ${idx} · ${pn}${kg.piecesPerPlane > 1 ? " piece " + piece : ""} · ${bytes(len)}`);
+      list.appendChild(s);
+      idx++;
+    }
+  });
+
+  const overBudget = d.totalSlots > IMM_BUDGET;
+  document.getElementById("slotmeta").innerHTML =
+    `<b>${kg.slotsPerLayerPerChunk}</b> slots for this layer in this chunk &nbsp;&middot;&nbsp;
+     <b>${(kg.slotsPerLayerPerChunk * kg.chunks).toLocaleString()}</b> across all its chunks
+     &nbsp;&middot;&nbsp; <b>${d.totalSlots.toLocaleString()}</b> for the whole request` +
+    (overBudget
+      ? `<div class="callout"><b>Over the 16-bit slot budget.</b> ${d.totalSlots.toLocaleString()}
+         exceeds ${IMM_BUDGET.toLocaleString()}. The fix is coarser readiness, not more bits —
+         <code>add_slot</code> throws rather than wrapping silently.</div>`
+      : "");
+}
+
+function renderImmediate(d) {
+  const bits = document.getElementById("bits");
+  bits.innerHTML = "";
+  for (let i = 0; i < 32; i++) bits.appendChild(el("div", "bit " + (i < 16 ? "g" : "s")));
+  const pct = (d.totalSlots / IMM_BUDGET * 100);
+  document.getElementById("immmeta").innerHTML =
+    `This request needs <b>${d.totalSlots.toLocaleString()}</b> of
+     <b>${IMM_BUDGET.toLocaleString()}</b> slot numbers &mdash; <b>${pct.toFixed(1)}%</b> of the
+     address space. Comfortable, but a 4× margin rather than a 4000× one, and long contexts with
+     small chunks eat into it fast.`;
+}
+
+function ms(v) { return v >= 100 ? v.toFixed(0) + " ms" : v.toFixed(v < 10 ? 2 : 1) + " ms"; }
+
+// Five fixed operating points, held against the same prompt and model geometry
+// so only link speed, GPU throughput and active parameter count vary.
+//
+// The point of the table is that the two effects move in opposite directions.
+// A faster GPU or more parameters shrinks the ratio, which makes caching look
+// better and pipelining look worse; a faster link does the same to both. Seeing
+// them side by side is the only way to stop reading one column in isolation.
+const SCENARIOS = [
+  { net: 125, gpu: 400, params: 8 },
+  { net: 125, gpu: 400, params: 40 },
+  { net: 125, gpu: 800, params: 40 },
+  { net: 250, gpu: 400, params: 40 },
+  { net: 250, gpu: 800, params: 40 },
+];
+
+// Evaluate `fn` with the operating point temporarily applied, then restore.
+// schedule() reads S directly, so this is the least invasive way to price a
+// configuration other than the one the sliders are on.
+function withOperatingPoint(sc, fn) {
+  const saved = { net: S.net, gpu: S.gpu, params: S.params };
+  S.net = sc.net; S.gpu = sc.gpu; S.params = sc.params;
+  try { return fn(); } finally { Object.assign(S, saved); }
+}
+
+function renderScenarios(d) {
+  const host = document.getElementById("tl-matrix");
+  const rows = SCENARIOS.map(sc => withOperatingPoint(sc, () => {
+    const t = schedule(d);
+    // Pipelining's best case is the partial hit where the two lanes balance,
+    // which is where the fraction still needing prefill equals the ratio.
+    const peak = t.ratio < 1 ? schedule(d, t.ratio).savedPct : t.savedPct;
+    return { sc, t, peak };
+  }));
+
+  const cells = rows.map(({ sc, t, peak }) => {
+    const here = sc.net === S.net && sc.gpu === S.gpu && sc.params === S.params;
+    const cacheSaves = Math.max(0, 1 - t.ratio) * 100;
+    return `<tr class="${here ? "here" : ""}">
+      <td class="cfg">${(sc.net / 10).toFixed(1)} GB/s &middot; ${sc.gpu} TFLOP/s &middot;
+        ${sc.params} B${here ? '<span class="tag">sliders</span>' : ""}</td>
+      <td>${ms(t.transferAll)}</td>
+      <td>${ms(t.computeAll)}</td>
+      <td class="big">${cacheSaves.toFixed(0)}%</td>
+      <td>${t.ratio.toFixed(3)}</td>
+      <td class="${t.savedPct < 5 ? "small" : ""}">${t.savedPct.toFixed(1)}%</td>
+      <td class="cfg">${ms(t.saved)}</td>
+      <td>${peak.toFixed(0)}%</td>
+    </tr>`;
+  }).join("");
+
+  const base = rows[0], fastGpu = rows[2], fastNet = rows[3], both = rows[4];
+  host.innerHTML = `<div class="callout"><b>Five operating points, same prompt.</b>
+    ${S.layers} layers, ${(S.chunks * S.tokens).toLocaleString()} tokens,
+    ${bytes(d.kgs.reduce((a, g) => a + g.groupBytes * g.chunks, 0))} of cache. Only the link,
+    the GPU and the active parameter count change.
+    <table class="smat">
+      <thead><tr>
+        <th>link &middot; GPU &middot; active params</th>
+        <th>fetch</th><th>prefill</th><th>caching saves</th>
+        <th>ratio</th><th>pipelining</th><th>&nbsp;&nbsp;in ms</th><th>peak pipelining</th>
+      </tr></thead>
+      <tbody>${cells}</tbody>
+    </table>
+    <br><b>Reading the columns.</b> <i>Caching saves</i> is what you gain by fetching instead of
+    recomputing &mdash; the large, unconditional win. <i>Pipelining</i> is the extra gain from
+    overlapping delivery with compute on top of that, and <i>in ms</i> is that same gain in
+    absolute terms. <i>Peak pipelining</i> is what overlap is worth on a partial hit where the
+    two lanes balance, which is the case CacheBlend creates on purpose.
+    <br><br><b>The percentage column is mostly an illusion, and the ms column says why.</b>
+    Pipelining recovers the transfer minus the one layer it can never hide, so its absolute
+    saving is <code>${ms(rows[1].t.saved)}</code> at 12.5 GB/s and
+    <code>${ms(rows[3].t.saved)}</code> at 25 GB/s &mdash; and that is the whole story. Rows 2
+    and 3 differ only in GPU speed and save an identical
+    <code>${ms(rows[2].t.saved)}</code>, yet report
+    ${rows[1].t.savedPct.toFixed(1)}% and ${rows[2].t.savedPct.toFixed(1)}%. Nothing about
+    pipelining changed; the denominator halved because the faster GPU cut the prefill it is
+    measured against.
+    <br><br><b>So only two things actually move the needle.</b> Link speed sets what pipelining
+    has to win &mdash; doubling it to 25 GB/s halves both the fetch and the saving. Everything
+    else (parameters, GPU) moves only the prefill, which changes how large that fixed saving
+    looks as a fraction. Going 8 B &rarr; 40 B takes caching from
+    ${(Math.max(0, 1 - rows[0].t.ratio) * 100).toFixed(0)}% to
+    ${(Math.max(0, 1 - rows[1].t.ratio) * 100).toFixed(0)}% and pipelining from
+    ${rows[0].t.savedPct.toFixed(1)}% to ${rows[1].t.savedPct.toFixed(1)}% &mdash; one fact
+    reported twice, not two findings.
+    <br><br><b>The column that does not move is <i>peak pipelining</i>.</b> It sits at
+    ${rows[0].peak.toFixed(0)}% in every row, because on a balanced partial hit the saving is
+    <code>(1 &minus; 1/${S.layers})/2</code> of the total whatever the hardware does. That
+    invariance is the argument for this work: the hit-rate regime decides whether pipelining
+    pays, and no amount of faster network or GPU decides it for you.</div>`;
+}
+
+function renderTimeline(d) {
+  const t = d.timing;
+  const span = Math.max(t.allOrNothing, t.pipelined) * 1.02;
+  const pct = v => (v / span * 100) + "%";
+
+  document.getElementById("tl-tag").textContent =
+    t.ratio < 1 ? "transfer hidden" : "network bound";
+  document.getElementById("tl-sub").innerHTML =
+    `${S.layers} layers, ${S.chunks} chunks, ${(S.chunks * S.tokens).toLocaleString()} tokens ` +
+    `&mdash; ${bytes(d.kgs.reduce((a, g) => a + g.groupBytes * g.chunks, 0))} of cache to move at ` +
+    `${(S.net / 10).toFixed(1)} GB/s, against a ${S.params}B model on a ${S.gpu} TFLOP/s GPU.`;
+
+  const netLane = document.getElementById("lane-net");
+  const cpuLane = document.getElementById("lane-cpu");
+  netLane.innerHTML = ""; cpuLane.innerHTML = "";
+
+  t.rows.forEach(r => {
+    const n = el("div", "blk net" + (r.L % 2 ? " alt" : "") + (r.L === S.sel ? " sel" : ""));
+    n.style.left = pct(r.netStart);
+    n.style.width = pct(r.netMs);
+    n.title = `layer ${r.L} on the wire — ${ms(r.netMs)}`;
+    if (r.netMs / span > 0.03) n.textContent = r.L;
+    netLane.appendChild(n);
+
+    // a gap before this layer's compute is the GPU waiting on the network
+    const priorEnd = r.L === 0 ? 0 : t.rows[r.L - 1].cpuEnd;
+    if (r.cpuStart - priorEnd > span * 0.002) {
+      const s = el("div", "blk stall");
+      s.style.left = pct(priorEnd);
+      s.style.width = pct(r.cpuStart - priorEnd);
+      s.title = `GPU idle ${ms(r.cpuStart - priorEnd)} waiting for layer ${r.L}`;
+      cpuLane.appendChild(s);
+    }
+    const c = el("div", "blk cpu" + (r.L % 2 ? " alt" : "") + (r.L === S.sel ? " sel" : ""));
+    c.style.left = pct(r.cpuStart);
+    c.style.width = pct(r.cpuMs);
+    c.title = `layer ${r.L} computing — ${ms(r.cpuMs)}`;
+    if (r.cpuMs / span > 0.03) c.textContent = r.L;
+    cpuLane.appendChild(c);
+  });
+
+  document.getElementById("tl-net-meta").innerHTML = `<b>${ms(t.transferAll)}</b> total`;
+  document.getElementById("tl-cpu-meta").innerHTML =
+    `done at <b>${ms(t.pipelined)}</b>` +
+    (t.stalled > 0.01 ? ` &middot; <b style="color:#ffb4ae">${ms(t.stalled)} idle</b>` : "");
+
+  // the all-or-nothing lane: every byte, then all compute
+  const base = document.getElementById("lane-base");
+  base.innerHTML = "";
+  const b1 = el("div", "blk net", "fetch everything");
+  b1.style.left = "0"; b1.style.width = pct(t.transferAll);
+  base.appendChild(b1);
+  const b2 = el("div", "blk cpu", "then compute");
+  b2.style.left = pct(t.transferAll); b2.style.width = pct(t.computeAll);
+  base.appendChild(b2);
+  document.getElementById("tl-base-meta").innerHTML = `done at <b>${ms(t.allOrNothing)}</b>`;
+
+  const axis = document.getElementById("tl-axis");
+  axis.innerHTML = "";
+  for (let i = 0; i <= 4; i++) {
+    const s = el("span", null, ms(span * i / 4));
+    s.style.left = (i / 4 * 100) + "%";
+    axis.appendChild(s);
+  }
+
+  const kpis = document.getElementById("tl-kpis");
+  kpis.innerHTML = "";
+  const add = (k, v, cls) => {
+    const e = el("div", "kpi" + (cls ? " " + cls : ""));
+    e.appendChild(el("div", "k", k));
+    e.appendChild(el("div", "val", v));
+    kpis.appendChild(e);
+  };
+  add("All-or-nothing", ms(t.allOrNothing));
+  add("Pipelined", ms(t.pipelined), "good");
+  add("Won by pipelining", ms(t.saved) + ` (${t.savedPct.toFixed(0)}%)`, "good");
+  add("Transfer hidden", t.hiddenPct.toFixed(0) + "%", t.hiddenPct > 90 ? "good" : "bad");
+  add("Transfer ÷ compute", t.ratio.toFixed(2), t.ratio < 1 ? "good" : "bad");
+  // The same ratio, read the other way round: fetching instead of computing is
+  // what caching *is*, so 1 - ratio is what the cache saves before pipelining
+  // contributes anything at all.
+  add("Caching saves (vs no cache)",
+      (Math.max(0, 1 - t.ratio) * 100).toFixed(0) + "%",
+      t.ratio < 1 ? "good" : "bad");
+
+  const co = document.getElementById("tl-callout");
+  if (t.ratio < 1) {
+    co.innerHTML = `<div class="callout ok"><b>The pipeline holds.</b> Each layer is delivered in
+      ${ms(t.avgNet)}, faster than the ${ms(t.avgCpu)} the GPU needs to consume the one before it,
+      so after layer 0 the GPU never waits. You pay for one layer's transfer instead of
+      ${ms(t.transferAll)}.</div>`;
+  } else {
+    co.innerHTML = `<div class="callout"><b>Network bound &mdash; the GPU is starved.</b> Each layer
+      takes ${ms(t.avgNet)} to arrive but only ${ms(t.avgCpu)} to compute, so the hatched gaps are
+      the GPU idle for ${ms(t.stalled)} in total. Pipelining still beats fetch-then-compute here
+      (it overlaps compute under transfer rather than the reverse), but the win is capped by the
+      link, not by how cleverly the layers are scheduled.</div>`;
+  }
+
+  // The percentage above is pipelining's marginal value on top of caching. It
+  // is NOT the value of caching, and the two move in opposite directions with
+  // model size -- which makes a small percentage here very easy to misread as
+  // "caching does not help for big models".
+  const scope = document.getElementById("tl-scope");
+  scope.innerHTML = `<div class="callout"><b>What this percentage is, and is not.</b>
+    Both lanes above are <i>already cached</i> &mdash; they differ only in whether delivery is
+    pipelined. So <b>${t.savedPct.toFixed(0)}%</b> is pipelining's marginal gain on top of
+    caching, not the value of caching.
+    <br><br>The two scale in opposite directions, which is why a big model makes this number
+    look bad:
+    <br>&nbsp;&nbsp;&middot; <b>Pipelining's ceiling is the transfer itself</b> &mdash;
+    <code>${ms(t.transferAll)}</code>, and it does not depend on the model at all. Layer 0 is
+    irreducible, so the most it can ever recover is
+    <code>${ms(t.transferAll - t.transferAll / S.layers)}</code>.
+    <br>&nbsp;&nbsp;&middot; <b>Caching's value is the prefill it avoids</b> &mdash;
+    <code>${ms(t.computeAll)}</code> here, and that grows with every parameter you add.
+    <br><br>Drag <i>Model size</i>: the transfer figure never moves, the compute figure grows,
+    so the percentage falls while <i>nothing about pipelining got worse</i>. At
+    ${S.params} B the cache avoids <code>${ms(t.computeAll)}</code> of prefill to spend
+    <code>${ms(t.transferAll)}</code> of network &mdash;
+    <b>${(t.computeAll / Math.max(t.transferAll, 0.001)).toFixed(0)}&times;</b>. The bigger the
+    model, the better caching looks and the less pipelining adds.
+    <br><br><b>So where does pipelining earn its keep?</b> Where transfer is large relative to
+    compute: long context (KV grows with tokens, compute per layer does too, but transfer is the
+    part that is not already overlapped), small and mid-size models, MoE with a low active
+    parameter count, and CacheBlend &mdash; which deletes compute deliberately. Those are the
+    configurations this work is for.
+    <br><br><b>Concretely, the partial hit is the case.</b> Overlap is greatest when the two
+    lanes are balanced &mdash; when the fraction of the prompt still needing prefill is about
+    equal to the ratio itself, <b>${(Math.min(1, t.ratio) * 100).toFixed(0)}%</b> here. Below
+    that there is too little compute to hide the transfer behind; above it the transfer runs
+    out first. A complete hit wins nothing from pipelining because no prefill remains to
+    overlap with.</div>`;
+
+  renderScenarios(d);
+}
+
+// ---- readiness simulation ----
+let R = { order: [], delivered: 0, timer: null, counts: null };
+
+function buildReadiness(d) {
+  // The server pushes layer-major: every chunk of layer 0, then layer 1, and so
+  // on. That is the schedule the whole design is built around, so the order is
+  // ordered -- not shuffled.
+  const order = [];
+  for (let L = 0; L < S.layers; L++) {
+    const g = d.byLayer.get(L).g;
+    for (let c = 0; c < g.chunks; c++) {
+      for (let s = 0; s < g.slotsPerLayerPerChunk; s++) order.push({ L, c });
+    }
+  }
+
+  // SRD reorders packets in flight, but only among writes that are actually in
+  // flight together. That is a bounded window at the frontier, not a global
+  // shuffle: layer 30 cannot overtake layer 2 because it has not been sent yet.
+  //
+  // Modelled by perturbing each write's delivery time within that window and
+  // re-sorting, which bounds displacement in *both* directions. Swapping in a
+  // loop would not -- an element can be pushed forward repeatedly and drift
+  // arbitrarily far, which is the global shuffle this is meant to avoid.
+  if (S.jitter && order.length > 1) {
+    const perLayer = Math.max(1, order.length / S.layers);
+    const window = Math.max(2, perLayer * 2);
+    order
+      .map((o, i) => ({ o, t: i + (Math.random() - 0.5) * window }))
+      .sort((a, b) => a.t - b.t)
+      .forEach((e, i) => { order[i] = e.o; });
+  }
+  const counts = new Map();
+  d.kgs.forEach(g => g.layers.forEach(L => {
+    for (let c = 0; c < g.chunks; c++) counts.set(L + ":" + c, { got: 0, need: g.slotsPerLayerPerChunk });
+  }));
+  R = { order, delivered: 0, timer: null, counts };
+}
+
+function renderReady(d) {
+  document.getElementById("ready-sub").innerHTML =
+    `Rows are chunks, columns are layers. A cell fills as its slots land; a column header turns
+     green only when <b>every chunk</b> of that layer is complete, because that is what unblocks
+     a pipeline step.`;
+
+  const rows = document.getElementById("ready-rows");
+  const cols = document.getElementById("ready-cols");
+  const grid = document.getElementById("ready-grid");
+  rows.innerHTML = ""; cols.innerHTML = ""; grid.innerHTML = "";
+
+  rows.style.gridTemplateRows = `repeat(${S.chunks}, 18px)`;
+  cols.style.gridTemplateColumns = `repeat(${S.layers}, minmax(0,1fr))`;
+  grid.style.gridTemplateColumns = `repeat(${S.layers}, minmax(0,1fr))`;
+
+  const readyLayers = [];
+  for (let L = 0; L < S.layers; L++) {
+    const g = d.byLayer.get(L).g;
+    let done = true;
+    for (let c = 0; c < g.chunks; c++) {
+      const k = R.counts.get(L + ":" + c);
+      if (!k || k.got < k.need) { done = false; break; }
+    }
+    if (done) readyLayers.push(L);
+    const ch = el("div", "ch" + (done ? " ready" : ""), String(L));
+    ch.title = `layer ${L}` + (done ? " — ready" : " — waiting");
+    cols.appendChild(ch);
+  }
+
+  for (let c = 0; c < S.chunks; c++) rows.appendChild(el("div", null, `c${c}`));
+  for (let c = 0; c < S.chunks; c++) {
+    for (let L = 0; L < S.layers; L++) {
+      const g = d.byLayer.get(L).g;
+      let cls = "mcell";
+      if (c >= g.chunks) cls += " na";
+      else {
+        const k = R.counts.get(L + ":" + c);
+        if (k.got >= k.need) cls += " full";
+        else if (k.got > 0) cls += " part";
+      }
+      const cell = el("div", cls);
+      cell.title = c >= g.chunks
+        ? `layer ${L}, chunk ${c} — outside the sliding window, never expected`
+        : `layer ${L}, chunk ${c}`;
+      grid.appendChild(cell);
+    }
+  }
+
+  document.getElementById("ready-counter").textContent =
+    `${R.delivered.toLocaleString()} of ${R.order.length.toLocaleString()} slots landed`;
+
+  const ro = document.getElementById("ready-readout");
+  ro.innerHTML = "";
+  const lbl = el("span", null, "Ready layers: ");
+  lbl.style.color = "var(--dim)";
+  ro.appendChild(lbl);
+  if (!readyLayers.length) {
+    ro.appendChild(el("span", "pill", "none yet"));
+  } else {
+    readyLayers.slice(0, 24).forEach(L => ro.appendChild(el("span", "pill on", String(L))));
+    if (readyLayers.length > 24) ro.appendChild(el("span", "pill", `+${readyLayers.length - 24} more`));
+  }
+  // Under a layer-major push the interesting signal is how wide the frontier
+  // is: how many layers are mid-flight at once. Strictly ordered delivery gives
+  // exactly one; reordering widens it, and that width is the reason arrivals
+  // are counted rather than assumed.
+  const inFlight = [];
+  for (let L = 0; L < S.layers; L++) {
+    const g = d.byLayer.get(L).g;
+    let got = 0, need = 0;
+    for (let c = 0; c < g.chunks; c++) {
+      const k = R.counts.get(L + ":" + c);
+      got += k.got; need += k.need;
+    }
+    if (got > 0 && got < need) inFlight.push(L);
+  }
+  if (inFlight.length) {
+    const note = el("div");
+    note.style.cssText = "margin-top:9px;font-size:12px;color:" +
+      (inFlight.length > 1 ? "#ffd9b0" : "var(--dim)");
+    note.textContent = inFlight.length > 1
+      ? `Frontier is ${inFlight.length} layers wide (${inFlight.join(", ")}) — reordering has ` +
+        `neighbouring layers in flight together, so the writes of a layer cannot be assumed to ` +
+        `arrive in order.`
+      : `Frontier is one layer wide (layer ${inFlight[0]}) — strictly ordered delivery.`;
+    ro.appendChild(note);
+  }
+}
+
+function renderCaveats(d) {
+  const rows = [
+    ["A layer is two regions", "Whenever <code>kv_size &gt; 1</code>. Announcing a layer ready after only the K plane lands gives the model uninitialised values, with no error raised anywhere."],
+    ["Slot numbers are request-wide", "Every node reports into one table over one queue pair. Per-fetch numbering makes two nodes' slot 5 indistinguishable."],
+    ["Not every chunk participates", `Sliding-window groups cover only part of the prompt — ${S.arch === "sw" ? `here, ${Math.min(S.chunks, 4)} of ${S.chunks} chunks` : "switch Architecture to the sliding-window hybrid to see it"}. Waiting for all chunks in such a group waits forever.`],
+    ["Recurrent groups are different", "Mamba/GDN groups hold state snapshots, not per-token KV, and probably should not sit behind a per-layer barrier at all. They also force <code>--separate-object-groups</code>, make the pages byte-opaque (no CacheGen or CacheBlend), and impose a unified block size of 544–944 tokens that the LMCache chunk size must be a multiple of. Unconfirmed how they should be treated here."],
+    ["A small pipelining gain does not mean caching is useless", "Caching's value is the prefill it avoids and grows with the model; pipelining's value is bounded by the transfer and does not depend on the model. At 405 B with an 8B KV shape the cache trades 6.4 ms of network for 1843 ms of prefill while pipelining adds 0.3% &mdash; the percentage collapsed because the denominator grew, not because pipelining degraded. This work targets large <code>T</code> relative to <code>C</code>: long context, small and mid-size models, low-active-parameter MoE, and CacheBlend."],
+    ["CacheBlend: half of it comes free", "Blend prefetches L2&rarr;L1 through the same <code>storage_manager.submit_prefetch_task</code> the dense path uses, so the RDMA server-push benefits it with no blend-specific work at all."],
+    ["CacheBlend is not the reason the GPU hop isn't pipelined", "Blend's L1&rarr;GPU kernel takes all layers of a kernel group at once — but so does the dense one (<code>multi_layer_block_kv_transfer</code>), and <code>wait_for_layer_load</code> is a no-op stub for both. Nothing in MP mode pipelines to the GPU yet. Per-layer delivery is the same unbuilt change in two kernels, so blend is a second instance of the work, not an obstacle. Blend is arguably the better conceptual fit: the original algorithm inspects selected layers (<code>blend_check_layers</code>) and the in-process version requires <code>use_layerwise=True</code>."],
+    ["CacheBlend: the transfer/compute ratio is not a score", "It answers whether transfer can be hidden, not whether the cache is worth fetching. At high recompute it reports &ldquo;transfer hides&rdquo; for a request that fetched a whole cache and recomputed everything regardless. Judge that against <i>no cache at all</i>: an all-or-nothing fetch loses to not caching above <code>r* = 1 − ratio</code> (~73% on the default model), and pipelining shrinks that worst case from the whole transfer to one layer's — layer 0 has no earlier compute to hide behind, so <code>T/L</code> is a hard floor, not break-even."],
+    ["CacheBlend: readiness is per leg", "Blend issues two prefetches over different group sets — the prefix leg reads attention + recurrent, the blend leg attention only. <code>expected(L)</code> must be summed over the leg's groups, not over every group in the registration."],
+    ["CacheBlend: one attention group, hard limit", "<code>_classify_cb_read_groups</code> raises unless there is exactly one group labelled <code>\"attention\"</code>. A sliding-window group is labelled attention, so splitting a sliding-window hybrid is a hard incompatibility. Mamba hybrids are fine: attention + recurrent is one attention group."],
+    ["One plane per record; undersize rather than share", "Decision: a record never holds pieces of two planes. Size it from the plane (<code>seg_b = plane / ceil(plane / cap)</code>), not from the cap. That makes straddling unrepresentable instead of unlikely &mdash; a record maps to one layer, a write to one slot, and <code>FetchSlot</code>'s single <code>layer_id</code> is always well defined, with no half-record handling anywhere. It costs record count (64 instead of 32 on the defaults), which M0 suggests is free or better: 1 MiB records measured 1880 MB/s against 8 MiB at 1659 MB/s. Two riders: <code>max-record-size</code> stops mattering for planes that fit under it, and where kernel groups in one object have different plane sizes the boundaries must reset per region rather than use one uniform stride."],
+    ["Storage does not need reorganising", "No new keys, no layer in the key, no change to the shard plan. Putting layout into the key is the coupling AIE-89 deferred, and per-layer records would pin record size to the plane size — which the M0 sweep showed swings latency by 60–100%. Only the read <i>order</i> changes."],
+    ["Slots are not tokens", "Compressed groups have <code>tokens_per_block ≠ slots_per_block</code>. Always ask <code>get_slots_per_chunk_in_sw</code>; never derive slot counts from token counts."],
+    ["Tail latency, not median", "All-or-nothing waits once for the slowest transfer. Layer-major waits for the slowest transfer of <i>each</i> layer, in sequence — and a sum of maxima is worse than one maximum. Judge the transfer-vs-compute ratio at p99."],
+    ["Can one request saturate the link?", "The M0 sweep saw 1.88 GB/s for a single object against a 12.2 GB/s NIC ceiling. Pipelining's value depends on closing that gap. Unresolved, and it gates everything."],
+    ["Landing in host memory is half the trip", "The final destination is non-contiguous paged GPU blocks. A per-layer signal only helps if a per-layer copy to the GPU can be issued too."],
+  ];
+  const t = document.getElementById("caveats");
+  t.innerHTML = "";
+  rows.forEach(([k, v]) => {
+    const tr = el("tr");
+    tr.appendChild(el("td", null, k));
+    const td = el("td"); td.innerHTML = v; tr.appendChild(td);
+    t.appendChild(tr);
+  });
+}
+
+function render() {
+  const d = derive();
+  if (S.sel >= S.layers) S.sel = S.layers - 1;
+
+  // Mamba/GDN forces the flag on; show that rather than letting the checkbox lie.
+  const sep = document.getElementById("t-separate");
+  sep.checked = separateObjectGroups();
+  sep.disabled = S.arch === "linear";
+  sep.parentElement.style.opacity = sep.disabled ? "0.6" : "1";
+
+  renderStepper();
+  renderNarrative();
+  renderShape(d);
+
+  const active = new Set(PHASES[S.phase].panels);
+  ["p-layers", "p-groups", "p-keys", "p-blend", "p-payload", "p-records", "p-slots", "p-imm",
+   "p-timeline", "p-ready", "p-caveats"]
+    .forEach(id => document.getElementById(id).classList.toggle("hidden", !active.has(id)));
+
+  if (active.has("p-layers")) renderLayerStrip(d);
+  if (active.has("p-groups")) renderGroupTree(d);
+  if (active.has("p-keys")) renderKeys(d);
+  if (active.has("p-blend")) renderBlend(d);
+  if (active.has("p-payload")) renderPayload(d);
+  if (active.has("p-records")) renderRecords(d);
+  if (active.has("p-slots")) renderSlots(d);
+  if (active.has("p-imm")) renderImmediate(d);
+  if (active.has("p-timeline")) renderTimeline(d);
+  if (active.has("p-ready")) {
+    if (!R.counts || R.order.length === 0) buildReadiness(d);
+    renderReady(d);
+  }
+  if (active.has("p-caveats")) renderCaveats(d);
+}
+
+// ---------- wiring ----------
+// Label formatters, shared by the sliders and by deep links.
+const LABEL = {
+  net: v => (v / 10).toFixed(1) + " GB/s",
+  gpu: v => v + " TFLOP/s",
+  params: v => v + " B",
+  maxwrite: v => bytes(Math.pow(2, v)),
+  reccap: v => bytes(Math.pow(2, v)),
+  recomp: v => v + "%",
+};
+
+function bindRange(id, key, fmt, resetSim) {
+  const inp = document.getElementById("c-" + id);
+  const out = document.getElementById("v-" + id);
+  inp.addEventListener("input", () => {
+    S[key] = Number(inp.value);
+    out.textContent = fmt ? fmt(S[key]) : S[key];
+    if (key === "layers") {
+      const sel = document.getElementById("c-sel");
+      sel.max = String(S.layers - 1);
+      if (S.sel > S.layers - 1) { S.sel = S.layers - 1; sel.value = S.sel; document.getElementById("v-sel").textContent = S.sel; }
+    }
+    if (resetSim) { stopSim(); R = { order: [], delivered: 0, timer: null, counts: null }; }
+    render();
+  });
+}
+
+bindRange("layers", "layers", null, true);
+bindRange("kvheads", "kvheads", null, true);
+bindRange("headdim", "headdim", null, true);
+bindRange("chunks", "chunks", null, true);
+bindRange("tokens", "tokens", null, true);
+bindRange("sel", "sel", null, false);
+bindRange("maxwrite", "maxwritePow", LABEL.maxwrite, true);
+bindRange("reccap", "reccapPow", LABEL.reccap, false);
+bindRange("recomp", "recomp", LABEL.recomp, false);
+bindRange("net", "net", LABEL.net, false);
+bindRange("gpu", "gpu", LABEL.gpu, false);
+bindRange("params", "params", LABEL.params, false);
+
+document.getElementById("t-aligned").addEventListener("change", e => {
+  S.aligned = e.target.checked;
+  render();
+});
+document.getElementById("t-jitter").addEventListener("change", e => {
+  S.jitter = e.target.checked;
+  stopSim(); buildReadiness(derive()); render();
+});
+
+document.getElementById("c-dtype").addEventListener("change", e => {
+  S.dtype = Number(e.target.value);
+  document.getElementById("v-dtype").textContent = S.dtype;
+  render();
+});
+document.getElementById("c-format").addEventListener("change", e => {
+  S.format = e.target.value;
+  stopSim(); R = { order: [], delivered: 0, timer: null, counts: null };
+  render();
+});
+document.getElementById("c-arch").addEventListener("change", e => {
+  S.arch = e.target.value;
+  stopSim(); R = { order: [], delivered: 0, timer: null, counts: null };
+  render();
+});
+document.getElementById("t-separate").addEventListener("change", e => {
+  S.separate = e.target.checked;
+  stopSim(); R = { order: [], delivered: 0, timer: null, counts: null };
+  render();
+});
+
+document.getElementById("btn-prev").onclick = () => { if (S.phase > 0) { S.phase--; render(); } };
+document.getElementById("btn-next").onclick = () => { if (S.phase < PHASES.length - 1) { S.phase++; render(); } };
+
+function stopSim() {
+  if (R.timer) { clearInterval(R.timer); R.timer = null; }
+  const b = document.getElementById("btn-play");
+  if (b) b.textContent = "Stream arrivals";
+}
+
+document.getElementById("btn-play").onclick = () => {
+  const d = derive();
+  if (R.timer) { stopSim(); return; }
+  if (R.delivered >= R.order.length) buildReadiness(d);
+  document.getElementById("btn-play").textContent = "Pause";
+  const perTick = Math.max(1, Math.ceil(R.order.length / 90));
+  R.timer = setInterval(() => {
+    for (let i = 0; i < perTick && R.delivered < R.order.length; i++) {
+      const a = R.order[R.delivered++];
+      const k = R.counts.get(a.L + ":" + a.c);
+      if (k) k.got++;
+    }
+    renderReady(derive());
+    if (R.delivered >= R.order.length) stopSim();
+  }, 55);
+};
+
+document.getElementById("btn-reset").onclick = () => {
+  stopSim();
+  buildReadiness(derive());
+  renderReady(derive());
+};
+
+document.addEventListener("keydown", e => {
+  if (e.key === "ArrowRight" && S.phase < PHASES.length - 1) { S.phase++; render(); }
+  if (e.key === "ArrowLeft" && S.phase > 0) { S.phase--; render(); }
+});
+
+// Deep links, so a specific step can be shared:
+//   #step=6&arch=linear&layer=5&format=layer_outer&chunks=12
+function applyHash() {
+  const h = location.hash.replace(/^#/, "");
+  if (!h) return;
+  const p = new URLSearchParams(h);
+  const num = (k, lo, hi) => {
+    const v = Number(p.get(k));
+    return p.has(k) && Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : null;
+  };
+
+  const step = num("step", 1, PHASES.length);
+  if (step !== null) S.phase = step - 1;
+
+  if (p.has("arch")) {
+    const a = p.get("arch");
+    S.arch = ["sw", "linear", "uniform"].includes(a) ? a : "sw";
+    document.getElementById("c-arch").value = S.arch;
+  }
+  if (p.has("separate")) {
+    S.separate = p.get("separate") !== "0";
+    document.getElementById("t-separate").checked = S.separate;
+  }
+  if (p.has("format")) {
+    S.format = p.get("format") === "layer_outer" ? "layer_outer" : "kv_outer";
+    document.getElementById("c-format").value = S.format;
+  }
+  if (p.has("aligned")) {
+    S.aligned = p.get("aligned") !== "0";
+    document.getElementById("t-aligned").checked = S.aligned;
+  }
+  if (p.has("jitter")) {
+    S.jitter = p.get("jitter") !== "0";
+    document.getElementById("t-jitter").checked = S.jitter;
+  }
+  for (const [param, key, id, lo, hi] of [
+    ["layers", "layers", "layers", 8, 128], ["chunks", "chunks", "chunks", 2, 16],
+    ["tokens", "tokens", "tokens", 64, 1024], ["layer", "sel", "sel", 0, 127],
+    ["net", "net", "net", 10, 250], ["gpu", "gpu", "gpu", 40, 900],
+    ["params", "params", "params", 1, 450],
+    ["reccap", "reccapPow", "reccap", 18, 23],
+    ["recomp", "recomp", "recomp", 5, 100],
+  ]) {
+    const v = num(param, lo, hi);
+    if (v === null) continue;
+    S[key] = v;
+    document.getElementById("c-" + id).value = String(v);
+    document.getElementById("v-" + id).textContent = LABEL[id] ? LABEL[id](v) : String(v);
+  }
+  if (S.sel > S.layers - 1) S.sel = S.layers - 1;
+  document.getElementById("c-sel").max = String(S.layers - 1);
+  R = { order: [], delivered: 0, timer: null, counts: null };
+}
+
+window.addEventListener("hashchange", () => { stopSim(); applyHash(); render(); });
+
+applyHash();
+render();
+</script>
+</body>
+</html>
