@@ -25,7 +25,9 @@ from .conftest import make_plan
 _PUMP_JOIN_TIMEOUT_SECONDS = 5.0
 
 
-def _wait_until_fetch_active(source: ScriptedLayerArrivalSource, plan_layer: int) -> None:
+def _wait_until_fetch_active(
+    source: ScriptedLayerArrivalSource, plan_layer: int
+) -> None:
     """Deliver one layer once begin_fetch has started."""
     deadline = time.monotonic() + _PUMP_JOIN_TIMEOUT_SECONDS
     while time.monotonic() < deadline:
@@ -171,7 +173,11 @@ def test_pump_times_out_when_a_layer_never_arrives() -> None:
 
 
 def test_pump_accepts_resident_layer_on_first_poll_after_deadline() -> None:
-    """Poll-before-deadline means an already-landed layer is never rejected for lateness."""
+    """An already-landed layer is never rejected for lateness.
+
+    The pump checks the deadline after polling, so a layer that is resident on
+    the first poll succeeds even if the deadline has already passed.
+    """
     plan = make_plan({0: 1})
     source = ScriptedLayerArrivalSource()
     sink = RecordingLayerLoadSink()

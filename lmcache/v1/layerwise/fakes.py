@@ -189,8 +189,7 @@ class ScriptedLayerArrivalSource:
         """
         if generation != self._generation or generation == 0:
             raise StaleGenerationError(
-                f"generation {generation} is not active "
-                f"(active is {self._generation})"
+                f"generation {generation} is not active (active is {self._generation})"
             )
 
     def _require_layer(self, layer_id: int) -> LayerArrivalStatus:
@@ -273,9 +272,7 @@ class RecordingLayerLoadSink:
             )
         expected = self._expected[self._next_index]
         if layer_id != expected:
-            raise LayerNotInPlanError(
-                f"expected layer {expected} next, got {layer_id}"
-            )
+            raise LayerNotInPlanError(f"expected layer {expected} next, got {layer_id}")
         self._next_index += 1
         self._loaded.append(layer_id)
 

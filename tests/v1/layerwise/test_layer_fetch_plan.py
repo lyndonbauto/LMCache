@@ -15,7 +15,11 @@ from .conftest import make_plan, make_slot
 
 
 def test_layer_ids_returns_each_layer_once_in_ascending_order() -> None:
-    """Ascending unique layer_ids is the loader copy order even when slots are shuffled."""
+    """layer_ids is ascending and unique however the slots were supplied.
+
+    That order is the order the loader must copy in, so it cannot depend on
+    the order slots happened to be planned.
+    """
     slots = (
         make_slot(5),
         make_slot(1),
