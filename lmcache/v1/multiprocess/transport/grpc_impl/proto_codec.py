@@ -198,7 +198,7 @@ def _compile_map_field(field: Any, py_type: Any) -> tuple[FieldWriter, FieldRead
 
 def _compile_field_codec(field: Any, py_type: Any) -> tuple[FieldWriter, FieldReader]:
     py_type, optional = _unwrap_optional(py_type)
-    if optional and (field.is_repeated or not field.has_presence):
+    if optional and not field.is_repeated and not field.has_presence:
         raise TypeError(
             f"field {field.full_name} cannot represent Python None; "
             "declare it optional in the proto"
@@ -364,6 +364,52 @@ def compile_request_codec_for_types(
         TypeError: If the protobuf request cannot represent the payload types.
     """
     proto_fields = tuple(message_cls.DESCRIPTOR.fields)
+    if len(payload_types) < len(proto_fields) and len(payload_types) != 1:
+        prefix_fields = proto_fields[: len(payload_types)]
+        codecs = tuple(
+            _compile_field_codec(field, py_type)
+            for field, py_type in zip(prefix_fields, payload_types, strict=True)
+        )
+
+        def encode_prefix(args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+            if (
+                len(args) == 1
+                and not kwargs
+                and _proto_has_same_descriptor(args[0], message_cls.DESCRIPTOR)
+            ):
+                return args[0]
+            if args and kwargs:
+                raise TypeError(
+                    "RPC call accepts either positional args or keyword fields"
+                )
+            message = message_cls()
+            if kwargs:
+                codecs_by_name = {
+                    field.name: codec
+                    for field, codec in zip(prefix_fields, codecs, strict=True)
+                }
+                for name, value in kwargs.items():
+                    codec = codecs_by_name.get(name)
+                    if codec is None:
+                        raise TypeError(
+                            f"{message_cls.DESCRIPTOR.full_name} has no field {name!r}"
+                        )
+                    codec[0](message, value)
+                return message
+            if len(args) > len(codecs):
+                raise TypeError(
+                    f"{message_cls.DESCRIPTOR.full_name} accepts at most "
+                    f"{len(codecs)} positional values, got {len(args)}"
+                )
+            for value, (writer, _) in zip(args, codecs, strict=False):
+                writer(message, value)
+            return message
+
+        def decode_prefix(message: Any) -> tuple[Any, ...]:
+            return tuple(reader(message) for _, reader in codecs)
+
+        return encode_prefix, decode_prefix
+
     if len(payload_types) == len(proto_fields):
         codecs = tuple(
             _compile_field_codec(field, py_type)
@@ -512,6 +558,18 @@ def compile_request_decoder(
         _encoder, decoder = compile_request_codec_for_types(message_cls, payload_types)
         return decoder, payload_types
 
+    if len(params) < len(proto_fields):
+        prefix_fields = proto_fields[: len(params)]
+        codecs = tuple(
+            _compile_field_codec(field, py_type)
+            for field, py_type in zip(prefix_fields, payload_types, strict=True)
+        )
+
+        def decode_handler_prefix(message: Any) -> tuple[Any, ...]:
+            return tuple(reader(message) for _, reader in codecs)
+
+        return decode_handler_prefix, payload_types
+
     fields_by_name = message_cls.DESCRIPTOR.fields_by_name
     selected_codecs: list[tuple[Any, FieldReader]] = []
     for param, py_type in zip(params, payload_types, strict=True):
@@ -567,9 +625,10 @@ def compile_response_encoder_for_type(
     def encode_response(result: Any) -> Any:
         message = message_cls()
         if response_type is None or response_type is type(None):
-            if proto_fields:
+            if proto_fields and result is not None:
                 raise TypeError(
-                    f"{message_cls.DESCRIPTOR.full_name} must be an empty response"
+                    f"{message_cls.DESCRIPTOR.full_name} got a value for "
+                    "a void response"
                 )
             return message
         if result is None:
@@ -637,10 +696,6 @@ def compile_response_decoder_for_type(
     """
     fields = tuple(message_cls.DESCRIPTOR.fields)
     if response_type is None or response_type is type(None):
-        if fields:
-            raise TypeError(
-                f"{message_cls.DESCRIPTOR.full_name} must be an empty response"
-            )
         return lambda _message: None
 
     response_type, optional = _unwrap_optional(response_type)

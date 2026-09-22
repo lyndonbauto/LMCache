@@ -15,19 +15,24 @@ import pytest
 import torch
 
 # First Party
+from lmcache.utils import EngineType
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.transfer_channel.api import TransferChannelAddress
+from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     CBMatchResult,
     CBUnifiedLookupResult,
     IPCCacheServerKey,
+    KVCache,
     PrepareRetrieveResponse,
     PrepareStoreResponse,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
+    RegisterKvCacheResponse,
 )
+from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.modules.blend import BlendModule
 from lmcache.v1.multiprocess.modules.engine_driven_transfer import (
     EngineDrivenTransferModule,
@@ -514,3 +519,61 @@ def test_generated_grpc_services_communicate_end_to_end(
     assert client.p2p_query_lookup_results(task_id).result(5) == [
         TransferChannelAddress(offset=8, size=16)
     ]
+
+
+def test_register_kv_cache_layerwise_response_survives_grpc_round_trip() -> None:
+    """REGISTER_KV_CACHE must return layerwise metadata over gRPC, not an empty body."""
+    expected = RegisterKvCacheResponse(
+        server_use_layerwise=True,
+        layer_event_ipc_handles=[b"event-a", b"event-b"],
+    )
+
+    class _RegisterModule:
+        @request_handler(RequestType.REGISTER_KV_CACHE)
+        def register_kv_cache(
+            self,
+            instance_id: int,
+            kv_caches: KVCache,
+            model_name: str,
+            world_size: int,
+            engine_type: EngineType,
+            layout_hints: LayoutHints,
+            engine_group_infos: list[EngineGroupInfo],
+            layer_event_ipc_handles: list[bytes],
+        ) -> RegisterKvCacheResponse:
+            assert instance_id == 9
+            assert model_name == "layerwise-model"
+            assert world_size == 1
+            assert engine_type is EngineType.VLLM
+            assert layer_event_ipc_handles == []
+            return expected
+
+    server = GrpcMultiprocessServer(
+        "grpc://127.0.0.1:0",
+        max_cpu_workers=2,
+        max_gpu_workers=1,
+        grpc_server_workers=4,
+    )
+    server.add_modules([_RegisterModule()])
+    server.start()
+    client = GrpcMultiprocessClient(  # type: ignore[abstract]
+        f"grpc://127.0.0.1:{server.bound_port}"
+    )
+    try:
+        response = client.register_kv_cache(
+            9,
+            [],
+            "layerwise-model",
+            1,
+            EngineType.VLLM,
+            LayoutHints(),
+            [],
+            [],
+        ).result(timeout=5)
+    finally:
+        client.close()
+        server.close()
+
+    assert response == expected
+    assert response.server_use_layerwise is True
+    assert response.layer_event_ipc_handles == [b"event-a", b"event-b"]
