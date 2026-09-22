@@ -36,6 +36,9 @@ from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.config import L2AdapterConfigBase
+from lmcache.v1.distributed.l2_adapters.rdma_registration import (
+    validate_fetch_timeout_against_write_ttl,
+)
 from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2ReconfigurableAdapter,
     L2ReconfigureError,
@@ -737,6 +740,108 @@ class StorageManager:
             )
         return found
 
+    def set_kv_plane_bytes(self, plane_bytes: int) -> None:
+        """Pass the K/V plane size on to every L2 adapter.
+
+        Adapters are built before any worker has registered its KV cache, so
+        none of them can derive the layout at construction. This is how they
+        learn it once it exists. Adapters that do not care ignore it; see
+        ``L2AdapterInterface.set_kv_plane_bytes``.
+
+        Args:
+            plane_bytes: Size of one K/V plane in bytes, or 0 when the model's
+                kernel groups disagree and no single plane size describes it.
+        """
+        with self._adapters_lock:
+            adapters = list(self._l2_adapters.values())
+        for adapter in adapters:
+            adapter.set_kv_plane_bytes(plane_bytes)
+
+    def set_object_group_layouts(
+        self,
+        group_layout_descs: dict[int, MemoryLayoutDesc],
+        group_kernel_layer_indices: dict[int, list[list[int]]] | None = None,
+    ) -> None:
+        """Pass per-object-group layouts on to every L2 adapter.
+
+        Adapters are built before any worker has registered its KV cache, so
+        none of them can derive the layout at construction. This is how they
+        learn it once it exists. Adapters that do not care ignore it; see
+        ``L2AdapterInterface.set_object_group_layouts``.
+
+        Args:
+            group_layout_descs: One ``MemoryLayoutDesc`` per object group id.
+            group_kernel_layer_indices: Optional global layer indices per
+                kernel group, keyed by object group id.
+        """
+        with self._adapters_lock:
+            adapters = list(self._l2_adapters.values())
+        for adapter in adapters:
+            adapter.set_object_group_layouts(
+                group_layout_descs, group_kernel_layer_indices
+            )
+
+    def begin_pipelined_fetch(
+        self,
+        placements: list[object],
+        chunk_nodes: list[object],
+        slot_digests: list[object],
+    ) -> int:
+        """Ask L2 adapters to start a pipelined fetch.
+
+        Returns the first non-zero generation reported by an adapter, or ``0``
+        when no adapter supports pipelined fetch.
+        """
+        with self._adapters_lock:
+            adapters = list(self._l2_adapters.values())
+        for adapter in adapters:
+            generation = adapter.begin_pipelined_fetch(
+                placements, chunk_nodes, slot_digests
+            )
+            if generation != 0:
+                return generation
+        return 0
+
+    def finish_pipelined_fetch(self) -> None:
+        """Finish the active pipelined fetch on every adapter."""
+        with self._adapters_lock:
+            adapters = list(self._l2_adapters.values())
+        for adapter in adapters:
+            adapter.finish_pipelined_fetch()
+
+    def abandon_pipelined_fetch(self) -> None:
+        """Abandon the active pipelined fetch on every adapter."""
+        with self._adapters_lock:
+            adapters = list(self._l2_adapters.values())
+        for adapter in adapters:
+            adapter.abandon_pipelined_fetch()
+
+    def is_pipelined_layer_ready(
+        self, layer_id: int, request_generation: int = 0
+    ) -> bool:
+        """Ask L2 adapters whether a pipelined fetch layer has landed.
+
+        Each adapter tracks its own active pipelined request. ``False`` when
+        no adapter owns ``request_generation`` or the layer is not complete on
+        that adapter.
+
+        Args:
+            layer_id: Global layer index in the model.
+            request_generation: Handle returned by ``begin_pipelined_fetch`` on
+                the adapter that issued the fetch. ``0`` means "whichever
+                request the adapter currently considers active".
+
+        Returns:
+            ``True`` when an adapter reports the layer ready for the given
+            request generation.
+        """
+        with self._adapters_lock:
+            adapters = list(self._l2_adapters.values())
+        for adapter in adapters:
+            if adapter.is_pipelined_layer_ready(layer_id, request_generation):
+                return True
+        return False
+
     def touch_l1_keys(self, keys: list[ObjectKey]):
         """
         Touch the keys in L1 storage, marking the keys
@@ -1204,6 +1309,13 @@ class StorageManager:
             the freshly allocated stable id, ``adapter`` is the new adapter
             instance, and ``descriptor`` is its descriptor carrying that id.
         """
+        # The RDMA fetch deadline and the L1 write-lock TTL live in different
+        # config objects, and this is the only place both are in scope. Check
+        # here so a mismatch fails on boot rather than silently corrupting KV.
+        validate_fetch_timeout_against_write_ttl(
+            config, self._l1_config.write_ttl_seconds
+        )
+
         adapter_id = self._next_adapter_id
         self._next_adapter_id += 1
         adapter: L2AdapterInterface = create_l2_adapter(config, self._l1_memory_desc)

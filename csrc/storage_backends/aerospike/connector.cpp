@@ -7,6 +7,10 @@
 #include <aerospike/as_config.h>
 #include <aerospike/as_record.h>
 #include <aerospike/as_status.h>
+#ifdef LMCACHE_AEROSPIKE_RDMA
+  #include <aerospike/as_cluster.h>
+  #include <aerospike/as_node.h>
+#endif
 
 #include <algorithm>
 #include <cassert>
@@ -26,6 +30,7 @@ constexpr const char* kBinPayload = "b";
 constexpr const char* kBinState = "state";
 constexpr const char* kBinNseg = "nseg";
 constexpr const char* kBinSegBytes = "seg_b";
+constexpr const char* kBinPlaneBytes = "plane_b";
 constexpr const char* kBinTotalBytes = "tot_b";
 constexpr const char* kBinVersion = "ver";
 constexpr const char* kBinCreatedAt = "created_at";
@@ -70,14 +75,17 @@ AerospikeNativeConnector::AerospikeNativeConnector(
     std::string hosts, std::string ns, std::string set_name, int num_workers,
     uint32_t read_timeout_ms, uint32_t write_timeout_ms,
     uint32_t default_ttl_seconds, size_t target_segment_bytes,
-    size_t max_record_bytes, std::string username, std::string password)
+    size_t max_record_bytes, std::string username, std::string password,
+    L1RdmaRegistration l1_rdma_registration, size_t plane_bytes)
     : ConnectorBase(num_workers),
       hosts_(std::move(hosts)),
       ns_(std::move(ns)),
       set_name_(std::move(set_name)),
       read_timeout_ms_(read_timeout_ms),
       write_timeout_ms_(write_timeout_ms),
-      default_ttl_seconds_(default_ttl_seconds) {
+      default_ttl_seconds_(default_ttl_seconds),
+      plane_bytes_(plane_bytes),
+      l1_rdma_registration_(std::move(l1_rdma_registration)) {
   as_config config;
   as_config_init(&config);
   config.thread_pool_size = static_cast<uint32_t>(std::max(num_workers, 1));
@@ -113,6 +121,14 @@ AerospikeNativeConnector::AerospikeNativeConnector(
             ? max_record_bytes_
             : std::min(target_segment_bytes, max_record_bytes_);
     single_record_threshold_bytes_ = target_segment_bytes_;
+
+#ifdef LMCACHE_AEROSPIKE_RDMA
+    if (l1_rdma_registration_.is_enabled()) {
+      pipelined_rdma_ = std::make_unique<AerospikePipelinedRdmaDriver>(
+          l1_rdma_registration_, ns_, max_record_bytes_);
+      try_initialize_pipelined_rdma();
+    }
+#endif
 
     start_workers();
   } catch (...) {
@@ -199,8 +215,15 @@ void AerospikeNativeConnector::do_single_get(WorkerAerospikeConn& conn,
     throw std::runtime_error("meta record is not ready");
   }
 
-  uint32_t nseg = static_cast<uint32_t>(positive_int_bin(rec, kBinNseg, 1));
-  size_t seg_b = static_cast<size_t>(positive_int_bin(rec, kBinSegBytes, len));
+  ShardPlan shard;
+  shard.nseg = static_cast<uint32_t>(positive_int_bin(rec, kBinNseg, 1));
+  shard.seg_b = static_cast<size_t>(positive_int_bin(rec, kBinSegBytes, len));
+  // Absent on records written before plane-aligned sharding existed, and on
+  // any payload sharded by byte count. Zero means "records tile the payload
+  // uniformly", which is what those records did, so they stay readable.
+  shard.plane_b = static_cast<size_t>(
+      std::max<int64_t>(as_record_get_int64(rec, kBinPlaneBytes, 0), 0));
+  uint32_t nseg = shard.nseg;
   // Read the stored total directly with a sentinel so a missing or corrupt bin
   // fails the integrity check instead of silently matching `len`.
   int64_t total_raw = as_record_get_int64(rec, kBinTotalBytes, -1);
@@ -226,17 +249,18 @@ void AerospikeNativeConnector::do_single_get(WorkerAerospikeConn& conn,
     return;
   }
 
-  size_t offset = 0;
+  size_t covered = 0;
   for (uint32_t i = 0; i < nseg; ++i) {
     std::string segment_key_i = segment_user_key(key, i);
-    size_t chunk_len = std::min(seg_b, len - offset);
+    ShardRange range = segment_range(shard, i, len);
     if (!read_payload_record(conn, segment_key_i,
-                             static_cast<char*>(buf) + offset, chunk_len)) {
+                             static_cast<char*>(buf) + range.offset,
+                             range.length)) {
       throw std::runtime_error("missing segment payload");
     }
-    offset += chunk_len;
+    covered += range.length;
   }
-  if (offset != len) {
+  if (covered != len) {
     throw std::runtime_error("segment read size mismatch");
   }
 }
@@ -253,10 +277,10 @@ void AerospikeNativeConnector::do_single_set(WorkerAerospikeConn& conn,
   }
 
   for (uint32_t i = 0; i < shard.nseg; ++i) {
-    size_t start = static_cast<size_t>(i) * shard.seg_b;
-    size_t chunk_len = std::min(shard.seg_b, len - start);
+    ShardRange range = segment_range(shard, i, len);
     put_payload_record(conn, segment_user_key(key, i),
-                       static_cast<const char*>(buf) + start, chunk_len);
+                       static_cast<const char*>(buf) + range.offset,
+                       range.length);
   }
   put_meta_record(conn, meta_user_key(key), shard, len, nullptr);
 }
@@ -384,18 +408,150 @@ void AerospikeNativeConnector::throw_status(const char* op, as_status status,
                            status_message(status, err));
 }
 
+void AerospikeNativeConnector::set_plane_bytes(size_t plane_bytes) {
+  plane_bytes_.store(plane_bytes, std::memory_order_relaxed);
+}
+
+#ifdef LMCACHE_AEROSPIKE_RDMA
+
+namespace {
+
+// The C client offers no public lookup from a node name to an as_node, so we
+// hold the cluster's node array for the duration of the call and search it.
+// The reservation is what keeps the node alive: a cluster tend that drops the
+// node mid-call would otherwise free it under aerospike_info_node().
+std::string send_pipelined_info_command(aerospike* client,
+                                        const std::string& node_name,
+                                        const std::string& command) {
+  as_nodes* nodes = as_nodes_reserve(client->cluster);
+  if (nodes == nullptr) {
+    throw std::runtime_error("Aerospike pipelined fetch: cluster has no nodes");
+  }
+
+  as_node* node = nullptr;
+  for (uint32_t i = 0; i < nodes->size; ++i) {
+    if (node_name == nodes->array[i]->name) {
+      node = nodes->array[i];
+      break;
+    }
+  }
+
+  if (node == nullptr) {
+    as_nodes_release(nodes);
+    throw std::runtime_error("Aerospike pipelined fetch: unknown node '" +
+                             node_name + "'");
+  }
+
+  as_error err;
+  char* response = nullptr;
+  const as_status status = aerospike_info_node(client, &err, nullptr, node,
+                                               command.c_str(), &response);
+  as_nodes_release(nodes);
+
+  if (status != AEROSPIKE_OK || response == nullptr) {
+    if (response != nullptr) {
+      std::free(response);
+    }
+    throw std::runtime_error(std::string("Aerospike pipelined fetch info: ") +
+                             err.message);
+  }
+  std::string reply(response);
+  std::free(response);
+  return reply;
+}
+
+}  // namespace
+
+void AerospikeNativeConnector::try_initialize_pipelined_rdma() {
+  if (!pipelined_rdma_) {
+    return;
+  }
+  try {
+    pipelined_rdma_->initialize(&as_);
+  } catch (const std::exception& e) {
+    pipelined_init_error_ = e.what();
+  } catch (...) {
+    pipelined_init_error_ =
+        "unknown error during pipelined RDMA initialization";
+  }
+}
+
+bool AerospikeNativeConnector::pipelined_fetch_ready() const {
+  if (!pipelined_rdma_) {
+    return false;
+  }
+  return pipelined_rdma_->is_ready();
+}
+
+std::string AerospikeNativeConnector::pipelined_fetch_init_error() const {
+  if (!pipelined_init_error_.empty()) {
+    return pipelined_init_error_;
+  }
+  if (!pipelined_rdma_) {
+    return {};
+  }
+  return pipelined_rdma_->init_error_message();
+}
+
+void AerospikeNativeConnector::set_object_group_layouts(
+    const std::map<uint32_t, rdma::ObjectGroupLayoutInput>& layouts) {
+  if (!pipelined_rdma_) {
+    return;
+  }
+  const std::vector<rdma::ObjectGroupLayout> converted =
+      rdma::object_group_layouts_from_inputs(layouts);
+  pipelined_rdma_->set_object_group_layouts(converted);
+}
+
+uint16_t AerospikeNativeConnector::issue_pipelined_fetch(
+    const std::vector<rdma::ChunkPlacement>& placements,
+    const std::vector<rdma::ChunkNodeBinding>& chunk_nodes,
+    const std::vector<rdma::SlotDigest>& slot_digests) {
+  if (!pipelined_rdma_) {
+    throw std::runtime_error(
+        "Aerospike pipelined fetch: RDMA path is not enabled");
+  }
+  return pipelined_rdma_->issue_pipelined_fetch(
+      [this](const std::string& node_name, const std::string& command) {
+        return send_pipelined_info_command(&as_, node_name, command);
+      },
+      placements, chunk_nodes, slot_digests);
+}
+
+bool AerospikeNativeConnector::is_pipelined_layer_ready(
+    uint32_t layer_id, uint16_t request_generation) const {
+  if (!pipelined_rdma_) {
+    return false;
+  }
+  return pipelined_rdma_->is_layer_ready(layer_id, request_generation);
+}
+
+void AerospikeNativeConnector::finish_pipelined_fetch() {
+  if (!pipelined_rdma_) {
+    return;
+  }
+  pipelined_rdma_->finish_request();
+}
+
+void AerospikeNativeConnector::abandon_pipelined_fetch() {
+  if (!pipelined_rdma_) {
+    return;
+  }
+  pipelined_rdma_->abandon_request();
+}
+
+void AerospikeNativeConnector::poll_pipelined_fetch_notifications() {
+  if (!pipelined_rdma_) {
+    return;
+  }
+  pipelined_rdma_->poll_notifications();
+}
+#endif
+
 ShardPlan AerospikeNativeConnector::plan(size_t payload_bytes) const {
-  if (payload_bytes <= single_record_threshold_bytes_ &&
-      payload_bytes <= max_record_bytes_) {
-    return {1, payload_bytes};
-  }
-  uint32_t nseg = static_cast<uint32_t>(
-      (payload_bytes + target_segment_bytes_ - 1) / target_segment_bytes_);
-  size_t seg_b = (payload_bytes + nseg - 1) / nseg;
-  if (seg_b > max_record_bytes_) {
-    throw std::runtime_error("payload cannot be sharded within record cap");
-  }
-  return {nseg, seg_b};
+  return make_shard_plan(payload_bytes, target_segment_bytes_,
+                         max_record_bytes_, single_record_threshold_bytes_,
+                         plane_bytes_.load(std::memory_order_relaxed));
 }
 
 size_t AerospikeNativeConnector::discover_record_cap() {
@@ -469,12 +625,18 @@ void AerospikeNativeConnector::put_meta_record(WorkerAerospikeConn& conn,
                   user_key.c_str());
 
   as_record rec;
-  as_record_inita(&rec, inline_buf == nullptr ? 7 : 8);
+  // Bin count must match the number of as_record_set_* calls below: the bin
+  // array is allocated on the stack here, so an undercount overruns it.
+  as_record_inita(&rec, inline_buf == nullptr ? 8 : 9);
   rec.ttl = AS_RECORD_CLIENT_DEFAULT_TTL;
   as_record_set_int64(&rec, kBinVersion, 1);
   as_record_set_str(&rec, kBinState, kReady);
   as_record_set_int64(&rec, kBinNseg, shard.nseg);
   as_record_set_int64(&rec, kBinSegBytes, static_cast<int64_t>(shard.seg_b));
+  // Written even when zero, so a reader never has to distinguish "byte-count
+  // sharded" from "bin absent" -- both mean uniform tiling.
+  as_record_set_int64(&rec, kBinPlaneBytes,
+                      static_cast<int64_t>(shard.plane_b));
   as_record_set_int64(&rec, kBinTotalBytes, static_cast<int64_t>(total_bytes));
   as_record_set_int64(&rec, kBinCreatedAt,
                       static_cast<int64_t>(std::time(nullptr)));

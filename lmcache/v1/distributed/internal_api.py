@@ -12,15 +12,118 @@ import enum
 from lmcache.v1.distributed.api import L1BackendType, ObjectKey
 
 
+class MemoryRegistrationTransport(enum.Enum):
+    """Transport that owns a memory-registration handle.
+
+    ``UNREGISTERED`` is the explicit "no registration" sentinel, preferred over
+    ``Optional`` so that callers never have to branch on ``None``.
+    """
+
+    UNREGISTERED = enum.auto()
+    """No transport has registered this memory."""
+
+    IB_VERBS = enum.auto()
+    """libibverbs; the handle is an ``ibv_mr`` rkey."""
+
+    MOONCAKE = enum.auto()
+    """Mooncake transfer engine; the handle is engine-defined."""
+
+    NIXL = enum.auto()
+    """NIXL agent; the handle is agent-defined."""
+
+
+@dataclass(frozen=True)
+class MemoryRegistration:
+    """A transport-agnostic handle for one registered memory window.
+
+    The handle is deliberately not named after any one transport: the same
+    struct is published to the Mooncake, NIXL, and libibverbs paths. Consumers
+    must check ``transport`` before interpreting ``handle``.
+
+    Attributes:
+        transport: Transport that produced ``handle``. ``UNREGISTERED`` means
+            the remaining fields carry no meaning.
+        handle: Opaque transport-defined registration token. For
+            ``IB_VERBS`` this is the ``rkey`` published to the remote writer.
+        base: Virtual address of the first byte covered by this registration.
+        size: Number of bytes covered by this registration.
+    """
+
+    transport: MemoryRegistrationTransport = MemoryRegistrationTransport.UNREGISTERED
+    handle: int = 0
+    base: int = 0
+    size: int = 0
+
+    def is_registered(self) -> bool:
+        """Report whether this registration refers to real registered memory.
+
+        Returns:
+            ``True`` when a transport has registered a non-empty window.
+        """
+        return (
+            self.transport is not MemoryRegistrationTransport.UNREGISTERED
+            and self.size > 0
+        )
+
+    def contains(self, base: int, size: int) -> bool:
+        """Report whether ``[base, base + size)`` lies inside this window.
+
+        Args:
+            base: Virtual address of the first byte to test.
+            size: Number of bytes to test. Must be non-negative.
+
+        Returns:
+            ``True`` when the whole range is covered by this registration.
+
+        Raises:
+            ValueError: If ``size`` is negative.
+        """
+        if size < 0:
+            raise ValueError(f"size must be non-negative, got {size}")
+        if not self.is_registered():
+            return False
+        return base >= self.base and base + size <= self.base + self.size
+
+
+UNREGISTERED_MEMORY = MemoryRegistration()
+"""Shared sentinel for memory that no transport has registered."""
+
+
+class MemoryGrowthPolicy(enum.Enum):
+    """Whether an L1 slab can move or grow after it is first described.
+
+    A transport that pins and registers the slab at initialization can only do
+    so safely for ``FIXED`` slabs: re-basing or extending a registered region
+    silently invalidates the remote writer's rkey and destination offsets.
+    """
+
+    FIXED = enum.auto()
+    """The slab keeps its base address and length for the process lifetime."""
+
+    GROWABLE = enum.auto()
+    """The slab may be extended or re-based after this descriptor was made."""
+
+
 @dataclass(frozen=True)
 class L1MemoryDesc:
     """
     Describes the L1 memory buffer registered with an external backend (e.g. Nixl).
+
+    Attributes:
+        ptr: Virtual address of the first byte of the L1 slab.
+        size: Length of the L1 slab in bytes.
+        align_bytes: Alignment guaranteed for allocations within the slab.
+        growth: Whether the slab may grow or move after this snapshot. Transports
+            that register memory once at init must refuse ``GROWABLE`` slabs.
+        registration: Slab-wide registration handle, or ``UNREGISTERED_MEMORY``
+            when no transport has registered the slab as a single region.
     """
 
     ptr: int
     size: int
     align_bytes: int
+    growth: MemoryGrowthPolicy = MemoryGrowthPolicy.FIXED
+    registration: MemoryRegistration = UNREGISTERED_MEMORY
 
 
 @dataclass(frozen=True)

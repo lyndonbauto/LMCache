@@ -9,7 +9,7 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc
 from lmcache.v1.distributed.config import L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.internal_api import L1MemoryDesc
+from lmcache.v1.distributed.internal_api import L1MemoryDesc, MemoryGrowthPolicy
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_allocators.mixed_memory_allocator import MixedMemoryAllocator
 from lmcache.v1.memory_management import (
@@ -195,17 +195,21 @@ class L1MemoryManager:
         Return an L1MemoryDesc describing the underlying memory buffer.
 
         Returns:
-            L1MemoryDesc: Pointer, size, and alignment of the L1 buffer.
+            L1MemoryDesc: Pointer, size, and alignment of the L1 buffer. ``growth``
+            is ``FIXED`` for :class:`MixedMemoryAllocator` and ``GROWABLE`` for
+            :class:`LazyMemoryAllocator`, whose slab may still expand.
 
         Raises:
             NotImplementedError: If the allocator type does not support this operation.
         """
         if isinstance(self._allocator, MixedMemoryAllocator):
             buffer = self._allocator.buffer
+            growth = MemoryGrowthPolicy.FIXED
         elif isinstance(self._allocator, LazyMemoryAllocator):
             # TODO(ApostaC): need to test if the RDMA registration works
             # before the lazy expansion is finished
             buffer = self._allocator.get_underlying_buffer()
+            growth = MemoryGrowthPolicy.GROWABLE
         else:
             raise NotImplementedError(
                 "get_l1_memory_desc is not implemented for this allocator type."
@@ -214,6 +218,7 @@ class L1MemoryManager:
             ptr=buffer.data_ptr(),
             size=self._size_in_bytes,
             align_bytes=self._align_bytes,
+            growth=growth,
         )
 
     def close(self) -> None:

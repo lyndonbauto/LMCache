@@ -380,6 +380,96 @@ class L2AdapterInterface(ABC):
         self._backend_name = name
         self._shared = shared
 
+    def set_kv_plane_bytes(self, plane_bytes: int) -> None:
+        """Tell the adapter the size of one K/V plane, in bytes.
+
+        A plane is one model layer's bytes within one of the K/V halves.
+        Backends that split a stored object into fixed-size pieces can use
+        this to place their boundaries on plane edges, so a piece belongs to
+        exactly one layer and a layer-pipelined reader can serve that layer
+        without waiting for its neighbours.
+
+        Called by the storage manager once a worker has registered its KV
+        cache, which is the earliest point the layout is known -- adapters are
+        constructed before that, so this cannot be a constructor argument. It
+        may be called again if a later registration reports a different
+        layout.
+
+        The default implementation ignores the hint, which is correct for any
+        backend whose layout does not depend on it.
+
+        Args:
+            plane_bytes: Size of one K/V plane in bytes, or 0 when no single
+                plane size describes the model, which happens when its kernel
+                groups disagree. Treat 0 as "do not align".
+        """
+        del plane_bytes
+
+    def set_object_group_layouts(
+        self,
+        group_layout_descs: dict[int, "MemoryLayoutDesc"],
+        group_kernel_layer_indices: dict[int, list[list[int]]] | None = None,
+    ) -> None:
+        """Tell the adapter the memory layout per object group.
+
+        Pipelined Aerospike RDMA uses this to build slot schedules. The
+        default implementation ignores the hint.
+
+        Args:
+            group_layout_descs: Maps object group id to that group's layout.
+            group_kernel_layer_indices: Optional global layer indices per
+                kernel group, parallel to ``MemoryLayoutDesc.shapes``.
+        """
+        del group_layout_descs, group_kernel_layer_indices
+
+    def pipelined_fetch_init_error(self) -> str:
+        """Return the last pipelined-fetch initialization error, if any."""
+        return ""
+
+    def begin_pipelined_fetch(
+        self,
+        placements: list[object],
+        chunk_nodes: list[object],
+        slot_digests: list[object],
+    ) -> int:
+        """Start a pipelined fetch when the backend supports one.
+
+        Returns:
+            Request generation for ``is_pipelined_layer_ready``, or ``0`` when
+            pipelined fetch is unavailable.
+        """
+        del placements, chunk_nodes, slot_digests
+        return 0
+
+    def finish_pipelined_fetch(self) -> None:
+        """Release the active pipelined fetch."""
+        return None
+
+    def abandon_pipelined_fetch(self) -> None:
+        """Abandon the active pipelined fetch without waiting."""
+        return None
+
+    def is_pipelined_layer_ready(
+        self, layer_id: int, request_generation: int = 0
+    ) -> bool:
+        """Report whether one layer of the active pipelined fetch has landed.
+
+        Layer-pipelined RDMA fetches signal each write separately; vLLM asks
+        this while decoding. Backends without a pipelined path always return
+        ``False``.
+
+        Args:
+            layer_id: Global layer index in the model.
+            request_generation: Pipelined fetch handle from the adapter, or
+                ``0`` to query whichever request the adapter currently tracks.
+
+        Returns:
+            ``True`` when every slot of ``layer_id`` for the identified
+            request has landed and no slot of that layer was declined.
+        """
+        del layer_id, request_generation
+        return False
+
     def _notify_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
         """Update byte accounting and notify listeners that ``keys`` were
         stored. ``sizes[i]`` is the byte size of ``keys[i]``.

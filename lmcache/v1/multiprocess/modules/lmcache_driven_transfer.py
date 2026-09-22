@@ -2,6 +2,7 @@
 """LMCache-driven KV cache transfer operations for the MPCacheServer."""
 
 # Standard
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Sequence
 import threading
@@ -79,6 +80,42 @@ def get_layout_desc(
     ]
     shapes, dtypes = zip(*shapes_and_dtypes, strict=False)
     return MemoryLayoutDesc(shapes=list(shapes), dtypes=list(dtypes))
+
+
+def uniform_kv_plane_bytes(layout_descs: Iterable[MemoryLayoutDesc]) -> int:
+    """Size in bytes of one K/V plane, when every kernel group agrees on it.
+
+    A "plane" is one model layer's bytes within one of the K/V halves. In
+    every layout this module emits, the two innermost dimensions are
+    ``(num_slots, hidden_dim)`` -- the standard shape is
+    ``(kv_size, num_layers, num_slots, hidden_dim)`` and the
+    ``NL_X_NB_BS_HS`` variant drops the leading ``kv_size`` -- so the plane
+    size is the product of the last two dimensions and the element size.
+
+    Storage backends use this to align record boundaries to planes, which
+    keeps a record within a single model layer. That is only expressible as
+    one number while the kernel groups agree; compressed and recurrent groups
+    generally do not, since their slot counts differ from the token count.
+
+    Args:
+        layout_descs: Layouts to inspect, typically one per object group, as
+            built by ``get_layout_desc``.
+
+    Returns:
+        The shared plane size in bytes, or 0 if the layouts disagree, carry a
+        shape with fewer than two dimensions, or are empty. Zero means "no
+        single plane size describes this model", which callers should treat as
+        "do not align".
+    """
+    plane_sizes = set()
+    for desc in layout_descs:
+        for shape, dtype in zip(desc.shapes, desc.dtypes, strict=True):
+            if len(shape) < 2:
+                return 0
+            plane_sizes.add(shape[-2] * shape[-1] * dtype.itemsize)
+    if len(plane_sizes) != 1:
+        return 0
+    return plane_sizes.pop()
 
 
 def all_null_chunk_masks(
@@ -467,6 +504,16 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
             for gid in range(num_object_groups)
         }
+        kv_groups = cache_context.kv_layer_groups_manager
+        group_kernel_layer_indices = {
+            gid: [
+                list(kv_groups.kernel_groups[kernel_group_idx].layer_indices)
+                for kernel_group_idx in kv_groups.object_groups[
+                    gid
+                ].kernel_group_indices
+            ]
+            for gid in range(num_object_groups)
+        }
         attn_desc = kv_groups_manager.get_attn_desc()
         self._ctx.layout_desc_registry.register(
             model_name,
@@ -474,6 +521,17 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             layout_desc,
             attn_desc,
             group_layout_descs=group_layout_descs,
+        )
+        # Storage backends that shard a payload into records need the plane
+        # size to keep a record inside one model layer. This is the first
+        # point where the authoritative layout exists -- the L2 adapters were
+        # built before any worker registered its KV cache, so they could not
+        # have derived it at construction.
+        self._ctx.storage_manager.set_kv_plane_bytes(
+            uniform_kv_plane_bytes(group_layout_descs.values())
+        )
+        self._ctx.storage_manager.set_object_group_layouts(
+            group_layout_descs, group_kernel_layer_indices
         )
 
         with self._lock:
