@@ -1132,6 +1132,8 @@ def multi_layer_block_kv_transfer(
     lmcache_chunk_size: int,
     engine_kv_format: EngineKVFormat,
     skip_prefix_n_blocks: int,
+    layer_offset: int = 0,
+    n_layers: int = -1,
 ) -> None:
     """Python fallback implementation of block-based multi-layer KV transfer.
 
@@ -1149,6 +1151,8 @@ def multi_layer_block_kv_transfer(
         lmcache_chunk_size: Chunk size of LMCache objects.
         engine_kv_format: GPU KV cache format.
         skip_prefix_n_blocks: Number of leading blocks to skip.
+        layer_offset: First layer index within the kernel group's layer span.
+        n_layers: Number of layers to transfer; ``-1`` transfers the full span.
 
     Returns:
         None
@@ -1156,7 +1160,34 @@ def multi_layer_block_kv_transfer(
     Raises:
         ValueError: If chunk size is invalid, or transfer direction is unsupported.
         TypeError: If input types do not match expected types.
+        NotImplementedError: If a layer sub-range is requested on an unsupported path.
     """
+    try:
+        # First Party
+        import lmcache.cuda_ops as cuda_ops
+
+        cuda_ops.multi_layer_block_kv_transfer(
+            paged_buffer_ptrs_tensor,
+            lmcache_objects_ptrs,
+            block_ids,
+            device,
+            int(direction),
+            shape_desc,
+            lmcache_chunk_size,
+            int(engine_kv_format),
+            skip_prefix_n_blocks,
+            layer_offset,
+            n_layers,
+        )
+        return
+    except (ImportError, AttributeError, TypeError):
+        pass
+
+    if layer_offset != 0 or n_layers not in (-1,):
+        raise NotImplementedError(
+            "layer sub-range multi_layer_block_kv_transfer requires the CUDA "
+            f"extension (layer_offset={layer_offset}, n_layers={n_layers})"
+        )
     if lmcache_chunk_size <= 0:
         raise ValueError("lmcache_chunk_size must be positive")
     if int(shape_desc.bs) <= 0 or lmcache_chunk_size % int(shape_desc.bs) != 0:

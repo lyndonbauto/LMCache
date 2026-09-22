@@ -39,6 +39,7 @@ def _bare_gpu_module() -> LMCacheDrivenTransferModule:
     """
     module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
     module._ctx = MagicMock(name="ctx")
+    module._ctx.use_layerwise = False
     module._cache_contexts = {}
     module._lock = threading.Lock()
     return module
@@ -79,7 +80,9 @@ def test_gpu_register_inserts_unlatched_entry(monkeypatch) -> None:
     monkeypatch.setattr(gpu_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
     module = _bare_gpu_module()
 
-    module.register_kv_cache(1, MagicMock(), "model", 1, MagicMock(), MagicMock(), [])
+    module.register_kv_cache(
+        1, MagicMock(), "model", 1, MagicMock(), MagicMock(), [], []
+    )
 
     assert module.tracked_instance_count() == 1
     entry = module.get_and_touch_context_entry(1)
@@ -98,10 +101,14 @@ def test_gpu_noop_register_refreshes_without_latching(monkeypatch) -> None:
     monkeypatch.setattr(gpu_mod, "create_cache_context", create)
     monkeypatch.setattr(gpu_mod, "get_layout_desc", lambda *a, **kw: MagicMock())
     module = _bare_gpu_module()
-    module.register_kv_cache(1, MagicMock(), "model", 1, MagicMock(), MagicMock(), [])
+    module.register_kv_cache(
+        1, MagicMock(), "model", 1, MagicMock(), MagicMock(), [], []
+    )
     module._cache_contexts[1].last_seen = 0.0
 
-    module.register_kv_cache(1, MagicMock(), "model", 1, MagicMock(), MagicMock(), [])
+    module.register_kv_cache(
+        1, MagicMock(), "model", 1, MagicMock(), MagicMock(), [], []
+    )
 
     assert create.call_count == 1  # not rebuilt
     assert module._cache_contexts[1].last_seen > 0.0  # refreshed

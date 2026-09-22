@@ -1,0 +1,150 @@
+# Multiprocess layerwise H2D load
+
+## Problem
+
+In default MP mode the daemon copies an entire retrieve—every object group, every
+layer in each kernel group—before vLLM runs the request. The worker blocks once on
+a single CUDA IPC event, so no attention layer overlaps the transfer.
+
+Layerwise mode launches one `multi_layer_block_kv_transfer` slice per global layer
+(in hybrid-safe order) and lets vLLM call `wait_for_layer_load` inside attention
+so layer *L* can compute while layer *L+1* is still in flight on the daemon
+stream.
+
+## Launch-order trap (hybrid models)
+
+Kernel groups are defined by transfer identity, not by model depth. A Mamba/GDN
+hybrid puts attention layers `[0, 2, 4, …]` in one group and recurrent layers
+`[1, 3, 5, …]` in another. Launching object-group-major enqueues every attention
+layer before any recurrent layer. vLLM’s second layer is recurrent; waiting for
+it would still drain almost the entire transfer.
+
+`LayerwiseSchedule` sorts launches by **global layer index**, interleaving groups
+the same way the RDMA fetch schedule does. Example with four layers split
+`[0, 2]` / `[1, 3]`: launch order is 0 → 1 → 2 → 3, not 0 → 2 → 1 → 3.
+
+## Generation and watermark (worker wait)
+
+The daemon runs H2D on its own CUDA stream in another process; the worker must
+hold its **compute** stream per layer. Shared state is a fixed record
+(generation + watermark) plus a pool of IPC events, one per launch ordinal,
+created at registration and re-recorded each retrieve.
+
+```
+Worker                          Shared memory              Daemon
+  | begin retrieve (gen G)          |                          |
+  |------------------------------>| begin_retrieve(G)          |
+  |                               | watermark=0                |
+  |                               |                            | for ordinal o:
+  |                               |                            |   enqueue layer kernel
+  |                               |                            |   record event[o]
+  |                               |<---------------------------| watermark=o+1
+  | wait_for_layer(L):            |                            |
+  |   poll until gen==G and       |                            |
+  |   watermark>=wait_ordinal(L)  |                            |
+  |   stream.wait(event[o])       |                            |
+```
+
+**Generation** tags one retrieve. Without it, a worker could wait on an IPC event
+that still holds a *previous* retrieve’s recording—the same stale-completion
+concern as the RDMA layer pipeline’s generation field.
+
+**Watermark** counts how many ordinals the daemon has enqueued and recorded. Launches
+share one transfer stream and follow `LayerwiseSchedule`, so the watermark is a
+tight bound for “layer *L* has landed.”
+
+Failure paths:
+
+- Retrieve fails partway: daemon sets a failure flag; the worker raises
+  `LayerProgressRetrieveFailedError` after a bounded poll instead of hanging.
+- Stale generation in shared memory: worker raises `LayerProgressStaleGenerationError`.
+- Layer not in the schedule: connector `wait_for_layer_load` is a no-op.
+
+## Staging vs overlap
+
+Per-layer kernels still read from GPU staging buffers filled by **whole-object**
+H2D copies (same as the default path). Staging is not split per layer. Overlap is
+therefore:
+
+- **Yes** between attention on layer *L* and the daemon stream processing layer
+  *L+1* (kernel launch, and staging for batches not yet copied).
+- **No** between staging an object and the first layer drawn from that object’s
+  staging buffer within the same batch—the full object must land before any of its
+  layer slices can launch.
+
+## Scheduling bargain (vLLM)
+
+With layerwise enabled, `get_num_new_matched_tokens` returns `False` for the
+async-load flag even when tokens must be loaded. Otherwise vLLM parks the request in
+`WAITING_FOR_REMOTE_KVS` until the **entire** retrieve finishes, which prevents any
+per-layer wait from running.
+
+Tradeoff: the forward pass starts while KV is still arriving. If the daemon cannot
+keep ahead of vLLM, the stall happens **inside** attention (holding GPU execution
+resources) instead of cleanly outside the forward pass. A scheduler step that
+mixes one loading request with several already-running ones can stall the whole
+batch inside attention, because every request in the step executes the same
+forward pass.
+
+Config (must match on worker and server):
+
+- Server: `--use-layerwise` / `MPServerConfig.use_layerwise`
+- Worker: `lmcache.mp.use_layerwise` in vLLM `kv_connector_extra_config`
+- Worker per-layer wait budget: `lmcache.mp.layerwise_wait_timeout_seconds`
+  (default ``5.0``; must be positive)
+
+When the flag is off, layerwise code paths are inert.
+
+## CUDA graphs
+
+Layerwise load calls ``wait_for_layer_load`` from inside attention. That path
+polls shared memory and enqueues ``cudaStreamWaitEvent`` on the compute stream
+from the host. Full CUDA graph capture cannot record that host-side
+synchronization; on graph replay the wait would be elided and attention could
+run before the daemon finished the matching layer transfer.
+
+vLLM resolves this at config time: connectors implement
+``KVConnectorBase_V1.requires_piecewise_for_cudagraph``. When it returns
+``True`` and the deployment asked for full CUDA graphs, vLLM logs a warning and
+sets ``cudagraph_mode`` to ``PIECEWISE``. In piecewise mode the attention op is
+a graph split point, so the per-layer wait runs in an eager segment and remains
+correct.
+
+``LMCacheMPConnector.requires_piecewise_for_cudagraph`` returns True when
+``lmcache.mp.use_layerwise`` is set—the same spelling as the rest of this
+feature. That mirrors the non-multiprocess ``LMCacheConnectorV1`` hook, which
+returns True when ``use_layerwise`` is enabled in extra config.
+
+This hook only fires for the connector class vLLM actually loads, and that is
+not always this one. vLLM vendors a fallback copy of the multiprocess connector
+(``LMCacheMPConnectorUpstream``) and, at import time, prefers the external class
+from ``lmcache.integration.vllm.lmcache_mp_connector`` whenever ``lmcache`` is
+importable. So an LMCache deployment gets this implementation, but a deployment
+that sets ``LMCACHE_USE_UPSTREAM_MP`` or runs an LMCache too old to ship the
+submodule falls back to vLLM's copy, which has no layerwise support and does not
+override the hook. There ``lmcache.mp.use_layerwise`` is silently ignored: no
+layerwise load, and no piecewise downgrade either. That is safe—the feature is
+simply off—but it means the flag alone is not evidence that layerwise is running.
+
+Trade-off: piecewise graphs retain most decode-graph wins but not the last
+slice of performance a single full graph would give. Layerwise overlap (attention
+on layer *L* while layer *L+1* transfers) is the intended win; forcing full
+graphs would silently break correctness.
+
+``LayerProgressWaiter`` still raises if the compute stream is capturing when a
+wait runs; that is an invariant backstop, not operator configuration advice.
+
+## Unverified on this machine
+
+This development environment has **no GPU** and a CPU-only PyTorch build. The
+following were **not** compiled or executed here:
+
+- CUDA changes to `multi_layer_block_kv_transfer` (`layer_offset`, `n_layers`)
+- End-to-end layerwise retrieve with real IPC events and overlap measurements
+- Hybrid schedule invariant: at registration the daemon asserts that
+  ``LayerwiseSchedule`` built from worker ``EngineGroupInfo`` matches the schedule
+  from registered ``kernel_groups`` (ordinal ranks in globally sorted layer order).
+  ``KVLayerGroupsManager`` already rejects kernel/engine group layer mismatches at
+  context creation.
+
+CI with CUDA remains the authority for kernel and integration correctness.

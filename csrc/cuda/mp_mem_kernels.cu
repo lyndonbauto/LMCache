@@ -203,14 +203,14 @@ __device__ void multi_layer_block_transfer_single_block(
     ScalarType* __restrict__ lmcache_object,
     ScalarType** __restrict__ paged_buffer_ptrs, const int engine_block_idx,
     const int offset_in_lmcache_block, const PageBufferShapeDesc shape_desc,
-    const int lmcache_chunk_size  // e.g., 256, used to calculate global offset
-                                  // in LMCache object
-) {
+    const int lmcache_chunk_size,  // e.g., 256, used to calculate global offset
+                                   // in LMCache object
+    const int layer_offset) {
   const int head_idx = threadIdx.y;
   const int init_token_offset = threadIdx.z;
   const int token_stride = blockDim.z;
   const int k_or_v = blockIdx.x;
-  const int layer_idx = blockIdx.z;
+  const int layer_idx = blockIdx.z + layer_offset;
 
   const size_t engine_global_offset =
       calculate_engine_global_offset<ScalarType, format>(
@@ -292,7 +292,7 @@ __global__ void multi_layer_block_transfer_kernel(
     const PageBufferShapeDesc shape_desc,
     const int lmcache_chunk_size,  // e.g., 256, used to calculate global offset
                                    // in LMCache object
-    const int skip_prefix_n_blocks) {
+    const int skip_prefix_n_blocks, const int layer_offset) {
   // blockIdx.y spans all blocks across all objects (total_blocks).
   // Derive which object and local block index from the flat index.
   const int flat_block_idx = blockIdx.y;
@@ -307,7 +307,7 @@ __global__ void multi_layer_block_transfer_kernel(
                                           format>(
       lmcache_objects.objects[obj_idx], paged_buffer_ptrs, engine_block_idx,
       block_idx_in_object * shape_desc.bs,  // offset in LMCache object
-      shape_desc, lmcache_chunk_size);
+      shape_desc, lmcache_chunk_size, layer_offset);
 }
 
 #define LAUNCH_KERNEL(DIRECTION, FORMAT)                                 \
@@ -315,7 +315,7 @@ __global__ void multi_layer_block_transfer_kernel(
       <<<grid, block, 0, stream>>>(lmcache_obj4, paged_buffer_ptrs,      \
                                    block_ids_ptr, num_blocks_per_object, \
                                    shape_desc, lmcache_chunk_size,       \
-                                   skip_prefix_n_blocks);                \
+                                   skip_prefix_n_blocks, layer_offset);  \
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 
 #define DISPATCH_FORMAT(DIRECTION)                                      \
@@ -376,8 +376,19 @@ void multi_layer_block_kv_transfer_templated(
     std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
     const torch::Device& device, TransferDirection direction,
     PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
-    EngineKVFormat engine_kv_format, int skip_prefix_n_blocks) {
+    EngineKVFormat engine_kv_format, int skip_prefix_n_blocks, int layer_offset,
+    int n_layers) {
   // --- Validation ---
+  const int n_layers_effective = (n_layers < 0) ? shape_desc.nl : n_layers;
+  TORCH_CHECK(n_layers_effective > 0, "n_layers must be positive, got ",
+              n_layers_effective);
+  TORCH_CHECK(layer_offset >= 0, "layer_offset must be non-negative, got ",
+              layer_offset);
+  TORCH_CHECK(layer_offset + n_layers_effective <= shape_desc.nl,
+              "layer range [", layer_offset, ", ",
+              layer_offset + n_layers_effective,
+              ") exceeds kernel group layer count ", shape_desc.nl);
+
   int num_objects = static_cast<int>(lmcache_objects_ptrs.size());
   TORCH_CHECK(num_objects >= 1 && num_objects <= 4,
               "Expected 1-4 LMCache objects, got ", num_objects);
@@ -426,7 +437,7 @@ void multi_layer_block_kv_transfer_templated(
   thread_dim_z = std::min(thread_dim_z, 64);  // max threads per block in z-dim
 
   dim3 block(thread_dim_x, thread_dim_y, thread_dim_z);
-  dim3 grid(shape_desc.kv_size, total_blocks, shape_desc.nl);
+  dim3 grid(shape_desc.kv_size, total_blocks, n_layers_effective);
 
   if (direction == TransferDirection::H2D) {
     DISPATCH_FORMAT(true);
@@ -486,7 +497,7 @@ int64_t calculate_kernel_section_bytes(
     multi_layer_block_kv_transfer_templated<type>(                         \
         paged_buffer_ptrs_tensor, lmcache_objects_ptrs, block_ids, device, \
         direction, shape_desc, lmcache_chunk_size, engine_kv_format,       \
-        skip_prefix_n_blocks);                                             \
+        skip_prefix_n_blocks, layer_offset, n_layers);                     \
   } while (0)
 
 void multi_layer_block_kv_transfer(
@@ -494,7 +505,8 @@ void multi_layer_block_kv_transfer(
     std::vector<int64_t> lmcache_objects_ptrs, const torch::Tensor& block_ids,
     const torch::Device& device, TransferDirection direction,
     PageBufferShapeDesc shape_desc, int lmcache_chunk_size,
-    EngineKVFormat engine_kv_format, int skip_prefix_n_blocks) {
+    EngineKVFormat engine_kv_format, int skip_prefix_n_blocks, int layer_offset,
+    int n_layers) {
   int head_bytes = shape_desc.hs * shape_desc.element_size;
   TORCH_CHECK(head_bytes % sizeof(uint16_t) == 0, "head_size * element_size (",
               head_bytes, ") must be divisible by 2 for vectorized access");

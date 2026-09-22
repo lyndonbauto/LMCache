@@ -626,6 +626,8 @@ class MusaDeviceOps(DeviceOps):
         lmcache_chunk_size: int,
         engine_kv_format: EngineKVFormat,
         skip_prefix_n_blocks: int,
+        layer_offset: int = 0,
+        n_layers: int = -1,
     ) -> None:
         """Transfer MUSA blocks through native code or the torch baseline.
 
@@ -649,6 +651,11 @@ class MusaDeviceOps(DeviceOps):
             ValueError: If ``engine_kv_format`` is not supported by the MUSA
                 handle path.
         """
+        if layer_offset != 0 or n_layers not in (-1,):
+            raise NotImplementedError(
+                "MUSA multi_layer_block_kv_transfer does not support layer "
+                f"sub-ranges (layer_offset={layer_offset}, n_layers={n_layers})"
+            )
         _musa_multi_layer_block_kv_transfer(
             paged_buffer_ptrs_tensor,
             lmcache_objects_ptrs,

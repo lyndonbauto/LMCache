@@ -89,6 +89,12 @@ class ExtraConfigDefault(enum.Enum):
     # lmcache.v1.platform.ipc_policy. Must match the LMCache server's
     # ``--isolated-ipc`` setting.
     isolated_ipc = False
+    # Whether MP retrieve pipelines one layer at a time (must match server
+    # ``--use-layerwise``).
+    use_layerwise = False
+    # Max seconds the worker waits per layer for daemon progress when layerwise
+    # load is enabled (must be positive).
+    layerwise_wait_timeout_seconds = 5.0
     # Whether the engine allocates its KV cache through the CUDA VMM API
     # (vLLM's ``--enable-cumem-allocator``), so KV registration must use
     # VMM IPC instead of legacy CUDA IPC handles; see
@@ -1253,8 +1259,16 @@ class LMCacheMPWorkerAdapter:
                 isolated_ipc=cfg[ExtraConfigDefault.isolated_ipc.name],
                 use_vmm_api=cfg[ExtraConfigDefault.use_vmm_api.name],
             )
+            self._use_layerwise = bool(cfg[ExtraConfigDefault.use_layerwise.name])
+            self._layerwise_wait_timeout_seconds = float(
+                cfg[ExtraConfigDefault.layerwise_wait_timeout_seconds.name]
+            )
         else:
             self._mp_transfer_mode = None
+            self._use_layerwise = False
+            self._layerwise_wait_timeout_seconds = (
+                ExtraConfigDefault.layerwise_wait_timeout_seconds.default
+            )
         self.req_client = RequestClientFactory.create(server_url, context=context)
         self._mq_timeout = mq_timeout
 
@@ -1488,6 +1502,8 @@ class LMCacheMPWorkerAdapter:
                 layout_hints=layout_hints,
                 engine_group_infos=self.engine_group_infos,
                 engine_type=EngineType.VLLM,
+                use_layerwise=self._use_layerwise,
+                layerwise_wait_timeout_seconds=self._layerwise_wait_timeout_seconds,
             )
         except TimeoutError:
             raise ConnectionError(
@@ -1495,6 +1511,13 @@ class LMCacheMPWorkerAdapter:
                 "register_kv_caches within "
                 f"{self._mq_timeout}s. Is the server running?"
             ) from None
+
+    def wait_for_layer_load(self, layer_id: int) -> None:
+        """Block until layer ``layer_id`` has landed when layerwise is enabled."""
+        if self.transfer_ctx is None:
+            return
+        if hasattr(self.transfer_ctx, "wait_for_layer_load"):
+            self.transfer_ctx.wait_for_layer_load(layer_id)
 
     def _ensure_heartbeat_started(self) -> None:
         """Lazily start the heartbeat thread on first store/retrieve.

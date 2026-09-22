@@ -37,8 +37,10 @@ class ZmqMultiprocessClient(RequestClient):
         engine_type: Any,
         layout_hints: Any,
         engine_group_infos: list[Any],
+        layer_event_ipc_handles: list[bytes] | None = None,
     ) -> MessagingFuture[Any]:
         """Register a worker KV cache with the multiprocess server."""
+        handles = layer_event_ipc_handles if layer_event_ipc_handles is not None else []
         return self._call(
             RequestType.REGISTER_KV_CACHE,
             instance_id,
@@ -48,6 +50,7 @@ class ZmqMultiprocessClient(RequestClient):
             engine_type,
             layout_hints,
             engine_group_infos,
+            handles,
         )
 
     def unregister_kv_cache(self, instance_id: int) -> MessagingFuture[Any]:
@@ -110,7 +113,8 @@ class ZmqMultiprocessClient(RequestClient):
         instance_id: int,
         block_ids: list[list[int]],
         event_ipc_handle: bytes,
-        skip_first_n_tokens: int,
+        skip_first_n_tokens: int = 0,
+        retrieve_generation: int = 0,
     ) -> MessagingFuture[Any]:
         """Retrieve KV-cache blocks."""
         return self._call(
@@ -120,6 +124,7 @@ class ZmqMultiprocessClient(RequestClient):
             block_ids,
             event_ipc_handle,
             skip_first_n_tokens,
+            retrieve_generation,
         )
 
     def lookup(self, key: Any, tp_size: int) -> MessagingFuture[Any]:

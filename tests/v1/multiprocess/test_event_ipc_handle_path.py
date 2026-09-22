@@ -116,7 +116,15 @@ def test_worker_exports_events_through_platform_backend(
     )
 
     client = MagicMock()
-    client.register_kv_cache.return_value = _resolved_future(True)
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import RegisterKvCacheResponse
+
+    client.register_kv_cache.return_value = _resolved_future(
+        RegisterKvCacheResponse(
+            server_use_layerwise=False,
+            layer_event_ipc_handles=[],
+        )
+    )
     client.store.return_value = MessagingFuture()
     client.retrieve.return_value = MessagingFuture()
 
@@ -157,7 +165,7 @@ def test_worker_exports_events_through_platform_backend(
     assert unregister_future is client.unregister_kv_cache.return_value
     client.unregister_kv_cache.assert_called_once_with(1)
     client.store.assert_called_once_with("key", 1, [[0]], b"completion-handle")
-    client.retrieve.assert_called_once_with("key", 1, [[0]], b"completion-handle", 2)
+    client.retrieve.assert_called_once_with("key", 1, [[0]], b"completion-handle", 2, 0)
     assert [call[0] for call in backend.calls] == [
         "check",
         "create",
@@ -224,6 +232,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
     server_context = SimpleNamespace(
         chunk_size=1,
         storage_manager=storage_manager,
+        use_layerwise=False,
         event_bus=SimpleNamespace(
             publish=lambda event: None,
             publish_on_stream=lambda stream, event: None,
@@ -266,7 +275,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
         b"completion-handle",
         True,
     )
-    assert module.retrieve(key, 1, [[]], b"retrieve-producer") == (
+    assert module.retrieve(key, 1, [[]], b"retrieve-producer", 0, 0) == (
         b"completion-handle",
         False,
     )

@@ -236,6 +236,7 @@ def retrieve_keys(
             [block_ids],
             event_handle,
             0,
+            0,
         )
         result = future.to_device_future().result(timeout=timeout)
         results.append(result)
@@ -368,6 +369,7 @@ def registered_instance(
         EngineType.VLLM,
         {},
         [],
+        [],
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)
     assert result is None, "Register should return None"
@@ -412,6 +414,7 @@ def test_register_unregister_kv_cache(
         1,
         EngineType.VLLM,
         {},
+        [],
         [],
     )
     result = future.result(timeout=DEFAULT_TIMEOUT)

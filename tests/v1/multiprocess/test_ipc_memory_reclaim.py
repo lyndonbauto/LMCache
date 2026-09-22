@@ -48,7 +48,9 @@ class _FakeTorchDev:
 def _module(monkeypatch) -> LMCacheDrivenTransferModule:
     """Construct the module through the real __init__ with stubbed deps."""
     monkeypatch.setattr(gpu_mod, "DeviceHostFuncDispatcher", MagicMock())
-    return LMCacheDrivenTransferModule(MagicMock(name="ctx"))
+    ctx = MagicMock(name="ctx")
+    ctx.use_layerwise = False
+    return LMCacheDrivenTransferModule(ctx)
 
 
 def _register(
@@ -89,6 +91,7 @@ def _register(
             engine_type=MagicMock(name="engine_type"),
             layout_hints=MagicMock(name="layout_hints"),
             engine_group_infos=[],
+            layer_event_ipc_handles=[],
         )
     finally:
         if age_s:

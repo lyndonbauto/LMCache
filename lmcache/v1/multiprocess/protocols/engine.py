@@ -23,6 +23,7 @@ from lmcache.v1.multiprocess.custom_types import (
     PrepareStoreResponse,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
+    RegisterKvCacheResponse,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.protocols.base import HandlerType, ProtocolDefinition
@@ -59,7 +60,12 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
     Returns protocol definitions for engine operations.
 
     Returns:
-        Dictionary mapping request names to their protocol definitions
+        Dictionary mapping request names to their protocol definitions.
+
+    Note:
+        ``REGISTER_KV_CACHE`` and ``RETRIEVE`` payload/response shapes must
+        stay in lockstep across the MP server and all workers; deploy them
+        together when either side changes.
     """
     return {
         # Register KV Cache
@@ -73,7 +79,10 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - layout_hints: LayoutHints - See custom_types.LayoutHints.
         #   - engine_group_infos: list[EngineGroupInfo] - Engine-neutral KV cache
         #     group metadata (msgspec-encoded by the message queue).
-        # Returns: None
+        #   - layer_event_ipc_handles: list[bytes] - Reserved; must be empty.
+        #     Daemon-owned layer events are returned in the response when
+        #     layerwise mode is enabled on the server.
+        # Returns: RegisterKvCacheResponse (server/worker must upgrade together).
         "REGISTER_KV_CACHE": ProtocolDefinition(
             payload_classes=[
                 int,
@@ -83,8 +92,9 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
                 EngineType,
                 LayoutHints,
                 list[EngineGroupInfo],
+                list[bytes],
             ],
-            response_class=None,
+            response_class=RegisterKvCacheResponse,
             handler_type=HandlerType.SYNC,
         ),
         # Unregister KV Cache
@@ -156,7 +166,7 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         # Returns: tuple[bytes, bool] - (device event handle, success flag).
         #   The handle is empty when the server submitted no device work.
         "RETRIEVE": ProtocolDefinition(
-            payload_classes=[KeyType, int, list[list[int]], bytes, int],
+            payload_classes=[KeyType, int, list[list[int]], bytes, int, int],
             response_class=tuple[bytes, bool],
             handler_type=HandlerType.BLOCKING,
         ),

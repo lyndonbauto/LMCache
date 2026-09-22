@@ -44,6 +44,7 @@ from lmcache.integration.vllm.kv_cache_group_edits import (
 from lmcache.integration.vllm.kv_cache_groups import (
     create_engine_group_infos_from_vllm,
     get_tokens_per_block,
+    layer_names_to_global_index,
 )
 from lmcache.integration.vllm.lazy_offload_manager import LazyOffloadManager
 from lmcache.integration.vllm.lmcache_mp_metadata import (
@@ -62,6 +63,9 @@ from lmcache.integration.vllm.utils import (
     vllm_layout_hints,
 )
 from lmcache.utils import init_logger as lmcache_init_logger
+from lmcache.v1.multiprocess.layer_progress import (
+    LayerProgressRetrieveGenerationTimeoutError,
+)
 
 try:
     # First Party
@@ -591,6 +595,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "lmcache.mp.lazy_offload requires vLLM prefix caching "
                 "(enable_prefix_caching=True)"
             )
+        self.use_layerwise = bool(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.use_layerwise", False
+            )
+        )
 
         if self.role == KVConnectorRole.SCHEDULER:
             # Banner from the scheduler role only, so tensor-parallel
@@ -625,6 +634,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 parallel_strategy=parallel_strategy,
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
+            self._layer_name_to_index: dict[str, int] = {}
             if self.transfer_intermediate_tensors:
                 # First Party
                 from lmcache.integration.vllm.experimental import (
@@ -740,6 +750,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             engine_group_infos=engine_group_infos,
             layout_hints=layout_hints,
         )
+        self._layer_name_to_index = layer_names_to_global_index(kv_caches)
         if self.dispatcher is not None:
             dispatch(
                 self.dispatcher,
@@ -795,17 +806,24 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
-        """
-        Block until the KV for a specific layer is loaded into vLLM's
-        paged buffer. This is called from within attention layer to ensure
-        async copying from start_load_kv is complete.
+        """Block until this layer's KV has landed for the active retrieve.
 
-        This interface will be useful for layer-by-layer pipelining.
+        Resolves ``layer_name`` to the global layer index registered with
+        LMCache. No-op when layerwise mode is disabled or the layer is outside
+        the transfer layout.
 
         Args:
-            layer_name: the name of that layer
+            layer_name: vLLM KV cache layer name from the forward pass.
         """
-        return
+        if not self.use_layerwise:
+            return
+        layer_id = self._layer_name_to_index.get(layer_name)
+        if layer_id is None:
+            return
+        try:
+            self.worker_adapter.wait_for_layer_load(layer_id)
+        except LayerProgressRetrieveGenerationTimeoutError:
+            return
 
     def save_kv_layer(
         self,
@@ -1018,6 +1036,19 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                   'False' if the first element is 0.
 
         Notes:
+            When MP layerwise load is enabled (``lmcache.mp.use_layerwise`` on
+            the worker and ``--use-layerwise`` on the server), the second
+            element is always ``False`` even when tokens must be loaded, so
+            vLLM enters the forward pass immediately and blocks inside
+            attention via :meth:`wait_for_layer_load` instead of parking in
+            ``WAITING_FOR_REMOTE_KVS``. Per-layer wait timeouts use
+            ``lmcache.mp.layerwise_wait_timeout_seconds`` in
+            ``kv_connector_extra_config`` (default ``5.0``). That trades a clean
+            scheduler wait for
+            overlap between attention on layer *L* and H2D for layer *L+1*, but
+            if the transfer cannot keep up the stall holds GPU execution
+            resources inside the forward pass rather than outside it.
+
             The connector should only consider the largest prefix of prompt-
             tokens for which KV cache is actually available at the time of the
             call. If the cache cannot be loaded for some tokens (e.g., due to
@@ -1113,7 +1144,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         logger.debug(
             "vLLM hit is: %d, Need to load is %d", num_computed_tokens, need_to_load
         )
-        return need_to_load, need_to_load > 0
+        load_async = need_to_load > 0 and not self.use_layerwise
+        return need_to_load, load_async
 
     def on_new_request(self, request: "Request") -> None:
         """Submit an LMCache lookup when a request enters the waiting queue.
@@ -1367,6 +1399,28 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             return False
 
         return self._lazy_offload_manager.has_inflight_store_work()
+
+    @classmethod
+    def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
+        """Tell vLLM to use piecewise CUDA graphs when MP layerwise load is on.
+
+        Each layer wait polls shared memory and issues ``cudaStreamWaitEvent``
+        from the host inside attention. That synchronization cannot be captured
+        into a full CUDA graph: on replay the wait would be skipped and the
+        worker could compute on KV that has not landed yet.
+
+        When this returns True and the operator requested full CUDA graphs,
+        vLLM downgrades to ``CUDAGraphMode.PIECEWISE`` so attention runs in
+        an eager segment where the wait is legal—the same mechanism as the
+        non-multiprocess LMCache connector uses for ``use_layerwise``.
+
+        Args:
+            extra_config: vLLM ``kv_connector_extra_config`` dict.
+
+        Returns:
+            True when ``lmcache.mp.use_layerwise`` is enabled in extra_config.
+        """
+        return bool(extra_config.get("lmcache.mp.use_layerwise", False))
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:

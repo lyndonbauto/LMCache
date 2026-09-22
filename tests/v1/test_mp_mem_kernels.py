@@ -61,6 +61,9 @@ FMT_VLLM_FUSED_HND = lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_TWO_HS
 FMT_VLLM_FUSED_NHD = lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_TWO_HS
 FMT_VLLM_CS_HND = lmcache_native.EngineKVFormat.NL_X_NB_NH_BS_CS
 FMT_VLLM_CS_NHD = lmcache_native.EngineKVFormat.NL_X_NB_BS_NH_CS
+FMT_CROSS_LAYER_HND = lmcache_native.EngineKVFormat.NB_NL_TWO_NH_BS_HS
+FMT_SGLANG_MHA_MP = lmcache_native.EngineKVFormat.TWO_X_NL_X_NB_BS_NH_HS
+FMT_BSV_BSS = getattr(lmcache_native.EngineKVFormat, "NL_X_NB_BSV_BSS", None)
 
 # Format parameters: (engine_kv_format, num_layers, num_heads, head_size, is_mla)
 # The is_mla column really means "kv_size == 1": the fused-K/V and content-size
@@ -81,6 +84,36 @@ FORMAT_PARAMS = [
     (FMT_VLLM_CS_HND, 4, 8, 256, True),
     (FMT_VLLM_CS_NHD, 4, 8, 256, True),
 ]
+
+# Formats where ``layer_offset`` indexes through a stride or a 2*NL pointer
+# table; a mis-indexed launch still produces plausible KV elsewhere.
+LAYER_SUBRANGE_SENSITIVE_FORMAT_PARAMS = [
+    (FMT_CROSS_LAYER_HND, 4, 8, 128, False),
+    (FMT_SGLANG_MHA_MP, 4, 8, 128, False),
+]
+if FMT_BSV_BSS is not None:
+    LAYER_SUBRANGE_SENSITIVE_FORMAT_PARAMS.append((FMT_BSV_BSS, 4, 1, 132, True))
+
+LAYER_SUBRANGE_FORMAT_PARAMS = FORMAT_PARAMS + LAYER_SUBRANGE_SENSITIVE_FORMAT_PARAMS
+
+LAYER_SUBRANGE_FORMAT_IDS = [
+    "normal",
+    "cross_layer",
+    "flash_infer",
+    "mla",
+    "sglang_mha",
+    "sglang_mla",
+    "normal_hnd",
+    "flash_infer_hnd",
+    "vllm_fused_hnd",
+    "vllm_fused_nhd",
+    "vllm_cs_hnd",
+    "vllm_cs_nhd",
+    "cross_layer_hnd",
+    "sglang_mha_mp",
+]
+if FMT_BSV_BSS is not None:
+    LAYER_SUBRANGE_FORMAT_IDS.append("bsv_bss")
 
 
 def create_vllm_tensors(
@@ -103,6 +136,9 @@ def create_vllm_tensors(
     elif engine_kv_format == FMT_CROSS_LAYER:
         shape = [nb, nl, 2, bs, nh, hs]
         return [_create_random_tensor(shape, dtype, device)]
+    elif engine_kv_format == FMT_CROSS_LAYER_HND:
+        shape = [nb, nl, 2, nh, bs, hs]
+        return [_create_random_tensor(shape, dtype, device)]
     elif engine_kv_format == FMT_FLASH_INFER:
         shape = [nb, 2, bs, nh, hs]
         return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
@@ -121,6 +157,12 @@ def create_vllm_tensors(
     elif engine_kv_format == FMT_SGLANG_MHA:
         shape = [nbbs, nh, hs]
         return [_create_random_tensor(shape, dtype, device) for _ in range(2 * nl)]
+    elif engine_kv_format == FMT_SGLANG_MHA_MP:
+        shape = [nb, bs, nh, hs]
+        return [_create_random_tensor(shape, dtype, device) for _ in range(2 * nl)]
+    elif engine_kv_format == FMT_BSV_BSS:
+        shape = [nb, bs, hs]
+        return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
     elif engine_kv_format == FMT_SGLANG_MLA:
         shape = [nbbs, 1, hs]
         return [_create_random_tensor(shape, dtype, device) for _ in range(nl)]
@@ -147,6 +189,9 @@ def create_zero_vllm_tensors(
     elif engine_kv_format == FMT_CROSS_LAYER:
         shape = [nb, nl, 2, bs, nh, hs]
         return [_create_zero_tensor(shape, dtype, device)]
+    elif engine_kv_format == FMT_CROSS_LAYER_HND:
+        shape = [nb, nl, 2, nh, bs, hs]
+        return [_create_zero_tensor(shape, dtype, device)]
     elif engine_kv_format == FMT_FLASH_INFER:
         shape = [nb, 2, bs, nh, hs]
         return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
@@ -165,6 +210,12 @@ def create_zero_vllm_tensors(
     elif engine_kv_format == FMT_SGLANG_MHA:
         shape = [nbbs, nh, hs]
         return [_create_zero_tensor(shape, dtype, device) for _ in range(2 * nl)]
+    elif engine_kv_format == FMT_SGLANG_MHA_MP:
+        shape = [nb, bs, nh, hs]
+        return [_create_zero_tensor(shape, dtype, device) for _ in range(2 * nl)]
+    elif engine_kv_format == FMT_BSV_BSS:
+        shape = [nb, bs, hs]
+        return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
     elif engine_kv_format == FMT_SGLANG_MLA:
         shape = [nbbs, 1, hs]
         return [_create_zero_tensor(shape, dtype, device) for _ in range(nl)]
@@ -211,6 +262,8 @@ def get_block_data(
             results.append(vllm_tensors[layer_idx][:, block_idx, :, :, :].clone())
         elif engine_kv_format == FMT_CROSS_LAYER:
             results.append(vllm_tensors[0][block_idx, layer_idx, :, :, :, :].clone())
+        elif engine_kv_format == FMT_CROSS_LAYER_HND:
+            results.append(vllm_tensors[0][block_idx, layer_idx, :, :, :, :].clone())
         elif engine_kv_format == FMT_FLASH_INFER:
             results.append(vllm_tensors[layer_idx][block_idx, :, :, :, :].clone())
         elif engine_kv_format == FMT_FLASH_INFER_HND:
@@ -226,6 +279,12 @@ def get_block_data(
             k = vllm_tensors[layer_idx][ts:ed, :, :].clone()
             v = vllm_tensors[nl + layer_idx][ts:ed, :, :].clone()
             results.append(torch.stack([k, v], dim=0))
+        elif engine_kv_format == FMT_SGLANG_MHA_MP:
+            k = vllm_tensors[layer_idx][block_idx, :, :, :].clone()
+            v = vllm_tensors[nl + layer_idx][block_idx, :, :, :].clone()
+            results.append(torch.stack([k, v], dim=0))
+        elif engine_kv_format == FMT_BSV_BSS:
+            results.append(vllm_tensors[layer_idx][block_idx, :, :].clone())
         elif engine_kv_format == FMT_SGLANG_MLA:
             ts, ed = block_idx * bs, (block_idx + 1) * bs
             results.append(vllm_tensors[layer_idx][ts:ed, 0, :].clone())
@@ -251,6 +310,8 @@ def call_block_kernel(
     is_mla: bool,
     tokens_per_object: int,
     skip_prefix_n_blocks: int = 0,
+    layer_offset: int = 0,
+    n_layers: int = -1,
 ) -> None:
     device = vllm_tensors[0].device
 
@@ -278,6 +339,8 @@ def call_block_kernel(
         tokens_per_object,
         engine_kv_format,
         skip_prefix_n_blocks,
+        layer_offset,
+        n_layers,
     )
 
 
@@ -648,4 +711,105 @@ def test_block_transfer_roundtrip_large_block(dtype, mem_device):
         for layer_idx in range(LARGE_BLOCK_NL):
             assert torch.equal(src_data[layer_idx], tgt_data[layer_idx]), (
                 f"Mismatch at block index {i}, layer {layer_idx}"
+            )
+
+
+@pytest.mark.parametrize(
+    "engine_kv_format,nl,nh,hs,is_mla",
+    LAYER_SUBRANGE_FORMAT_PARAMS,
+    ids=LAYER_SUBRANGE_FORMAT_IDS,
+)
+@pytest.mark.parametrize("dtype", [torch.bfloat16], ids=["bf16"])
+def test_block_transfer_layer_subrange(engine_kv_format, nl, nh, hs, is_mla, dtype):
+    """A layer_offset/n_layers launch moves only those layers' bytes."""
+    if nl < 3:
+        pytest.skip("need at least three layers to test a middle sub-range")
+    if engine_kv_format == FMT_BSV_BSS:
+        dtype = torch.uint8
+
+    device = torch.device(torch_device_type)
+    kv_dim = 1 if is_mla else 2
+    hidden_dim = nh * hs
+    layer_offset = 1
+    n_layers = 2
+
+    source_vllm = create_vllm_tensors(
+        engine_kv_format, nl, NB, BS, nh, hs, dtype, device
+    )
+    target_vllm = create_zero_vllm_tensors(
+        engine_kv_format, nl, NB, BS, nh, hs, dtype, device
+    )
+    mem_objects = create_memory_objects(
+        kv_dim,
+        nl,
+        TOKENS_PER_OBJECT,
+        hidden_dim,
+        NUM_MEMORY_OBJECTS,
+        dtype,
+        device,
+    )
+
+    rng_d2h = random.Random(7)
+    block_ids_d2h = rng_d2h.sample(range(NB), TOTAL_BLOCKS)
+    excluded = set(block_ids_d2h)
+    available = [i for i in range(NB) if i not in excluded]
+    rng_h2d = random.Random(9)
+    block_ids_h2d = rng_h2d.sample(available, TOTAL_BLOCKS)
+
+    call_block_kernel(
+        source_vllm,
+        mem_objects,
+        block_ids_d2h,
+        engine_kv_format,
+        lmcache_native.TransferDirection.D2H,
+        nl,
+        NB,
+        BS,
+        nh,
+        hs,
+        is_mla,
+        TOKENS_PER_OBJECT,
+    )
+    torch_dev.synchronize()
+
+    call_block_kernel(
+        target_vllm,
+        mem_objects,
+        block_ids_h2d,
+        engine_kv_format,
+        lmcache_native.TransferDirection.H2D,
+        nl,
+        NB,
+        BS,
+        nh,
+        hs,
+        is_mla,
+        TOKENS_PER_OBJECT,
+        layer_offset=layer_offset,
+        n_layers=n_layers,
+    )
+    torch_dev.synchronize()
+
+    transferred_layers = range(layer_offset, layer_offset + n_layers)
+    untouched_layers = [
+        layer_idx for layer_idx in range(nl) if layer_idx not in transferred_layers
+    ]
+
+    for i in range(TOTAL_BLOCKS):
+        src_data = get_block_data(
+            source_vllm, engine_kv_format, nl, BS, nh, block_ids_d2h[i]
+        )
+        tgt_data = get_block_data(
+            target_vllm, engine_kv_format, nl, BS, nh, block_ids_h2d[i]
+        )
+        for layer_idx in transferred_layers:
+            assert torch.equal(src_data[layer_idx], tgt_data[layer_idx]), (
+                f"Mismatch at block index {i}, layer {layer_idx}"
+            )
+        for layer_idx in untouched_layers:
+            block = tgt_data[layer_idx]
+            if block.dtype == torch.float8_e4m3fn:
+                block = block.to(torch.float32)
+            assert block.abs().sum().item() == 0, (
+                f"Untouched layer {layer_idx} at block index {i} is not zero"
             )

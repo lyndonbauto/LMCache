@@ -127,6 +127,7 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
     ]
     ctx = MagicMock()
     ctx.chunk_size = 256
+    ctx.use_layerwise = False
     ctx.resolve_obj_keys.return_value = obj_keys
 
     read_calls: list[list[str]] = []
@@ -178,6 +179,8 @@ def test_retrieve_reads_and_transfers_only_in_window(monkeypatch):
         instance_id=1,
         gpu_block_ids=gpu_block_ids,
         event_ipc_handle=b"x",
+        skip_first_n_tokens=0,
+        retrieve_generation=0,
     )
     assert ok is True
 
@@ -205,6 +208,8 @@ def test_retrieve_full_attention_only_reads_everything(monkeypatch):
         instance_id=1,
         gpu_block_ids=[[1, 2, 3]],
         event_ipc_handle=b"x",
+        skip_first_n_tokens=0,
+        retrieve_generation=0,
     )
     assert ok is True
     assert read_calls == [["g0c0", "g0c1", "g0c2"]]
@@ -233,6 +238,8 @@ def test_retrieve_never_reads_aux_groups(monkeypatch):
         instance_id=1,
         gpu_block_ids=gpu_block_ids,
         event_ipc_handle=b"x",
+        skip_first_n_tokens=0,
+        retrieve_generation=0,
     )
     assert ok is True
 

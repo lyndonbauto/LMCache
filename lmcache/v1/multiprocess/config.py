@@ -59,6 +59,10 @@ class MPServerConfig:
     sliding-window size at KV-cache registration (hybrid models). When False
     (default), all kernel groups share a single full-attention object group."""
 
+    use_layerwise: bool = False
+    """When True, H2D retrieve launches one kernel per layer in global layer
+    order and workers wait per layer instead of on one completion event."""
+
     enable_segmented_prefix: bool = False
     """CacheBlend only (engine_type='blend'): on a mid-prefix L2 retrieve
     failure, retain the gapped contiguous prefix so the post-gap chunks stay
@@ -415,6 +419,14 @@ def add_mp_server_args(
         "at KV-cache registration (for hybrid models). (Default is False)",
     )
     mp_group.add_argument(
+        "--use-layerwise",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Pipeline MP H2D retrieve one transformer layer at a time so "
+        "vLLM can overlap attention with the next layer's transfer. "
+        "(Default is False)",
+    )
+    mp_group.add_argument(
         "--worker-reap-timeout-seconds",
         type=float,
         default=120.0,
@@ -488,6 +500,7 @@ def parse_args_to_mp_server_config(
         hash_algorithm=args.hash_algorithm,
         engine_type=args.engine_type,
         separate_object_groups=args.separate_object_groups,
+        use_layerwise=args.use_layerwise,
         enable_segmented_prefix=args.enable_segmented_prefix,
         enable_dedup_content=args.enable_dedup_content,
         supported_transfer_mode=args.supported_transfer_mode,
