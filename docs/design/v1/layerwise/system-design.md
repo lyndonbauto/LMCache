@@ -246,6 +246,18 @@ in both, and the Python tests pin concrete byte values rather than relying on
 the formula being re-derived correctly. If these drift, a slot will name a
 record the write side never produced.
 
+Each side's own tests cannot see a drift, so there is a direct guard:
+`tests/v1/distributed/rdma/fixtures/slot_plans.txt` holds planning cases that
+both read. `csrc/slot_plan_dump.cpp` prints the production `SlotPlanner`'s
+slots for each case, and `test_slot_plan_parity.py` plans the same cases with
+`FetchPlanner` and diffs them slot for slot -- including order, since a slot's
+index is its position. It lives beside the other C++ harnesses because it
+needs a compiler, which keeps `tests/v1/layerwise/` free of even that
+dependency; it skips rather than fails where no compiler exists.
+
+Add a case to the fixture whenever either planner grows a shape it did not
+handle before. A case only the harness runs is not a guard.
+
 ## 8. Invariants that are not negotiable
 
 Each of these was a real bug. Losing one reintroduces it.

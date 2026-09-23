@@ -1,0 +1,130 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Shared slot-planning cases, read by both planners.
+#
+# The slot arithmetic exists twice on purpose -- in C++ for the production
+# fetch path, and in Python so Track C's tests need no native build. Each
+# side has its own tests; what neither can catch alone is the two drifting
+# apart, which would surface as a slot naming a record the write side never
+# produced. This file is the one thing both read, so a divergence fails here.
+#
+# Consumed by:
+#   tests/v1/distributed/rdma/csrc/slot_plan_dump.cpp   (C++ SlotPlanner)
+#   tests/v1/distributed/rdma/test_slot_plan_parity.py  (Python FetchPlanner)
+#
+# Format, one directive per line, `#` and blank lines ignored:
+#
+#   case  <name>
+#   kernel <group_id> <kv_size> <num_slots> <hidden_dim> <element_size> <layer_id>...
+#   place <chunk_id> <group_id> <dest_offset>
+#   caps  <max_record_bytes> <max_write_bytes>
+#   end
+#
+# Kernel groups are concatenated into their object group's payload in the
+# order declared here, so declaration order is part of the case.
+#
+# Cases are chosen for where the two implementations could plausibly
+# disagree, not for coverage of either alone: plane striding, how a plane is
+# cut into records, and what happens when one geometry is not enough.
+
+# The ordinary case: key and value planes a whole layer dimension apart,
+# several chunks, a plane that is exactly one record.
+case uniform_two_plane_exact_record
+kernel 0 2 16 128 2 0 1 2 3
+place 0 0 0
+place 1 0 1048576
+place 2 0 2097152
+caps 4096 1048576
+end
+
+# A 10000-byte plane against a 4096-byte cap. Cutting as cap-plus-remainder
+# gives 4096/4096/1808; cutting into the fewest equal pieces gives
+# 3334/3334/3332. Only the second is servable, because a sink carries no
+# record-relative source offset, so every piece but the last must be exactly
+# the record size the write side used.
+case plane_needing_three_uneven_pieces
+kernel 0 2 10 500 2 0 1
+place 0 0 0
+caps 4096 1048576
+end
+
+# Two pieces where the naive split would be 4096 + 904 and the correct one
+# is 2500 + 2500.
+case plane_splitting_evenly_in_two
+kernel 0 2 25 100 2 0 1 2
+place 0 0 0
+place 1 0 1048576
+caps 4096 1048576
+end
+
+# One object group holding kernel groups of different geometry. This is the
+# case a single flattened stride gets wrong: the second group's layers would
+# be strided by the first group's plane size.
+case hybrid_kernel_groups_in_one_object_group
+kernel 0 2 8 64 2 0 1
+kernel 0 2 32 64 2 2
+kernel 0 1 8 64 4 3 4
+place 0 0 0
+place 1 0 1048576
+caps 4096 1048576
+end
+
+# Layers spread across two object groups with interleaved global indices, so
+# a plan grouped by object group would fetch layer 3 before layer 1.
+case interleaved_layers_across_object_groups
+kernel 0 2 8 64 2 0 2 4
+kernel 1 2 8 64 2 1 3 5
+place 0 0 0
+place 1 0 1048576
+place 0 1 2097152
+place 1 1 3145728
+caps 4096 1048576
+end
+
+# MLA: the engine format drops the leading K/V dimension, so a layer is one
+# contiguous plane. Not a special case in either planner -- kv_size of 1.
+case single_plane_mla_layout
+kernel 0 1 64 576 2 0 1 2 3
+place 0 0 0
+caps 65536 1048576
+end
+
+# Layer indices in tensor order rather than ascending. Position in the
+# kernel group is the stride index, but the plan is ordered by global layer
+# id, so these two orders must not be conflated.
+case layer_indices_not_in_ascending_tensor_order
+kernel 0 2 8 64 2 5 1 9 3
+place 0 0 0
+caps 4096 1048576
+end
+
+# A sliding-window group placed for only its trailing chunks, alongside a
+# full-attention group placed for all of them. The windowed group's layers
+# must still complete.
+case windowed_group_beside_full_attention
+kernel 0 2 8 64 2 0 1
+kernel 1 2 8 64 2 2 3
+place 0 0 0
+place 1 0 1048576
+place 2 0 2097152
+place 1 1 3145728
+place 2 1 4194304
+caps 4096 1048576
+end
+
+# A record cap far below the plane size, so one plane becomes many equal
+# pieces and the piece count is where the two could drift.
+case many_pieces_per_plane
+kernel 0 2 64 128 2 0 1
+place 0 0 0
+caps 1000 1048576
+end
+
+# Element size drives the plane size, so a wider dtype must move every
+# offset rather than only the lengths.
+case wide_dtype_moves_every_offset
+kernel 0 2 16 32 4 0 1 2
+place 0 0 0
+place 1 0 1048576
+caps 4096 1048576
+end

@@ -160,6 +160,56 @@ def logic_harness(_logic_build_dir: Path) -> Callable[[str], str]:
 
 
 @pytest.fixture
+def logic_harness_build_dir(_logic_build_dir: Path) -> Path:
+    """Return the directory holding the built device-independent harnesses.
+
+    Exposed for tests that run a harness in a way ``logic_harness`` does not
+    cover -- passing a fixture file, or expecting a non-zero exit.
+
+    Returns:
+        Path to the build output directory.
+    """
+    return _logic_build_dir
+
+
+@pytest.fixture
+def logic_harness_with_fixture(
+    _logic_build_dir: Path,
+) -> Callable[[str, Path], str]:
+    """Return a callable running a logic harness against a fixture file.
+
+    Separate from ``logic_harness`` because these harnesses take an argument
+    and print data rather than asserting and printing ``PASS``.
+
+    Returns:
+        A function mapping a harness name and a fixture path to its stdout.
+    """
+
+    def run(name: str, fixture: Path) -> str:
+        binary = _logic_build_dir / name
+        if not binary.exists():
+            pytest.fail(f"harness build reported success but {binary} is missing")
+        if not fixture.exists():
+            pytest.fail(f"fixture {fixture} is missing")
+
+        result = subprocess.run(
+            [str(binary), str(fixture)],
+            capture_output=True,
+            text=True,
+            timeout=_RUN_TIMEOUT_SECONDS,
+            check=False,
+        )
+        if result.returncode != 0:
+            pytest.fail(
+                f"{name} failed on {fixture.name}.\n"
+                f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+            )
+        return result.stdout
+
+    return run
+
+
+@pytest.fixture
 def rdma_harness(_harness_build_dir: Path) -> Callable[[str], str]:
     """Return a callable that runs a named harness and yields its stdout.
 
