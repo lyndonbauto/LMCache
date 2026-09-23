@@ -82,8 +82,18 @@ class _Case:
         )
         return FetchPlanner(layout).plan(request, _ConstantDigests())
 
-    def render(self) -> list[str]:
-        """Render this case's Python plan in the harness's output form.
+    def layout(self) -> ModelLayout:
+        """Build this case's model layout.
+
+        Returns:
+            A layout over every object group the case declares.
+        """
+        return ModelLayout(
+            {group: self.kernel_groups[group] for group in sorted(self.kernel_groups)}
+        )
+
+    def render_slots(self) -> list[str]:
+        """Render this case's Python plan in the harness's ``slot`` form.
 
         Returns:
             One ``case`` line followed by one ``slot`` line per slot.
@@ -94,6 +104,26 @@ class _Case:
                 f"slot {index} {slot.layer_id} {slot.chunk_id} "
                 f"{slot.offset} {slot.length}"
             )
+        return lines
+
+    def render_records(self) -> list[str]:
+        """Render which stored record each slot maps to, in Python's view.
+
+        Returns:
+            One ``record`` line per slot, ``none`` where the layout is one the
+            write side does not shard along layer boundaries.
+        """
+        layout = self.layout()
+        lines = []
+        for index, slot in enumerate(self.plan().slots):
+            try:
+                record = layout.record_index_for(
+                    slot.layer_id, slot.plane, slot.piece, self.max_record_bytes
+                )
+            except ValueError:
+                lines.append(f"record {index} none")
+            else:
+                lines.append(f"record {index} {record}")
         return lines
 
 
@@ -242,9 +272,96 @@ def test_every_fixture_case_plans_identically_in_both_languages(
         "the harness and the fixture parser disagree about which cases exist"
     )
     for case in cases:
-        assert case.render() == native[case.name], (
+        native_slots = [
+            line for line in native[case.name] if not line.startswith("record ")
+        ]
+        assert case.render_slots() == native_slots, (
             f"case {case.name}: the Python and C++ planners disagree"
         )
+
+
+def test_a_slot_maps_to_the_record_the_write_side_actually_stored(
+    logic_harness_with_fixture: Callable[[str, Path], str],
+) -> None:
+    """Planning the right bytes is not enough; a record must hold them.
+
+    Which bytes a slot carries and which records exist are computed by
+    different code. The planner cuts planes per kernel group; the writer
+    shards through ``make_shard_plan``, which is told one plane size for the
+    whole model. Where they line up, ``record_index_for`` must name the
+    record the harness finds by searching -- if it named a different one, the
+    fetch would pull a real record into the right address and the model would
+    read the wrong bytes.
+
+    Args:
+        logic_harness_with_fixture: Fixture that builds and runs a harness
+            against a fixture file.
+    """
+    native = _cases_from_output(
+        logic_harness_with_fixture("slot_plan_dump", _FIXTURE).splitlines()
+    )
+
+    checked = 0
+    for case in _parse_fixture(_FIXTURE.read_text()):
+        if case.layout().uniform_plane_bytes() == 0:
+            continue
+        native_records = [
+            line for line in native[case.name] if line.startswith("record ")
+        ]
+        assert "none" not in " ".join(native_records), (
+            f"case {case.name}: the layout is plane-aligned, so every slot "
+            "should correspond to a stored record"
+        )
+        assert case.render_records() == native_records, (
+            f"case {case.name}: Python and the write side disagree about "
+            "which record holds a slot"
+        )
+        checked += 1
+
+    assert checked >= 7, "too few plane-aligned cases to be worth asserting"
+
+
+def test_a_model_the_writer_does_not_plane_align_has_no_servable_records(
+    logic_harness_with_fixture: Callable[[str, Path], str],
+) -> None:
+    """Refusing to name records for a hybrid model is justified, not cautious.
+
+    ``uniform_kv_plane_bytes`` yields one plane size for the whole model, so a
+    single kernel group that disagrees drops the writer back to byte-count
+    sharding for everything. Its record boundaries then fall wherever the
+    arithmetic puts them, while the planner still cuts each kernel group
+    along its own planes.
+
+    ``record_index_for`` refuses outright for such a model. This checks that
+    the refusal is not overcautious: the harness, which searches for a record
+    covering exactly a slot's range, finds none for most slots. The few it
+    does find are coincidences -- byte-count boundaries that happen to land on
+    a plane edge -- and serving only those would deliver part of a layer and
+    report it ready.
+
+    Args:
+        logic_harness_with_fixture: Fixture that builds and runs a harness
+            against a fixture file.
+    """
+    native = _cases_from_output(
+        logic_harness_with_fixture("slot_plan_dump", _FIXTURE).splitlines()
+    )
+
+    hybrid = [
+        case
+        for case in _parse_fixture(_FIXTURE.read_text())
+        if case.layout().uniform_plane_bytes() == 0
+    ]
+    assert hybrid, "no case covers a model the writer will not plane-align"
+
+    for case in hybrid:
+        records = [line for line in native[case.name] if line.startswith("record ")]
+        unservable = [line for line in records if line.endswith(" none")]
+        assert unservable, (
+            f"case {case.name}: every slot found a record, so refusing to "
+            "name them is too strict"
+        )
+        assert all(line.endswith(" none") for line in case.render_records())
 
 
 def test_the_harness_rejects_a_fixture_it_cannot_parse(

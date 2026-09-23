@@ -446,6 +446,119 @@ def test_layers_from_several_object_groups_interleave_by_layer_id() -> None:
 
 
 # --------------------------------------------------------------------------
+# Naming the stored record behind a slot.
+#
+# Cross-checked against the write side's own sharding in
+# tests/v1/distributed/rdma/test_slot_plan_parity.py; these pin the
+# behaviour that does not need a compiler.
+# --------------------------------------------------------------------------
+
+
+def test_a_model_whose_kernel_groups_agree_reports_their_plane_size() -> None:
+    """One plane size describes the model, so the writer can align to it."""
+    layout = ModelLayout(
+        {
+            0: [KernelGroupGeometry((0, 1), kv_planes=2, plane_bytes=1024)],
+            1: [KernelGroupGeometry((2,), kv_planes=1, plane_bytes=1024)],
+        }
+    )
+    assert layout.uniform_plane_bytes() == 1024
+
+
+def test_a_model_whose_kernel_groups_disagree_reports_no_plane_size() -> None:
+    """Zero is the writer's signal to fall back to byte-count sharding.
+
+    One kernel group is enough to turn plane alignment off for the whole
+    model, because the write side is told a single number.
+    """
+    layout = ModelLayout(
+        {
+            0: [
+                KernelGroupGeometry((0, 1), kv_planes=2, plane_bytes=1024),
+                KernelGroupGeometry((2,), kv_planes=2, plane_bytes=4096),
+            ]
+        }
+    )
+    assert layout.uniform_plane_bytes() == 0
+
+
+def test_records_are_numbered_plane_major_across_the_object() -> None:
+    """Record order follows the object's planes, not the model's layers.
+
+    A layer's two planes sit a whole layer dimension apart, so its records
+    are far apart in the numbering even though the layer is one unit to the
+    reader.
+    """
+    layout = uniform_layout(num_layers=3, kv_planes=2, plane_bytes=1024)
+    indices = [
+        layout.record_index_for(layer_id, plane, 0, max_record_bytes=4096)
+        for plane in range(2)
+        for layer_id in range(3)
+    ]
+    assert indices == [0, 1, 2, 3, 4, 5]
+
+
+def test_a_plane_cut_into_pieces_numbers_them_within_the_plane() -> None:
+    """Pieces are consecutive inside a plane before the next plane starts."""
+    layout = uniform_layout(num_layers=2, kv_planes=2, plane_bytes=10_000)
+    # Three pieces per plane, so layer 1's key plane starts at record 3.
+    assert layout.record_index_for(0, 0, 0, max_record_bytes=4096) == 0
+    assert layout.record_index_for(0, 0, 2, max_record_bytes=4096) == 2
+    assert layout.record_index_for(1, 0, 0, max_record_bytes=4096) == 3
+    assert layout.record_index_for(0, 1, 0, max_record_bytes=4096) == 6
+
+
+def test_naming_a_record_is_refused_when_the_writer_will_not_align() -> None:
+    """A hybrid model has no record matching a slot, so this must not guess.
+
+    Returning a plausible index would name a record that exists and holds
+    other layers' bytes, which the transport would happily fetch.
+    """
+    layout = ModelLayout(
+        {
+            0: [
+                KernelGroupGeometry((0, 1), kv_planes=2, plane_bytes=1024),
+                KernelGroupGeometry((2,), kv_planes=2, plane_bytes=4096),
+            ]
+        }
+    )
+    with pytest.raises(ValueError, match="disagree on a plane size"):
+        layout.record_index_for(0, 0, 0, max_record_bytes=4096)
+
+
+@pytest.mark.parametrize(
+    "plane, piece, match",
+    [(2, 0, "plane 2 does not exist"), (0, 3, "piece 3 does not exist")],
+)
+def test_naming_a_record_outside_the_layer_is_refused(
+    plane: int, piece: int, match: str
+) -> None:
+    """An out-of-range plane or piece names a record of another layer."""
+    layout = uniform_layout(num_layers=2, kv_planes=2, plane_bytes=4096)
+    with pytest.raises(ValueError, match=match):
+        layout.record_index_for(0, plane, piece, max_record_bytes=4096)
+
+
+def test_every_slot_of_a_plan_names_a_distinct_record() -> None:
+    """Two slots sharing a record would each report the other's layer ready.
+
+    Uniqueness is checked per chunk, since records are numbered within a
+    chunk's object and two chunks reuse the same numbers.
+    """
+    layout = uniform_layout(num_layers=3, kv_planes=2, plane_bytes=10_000)
+    plan = FetchPlanner(layout).plan(request_for(place([0, 1])), DIGESTS)
+
+    by_chunk: dict[int, list[int]] = {}
+    for slot in plan.slots:
+        by_chunk.setdefault(slot.chunk_id, []).append(
+            layout.record_index_for(slot.layer_id, slot.plane, slot.piece, 4096)
+        )
+    for chunk_id, indices in by_chunk.items():
+        assert len(set(indices)) == len(indices), f"chunk {chunk_id} reuses a record"
+        assert sorted(indices) == list(range(len(indices)))
+
+
+# --------------------------------------------------------------------------
 # C2. A layer is kv_planes disjoint ranges, not one.
 # --------------------------------------------------------------------------
 

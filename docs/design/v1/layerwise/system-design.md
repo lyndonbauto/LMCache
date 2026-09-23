@@ -258,6 +258,47 @@ dependency; it skips rather than fails where no compiler exists.
 Add a case to the fixture whenever either planner grows a shape it did not
 handle before. A case only the harness runs is not a guard.
 
+The fixture also checks something the planners cannot check alone: that a
+record holding a slot's bytes was actually stored.
+`ModelLayout.record_index_for` names the record behind a slot, and the
+harness independently searches the write side's own `make_shard_plan` output
+for a record covering exactly that range. Where they disagree, the fetch
+would pull a real record into the right address and the model would read the
+wrong bytes.
+
+## 10. Known limitation: layerwise needs one plane size per model
+
+A layerwise fetch cannot currently be served for a model whose kernel groups
+disagree on their plane size -- which is the Mamba/GDN hybrid case that
+motivated plane-aligned sharding in the first place.
+
+The two halves disagree about what a record is:
+
+- The **writer** is told one plane size for the whole model.
+  `uniform_kv_plane_bytes` returns `0` as soon as any kernel group differs,
+  and `make_shard_plan` then falls back to byte-count sharding, putting
+  record boundaries wherever the arithmetic lands.
+- The **planner** cuts each kernel group along its own planes, which is
+  correct for the plan and is what keeps a slot inside one layer.
+
+So the plan names pieces that were never stored as records. Measured on the
+`hybrid_kernel_groups_in_one_object_group` fixture case, 12 of 16 slots match
+no record at all. The other 4 are worse than the misses: byte-count
+boundaries that happen to land on a plane edge, so a naive implementation
+would serve part of a layer and report it ready.
+
+`record_index_for` therefore refuses outright for such a model rather than
+returning a plausible index, and `test_slot_plan_parity.py` asserts both that
+it refuses and that the refusal is justified. A real `SlotDigestSource` built
+on it will raise, the fetch will fail loudly, and the caller falls back to a
+whole-request load -- the path `LayerArrivalStatus.UNSERVABLE` exists for.
+
+Closing this means making the write side shard per kernel group rather than
+per model, so that `set_kv_plane_bytes` carries a plane size per object group
+instead of one number. That is a change to `shard_plan` and the connector's
+record naming, so it is Track C's to make, but it is a separate piece of work
+from planning and is not started.
+
 ## 8. Invariants that are not negotiable
 
 Each of these was a real bug. Losing one reintroduces it.

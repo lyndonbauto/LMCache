@@ -17,11 +17,27 @@
 //   case <name>
 //   slot <index> <layer_id> <chunk_id> <offset> <length>
 //   ...
+//   record <slot_index> <segment_index>|none
+//   ...
 //
 // Digests and nodes are deliberately absent. They are joined onto the plan
 // later, by pipelined_fetch_session on this side, so they are not something
 // the two planners could disagree about.
+//
+// == Why the record lines are here ==
+//
+// The plan says which bytes a slot carries. It does not say whether a record
+// holding exactly those bytes was ever stored. Those are separate questions
+// with separate arithmetic -- the writer shards through make_shard_plan(),
+// which is told a single uniform plane size for the whole model and falls
+// back to byte-count sharding when the kernel groups disagree about it.
+//
+// So each slot is resolved against the write-side shard plan and reported as
+// the record index it corresponds to, or `none` when no record covers
+// exactly that range. `none` is not a harness failure: it is the answer, and
+// the parity test asserts which cases produce it.
 
+#include "shard_plan.h"
 #include "slot_planner.h"
 
 #include <cstdint>
@@ -35,6 +51,10 @@
 
 namespace {
 
+using lmcache::connector::make_shard_plan;
+using lmcache::connector::segment_range;
+using lmcache::connector::ShardPlan;
+using lmcache::connector::ShardRange;
 using lmcache::connector::rdma::ChunkPlacement;
 using lmcache::connector::rdma::KernelGroupLayout;
 using lmcache::connector::rdma::ObjectGroupLayout;
@@ -57,6 +77,45 @@ struct Case {
   size_t max_write_bytes = 0;
 };
 
+// The plane size the writer is given: shared by every kernel group of every
+// object group, or 0 when they disagree.
+//
+// Mirrors uniform_kv_plane_bytes() in lmcache_driven_transfer.py, which is
+// what actually reaches the connector through set_plane_bytes(). It is one
+// number for the whole model, not one per object group, which is why a
+// single disagreeing kernel group turns off plane alignment everywhere.
+size_t uniform_plane_bytes(const std::vector<ObjectGroupLayout>& layouts) {
+  size_t shared = 0;
+  for (const ObjectGroupLayout& layout : layouts) {
+    for (const KernelGroupLayout& kernel : layout.kernel_groups) {
+      const size_t plane = lmcache::connector::rdma::plane_bytes(kernel);
+      if (shared == 0) {
+        shared = plane;
+      } else if (shared != plane) {
+        return 0;
+      }
+    }
+  }
+  return shared;
+}
+
+// Index of the stored record covering exactly [offset, offset + length), or
+// -1 when no record does.
+//
+// Searched rather than computed. The point is to find out whether a record
+// with these bounds exists at all, and computing an index from the same
+// formula the planner used would assume the answer.
+long find_record(const ShardPlan& shard, size_t payload_bytes, size_t offset,
+                 size_t length) {
+  for (uint32_t index = 0; index < shard.nseg; ++index) {
+    const ShardRange range = segment_range(shard, index, payload_bytes);
+    if (range.offset == offset && range.length == length) {
+      return static_cast<long>(index);
+    }
+  }
+  return -1;
+}
+
 // Emit one case's plan, or fail loudly: a case the planner rejects is a
 // fixture bug, and silently skipping it would quietly stop testing it.
 void dump_case(const Case& current) {
@@ -77,6 +136,43 @@ void dump_case(const Case& current) {
     std::cout << "slot " << index << ' ' << slot.layer_id << ' '
               << slot.chunk_id << ' ' << slot.offset << ' ' << slot.length
               << "\n";
+  }
+
+  // The writer's knobs default to the record cap; see the connector, where
+  // target_segment_bytes and single_record_threshold_bytes both fall back to
+  // max_record_bytes.
+  const size_t plane = uniform_plane_bytes(layouts);
+  for (size_t index = 0; index < plan.slot_count(); ++index) {
+    const auto& slot = plan.slot(static_cast<uint16_t>(index));
+    const ChunkPlacement* owner = nullptr;
+    for (const ChunkPlacement& placement : current.placements) {
+      const size_t payload =
+          object_group_bytes(current.groups.at(placement.object_group_id));
+      if (placement.chunk_id == slot.chunk_id &&
+          slot.offset >= placement.dest_offset &&
+          slot.offset < placement.dest_offset + payload) {
+        owner = &placement;
+        break;
+      }
+    }
+    if (owner == nullptr) {
+      throw std::runtime_error("slot belongs to no placement");
+    }
+
+    const size_t payload =
+        object_group_bytes(current.groups.at(owner->object_group_id));
+    const ShardPlan shard = make_shard_plan(payload, current.max_record_bytes,
+                                            current.max_record_bytes,
+                                            current.max_record_bytes, plane);
+    const long record = find_record(
+        shard, payload, slot.offset - owner->dest_offset, slot.length);
+
+    std::cout << "record " << index << ' ';
+    if (record < 0) {
+      std::cout << "none\n";
+    } else {
+      std::cout << record << "\n";
+    }
   }
 }
 

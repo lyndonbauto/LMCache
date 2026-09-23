@@ -372,11 +372,13 @@ class ModelLayout:
 
         locations: dict[int, _LayerLocation] = {}
         group_bytes: dict[int, int] = {}
+        geometries: list[KernelGroupGeometry] = []
         for object_group_id, kernel_groups in object_groups.items():
             if not kernel_groups:
                 raise ValueError(f"object group {object_group_id} has no kernel groups")
             base = 0
             for kernel_group in kernel_groups:
+                geometries.append(kernel_group)
                 num_layers = len(kernel_group.layer_ids)
                 for position, layer_id in enumerate(kernel_group.layer_ids):
                     if layer_id in locations:
@@ -403,6 +405,7 @@ class ModelLayout:
 
         self._locations = locations
         self._group_bytes = group_bytes
+        self._geometries = tuple(geometries)
 
     @classmethod
     def from_registration(
@@ -509,6 +512,83 @@ class ModelLayout:
             KeyError: If the layout does not cover ``layer_id``.
         """
         return self._layer_location(layer_id).planes
+
+    def uniform_plane_bytes(self) -> int:
+        """Return the plane size every kernel group shares, or 0 if they differ.
+
+        This is the number the write side is given. ``set_kv_plane_bytes``
+        carries one plane size for the whole model, and the storage backend
+        aligns record boundaries to it so that a record belongs to exactly one
+        layer. A single kernel group that disagrees turns that off everywhere,
+        because one uniform stride cannot describe the payload.
+
+        Returns:
+            The shared plane size in bytes, or ``0`` when the kernel groups do
+            not agree on one.
+        """
+        sizes = {geometry.plane_bytes for geometry in self._geometries}
+        return sizes.pop() if len(sizes) == 1 else 0
+
+    def record_index_for(
+        self, layer_id: int, plane: int, piece: int, max_record_bytes: int
+    ) -> int:
+        """Return which stored record of a chunk's object holds one slot.
+
+        The plan says which bytes a slot carries; it does not say whether a
+        record holding exactly those bytes was ever written. This is the join
+        between the two, and it is what a real
+        :class:`SlotDigestSource` needs in order to name a record: the write
+        side stores an object's records under keys ending in their index, so
+        the index is the last thing missing between a slot and its digest.
+
+        Records are numbered plane-major across the whole object -- every
+        piece of plane 0, then of plane 1 -- which is how
+        ``segment_range`` in ``shard_plan.h`` resolves an index back to a
+        range.
+
+        Args:
+            layer_id: Global layer index in the model.
+            plane: Which K/V plane of the layer, counting from zero.
+            piece: Which record of that plane, counting from zero.
+            max_record_bytes: Largest record the cluster will hold.
+
+        Returns:
+            The record's index within the chunk's object for that object
+            group.
+
+        Raises:
+            KeyError: If the layout does not cover ``layer_id``.
+            ValueError: If the kernel groups disagree on a plane size, since
+                the write side then shards by byte count and no record
+                matches a slot; or if ``plane`` or ``piece`` is outside what
+                the layer actually has.
+        """
+        plane_size = self.uniform_plane_bytes()
+        if plane_size == 0:
+            raise ValueError(
+                "this model's kernel groups disagree on a plane size, so the "
+                "write side shards by byte count and its records do not line "
+                "up with layer boundaries; no record corresponds to a slot, "
+                "and a layerwise fetch cannot be served for it"
+            )
+        if max_record_bytes <= 0:
+            raise ValueError(
+                f"max_record_bytes must be positive, got {max_record_bytes}"
+            )
+
+        planes = self._layer_location(layer_id).planes
+        if not 0 <= plane < len(planes):
+            raise ValueError(
+                f"layer {layer_id} has {len(planes)} planes, so plane "
+                f"{plane} does not exist"
+            )
+        pieces = _ceil_div(plane_size, max_record_bytes)
+        if not 0 <= piece < pieces:
+            raise ValueError(
+                f"a plane of {plane_size} bytes under a {max_record_bytes} "
+                f"byte cap is {pieces} pieces, so piece {piece} does not exist"
+            )
+        return ((planes[plane].offset // plane_size) * pieces) + piece
 
     def object_group_bytes(self, object_group_id: int) -> int:
         """Return the size of one chunk's object for an object group.
