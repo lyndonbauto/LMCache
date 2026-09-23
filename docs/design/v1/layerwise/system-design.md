@@ -299,6 +299,30 @@ instead of one number. That is a change to `shard_plan` and the connector's
 record naming, so it is Track C's to make, but it is a separate piece of work
 from planning and is not started.
 
+## 11. What still has to come from the native side
+
+Planning is complete; issuing a plan is not. A `PlanRequest` needs three
+facts per chunk that Track C cannot produce, and it is worth being precise
+about why, so nobody re-attempts them in Python:
+
+- **Digests.** An Aerospike digest is RIPEMD-160 over the key. Python cannot
+  compute one -- most OpenSSL builds disable RIPEMD-160, and this one does,
+  so `hashlib.new("ripemd160")` raises. `RecordKeyDigests` therefore does
+  everything except the hash: it resolves a slot to a record index via
+  `record_index_for`, forms the record's user key the way
+  `connector.cpp` does, and calls an injected `digest_of`. Only that
+  callable needs to come from the client, which already links RIPEMD-160.
+- **Nodes.** Which node owns a chunk comes from the cluster's partition map,
+  which only the C client has. It reaches the plan as a name in
+  `LayerFetchPlan.node_names`.
+- **Destination offsets.** Chosen by the L1 allocator when it places a
+  chunk's object in the registered window, so they are an input to planning
+  rather than something planning derives.
+
+Note the record cap `RecordKeyDigests` is built with must be the cap the
+object was *written* under, not today's. It decides how many records exist,
+so a cap that changed between write and read renames every record.
+
 ## 8. Invariants that are not negotiable
 
 Each of these was a real bug. Losing one reintroduces it.

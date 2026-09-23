@@ -26,7 +26,7 @@ see ``docs/design/v1/layerwise/system-design.md`` section 7.
 """
 
 # Standard
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -590,6 +590,39 @@ class ModelLayout:
             )
         return ((planes[plane].offset // plane_size) * pieces) + piece
 
+    def record_count(self, object_group_id: int, max_record_bytes: int) -> int:
+        """Return how many records one chunk's object is stored as.
+
+        Needed because the write side names a single-record object
+        differently from a sharded one, so a caller cannot form a record's
+        key without knowing which case it is in.
+
+        Args:
+            object_group_id: The object group to size.
+            max_record_bytes: Largest record the cluster will hold.
+
+        Returns:
+            The number of records the object occupies.
+
+        Raises:
+            KeyError: If the layout does not cover ``object_group_id``.
+            ValueError: If the kernel groups disagree on a plane size, or
+                ``max_record_bytes`` is not positive.
+        """
+        plane_size = self.uniform_plane_bytes()
+        if plane_size == 0:
+            raise ValueError(
+                "this model's kernel groups disagree on a plane size, so the "
+                "write side shards by byte count and its record count does "
+                "not follow from the layout"
+            )
+        if max_record_bytes <= 0:
+            raise ValueError(
+                f"max_record_bytes must be positive, got {max_record_bytes}"
+            )
+        planes = self.object_group_bytes(object_group_id) // plane_size
+        return planes * _ceil_div(plane_size, max_record_bytes)
+
     def object_group_bytes(self, object_group_id: int) -> int:
         """Return the size of one chunk's object for an object group.
 
@@ -622,6 +655,93 @@ class ModelLayout:
         if location is None:
             raise KeyError(f"no layer {layer_id} in the layout")
         return location
+
+
+class RecordKeyDigests:
+    """Names records by the keys the write side stored them under.
+
+    Composes the two halves of the answer. Which record a slot needs comes
+    from the layout; what that record is called comes from the key naming the
+    connector uses; and turning a key into a digest is RIPEMD-160 over the
+    Aerospike key, which is the client's job and is not available in Python
+    -- most builds of OpenSSL disable RIPEMD-160 outright. So the hash is
+    injected and everything around it is testable without a cluster.
+
+    The key layout mirrors ``meta_user_key`` and ``segment_user_key`` in
+    ``csrc/storage_backends/aerospike/connector.cpp``. An object stored as a
+    single record lives under its meta key; a sharded one has its records
+    suffixed by index. Getting that wrong asks for a record that does not
+    exist, which at least fails loudly.
+    """
+
+    def __init__(
+        self,
+        layout: ModelLayout,
+        max_record_bytes: int,
+        cache_keys: Mapping[tuple[int, int], str],
+        digest_of: Callable[[str], bytes],
+    ) -> None:
+        """Build a digest source for one request.
+
+        Args:
+            layout: Where each layer lives within its object group.
+            max_record_bytes: Largest record the cluster will hold. Must be
+                the value the object was *written* under, since it decides
+                how many records exist.
+            cache_keys: The stored object's cache key per ``(chunk id, object
+                group id)``.
+            digest_of: Maps a record's user key to its Aerospike digest.
+
+        Raises:
+            ValueError: If ``max_record_bytes`` is not positive.
+        """
+        if max_record_bytes <= 0:
+            raise ValueError(
+                f"max_record_bytes must be positive, got {max_record_bytes}"
+            )
+        self._layout = layout
+        self._max_record_bytes = max_record_bytes
+        self._cache_keys = dict(cache_keys)
+        self._digest_of = digest_of
+
+    def digest_for(self, chunk_id: int, layer_id: int, plane: int, piece: int) -> bytes:
+        """Return the digest of the record holding one slot.
+
+        Args:
+            chunk_id: Index of the KV chunk within the request.
+            layer_id: Global layer index in the model.
+            plane: Which K/V plane of the layer, counting from zero.
+            piece: Which record of that plane, counting from zero.
+
+        Returns:
+            The record's Aerospike digest.
+
+        Raises:
+            KeyError: If no object was stored for this chunk and object
+                group, or the layout does not cover ``layer_id``.
+            ValueError: If the model is one the write side does not shard
+                along layer boundaries, or ``digest_of`` returns nothing.
+        """
+        object_group_id = self._layout.object_group_of_layer(layer_id)
+        cache_key = self._cache_keys.get((chunk_id, object_group_id))
+        if cache_key is None:
+            raise KeyError(
+                f"no object was stored for chunk {chunk_id} of object group "
+                f"{object_group_id}, so this fetch cannot be served"
+            )
+
+        index = self._layout.record_index_for(
+            layer_id, plane, piece, self._max_record_bytes
+        )
+        if self._layout.record_count(object_group_id, self._max_record_bytes) == 1:
+            user_key = f"{cache_key}|m"
+        else:
+            user_key = f"{cache_key}|s|{index}"
+
+        digest = self._digest_of(user_key)
+        if not digest:
+            raise ValueError(f"no digest for record {user_key!r}")
+        return digest
 
 
 class FetchPlanner:

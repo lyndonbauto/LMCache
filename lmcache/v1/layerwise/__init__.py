@@ -41,6 +41,7 @@ from .planner import (
     KernelGroupGeometry,
     ModelLayout,
     PlanRequest,
+    RecordKeyDigests,
     SlotDigestSource,
     plane_segment_bytes,
 )
@@ -63,6 +64,7 @@ __all__ = [
     "LayerwiseContractError",
     "ModelLayout",
     "PlanRequest",
+    "RecordKeyDigests",
     "RecordingLayerLoadSink",
     "ScriptedLayerArrivalSource",
     "SlotDigestSource",

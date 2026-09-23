@@ -12,7 +12,7 @@ or a fabric would mean something had leaked across a contract boundary.
 """
 
 # Standard
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 import hashlib
 
 # Third Party
@@ -29,6 +29,7 @@ from lmcache.v1.layerwise.planner import (
     KernelGroupGeometry,
     ModelLayout,
     PlanRequest,
+    RecordKeyDigests,
     plane_segment_bytes,
 )
 
@@ -556,6 +557,111 @@ def test_every_slot_of_a_plan_names_a_distinct_record() -> None:
     for chunk_id, indices in by_chunk.items():
         assert len(set(indices)) == len(indices), f"chunk {chunk_id} reuses a record"
         assert sorted(indices) == list(range(len(indices)))
+
+
+# --------------------------------------------------------------------------
+# Naming records by the keys the write side stored them under.
+# --------------------------------------------------------------------------
+
+
+def key_recorder() -> tuple[Callable[[str], bytes], list[str]]:
+    """Return a digest function and the list of keys it was asked for.
+
+    Returns:
+        A hashing callable standing in for the Aerospike client, and the
+        keys it saw, in order.
+    """
+    seen: list[str] = []
+
+    def digest_of(user_key: str) -> bytes:
+        seen.append(user_key)
+        return hashlib.blake2b(user_key.encode(), digest_size=20).digest()
+
+    return digest_of, seen
+
+
+def test_a_sharded_object_names_its_records_by_index() -> None:
+    """Record keys follow the write side's segment naming."""
+    layout = uniform_layout(num_layers=2, kv_planes=2, plane_bytes=4096)
+    digest_of, seen = key_recorder()
+    source = RecordKeyDigests(layout, 4096, {(7, 0): "cache-key"}, digest_of)
+
+    source.digest_for(chunk_id=7, layer_id=1, plane=1, piece=0)
+    assert seen == ["cache-key|s|3"]
+
+
+def test_an_object_stored_as_one_record_uses_its_meta_key() -> None:
+    """A single-record object is written under the meta key, not |s|0.
+
+    The write side takes that branch whenever the object is one record, so a
+    reader that always appended an index would ask for a key that was never
+    stored.
+    """
+    layout = uniform_layout(num_layers=1, kv_planes=1, plane_bytes=4096)
+    assert layout.record_count(0, 4096) == 1
+    digest_of, seen = key_recorder()
+    source = RecordKeyDigests(layout, 4096, {(0, 0): "cache-key"}, digest_of)
+
+    source.digest_for(chunk_id=0, layer_id=0, plane=0, piece=0)
+    assert seen == ["cache-key|m"]
+
+
+def test_each_chunk_is_named_by_its_own_stored_object() -> None:
+    """Chunks are separate objects, so they must not share a cache key."""
+    layout = uniform_layout(num_layers=2, kv_planes=2, plane_bytes=4096)
+    digest_of, seen = key_recorder()
+    source = RecordKeyDigests(
+        layout, 4096, {(0, 0): "key-a", (1, 0): "key-b"}, digest_of
+    )
+
+    first = source.digest_for(chunk_id=0, layer_id=0, plane=0, piece=0)
+    second = source.digest_for(chunk_id=1, layer_id=0, plane=0, piece=0)
+    assert seen == ["key-a|s|0", "key-b|s|0"]
+    assert first != second
+
+
+def test_a_chunk_with_no_stored_object_is_reported_not_guessed() -> None:
+    """A miss must reach the planner, which refuses the whole fetch."""
+    layout = uniform_layout(num_layers=2, kv_planes=2, plane_bytes=4096)
+    digest_of, _ = key_recorder()
+    source = RecordKeyDigests(layout, 4096, {(0, 0): "key-a"}, digest_of)
+
+    with pytest.raises(KeyError, match="chunk 4"):
+        source.digest_for(chunk_id=4, layer_id=0, plane=0, piece=0)
+
+
+def test_a_planned_fetch_asks_for_every_record_of_every_chunk_once() -> None:
+    """End to end: the plan's slots name each stored record exactly once."""
+    layout = uniform_layout(num_layers=2, kv_planes=2, plane_bytes=10_000)
+    digest_of, seen = key_recorder()
+    source = RecordKeyDigests(
+        layout, 4096, {(0, 0): "key-a", (1, 0): "key-b"}, digest_of
+    )
+
+    plan = FetchPlanner(layout).plan(request_for(place([0, 1])), source)
+
+    records = layout.record_count(0, 4096)
+    assert len(plan.slots) == 2 * records
+    assert sorted(seen) == sorted(
+        f"{key}|s|{index}" for key in ("key-a", "key-b") for index in range(records)
+    )
+
+
+def test_a_hybrid_model_cannot_be_named_at_all() -> None:
+    """The refusal propagates, so no fetch is planned against bad records."""
+    layout = ModelLayout(
+        {
+            0: [
+                KernelGroupGeometry((0, 1), kv_planes=2, plane_bytes=1024),
+                KernelGroupGeometry((2,), kv_planes=2, plane_bytes=4096),
+            ]
+        }
+    )
+    digest_of, _ = key_recorder()
+    source = RecordKeyDigests(layout, 4096, {(0, 0): "key-a"}, digest_of)
+
+    with pytest.raises(ValueError, match="disagree on a plane size"):
+        FetchPlanner(layout).plan(request_for(place([0])), source)
 
 
 # --------------------------------------------------------------------------
