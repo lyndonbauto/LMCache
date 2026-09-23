@@ -1,97 +1,640 @@
 # SPDX-License-Identifier: Apache-2.0
 """Track C's side of the layerwise work: turning a request into a fetch plan.
 
-This is the skeleton Track C fills in. Planning is the one piece with no
-counterpart on the other side of a contract -- Track A consumes the plan and
-Track B consumes the layer order derived from it, but neither produces
-anything Track C has to wait for. That makes this the part that can be
-finished first, and both other tracks are blocked on realistic plans, so it
-should be.
+Planning is the one piece with no counterpart on the other side of a
+contract -- Track A consumes the plan and Track B consumes the layer order
+derived from it, but neither produces anything Track C has to wait for.
 
-The arithmetic already exists in C++, in
-``csrc/storage_backends/aerospike/slot_planner.*`` and ``shard_plan.*``. What
-is missing is the path from a vLLM request to a
-:class:`~lmcache.v1.layerwise.contract.LayerFetchPlan`. Nothing in production
-builds a plan today.
+Two stages, matching how the information actually arrives:
+
+:class:`ModelLayout`
+    Built once, from the layouts LMCache publishes at registration. It
+    answers "where does global layer N live inside its object group's
+    payload", which depends only on the model.
+
+:class:`FetchPlanner`
+    Built over a layout and used per request. It answers "which writes does
+    this request expect", which depends on the chunks the request needs and
+    where they were placed in the registered window.
+
+The same arithmetic exists in C++, in
+``csrc/storage_backends/aerospike/{slot_planner,shard_plan,memory_layout_conversion}.*``,
+where it drives the production fetch path and is proven by the harness in
+``tests/v1/distributed/rdma/``. It exists here as well so that Track C's tests
+need no native build (acceptance criterion C10). The two must agree exactly;
+see ``docs/design/v1/layerwise/system-design.md`` section 7.
 """
 
 # Standard
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 # Local
-from .contract import LayerFetchPlan
+from .contract import LayerFetchPlan, SlotPlacement
+
+if TYPE_CHECKING:
+    # First Party
+    from lmcache.v1.distributed.api import MemoryLayoutDesc
+
+#: Slots addressable by one request. The RDMA immediate carries 32 bits, split
+#: as ``(generation << 16) | slot``, so a request has 16 bits of slot index.
+#: Mirrors ``kMaxSlotsPerRequest`` in
+#: ``csrc/storage_backends/aerospike/layer_pipeline.h``; the two must agree,
+#: because the transport decodes what this module numbers.
+MAX_SLOTS_PER_REQUEST = 0x10000
+
+
+def _ceil_div(numerator: int, denominator: int) -> int:
+    """Divide, rounding up.
+
+    Args:
+        numerator: Value to divide, non-negative.
+        denominator: Divisor, must be positive.
+
+    Returns:
+        The smallest integer at least ``numerator / denominator``.
+    """
+    return -(-numerator // denominator)
+
+
+def plane_segment_bytes(plane_bytes: int, max_record_bytes: int) -> int:
+    """Return the size of one record of a plane cut plane-aligned.
+
+    A plane is cut into the fewest pieces that each fit the record cap, and
+    those pieces are then equally sized::
+
+        pieces  = ceil(plane_bytes / max_record_bytes)
+        segment = ceil(plane_bytes / pieces)
+
+    The even split is not cosmetic. A slot is exactly one record, and the
+    wire format names a record and a destination with no record-relative
+    source offset, so a planner that emitted a full cap plus a short
+    remainder would name records the write side never produced. This mirrors
+    ``plane_segment_bytes`` in
+    ``csrc/storage_backends/aerospike/shard_plan.h``.
+
+    Args:
+        plane_bytes: Size of one K/V plane of one layer within one chunk.
+        max_record_bytes: Largest record the cluster will hold.
+
+    Returns:
+        Size in bytes of one record of the plane.
+
+    Raises:
+        ValueError: If either argument is not positive.
+    """
+    if plane_bytes <= 0:
+        raise ValueError(f"plane_bytes must be positive, got {plane_bytes}")
+    if max_record_bytes <= 0:
+        raise ValueError(f"max_record_bytes must be positive, got {max_record_bytes}")
+    return _ceil_div(plane_bytes, _ceil_div(plane_bytes, max_record_bytes))
+
+
+@dataclass(frozen=True)
+class ByteRange:
+    """A contiguous span of an object group's payload.
+
+    Attributes:
+        offset: Start of the span, relative to the base of the object group's
+            payload.
+        length: Length of the span in bytes.
+    """
+
+    offset: int
+    length: int
+
+
+@dataclass(frozen=True)
+class KernelGroupGeometry:
+    """One kernel group's shape, as published at registration.
+
+    A kernel group is internally uniform by construction -- every layer in it
+    shares one shape -- which is what makes per-layer offsets exactly
+    computable. Geometry is held per kernel group and never flattened,
+    because the hazard is not that strides are unpredictable but that one
+    group's stride gets applied to another group's layers.
+
+    Attributes:
+        layer_ids: Global layer indices this group holds, in the order they
+            appear along the tensor's layer dimension. Position in this tuple
+            is the layer's stride index; the order is therefore the tensor's,
+            not necessarily ascending.
+        kv_planes: Independent planes per layer: two when key and value are
+            separate tensors, one when the engine format puts the layer
+            dimension outermost, as MLA does.
+        plane_bytes: Bytes in one plane of one layer, which is
+            ``num_slots * hidden_dim * element_size``.
+
+    Raises:
+        ValueError: If the group holds no layers, repeats a layer, or has a
+            non-positive plane count or plane size.
+    """
+
+    layer_ids: tuple[int, ...]
+    kv_planes: int
+    plane_bytes: int
+
+    def __post_init__(self) -> None:
+        if not self.layer_ids:
+            raise ValueError("a kernel group must hold at least one layer")
+        if len(set(self.layer_ids)) != len(self.layer_ids):
+            raise ValueError(
+                f"kernel group repeats a layer: {self.layer_ids}, so its "
+                "plane offsets would be ambiguous"
+            )
+        if self.kv_planes <= 0:
+            raise ValueError(f"kv_planes must be positive, got {self.kv_planes}")
+        if self.plane_bytes <= 0:
+            raise ValueError(f"plane_bytes must be positive, got {self.plane_bytes}")
+
+    def total_bytes(self) -> int:
+        """Return the bytes this group's tensor occupies within one chunk.
+
+        Returns:
+            ``kv_planes * len(layer_ids) * plane_bytes``.
+        """
+        return self.kv_planes * len(self.layer_ids) * self.plane_bytes
+
+
+@dataclass(frozen=True)
+class ChunkPlacement:
+    """Where one chunk's object for one object group sits in the window.
+
+    LMCache chooses every destination address, because the window is its own
+    registered memory and the server is told where to write. So the offset is
+    an input here rather than something derived.
+
+    Attributes:
+        chunk_id: Index of the KV chunk within the request.
+        object_group_id: Object group this placement is for. A chunk has one
+            placement per object group it participates in.
+        node_index: Index into :attr:`PlanRequest.node_names` identifying the
+            cluster node holding this chunk. A chunk's object is stored whole
+            on one node, so every slot cut from it is fetched from there.
+        dest_offset: Base offset of this object within the registered window.
+
+    Raises:
+        ValueError: If the offset or node index is negative.
+    """
+
+    chunk_id: int
+    object_group_id: int
+    node_index: int
+    dest_offset: int
+
+    def __post_init__(self) -> None:
+        if self.node_index < 0:
+            raise ValueError(
+                f"chunk {self.chunk_id} has a negative node index {self.node_index}"
+            )
+        if self.dest_offset < 0:
+            raise ValueError(
+                f"chunk {self.chunk_id} has a negative destination offset "
+                f"{self.dest_offset}"
+            )
 
 
 @dataclass(frozen=True)
 class PlanRequest:
-    """What the planner needs to know to lay out one fetch.
-
-    This is Track C's to extend. It starts deliberately small: the fields here
-    are the ones no plan can be built without. Add to it as the real planner
-    takes shape rather than passing extra context around the side, so that the
-    inputs to a plan stay visible in one place.
+    """What one fetch needs to cover.
 
     Attributes:
-        layer_ids: Global layer indices the request needs, ascending.
-        chunk_ids: KV chunk indices the request needs, ascending. Under a
-            sliding window this is the participating subset, not every chunk
-            of the prompt -- use the planner's window helper to derive it
-            rather than computing it at the call site.
-        node_index_by_chunk: Which cluster node holds each chunk, as an index
-            into the fetch's node list.
-        digest_by_chunk: The Aerospike record digest for each chunk.
-        kv_planes: Number of independent planes per layer: two for separate
-            key and value tensors, one for MLA. A layer occupies this many
-            disjoint byte ranges per chunk, not one, which is the detail most
-            easily got wrong -- the fetch still succeeds and the data is wrong.
-        plane_bytes: Size in bytes of one layer's one plane within one chunk.
+        placements: Where each participating chunk's object sits, one entry
+            per (chunk, object group). Under a sliding window this is the
+            participating subset, not every chunk of the prompt -- use
+            :meth:`FetchPlanner.participating_chunks` to derive it rather
+            than computing it at the call site.
+        max_record_bytes: Largest record the cluster will hold, which decides
+            how a plane is cut into slots.
+
+        node_names: The cluster nodes this fetch talks to, in the order
+            :attr:`ChunkPlacement.node_index` numbers them.
+
+    Raises:
+        ValueError: If there are no placements or no node names, if
+            ``max_record_bytes`` is not positive, if a (chunk, object group)
+            pair is placed twice, if a node name is blank or repeated, or if
+            a placement names a node outside ``node_names``.
     """
 
-    layer_ids: tuple[int, ...]
-    chunk_ids: tuple[int, ...]
-    node_index_by_chunk: Mapping[int, int]
-    digest_by_chunk: Mapping[int, bytes]
-    kv_planes: int
-    plane_bytes: int
+    placements: tuple[ChunkPlacement, ...]
+    node_names: tuple[str, ...]
+    max_record_bytes: int
+
+    def __post_init__(self) -> None:
+        if not self.placements:
+            raise ValueError("a fetch must place at least one chunk")
+        if not self.node_names:
+            raise ValueError("a fetch must name at least one node")
+        if any(not name for name in self.node_names):
+            raise ValueError("a fetch must not name a node with an empty name")
+        if len(set(self.node_names)) != len(self.node_names):
+            raise ValueError(
+                f"fetch repeats a node name: {self.node_names}, so a "
+                "placement's node index would be ambiguous"
+            )
+        if self.max_record_bytes <= 0:
+            raise ValueError(
+                f"max_record_bytes must be positive, got {self.max_record_bytes}"
+            )
+        seen: set[tuple[int, int]] = set()
+        for placement in self.placements:
+            if placement.node_index >= len(self.node_names):
+                raise ValueError(
+                    f"chunk {placement.chunk_id} names node index "
+                    f"{placement.node_index}, but the fetch has "
+                    f"{len(self.node_names)} nodes"
+                )
+            key = (placement.object_group_id, placement.chunk_id)
+            if key in seen:
+                # Two placements for one pair would double the layer's
+                # expected slot count, so the layer could never complete.
+                raise ValueError(
+                    f"chunk {placement.chunk_id} is placed twice for object "
+                    f"group {placement.object_group_id}"
+                )
+            seen.add(key)
+
+
+@runtime_checkable
+class SlotDigestSource(Protocol):
+    """Names the stored record behind each slot.
+
+    A digest is what the cluster is actually asked for, and it is derived
+    from the record's key rather than from its geometry. The planner
+    therefore knows which records a fetch needs but not what they are
+    called, and asks this.
+
+    Keeping it a lookup rather than a field on the request also resolves an
+    ordering problem: which records exist depends on how planes are cut into
+    pieces, which is the planner's own output, so a caller cannot enumerate
+    the keys before planning.
+    """
+
+    def digest_for(self, chunk_id: int, layer_id: int, plane: int, piece: int) -> bytes:
+        """Return the digest of one stored record.
+
+        Args:
+            chunk_id: Index of the KV chunk within the request.
+            layer_id: Global layer index in the model.
+            plane: Which K/V plane of the layer, counting from zero.
+            piece: Which record of that plane, counting from zero in
+                ascending offset order.
+
+        Returns:
+            The record digest, which must not be empty.
+
+        Raises:
+            KeyError: If no record was stored under that identity, since the
+                plan would otherwise name a record the write side never
+                produced.
+        """
+        ...
+
+
+@dataclass(frozen=True)
+class _LayerLocation:
+    """Where one layer sits: its object group and its planes within it."""
+
+    object_group_id: int
+    planes: tuple[ByteRange, ...]
+
+
+def _parse_kernel_shape(shape: Sequence[int]) -> tuple[int, int, int]:
+    """Split a registered kernel-group shape into its planning dimensions.
+
+    Two ranks are supported. The standard KV shape is
+    ``(kv_size, num_layers, num_slots, hidden_dim)``, where the key/value
+    dimension is outermost. The engine format that puts the layer dimension
+    outermost drops that leading dimension, giving
+    ``(num_layers, num_slots, hidden_dim)``, which is the same arithmetic
+    with one plane.
+
+    Args:
+        shape: The kernel group's tensor shape.
+
+    Returns:
+        ``(kv_planes, num_layers, plane_elements)`` where ``plane_elements``
+        is ``num_slots * hidden_dim``.
+
+    Raises:
+        ValueError: If the rank is not three or four, or any dimension is not
+            positive.
+    """
+    if len(shape) not in (3, 4):
+        raise ValueError(
+            f"expected a 3D or 4D kernel shape, got rank {len(shape)}: {tuple(shape)}"
+        )
+    if any(dim <= 0 for dim in shape):
+        raise ValueError(
+            f"kernel shape dimensions must be positive, got {tuple(shape)}"
+        )
+    if len(shape) == 4:
+        kv_planes, num_layers, num_slots, hidden_dim = shape
+    else:
+        kv_planes = 1
+        num_layers, num_slots, hidden_dim = shape
+    return int(kv_planes), int(num_layers), int(num_slots) * int(hidden_dim)
+
+
+class ModelLayout:
+    """Resolves a global layer index to byte ranges within its object group.
+
+    Built once from the registered layout and then read, so the lookup is a
+    prepared mapping rather than a search. Immutable after construction and
+    therefore safe to share across concurrently planned requests.
+
+    An object group's payload is its kernel groups concatenated in the order
+    declared, so a kernel group's base is the running sum of the sizes of
+    those before it. Within a kernel group the key/value dimension is
+    outermost, so layer ``L``'s planes are a whole layer dimension apart
+    rather than adjacent.
+    """
+
+    def __init__(
+        self, object_groups: Mapping[int, Sequence[KernelGroupGeometry]]
+    ) -> None:
+        """Build a layout over every object group of the model.
+
+        Args:
+            object_groups: Kernel groups per object group id, in the order
+                their tensors are concatenated in the payload.
+
+        Raises:
+            ValueError: If there are no object groups, if an object group has
+                no kernel groups, or if a global layer index appears in more
+                than one kernel group, which would make its plane offsets
+                ambiguous.
+        """
+        if not object_groups:
+            raise ValueError("a layout must cover at least one object group")
+
+        locations: dict[int, _LayerLocation] = {}
+        group_bytes: dict[int, int] = {}
+        for object_group_id, kernel_groups in object_groups.items():
+            if not kernel_groups:
+                raise ValueError(f"object group {object_group_id} has no kernel groups")
+            base = 0
+            for kernel_group in kernel_groups:
+                num_layers = len(kernel_group.layer_ids)
+                for position, layer_id in enumerate(kernel_group.layer_ids):
+                    if layer_id in locations:
+                        raise ValueError(
+                            f"layer {layer_id} appears in more than one kernel "
+                            "group, so its plane offsets would be ambiguous"
+                        )
+                    planes = tuple(
+                        ByteRange(
+                            offset=base
+                            + (
+                                ((plane * num_layers) + position)
+                                * kernel_group.plane_bytes
+                            ),
+                            length=kernel_group.plane_bytes,
+                        )
+                        for plane in range(kernel_group.kv_planes)
+                    )
+                    locations[layer_id] = _LayerLocation(
+                        object_group_id=object_group_id, planes=planes
+                    )
+                base += kernel_group.total_bytes()
+            group_bytes[object_group_id] = base
+
+        self._locations = locations
+        self._group_bytes = group_bytes
+
+    @classmethod
+    def from_registration(
+        cls,
+        group_layout_descs: Mapping[int, "MemoryLayoutDesc"],
+        group_kernel_layer_indices: Mapping[int, list[list[int]]] | None = None,
+    ) -> "ModelLayout":
+        """Build a layout from what LMCache publishes at registration.
+
+        These are the exact arguments
+        ``StorageManager.set_object_group_layouts`` receives, so this is the
+        seam between the engine's view of the model and the planner's. Taking
+        the geometry from the published layout rather than re-deriving it
+        from model config keeps one source of truth for shapes and strides.
+
+        Args:
+            group_layout_descs: One layout per object group id. Each holds
+                parallel lists of shapes and dtypes, one pair per kernel
+                group.
+            group_kernel_layer_indices: Global layer indices per kernel group,
+                keyed by object group id and parallel to that group's shapes.
+                When absent for an object group, consecutive indices are
+                assigned from zero within it, which is correct only for a
+                single-object-group model and is why real callers supply it.
+
+        Returns:
+            A layout covering every object group described.
+
+        Raises:
+            ValueError: If a group has no kernel groups, a shape has an
+                unsupported rank or a non-positive dimension, or the supplied
+                layer indices do not match the tensor's layer dimension.
+        """
+        object_groups: dict[int, list[KernelGroupGeometry]] = {}
+        for object_group_id, layout_desc in group_layout_descs.items():
+            per_group_indices = (group_kernel_layer_indices or {}).get(
+                object_group_id, []
+            )
+            kernel_groups: list[KernelGroupGeometry] = []
+            next_auto_layer = 0
+            for index, (shape, dtype) in enumerate(
+                zip(layout_desc.shapes, layout_desc.dtypes, strict=True)
+            ):
+                kv_planes, num_layers, plane_elements = _parse_kernel_shape(shape)
+                if index < len(per_group_indices) and per_group_indices[index]:
+                    layer_ids = tuple(per_group_indices[index])
+                    if len(layer_ids) != num_layers:
+                        raise ValueError(
+                            f"object group {object_group_id} kernel group "
+                            f"{index}: got {len(layer_ids)} layer indices for a "
+                            f"layer dimension of {num_layers}"
+                        )
+                else:
+                    layer_ids = tuple(
+                        range(next_auto_layer, next_auto_layer + num_layers)
+                    )
+                    next_auto_layer += num_layers
+                kernel_groups.append(
+                    KernelGroupGeometry(
+                        layer_ids=layer_ids,
+                        kv_planes=kv_planes,
+                        plane_bytes=plane_elements * dtype.itemsize,
+                    )
+                )
+            object_groups[object_group_id] = kernel_groups
+        return cls(object_groups)
+
+    def layer_ids(self) -> tuple[int, ...]:
+        """Return every global layer index in the layout, ascending.
+
+        Returns:
+            Each covered layer index exactly once, ascending.
+        """
+        return tuple(sorted(self._locations))
+
+    def object_group_of_layer(self, layer_id: int) -> int:
+        """Return the object group holding ``layer_id``.
+
+        Args:
+            layer_id: Global layer index in the model.
+
+        Returns:
+            The object group id.
+
+        Raises:
+            KeyError: If the layout does not cover ``layer_id``.
+        """
+        return self._layer_location(layer_id).object_group_id
+
+    def layer_plane_ranges(self, layer_id: int) -> tuple[ByteRange, ...]:
+        """Return the byte ranges ``layer_id`` occupies within its group.
+
+        Offsets are relative to the start of the object group's payload, so a
+        caller adds the chunk's destination offset to place them in the
+        window.
+
+        Args:
+            layer_id: Global layer index in the model.
+
+        Returns:
+            One range per plane, ascending by offset.
+
+        Raises:
+            KeyError: If the layout does not cover ``layer_id``.
+        """
+        return self._layer_location(layer_id).planes
+
+    def object_group_bytes(self, object_group_id: int) -> int:
+        """Return the size of one chunk's object for an object group.
+
+        Args:
+            object_group_id: The object group to size.
+
+        Returns:
+            Total bytes of that group's payload for a single chunk.
+
+        Raises:
+            KeyError: If the layout does not cover ``object_group_id``.
+        """
+        if object_group_id not in self._group_bytes:
+            raise KeyError(f"no object group {object_group_id} in the layout")
+        return self._group_bytes[object_group_id]
+
+    def _layer_location(self, layer_id: int) -> _LayerLocation:
+        """Return where ``layer_id`` lives.
+
+        Args:
+            layer_id: Global layer index in the model.
+
+        Returns:
+            The layer's object group and plane ranges.
+
+        Raises:
+            KeyError: If the layout does not cover ``layer_id``.
+        """
+        location = self._locations.get(layer_id)
+        if location is None:
+            raise KeyError(f"no layer {layer_id} in the layout")
+        return location
 
 
 class FetchPlanner:
     """Builds the slot layout for one pipelined fetch.
 
-    Every method raises :class:`NotImplementedError` today. Track A and
-    Track B can already build :class:`LayerFetchPlan` objects by hand for
-    tests, so this class is not on their critical path -- but realistic plans
-    are, so it is worth finishing early.
+    Holds no per-request state, so one planner serves every request against a
+    given model layout.
     """
 
-    def plan(self, request: PlanRequest) -> LayerFetchPlan:
-        """Lay out every slot the fetch will request.
-
-        Implementation notes for whoever fills this in:
-
-        - A layer yields ``kv_planes`` disjoint ranges per chunk, not one.
-        - Slot indices are request-scoped and unique across the whole
-          request, not per node. The RDMA immediate encodes
-          ``(generation << 16) | slot``, giving 65536 slots and 16 bits of
-          generation. Per-node numbering passes a single-node test and
-          corrupts a multi-node fetch.
-        - Reject a request that would exceed the slot space rather than
-          truncating it.
+    def __init__(self, layout: ModelLayout) -> None:
+        """Build a planner over a model layout.
 
         Args:
-            request: What the fetch needs to cover.
+            layout: Where each layer lives within its object group.
+        """
+        self._layout = layout
+
+    def plan(self, request: PlanRequest, digests: SlotDigestSource) -> LayerFetchPlan:
+        """Lay out every slot the fetch will request.
+
+        Slots are appended layer-major -- every participating chunk's pieces
+        of the lowest layer, then of the next, and so on -- which is the order
+        the servers are asked to push in so the head of the pipeline arrives
+        first. The order is only a hint: the fabric reorders writes in flight
+        and independent nodes interleave regardless.
+
+        A slot's index is **its position in the returned plan's** ``slots``.
+        That numbering spans the whole request rather than restarting per
+        node, which is what keeps two nodes' notifications distinguishable
+        when they land on the same queue pair. Slot order is therefore
+        load-bearing, and this method is deterministic for a given request.
+
+        Placements for an object group the layout does not cover are ignored,
+        and a layer whose object group the request did not place contributes
+        no slots -- the correct answer for a layer this fetch is not after.
+
+        Args:
+            request: Which chunks to fetch and where they were placed.
+            digests: Names the stored record behind each slot.
 
         Returns:
-            A plan whose slots cover exactly the requested bytes, with no
-            gaps and no overlaps.
+            A plan whose slots cover exactly the requested bytes, with no gaps
+            and no overlaps.
 
         Raises:
-            ValueError: If the request cannot be expressed as a valid plan,
-                for instance because it needs more slots than the immediate
-                can address.
+            ValueError: If the placements cover none of the layout's layers,
+                if the fetch needs more slots than the RDMA immediate can
+                address, or if ``digests`` returns an empty digest. The
+                device's own limit on writes in flight is checked by the
+                transport, not here.
+            KeyError: If ``digests`` has no record for a slot the fetch
+                needs, which means the write side stored the chunk under a
+                different geometry than this layout describes.
         """
-        raise NotImplementedError("Track C: lay out slots from the request")
+        placements_by_group: dict[int, list[ChunkPlacement]] = {}
+        for placement in request.placements:
+            placements_by_group.setdefault(placement.object_group_id, []).append(
+                placement
+            )
+
+        slots: list[SlotPlacement] = []
+        for layer_id in self._layout.layer_ids():
+            group_id = self._layout.object_group_of_layer(layer_id)
+            group_placements = placements_by_group.get(group_id)
+            if not group_placements:
+                continue
+            planes = self._layout.layer_plane_ranges(layer_id)
+            for placement in group_placements:
+                for plane_index, plane in enumerate(planes):
+                    slots.extend(
+                        self._plane_slots(
+                            layer_id,
+                            placement,
+                            plane_index,
+                            plane,
+                            request.max_record_bytes,
+                            digests,
+                        )
+                    )
+                    if len(slots) > MAX_SLOTS_PER_REQUEST:
+                        raise ValueError(
+                            f"request needs more than {MAX_SLOTS_PER_REQUEST} "
+                            "slots, which is all the RDMA immediate can "
+                            "address; fetch fewer chunks per request or use a "
+                            "coarser readiness granularity"
+                        )
+
+        if not slots:
+            raise ValueError(
+                "none of the placed object groups hold layers in this layout, "
+                "so the fetch would expect no writes"
+            )
+        return LayerFetchPlan(tuple(slots), request.node_names)
 
     def participating_chunks(
         self,
@@ -105,10 +648,18 @@ class FetchPlanner:
         This exists so call sites do not each re-derive it. Window arithmetic
         is easy to get subtly wrong -- particularly a window starting
         mid-chunk -- and a wrong answer here silently fetches the wrong
-        tokens rather than failing.
+        tokens rather than failing. A chunk is included when it overlaps the
+        window at all, including partially, since the model needs whatever
+        part of it falls inside.
+
+        A chunk id is its own index in the request, so chunk ``c`` spans
+        tokens ``[c * tokens_per_chunk, (c + 1) * tokens_per_chunk - 1]``.
+        Deriving the span from position in ``chunk_ids`` instead would shift
+        every span whenever the caller passed a non-contiguous candidate
+        list.
 
         Args:
-            chunk_ids: Candidate chunk indices, ascending.
+            chunk_ids: Candidate chunk indices.
             window_start_token: First token index in the window, inclusive.
             window_end_token: Last token index in the window, inclusive.
             tokens_per_chunk: Number of tokens each chunk covers.
@@ -117,7 +668,74 @@ class FetchPlanner:
             The subset of ``chunk_ids`` overlapping the window, ascending.
 
         Raises:
-            ValueError: If ``tokens_per_chunk`` is not positive or the window
-                bounds are inverted.
+            ValueError: If ``tokens_per_chunk`` is not positive, the window
+                bounds are inverted, or a chunk id is negative.
         """
-        raise NotImplementedError("Track C: derive the participating chunks")
+        if tokens_per_chunk <= 0:
+            raise ValueError(
+                f"tokens_per_chunk must be positive, got {tokens_per_chunk}"
+            )
+        if window_end_token < window_start_token:
+            raise ValueError(
+                f"window is inverted: start {window_start_token} is after "
+                f"end {window_end_token}"
+            )
+        if any(chunk_id < 0 for chunk_id in chunk_ids):
+            raise ValueError(f"chunk ids must not be negative: {tuple(chunk_ids)}")
+        return tuple(
+            chunk_id
+            for chunk_id in sorted(set(chunk_ids))
+            if chunk_id * tokens_per_chunk <= window_end_token
+            and ((chunk_id + 1) * tokens_per_chunk) - 1 >= window_start_token
+        )
+
+    @staticmethod
+    def _plane_slots(
+        layer_id: int,
+        placement: ChunkPlacement,
+        plane_index: int,
+        plane: ByteRange,
+        max_record_bytes: int,
+        digests: SlotDigestSource,
+    ) -> list[SlotPlacement]:
+        """Cut one plane of one layer of one chunk into record-sized slots.
+
+        Args:
+            layer_id: Global layer index in the model.
+            placement: Where the chunk's object sits in the window.
+            plane_index: Which K/V plane of the layer this is.
+            plane: The plane's range within the object group's payload.
+            max_record_bytes: Largest record the cluster will hold.
+            digests: Names the stored record behind each slot.
+
+        Returns:
+            One slot per record of the plane, ascending by offset.
+
+        Raises:
+            ValueError: If ``digests`` returns an empty digest, which names
+                no record.
+            KeyError: If ``digests`` has no record for one of the pieces.
+        """
+        record_bytes = plane_segment_bytes(plane.length, max_record_bytes)
+        base = placement.dest_offset + plane.offset
+        slots: list[SlotPlacement] = []
+        for piece, piece_offset in enumerate(range(0, plane.length, record_bytes)):
+            digest = digests.digest_for(
+                chunk_id=placement.chunk_id,
+                layer_id=layer_id,
+                plane=plane_index,
+                piece=piece,
+            )
+            slots.append(
+                SlotPlacement(
+                    layer_id=layer_id,
+                    chunk_id=placement.chunk_id,
+                    node_index=placement.node_index,
+                    digest=digest,
+                    plane=plane_index,
+                    piece=piece,
+                    offset=base + piece_offset,
+                    length=min(record_bytes, plane.length - piece_offset),
+                )
+            )
+        return slots

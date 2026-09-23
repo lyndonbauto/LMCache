@@ -206,6 +206,46 @@ Produces `LayerFetchPlan`, owns `LayerArrivalPump`, and owns both contracts.
 Tests as pure CPU logic. Track C is the integrator: when A and B disagree,
 Track C adjudicates and the contract changes by agreement.
 
+The slot arithmetic exists twice on purpose, and the duplication is the price
+of a hardware-free test suite. `FetchPlanner` in `lmcache/v1/layerwise/` lays
+out slots in Python so Track C's tests need no native build; the C++
+`SlotPlanner` does the same for the production fetch path, driven by the
+registered `MemoryLayoutDesc`. Binding the C++ planner into Python instead
+would give one implementation but would make every planning test depend on an
+extension built with `BUILD_AEROSPIKE=1`, which breaks C10.
+
+Planning is two stages, because the two kinds of input arrive at different
+times and change at different rates:
+
+- `ModelLayout` is built once per model, via `ModelLayout.from_registration`,
+  from the exact arguments `StorageManager.set_object_group_layouts` receives.
+  It answers "where does global layer N sit inside its object group's
+  payload". Geometry is held **per kernel group and never flattened**: the
+  hazard in a hybrid model is not that strides are unpredictable but that one
+  kernel group's stride gets applied to another group's layers, which yields a
+  plausible tensor and no error.
+- `FetchPlanner(layout).plan(request, digests)` runs per request. `PlanRequest`
+  carries only what the request decides -- which chunks, on which nodes, at
+  which destination offsets, under which record cap.
+
+Digests are looked up rather than passed in. A slot is exactly one stored
+record, identified by `(chunk_id, layer_id, plane, piece)` -- the same key the
+native `pipelined_fetch_session` joins digests on. The caller cannot enumerate
+those keys before planning, because which pieces exist depends on how the
+planner cuts planes, so the planner asks a `SlotDigestSource` as it goes.
+Note that the key has no object-group field: a layer belongs to exactly one
+object group, which is why `ModelLayout` rejects a layer appearing in two
+kernel groups.
+
+The duplication is bounded to *layout*, not geometry: the published
+`MemoryLayoutDesc` remains the only source of truth for shapes and strides.
+What both sides implement independently is plane striding, record cutting and
+layer-major ordering. The two must agree exactly, so
+`plane_segment_bytes` is mirrored from `shard_plan.h` with the formula stated
+in both, and the Python tests pin concrete byte values rather than relying on
+the formula being re-derived correctly. If these drift, a slot will name a
+record the write side never produced.
+
 ## 8. Invariants that are not negotiable
 
 Each of these was a real bug. Losing one reintroduces it.
@@ -223,9 +263,31 @@ Each of these was a real bug. Losing one reintroduces it.
 6. Slot indices are request-scoped and unique across the whole request, not
    per-node. The immediate encodes `(generation << 16) | slot`, giving 65536
    slots and 16 bits of generation.
+
+   A slot index is carried positionally: it is the slot's position in
+   `LayerFetchPlan.slots`. Nothing stores it as a field, so **the order of
+   that tuple is load-bearing** -- a producer must be deterministic and a
+   consumer must never reorder. Layer order is exposed separately by
+   `layer_ids()`, so no consumer needs to infer it from slot order. The
+   alternative, an explicit `slot_index` field, was rejected because it makes
+   the same fact representable twice and therefore representable
+   inconsistently. `FetchPlanner.plan` enforces the ceiling as
+   `MAX_SLOTS_PER_REQUEST`, which must stay equal to `kMaxSlotsPerRequest` in
+   `csrc/storage_backends/aerospike/layer_pipeline.h`.
 7. A node accepts at most `max_sinks` sinks per command, advertised in the
    `kv-sink-register` reply and defaulting to 256. Commands are chunked to fit.
    The server hard-refuses more, so an unchunked command fails the whole fetch.
+8. A slot's digest is looked up per `(chunk_id, layer_id, plane, piece)`, never
+   per chunk. Reusing one chunk's digest across its slots is not a type error
+   and not a coverage gap -- the transport fetches a record that really exists
+   into an address that is really in the window, and the model reads another
+   piece's bytes. `SlotPlacement` therefore carries `plane` and `piece`, so a
+   plan can be checked against the records it names.
+9. `SlotPlacement.node_index` indexes `LayerFetchPlan.node_names`, which the
+   plan carries so the transport can resolve a slot to a node without holding
+   Track C's `PlanRequest`. Both the plan and the request reject an index
+   outside their node list; an out-of-range index would otherwise address the
+   fetch to whichever node happened to be at that position.
 
 ## 9. Known unknowns
 

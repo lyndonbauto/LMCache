@@ -107,23 +107,52 @@ class SlotPlacement:
     every slot carrying part of it has landed, which is why the plan is
     expressed as slots rather than as layers.
 
+    One slot is exactly one stored record, and ``(chunk_id, layer_id, plane,
+    piece)`` is that record's identity -- the same four fields the native
+    fetch path keys digests by. There is deliberately no object group in that
+    key: a layer belongs to exactly one object group, so naming the layer
+    already names the group.
+
     Attributes:
         layer_id: Global layer index in the model.
         chunk_id: Index of the KV chunk this range belongs to.
-        node_index: Index into the fetch's node list identifying which cluster
-            node holds this slot. Slot indices are request-scoped, so two
-            slots on different nodes still have distinct indices.
+        node_index: Index into :attr:`LayerFetchPlan.node_names` identifying
+            which cluster node holds this slot. Slot indices are
+            request-scoped, so two slots on different nodes still have
+            distinct indices.
         digest: Record digest the transport asks the node for.
+        plane: Which K/V plane of the layer this range belongs to. Zero for a
+            format that stores a layer as a single plane.
+        piece: Which record of that plane this range is, counting from zero
+            in ascending offset order.
         offset: Byte offset of this range within the destination host buffer.
         length: Length of this range in bytes.
+
+    Raises:
+        ValueError: If the digest is empty, or ``plane`` or ``piece`` is
+            negative, since none of those name a record that exists.
     """
 
     layer_id: int
     chunk_id: int
     node_index: int
     digest: bytes
+    plane: int
+    piece: int
     offset: int
     length: int
+
+    def __post_init__(self) -> None:
+        if not self.digest:
+            raise ValueError(
+                f"slot for layer {self.layer_id} of chunk {self.chunk_id} has "
+                "an empty digest, which names no record"
+            )
+        if self.plane < 0 or self.piece < 0:
+            raise ValueError(
+                f"slot for layer {self.layer_id} of chunk {self.chunk_id} has "
+                f"a negative plane/piece ({self.plane}, {self.piece})"
+            )
 
 
 @dataclass(frozen=True)
@@ -137,25 +166,72 @@ class LayerFetchPlan:
     order without reaching into transport internals.
 
     Attributes:
-        slots: Every slot the fetch will request. Order is not significant;
-            layer order is given by :meth:`layer_ids`.
+        slots: Every slot the fetch will request. **Order is significant**: a
+            slot's index -- the value the RDMA immediate carries in its low 16
+            bits -- is its position in this tuple. That numbering therefore
+            spans the whole request rather than restarting per node, which is
+            what keeps two nodes' notifications distinguishable when they land
+            on one queue pair. Producers must be deterministic; consumers must
+            not reorder. Layer order is given separately by :meth:`layer_ids`,
+            so nothing needs to infer it from this order.
+        node_names: The cluster nodes this fetch talks to, in the order
+            :attr:`SlotPlacement.node_index` numbers them. Carried on the
+            plan so the transport can resolve a slot to a node without
+            holding the planner's request, which is a Track C type it should
+            not depend on.
 
     Raises:
-        ValueError: If ``slots`` is empty, or any slot has a non-positive
-            length, since neither can describe a fetch that could complete.
+        ValueError: If ``slots`` is empty, if any slot has a non-positive
+            length, if ``node_names`` is empty or repeats a name, or if a
+            slot names a node outside ``node_names`` -- the last of which
+            would otherwise surface as a fetch addressed to the wrong node.
     """
 
     slots: tuple[SlotPlacement, ...]
+    node_names: tuple[str, ...]
 
     def __post_init__(self) -> None:
         if not self.slots:
             raise ValueError("a fetch plan must contain at least one slot")
+        if not self.node_names:
+            raise ValueError("a fetch plan must name at least one node")
+        if len(set(self.node_names)) != len(self.node_names):
+            raise ValueError(
+                f"fetch plan repeats a node name: {self.node_names}, so a "
+                "slot's node index would be ambiguous"
+            )
         for slot in self.slots:
             if slot.length <= 0:
                 raise ValueError(
                     f"slot for layer {slot.layer_id} has non-positive "
                     f"length {slot.length}"
                 )
+            if not 0 <= slot.node_index < len(self.node_names):
+                raise ValueError(
+                    f"slot for layer {slot.layer_id} names node index "
+                    f"{slot.node_index}, but the plan has "
+                    f"{len(self.node_names)} nodes"
+                )
+
+    def node_name_for(self, slot: SlotPlacement) -> str:
+        """Return the cluster node holding ``slot``.
+
+        Args:
+            slot: A slot of this plan.
+
+        Returns:
+            The node name :attr:`SlotPlacement.node_index` refers to.
+
+        Raises:
+            IndexError: If ``slot`` names a node this plan does not have,
+                which means it came from a different plan.
+        """
+        if not 0 <= slot.node_index < len(self.node_names):
+            raise IndexError(
+                f"slot node index {slot.node_index} is not in this plan's "
+                f"{len(self.node_names)} nodes; the slot is from another plan"
+            )
+        return self.node_names[slot.node_index]
 
     def layer_ids(self) -> tuple[int, ...]:
         """Return the layers this fetch covers, in ascending layer order.

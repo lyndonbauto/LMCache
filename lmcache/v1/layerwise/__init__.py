@@ -33,9 +33,25 @@ from .fakes import (
     ScriptedLayerArrivalSource,
     UnservableLayerArrivalSource,
 )
+from .planner import (
+    MAX_SLOTS_PER_REQUEST,
+    ByteRange,
+    ChunkPlacement,
+    FetchPlanner,
+    KernelGroupGeometry,
+    ModelLayout,
+    PlanRequest,
+    SlotDigestSource,
+    plane_segment_bytes,
+)
 from .pump import LayerArrivalPump
 
 __all__ = [
+    "MAX_SLOTS_PER_REQUEST",
+    "ByteRange",
+    "ChunkPlacement",
+    "FetchPlanner",
+    "KernelGroupGeometry",
     "LayerArrivalPump",
     "LayerArrivalSource",
     "LayerArrivalStatus",
@@ -45,9 +61,13 @@ __all__ = [
     "LayerNotInPlanError",
     "LayerUnservableError",
     "LayerwiseContractError",
+    "ModelLayout",
+    "PlanRequest",
     "RecordingLayerLoadSink",
     "ScriptedLayerArrivalSource",
+    "SlotDigestSource",
     "SlotPlacement",
     "StaleGenerationError",
     "UnservableLayerArrivalSource",
+    "plane_segment_bytes",
 ]
