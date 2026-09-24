@@ -9,6 +9,9 @@ on:
     paths:
       - "csrc/storage_backends/aerospike/**"
       - "lmcache/v1/distributed/l2_adapters/aerospike_l2_adapter.py"
+      - "lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py"
+      - "lmcache/v1/layerwise/**"
+      - "setup_extensions/storage_backend_profiles/aerospike.py"
       - "lmcache/v1/storage_backend/native_clients/aerospike_client.py"
       - "setup.py"
       - "tests/aerospike_ce.conf.template"
@@ -21,6 +24,9 @@ on:
     paths:
       - "csrc/storage_backends/aerospike/**"
       - "lmcache/v1/distributed/l2_adapters/aerospike_l2_adapter.py"
+      - "lmcache/v1/distributed/l2_adapters/native_connector_l2_adapter.py"
+      - "lmcache/v1/layerwise/**"
+      - "setup_extensions/storage_backend_profiles/aerospike.py"
       - "lmcache/v1/storage_backend/native_clients/aerospike_client.py"
       - "setup.py"
       - "tests/aerospike_ce.conf.template"
@@ -68,9 +74,13 @@ jobs:
           dpkg-deb -x "${DEPS}/${BASE}/aerospike-client-c-libuv_${VERSION}-${UBUNTU}_amd64.deb" "${INSTALL}"
           sudo apt-get update -qq
           sudo apt-get install -y -qq libyaml-0-2 libuv1-dev
-          (cd "${DEPS}" && apt download libyaml-dev && \
+          # Extract the runtime package too: the -dev package's libyaml.so is
+          # a symlink to it, and dangles without it.
+          (cd "${DEPS}" && apt download libyaml-dev libyaml-0-2 && \
             rm -rf libyaml-install && mkdir -p libyaml-install && \
-            dpkg-deb -x libyaml-dev_*.deb libyaml-install)
+            dpkg-deb -x libyaml-dev_*.deb libyaml-install && \
+            dpkg-deb -x libyaml-0-2_*.deb libyaml-install && \
+            test -e libyaml-install/usr/lib/x86_64-linux-gnu/libyaml.so)
           {
             echo "AEROSPIKE_INCLUDE_DIR=${INSTALL}/usr/include"
             echo "AEROSPIKE_LIBRARY_DIR=${INSTALL}/usr/lib"

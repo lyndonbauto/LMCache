@@ -54,6 +54,22 @@ def is_rdma_requested() -> bool:
     )
 
 
+def _system_yaml_soname() -> str:
+    """Return the soname of the system libyaml runtime library.
+
+    ``ctypes.util.find_library`` misses a runtime-only install (no
+    ``libyaml.so`` development symlink), which is exactly the case where the
+    extension must link the runtime library by name.
+
+    Returns:
+        A name such as ``"libyaml-0.so.2"``, or ``""`` if none is installed.
+    """
+    for directory in ("/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib"):
+        for candidate in sorted(Path(directory).glob("libyaml-0.so.[0-9]")):
+            return candidate.name
+    return ""
+
+
 def is_efa_requested() -> bool:
     """Return True when the EFA/SRD queue-pair path was requested.
 
@@ -100,14 +116,21 @@ class AerospikeStorageBackend(StorageBackendProfile):
         if as_lib:
             library_dirs.extend(as_lib.split(";"))
         extra_objects: list[str] = []
+        # libaerospike.so does not declare its libyaml dependency, so this
+        # extension must, as a shared library. .deps usually holds only the
+        # -dev package, whose libyaml.so dangles unless the runtime package
+        # was extracted beside it; ld then skips it and would pick libyaml.a,
+        # which cannot satisfy libaerospike.so. Hence the soname fallback.
         yaml_shared = deps_yaml_lib / "libyaml.so"
         yaml_static = deps_yaml_lib / "libyaml.a"
-        if yaml_shared.exists() or yaml_static.exists():
-            library_dirs.append(str(deps_yaml_lib))
+        system_yaml = _system_yaml_soname() or ctypes.util.find_library("yaml")
 
         libraries = ["aerospike"]
-        if yaml_shared.exists() or ctypes.util.find_library("yaml"):
+        if yaml_shared.exists():
+            library_dirs.append(str(deps_yaml_lib))
             libraries.append("yaml")
+        elif system_yaml:
+            libraries.append(f":{system_yaml}")
         elif yaml_static.exists():
             extra_objects.append(str(yaml_static))
         libraries.extend(["ssl", "crypto", "pthread", "z", "rt"])
