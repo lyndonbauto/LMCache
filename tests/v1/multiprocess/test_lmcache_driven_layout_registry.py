@@ -57,7 +57,21 @@ class _FakeDeviceHostFuncDispatcher:
 
 @pytest.fixture
 def stub_lmcache_native() -> Any:
-    """Stub native modules so MP server imports work in source-only test runs."""
+    """Stub native modules so MP server imports work in source-only test runs.
+
+    The stub covers only what registration touches, so it is used only when
+    the real extension is missing; otherwise an import it does not cover
+    would fail depending on which tests ran first.
+    """
+    try:
+        # First Party
+        import lmcache.lmcache_native  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        with patch.dict(sys.modules, {"cupy": MagicMock()}):
+            yield
+        return
     module = types.ModuleType("lmcache.lmcache_native")
     module_any = cast(Any, module)
     module_any.PageBufferShapeDesc = type("PageBufferShapeDesc", (), {})

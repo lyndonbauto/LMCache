@@ -111,6 +111,21 @@ def test_the_pipelined_planner_still_gets_its_layouts(
     assert client.object_group_layouts[0][0]["layer_indices"] == [[0, 2, 4], [1, 3]]
 
 
+def test_a_group_without_layer_indices_lets_the_native_side_number_layers(
+    client: _RecordLayoutClient,
+) -> None:
+    """No indices means no key: the native side rejects an empty list."""
+    adapter = NativeConnectorL2Adapter(native_client=client, type_name="test")
+    try:
+        adapter.set_object_group_layouts(_hybrid_descs(), {0: [[0, 2, 4], [1, 3]]})
+    finally:
+        adapter.close()
+
+    layouts = client.object_group_layouts[0]
+    assert layouts[0]["layer_indices"] == [[0, 2, 4], [1, 3]]
+    assert "layer_indices" not in layouts[1]
+
+
 def test_a_client_without_record_layouts_is_left_alone() -> None:
     """An older connector keeps working; it just stays byte-count sharded."""
     client = _RecordLayoutClient(accepts_record_layouts=False)

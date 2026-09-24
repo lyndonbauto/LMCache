@@ -46,15 +46,22 @@ def _native_object_group_layouts(
     group_layout_descs: dict[int, MemoryLayoutDesc],
     group_kernel_layer_indices: dict[int, list[list[int]]] | None,
 ) -> dict[int, dict[str, object]]:
-    """Build the native layout map consumed by ``set_object_group_layouts``."""
+    """Build the native layout map consumed by ``set_object_group_layouts``.
+
+    ``layer_indices`` is omitted for a group the caller gave none for: the
+    native side then numbers layers itself, whereas an empty list would be
+    rejected as not matching the group's shapes.
+    """
     native: dict[int, dict[str, object]] = {}
     for group_id, layout_desc in group_layout_descs.items():
-        layer_indices = (group_kernel_layer_indices or {}).get(group_id, [])
-        native[group_id] = {
+        group: dict[str, object] = {
             "shapes": [tuple(shape) for shape in layout_desc.shapes],
             "dtypes": [str(dtype) for dtype in layout_desc.dtypes],
-            "layer_indices": layer_indices,
         }
+        layer_indices = (group_kernel_layer_indices or {}).get(group_id)
+        if layer_indices:
+            group["layer_indices"] = layer_indices
+        native[group_id] = group
     return native
 
 
