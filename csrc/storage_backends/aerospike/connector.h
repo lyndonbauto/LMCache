@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -69,6 +70,27 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
   // change affects only subsequent writes and never makes an existing record
   // unreadable.
   void set_plane_bytes(size_t plane_bytes);
+
+  // Register how each object group's payload is laid out, one list of plane
+  // runs per object group with one run per kernel group in payload order.
+  //
+  // Writes whose size matches a registered layout are cut so that every
+  // record stays inside one plane of its own kernel group; see
+  // make_layered_shard_plan(). This is what lets hybrid models, whose kernel
+  // groups differ in plane size, be fetched a layer at a time -- the single
+  // set_plane_bytes() hint cannot describe them. A later call adds to the
+  // layouts already registered rather than replacing them, so a second model
+  // sharing this connector cannot re-cut the first's records; a size two
+  // layouts share with different runs is not aligned at all.
+  //
+  // Thread safety: safe to call while stores are in flight. Each record
+  // persists the layout it was written with, so this affects only
+  // subsequent writes and never makes an existing record unreadable.
+  //
+  // Throws std::invalid_argument if any run has no planes or a zero plane
+  // size; nothing is registered in that case.
+  void set_record_layouts(
+      const std::vector<std::vector<PlaneRun>>& object_groups);
 
 #ifdef LMCACHE_AEROSPIKE_RDMA
   // Report whether pipelined kv-sink-fetch is initialized and at least one
@@ -167,6 +189,13 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
   // Atomic because set_plane_bytes() may land while worker threads are
   // sharding a payload in plan().
   std::atomic<size_t> plane_bytes_;
+
+  // Every object-group layout registered through set_record_layouts(), and
+  // the per-payload-size lookup derived from them. Guarded by
+  // record_layouts_mu_, which plan() takes on every write.
+  mutable std::mutex record_layouts_mu_;
+  std::vector<std::vector<PlaneRun>> registered_record_layouts_;
+  std::map<size_t, std::vector<PlaneRun>> record_layouts_;
 
   // Description of the L1 slab and window pool to register for RDMA
   // reception. Default-constructed (and therefore inert) unless the L2

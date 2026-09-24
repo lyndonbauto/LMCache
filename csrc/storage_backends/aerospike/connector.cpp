@@ -31,6 +31,7 @@ constexpr const char* kBinState = "state";
 constexpr const char* kBinNseg = "nseg";
 constexpr const char* kBinSegBytes = "seg_b";
 constexpr const char* kBinPlaneBytes = "plane_b";
+constexpr const char* kBinRuns = "runs";
 constexpr const char* kBinTotalBytes = "tot_b";
 constexpr const char* kBinVersion = "ver";
 constexpr const char* kBinCreatedAt = "created_at";
@@ -223,6 +224,23 @@ void AerospikeNativeConnector::do_single_get(WorkerAerospikeConn& conn,
   // uniformly", which is what those records did, so they stay readable.
   shard.plane_b = static_cast<size_t>(
       std::max<int64_t>(as_record_get_int64(rec, kBinPlaneBytes, 0), 0));
+  // Present only on objects whose kernel groups differ in plane size. When
+  // set it alone describes the records, and must describe exactly `len`
+  // bytes in `nseg` records -- a layout that disagrees is corrupt, not a
+  // reason to guess.
+  const char* runs = as_record_get_str(rec, kBinRuns);
+  if (runs != nullptr) {
+    try {
+      shard.runs = decode_shard_runs(runs);
+      shard.seg_b = 0;
+      shard.plane_b = 0;
+      require_consistent_runs(shard, len);
+    } catch (const std::invalid_argument& error) {
+      as_record_destroy(rec);
+      throw std::runtime_error(std::string("meta record runs: ") +
+                               error.what());
+    }
+  }
   uint32_t nseg = shard.nseg;
   // Read the stored total directly with a sentinel so a missing or corrupt bin
   // fails the integrity check instead of silently matching `len`.
@@ -412,6 +430,23 @@ void AerospikeNativeConnector::set_plane_bytes(size_t plane_bytes) {
   plane_bytes_.store(plane_bytes, std::memory_order_relaxed);
 }
 
+void AerospikeNativeConnector::set_record_layouts(
+    const std::vector<std::vector<PlaneRun>>& object_groups) {
+  std::lock_guard<std::mutex> lk(record_layouts_mu_);
+  // Every TP rank registers the same layouts, so only new ones are kept.
+  std::vector<std::vector<PlaneRun>> merged = registered_record_layouts_;
+  for (const std::vector<PlaneRun>& runs : object_groups) {
+    if (std::find(merged.begin(), merged.end(), runs) == merged.end()) {
+      merged.push_back(runs);
+    }
+  }
+  // Validates every group before anything is replaced.
+  std::map<size_t, std::vector<PlaneRun>> layouts =
+      record_layouts_by_payload(merged);
+  registered_record_layouts_ = std::move(merged);
+  record_layouts_ = std::move(layouts);
+}
+
 #ifdef LMCACHE_AEROSPIKE_RDMA
 
 namespace {
@@ -549,9 +584,11 @@ void AerospikeNativeConnector::poll_pipelined_fetch_notifications() {
 #endif
 
 ShardPlan AerospikeNativeConnector::plan(size_t payload_bytes) const {
-  return make_shard_plan(payload_bytes, target_segment_bytes_,
-                         max_record_bytes_, single_record_threshold_bytes_,
-                         plane_bytes_.load(std::memory_order_relaxed));
+  std::lock_guard<std::mutex> lk(record_layouts_mu_);
+  return choose_shard_plan(payload_bytes, record_layouts_,
+                           target_segment_bytes_, max_record_bytes_,
+                           single_record_threshold_bytes_,
+                           plane_bytes_.load(std::memory_order_relaxed));
 }
 
 size_t AerospikeNativeConnector::discover_record_cap() {
@@ -624,10 +661,15 @@ void AerospikeNativeConnector::put_meta_record(WorkerAerospikeConn& conn,
   as_key_init_str(&key, conn.ns.c_str(), conn.set_name.c_str(),
                   user_key.c_str());
 
+  // Kept alive until the put: as_record_set_str borrows the pointer.
+  const std::string runs =
+      shard.runs.empty() ? std::string() : encode_shard_runs(shard.runs);
+
   as_record rec;
   // Bin count must match the number of as_record_set_* calls below: the bin
   // array is allocated on the stack here, so an undercount overruns it.
-  as_record_inita(&rec, inline_buf == nullptr ? 8 : 9);
+  as_record_inita(&rec,
+                  8 + (inline_buf == nullptr ? 0 : 1) + (runs.empty() ? 0 : 1));
   rec.ttl = AS_RECORD_CLIENT_DEFAULT_TTL;
   as_record_set_int64(&rec, kBinVersion, 1);
   as_record_set_str(&rec, kBinState, kReady);
@@ -637,6 +679,12 @@ void AerospikeNativeConnector::put_meta_record(WorkerAerospikeConn& conn,
   // sharded" from "bin absent" -- both mean uniform tiling.
   as_record_set_int64(&rec, kBinPlaneBytes,
                       static_cast<int64_t>(shard.plane_b));
+  // Only for objects whose kernel groups differ in plane size. Uniform
+  // objects keep the three-number form, so readers that predate runs can
+  // still read them.
+  if (!runs.empty()) {
+    as_record_set_str(&rec, kBinRuns, runs.c_str());
+  }
   as_record_set_int64(&rec, kBinTotalBytes, static_cast<int64_t>(total_bytes));
   as_record_set_int64(&rec, kBinCreatedAt,
                       static_cast<int64_t>(std::time(nullptr)));

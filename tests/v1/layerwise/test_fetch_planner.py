@@ -28,6 +28,7 @@ from lmcache.v1.layerwise.planner import (
     FetchPlanner,
     KernelGroupGeometry,
     ModelLayout,
+    PlaneRun,
     PlanRequest,
     RecordKeyDigests,
     plane_segment_bytes,
@@ -455,32 +456,51 @@ def test_layers_from_several_object_groups_interleave_by_layer_id() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_a_model_whose_kernel_groups_agree_reports_their_plane_size() -> None:
-    """One plane size describes the model, so the writer can align to it."""
-    layout = ModelLayout(
-        {
-            0: [KernelGroupGeometry((0, 1), kv_planes=2, plane_bytes=1024)],
-            1: [KernelGroupGeometry((2,), kv_planes=1, plane_bytes=1024)],
-        }
-    )
-    assert layout.uniform_plane_bytes() == 1024
+def hybrid_layout() -> ModelLayout:
+    """An attention kernel group beside a larger-plane one, in one object.
 
-
-def test_a_model_whose_kernel_groups_disagree_reports_no_plane_size() -> None:
-    """Zero is the writer's signal to fall back to byte-count sharding.
-
-    One kernel group is enough to turn plane alignment off for the whole
-    model, because the write side is told a single number.
+    Layers 0 and 1 have 1024-byte planes; layer 2 has 10000-byte planes,
+    which a 4096-byte cap cuts into three pieces. No single plane size
+    describes this payload, which is the case the writer used to give up on.
     """
-    layout = ModelLayout(
+    return ModelLayout(
         {
             0: [
                 KernelGroupGeometry((0, 1), kv_planes=2, plane_bytes=1024),
-                KernelGroupGeometry((2,), kv_planes=2, plane_bytes=4096),
+                KernelGroupGeometry((2,), kv_planes=2, plane_bytes=10_000),
             ]
         }
     )
-    assert layout.uniform_plane_bytes() == 0
+
+
+def test_plane_runs_describe_each_kernel_group_in_payload_order() -> None:
+    """This is what the writer is handed, so it must match the payload."""
+    layout = hybrid_layout()
+    assert layout.plane_runs(0) == (
+        PlaneRun(plane_bytes=1024, planes=4),
+        PlaneRun(plane_bytes=10_000, planes=2),
+    )
+    assert layout.object_group_ids() == (0,)
+    with pytest.raises(KeyError, match="object group 1"):
+        layout.plane_runs(1)
+
+
+def test_plane_runs_tile_the_object_exactly() -> None:
+    """A run list that disagreed with the offsets would misplace records."""
+    layout = ModelLayout(
+        {
+            0: [
+                KernelGroupGeometry((3, 0), kv_planes=2, plane_bytes=512),
+                KernelGroupGeometry((1,), kv_planes=1, plane_bytes=2048),
+            ],
+            1: [KernelGroupGeometry((2,), kv_planes=2, plane_bytes=768)],
+        }
+    )
+    for object_group_id in layout.object_group_ids():
+        runs = layout.plane_runs(object_group_id)
+        assert sum(run.plane_bytes * run.planes for run in runs) == (
+            layout.object_group_bytes(object_group_id)
+        )
 
 
 def test_records_are_numbered_plane_major_across_the_object() -> None:
@@ -509,22 +529,81 @@ def test_a_plane_cut_into_pieces_numbers_them_within_the_plane() -> None:
     assert layout.record_index_for(0, 1, 0, max_record_bytes=4096) == 6
 
 
-def test_naming_a_record_is_refused_when_the_writer_will_not_align() -> None:
-    """A hybrid model has no record matching a slot, so this must not guess.
+def test_a_hybrid_object_numbers_each_kernel_group_by_its_own_planes() -> None:
+    """Each kernel group is cut against its own plane size, in payload order.
 
-    Returning a plausible index would name a record that exists and holds
-    other layers' bytes, which the transport would happily fetch.
+    The first group's four 1024-byte planes are one record each (0-3); the
+    second group's two 10000-byte planes are three pieces each (4-9).
+    """
+    layout = hybrid_layout()
+    assert layout.record_index_for(0, 0, 0, max_record_bytes=4096) == 0
+    assert layout.record_index_for(1, 0, 0, max_record_bytes=4096) == 1
+    assert layout.record_index_for(0, 1, 0, max_record_bytes=4096) == 2
+    assert layout.record_index_for(1, 1, 0, max_record_bytes=4096) == 3
+    assert layout.record_index_for(2, 0, 0, max_record_bytes=4096) == 4
+    assert layout.record_index_for(2, 0, 2, max_record_bytes=4096) == 6
+    assert layout.record_index_for(2, 1, 0, max_record_bytes=4096) == 7
+    assert layout.record_count(0, max_record_bytes=4096) == 10
+
+
+def test_a_small_plane_does_not_borrow_a_larger_groups_piece_count() -> None:
+    """Pieces are counted per kernel group, not taken from the largest plane."""
+    layout = hybrid_layout()
+    with pytest.raises(ValueError, match="piece 1 does not exist"):
+        layout.record_index_for(0, 0, 1, max_record_bytes=4096)
+    with pytest.raises(ValueError, match="piece 3 does not exist"):
+        layout.record_index_for(2, 0, 3, max_record_bytes=4096)
+
+
+def test_every_slot_of_a_hybrid_plan_names_a_distinct_record() -> None:
+    """The plan and the numbering agree: each record is fetched exactly once."""
+    layout = hybrid_layout()
+    plan = FetchPlanner(layout).plan(request_for(place([0, 1])), DIGESTS)
+
+    by_chunk: dict[int, list[int]] = {}
+    for slot in plan.slots:
+        by_chunk.setdefault(slot.chunk_id, []).append(
+            layout.record_index_for(slot.layer_id, slot.plane, slot.piece, 4096)
+        )
+    for chunk_id, indices in by_chunk.items():
+        assert sorted(indices) == list(range(layout.record_count(0, 4096))), (
+            f"chunk {chunk_id} does not name every record exactly once"
+        )
+
+
+def test_naming_is_refused_for_a_payload_size_the_writer_cannot_attribute() -> None:
+    """Two differently laid out groups of one size get byte-count records.
+
+    The writer picks a layout by payload size, so it cannot align either
+    group; returning a plausible index would name a record holding other
+    layers' bytes, which the transport would happily fetch. A group of a
+    different size is unaffected.
     """
     layout = ModelLayout(
         {
-            0: [
-                KernelGroupGeometry((0, 1), kv_planes=2, plane_bytes=1024),
-                KernelGroupGeometry((2,), kv_planes=2, plane_bytes=4096),
-            ]
+            0: [KernelGroupGeometry((0, 1), kv_planes=2, plane_bytes=1024)],
+            1: [KernelGroupGeometry((2,), kv_planes=1, plane_bytes=4096)],
+            2: [KernelGroupGeometry((3,), kv_planes=2, plane_bytes=1024)],
         }
     )
-    with pytest.raises(ValueError, match="disagree on a plane size"):
-        layout.record_index_for(0, 0, 0, max_record_bytes=4096)
+    for layer_id, object_group_id in ((0, 0), (2, 1)):
+        with pytest.raises(ValueError, match="cannot tell"):
+            layout.record_index_for(layer_id, 0, 0, max_record_bytes=4096)
+        with pytest.raises(ValueError, match="cannot tell"):
+            layout.record_count(object_group_id, max_record_bytes=4096)
+    assert layout.record_index_for(3, 1, 0, max_record_bytes=4096) == 1
+
+
+def test_same_sized_groups_with_the_same_layout_stay_nameable() -> None:
+    """Identical layouts are not ambiguous: either reading of the size agrees."""
+    layout = ModelLayout(
+        {
+            0: [KernelGroupGeometry((0, 1), kv_planes=2, plane_bytes=1024)],
+            1: [KernelGroupGeometry((2, 3), kv_planes=2, plane_bytes=1024)],
+        }
+    )
+    assert layout.record_index_for(3, 1, 0, max_record_bytes=4096) == 3
+    assert layout.record_count(1, max_record_bytes=4096) == 4
 
 
 @pytest.mark.parametrize(
@@ -647,20 +726,28 @@ def test_a_planned_fetch_asks_for_every_record_of_every_chunk_once() -> None:
     )
 
 
-def test_a_hybrid_model_cannot_be_named_at_all() -> None:
+def test_a_hybrid_fetch_asks_for_every_record_of_its_object_once() -> None:
+    """End to end for a hybrid object: every stored record, none twice."""
+    layout = hybrid_layout()
+    digest_of, seen = key_recorder()
+    source = RecordKeyDigests(layout, 4096, {(0, 0): "key-a"}, digest_of)
+
+    FetchPlanner(layout).plan(request_for(place([0])), source)
+    assert sorted(seen) == sorted(f"key-a|s|{index}" for index in range(10))
+
+
+def test_an_unattributable_payload_size_cannot_be_named_at_all() -> None:
     """The refusal propagates, so no fetch is planned against bad records."""
     layout = ModelLayout(
         {
-            0: [
-                KernelGroupGeometry((0, 1), kv_planes=2, plane_bytes=1024),
-                KernelGroupGeometry((2,), kv_planes=2, plane_bytes=4096),
-            ]
+            0: [KernelGroupGeometry((0, 1), kv_planes=2, plane_bytes=1024)],
+            1: [KernelGroupGeometry((2,), kv_planes=1, plane_bytes=4096)],
         }
     )
     digest_of, _ = key_recorder()
     source = RecordKeyDigests(layout, 4096, {(0, 0): "key-a"}, digest_of)
 
-    with pytest.raises(ValueError, match="disagree on a plane size"):
+    with pytest.raises(ValueError, match="cannot tell"):
         FetchPlanner(layout).plan(request_for(place([0])), source)
 
 

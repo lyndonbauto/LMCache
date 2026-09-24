@@ -11,6 +11,31 @@ defect coming back.
 
 ---
 
+## Hybrid models are servable: records follow each kernel group's planes
+
+**Who is affected:** Track A (the meta record gained a bin); nobody's
+contract types changed.
+
+**What changed.** The Aerospike writer now cuts each object group's payload
+per kernel group, so every record stays inside one plane even when kernel
+groups differ in plane size. `ModelLayout.record_index_for` numbers records
+the same way and no longer refuses hybrid models; it refuses only an object
+group whose payload size another group shares with a different layout. See
+[system-design.md](system-design.md) section 10.
+
+**What breaks.** Nothing for uniform models: their records, indices and meta
+records are byte-for-byte what they were. A hybrid object's meta record gains
+a `runs` bin; a reader built before this change fails loudly on such an
+object (each record's size is checked), rather than misreading it.
+
+**Why.** The writer used to be told one plane size per model. A hybrid model
+has none, so it fell back to byte-count sharding and 12 of the 16 slots in the
+`hybrid_kernel_groups_in_one_object_group` fixture case matched no stored
+record -- and the other 4 matched by coincidence, which would have served part
+of a layer and reported it ready. Nothing in production published the layout
+at all, so in practice every model was byte-count sharded;
+`register_kv_cache` now publishes it.
+
 ## `SlotPlacement` gained `plane` and `piece`
 
 **Who is affected:** Track A.
@@ -74,8 +99,7 @@ transport does not have to depend on a Track C type to read its own input.
 planner calls as it cuts planes, because which pieces exist is the planner's
 own output and so cannot be enumerated by the caller beforehand.
 
-Note the limitation in [system-design.md](system-design.md) section 10:
-a layerwise fetch cannot be served for a model whose kernel groups disagree
-on their plane size, because the write side then shards by byte count and no
-stored record matches a slot. `ModelLayout.record_index_for` refuses for such
-a model rather than naming a record that holds other layers' bytes.
+`ModelLayout.record_index_for` refuses to name a record the write side did
+not align to layer boundaries, rather than naming one that holds other
+layers' bytes; which cases that covers is described in
+[system-design.md](system-design.md) section 10.

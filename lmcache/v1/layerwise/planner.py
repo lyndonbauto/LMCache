@@ -294,10 +294,30 @@ class SlotDigestSource(Protocol):
 
 
 @dataclass(frozen=True)
+class PlaneRun:
+    """One kernel group's planes, as the write side is told to cut them.
+
+    Mirrors ``PlaneRun`` in ``csrc/storage_backends/aerospike/shard_plan.h``.
+    The writer keeps every record inside one plane, so it needs each kernel
+    group's plane size separately: a hybrid object group holds kernel groups
+    whose planes differ, and one size for the whole payload cannot describe
+    it.
+
+    Attributes:
+        plane_bytes: Bytes in each plane of the kernel group.
+        planes: Planes the kernel group holds, ``kv_planes * num_layers``.
+    """
+
+    plane_bytes: int
+    planes: int
+
+
+@dataclass(frozen=True)
 class _LayerLocation:
-    """Where one layer sits: its object group and its planes within it."""
+    """Where one layer sits: its object group, kernel group and planes."""
 
     object_group_id: int
+    kernel_group_index: int
     planes: tuple[ByteRange, ...]
 
 
@@ -338,6 +358,76 @@ def _parse_kernel_shape(shape: Sequence[int]) -> tuple[int, int, int]:
     return int(kv_planes), int(num_layers), int(num_slots) * int(hidden_dim)
 
 
+def record_plane_runs(
+    group_layout_descs: Mapping[int, "MemoryLayoutDesc"],
+) -> dict[int, tuple[PlaneRun, ...]]:
+    """Return how the write side should cut each object group's payload.
+
+    This is what a storage backend is given at registration so that it keeps
+    every record inside one plane of one layer. It reads the same shapes as
+    :meth:`ModelLayout.from_registration`, through the same parser, and
+    yields the same runs as :meth:`ModelLayout.plane_runs` -- but needs no
+    layer indices, because where a record's bytes go in the payload does not
+    depend on which global layer they belong to.
+
+    Args:
+        group_layout_descs: One layout per object group id, as published at
+            registration. Each holds parallel lists of shapes and dtypes, one
+            pair per kernel group in payload order.
+
+    Returns:
+        One run per kernel group, in payload order, per object group id.
+
+    Raises:
+        ValueError: If a group has no kernel groups, or a shape has an
+            unsupported rank or a non-positive dimension.
+    """
+    runs: dict[int, tuple[PlaneRun, ...]] = {}
+    for object_group_id, layout_desc in group_layout_descs.items():
+        if not layout_desc.shapes:
+            raise ValueError(f"object group {object_group_id} has no kernel groups")
+        group_runs: list[PlaneRun] = []
+        for shape, dtype in zip(layout_desc.shapes, layout_desc.dtypes, strict=True):
+            kv_planes, num_layers, plane_elements = _parse_kernel_shape(shape)
+            group_runs.append(
+                PlaneRun(
+                    plane_bytes=plane_elements * dtype.itemsize,
+                    planes=kv_planes * num_layers,
+                )
+            )
+        runs[object_group_id] = tuple(group_runs)
+    return runs
+
+
+def _unattributable_object_groups(
+    group_bytes: Mapping[int, int], runs: Mapping[int, tuple[PlaneRun, ...]]
+) -> frozenset[int]:
+    """Return object groups whose payload size the writer cannot attribute.
+
+    The writer is handed a key and a byte count, so it picks a record layout
+    by payload size. Two object groups of the same size with different runs
+    leave it unable to tell which layout a payload has, and it falls back to
+    byte-count sharding for that size -- see ``record_layouts_by_payload`` in
+    ``shard_plan.h``. Records of those groups do not follow layer boundaries.
+
+    Args:
+        group_bytes: Payload size per object group id.
+        runs: Plane runs per object group id.
+
+    Returns:
+        Ids of every object group whose size another group shares with
+        different runs.
+    """
+    runs_by_size: dict[int, set[tuple[PlaneRun, ...]]] = {}
+    for object_group_id, size in group_bytes.items():
+        runs_by_size.setdefault(size, set()).add(runs[object_group_id])
+    return frozenset(
+        object_group_id
+        for object_group_id, size in group_bytes.items()
+        if len(runs_by_size[size]) > 1
+    )
+
+
 class ModelLayout:
     """Resolves a global layer index to byte ranges within its object group.
 
@@ -372,13 +462,15 @@ class ModelLayout:
 
         locations: dict[int, _LayerLocation] = {}
         group_bytes: dict[int, int] = {}
-        geometries: list[KernelGroupGeometry] = []
+        runs: dict[int, tuple[PlaneRun, ...]] = {}
+        run_bases: dict[int, tuple[int, ...]] = {}
         for object_group_id, kernel_groups in object_groups.items():
             if not kernel_groups:
                 raise ValueError(f"object group {object_group_id} has no kernel groups")
             base = 0
-            for kernel_group in kernel_groups:
-                geometries.append(kernel_group)
+            bases: list[int] = []
+            for kernel_index, kernel_group in enumerate(kernel_groups):
+                bases.append(base)
                 num_layers = len(kernel_group.layer_ids)
                 for position, layer_id in enumerate(kernel_group.layer_ids):
                     if layer_id in locations:
@@ -398,14 +490,26 @@ class ModelLayout:
                         for plane in range(kernel_group.kv_planes)
                     )
                     locations[layer_id] = _LayerLocation(
-                        object_group_id=object_group_id, planes=planes
+                        object_group_id=object_group_id,
+                        kernel_group_index=kernel_index,
+                        planes=planes,
                     )
                 base += kernel_group.total_bytes()
             group_bytes[object_group_id] = base
+            run_bases[object_group_id] = tuple(bases)
+            runs[object_group_id] = tuple(
+                PlaneRun(
+                    plane_bytes=kernel_group.plane_bytes,
+                    planes=kernel_group.kv_planes * len(kernel_group.layer_ids),
+                )
+                for kernel_group in kernel_groups
+            )
 
         self._locations = locations
         self._group_bytes = group_bytes
-        self._geometries = tuple(geometries)
+        self._runs = runs
+        self._run_bases = run_bases
+        self._unattributable = _unattributable_object_groups(group_bytes, runs)
 
     @classmethod
     def from_registration(
@@ -513,21 +617,33 @@ class ModelLayout:
         """
         return self._layer_location(layer_id).planes
 
-    def uniform_plane_bytes(self) -> int:
-        """Return the plane size every kernel group shares, or 0 if they differ.
-
-        This is the number the write side is given. ``set_kv_plane_bytes``
-        carries one plane size for the whole model, and the storage backend
-        aligns record boundaries to it so that a record belongs to exactly one
-        layer. A single kernel group that disagrees turns that off everywhere,
-        because one uniform stride cannot describe the payload.
+    def object_group_ids(self) -> tuple[int, ...]:
+        """Return every object group id in the layout, ascending.
 
         Returns:
-            The shared plane size in bytes, or ``0`` when the kernel groups do
-            not agree on one.
+            Each covered object group id exactly once, ascending.
         """
-        sizes = {geometry.plane_bytes for geometry in self._geometries}
-        return sizes.pop() if len(sizes) == 1 else 0
+        return tuple(sorted(self._group_bytes))
+
+    def plane_runs(self, object_group_id: int) -> tuple[PlaneRun, ...]:
+        """Return how the write side should cut one object group's payload.
+
+        This is what the storage backend is handed at registration, one run
+        per kernel group in payload order, so that it can keep every record
+        inside one plane of one layer.
+
+        Args:
+            object_group_id: The object group to describe.
+
+        Returns:
+            One run per kernel group, in the order the payload holds them.
+
+        Raises:
+            KeyError: If the layout does not cover ``object_group_id``.
+        """
+        if object_group_id not in self._runs:
+            raise KeyError(f"no object group {object_group_id} in the layout")
+        return self._runs[object_group_id]
 
     def record_index_for(
         self, layer_id: int, plane: int, piece: int, max_record_bytes: int
@@ -541,10 +657,13 @@ class ModelLayout:
         side stores an object's records under keys ending in their index, so
         the index is the last thing missing between a slot and its digest.
 
-        Records are numbered plane-major across the whole object -- every
-        piece of plane 0, then of plane 1 -- which is how
-        ``segment_range`` in ``shard_plan.h`` resolves an index back to a
-        range.
+        Records are numbered in payload order, one kernel group at a time:
+        every piece of the first kernel group's first plane, then its second
+        plane, and so on, then the next kernel group. Each kernel group is
+        cut against its own plane size. This is how ``segment_range`` in
+        ``shard_plan.h`` resolves an index back to a range, and for a model
+        whose planes are all one size it is the same numbering as a single
+        plane-major sweep of the object.
 
         Args:
             layer_id: Global layer index in the model.
@@ -558,37 +677,41 @@ class ModelLayout:
 
         Raises:
             KeyError: If the layout does not cover ``layer_id``.
-            ValueError: If the kernel groups disagree on a plane size, since
-                the write side then shards by byte count and no record
-                matches a slot; or if ``plane`` or ``piece`` is outside what
-                the layer actually has.
+            ValueError: If the layer's object group is one the write side
+                cannot attribute a record layout to (see
+                :meth:`record_count`), so no record matches a slot; if
+                ``max_record_bytes`` is not positive; or if ``plane`` or
+                ``piece`` is outside what the layer actually has.
         """
-        plane_size = self.uniform_plane_bytes()
-        if plane_size == 0:
-            raise ValueError(
-                "this model's kernel groups disagree on a plane size, so the "
-                "write side shards by byte count and its records do not line "
-                "up with layer boundaries; no record corresponds to a slot, "
-                "and a layerwise fetch cannot be served for it"
-            )
+        location = self._layer_location(layer_id)
+        self._require_attributable(location.object_group_id)
         if max_record_bytes <= 0:
             raise ValueError(
                 f"max_record_bytes must be positive, got {max_record_bytes}"
             )
-
-        planes = self._layer_location(layer_id).planes
-        if not 0 <= plane < len(planes):
+        if not 0 <= plane < len(location.planes):
             raise ValueError(
-                f"layer {layer_id} has {len(planes)} planes, so plane "
+                f"layer {layer_id} has {len(location.planes)} planes, so plane "
                 f"{plane} does not exist"
             )
-        pieces = _ceil_div(plane_size, max_record_bytes)
+
+        runs = self._runs[location.object_group_id]
+        run = runs[location.kernel_group_index]
+        pieces = _ceil_div(run.plane_bytes, max_record_bytes)
         if not 0 <= piece < pieces:
             raise ValueError(
-                f"a plane of {plane_size} bytes under a {max_record_bytes} "
+                f"a plane of {run.plane_bytes} bytes under a {max_record_bytes} "
                 f"byte cap is {pieces} pieces, so piece {piece} does not exist"
             )
-        return ((planes[plane].offset // plane_size) * pieces) + piece
+        records_before = sum(
+            earlier.planes * _ceil_div(earlier.plane_bytes, max_record_bytes)
+            for earlier in runs[: location.kernel_group_index]
+        )
+        run_base = self._run_bases[location.object_group_id][
+            location.kernel_group_index
+        ]
+        plane_in_run = (location.planes[plane].offset - run_base) // run.plane_bytes
+        return records_before + (plane_in_run * pieces) + piece
 
     def record_count(self, object_group_id: int, max_record_bytes: int) -> int:
         """Return how many records one chunk's object is stored as.
@@ -606,22 +729,21 @@ class ModelLayout:
 
         Raises:
             KeyError: If the layout does not cover ``object_group_id``.
-            ValueError: If the kernel groups disagree on a plane size, or
-                ``max_record_bytes`` is not positive.
+            ValueError: If ``max_record_bytes`` is not positive, or another
+                object group has the same payload size with a different
+                kernel-group layout. The write side picks a record layout by
+                payload size alone, so for such a size it cannot tell the
+                groups apart and shards by byte count instead.
         """
-        plane_size = self.uniform_plane_bytes()
-        if plane_size == 0:
-            raise ValueError(
-                "this model's kernel groups disagree on a plane size, so the "
-                "write side shards by byte count and its record count does "
-                "not follow from the layout"
-            )
+        runs = self.plane_runs(object_group_id)
+        self._require_attributable(object_group_id)
         if max_record_bytes <= 0:
             raise ValueError(
                 f"max_record_bytes must be positive, got {max_record_bytes}"
             )
-        planes = self.object_group_bytes(object_group_id) // plane_size
-        return planes * _ceil_div(plane_size, max_record_bytes)
+        return sum(
+            run.planes * _ceil_div(run.plane_bytes, max_record_bytes) for run in runs
+        )
 
     def object_group_bytes(self, object_group_id: int) -> int:
         """Return the size of one chunk's object for an object group.
@@ -655,6 +777,26 @@ class ModelLayout:
         if location is None:
             raise KeyError(f"no layer {layer_id} in the layout")
         return location
+
+    def _require_attributable(self, object_group_id: int) -> None:
+        """Refuse an object group whose records do not follow its layers.
+
+        Args:
+            object_group_id: The object group being named.
+
+        Raises:
+            ValueError: If another object group shares its payload size with
+                a different kernel-group layout.
+        """
+        if object_group_id in self._unattributable:
+            raise ValueError(
+                f"object group {object_group_id} is "
+                f"{self._group_bytes[object_group_id]} bytes, the same as another "
+                "object group laid out differently; the write side cannot tell "
+                "their payloads apart, shards that size by byte count, and no "
+                "record lines up with a slot, so a layerwise fetch cannot be "
+                "served for it"
+            )
 
 
 class RecordKeyDigests:

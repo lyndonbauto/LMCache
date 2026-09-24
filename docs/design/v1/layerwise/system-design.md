@@ -261,43 +261,76 @@ handle before. A case only the harness runs is not a guard.
 The fixture also checks something the planners cannot check alone: that a
 record holding a slot's bytes was actually stored.
 `ModelLayout.record_index_for` names the record behind a slot, and the
-harness independently searches the write side's own `make_shard_plan` output
-for a record covering exactly that range. Where they disagree, the fetch
-would pull a real record into the right address and the model would read the
-wrong bytes.
+harness independently searches the write side's own `choose_shard_plan`
+output for a record covering exactly that range. Where they disagree, the
+fetch would pull a real record into the right address and the model would
+read the wrong bytes.
 
-## 10. Known limitation: layerwise needs one plane size per model
+## 10. How the writer keeps records inside a layer
 
-A layerwise fetch cannot currently be served for a model whose kernel groups
-disagree on their plane size -- which is the Mamba/GDN hybrid case that
-motivated plane-aligned sharding in the first place.
+A layer can only be fetched on its own if no record it needs also holds
+another layer's bytes. The writer is handed a key and a byte count, not a
+model, so it has to be told the layout ahead of time.
 
-The two halves disagree about what a record is:
+**At registration**, `register_kv_cache` calls
+`StorageManager.set_object_group_layouts`, and the native adapter forwards
+each object group's *plane runs* -- one `(plane_bytes, planes)` pair per
+kernel group, in payload order, computed by `record_plane_runs` -- to the
+connector's `set_record_layouts`. For a Mamba/GDN hybrid whose object group
+holds 1024-byte attention planes and 10000-byte state planes:
 
-- The **writer** is told one plane size for the whole model.
-  `uniform_kv_plane_bytes` returns `0` as soon as any kernel group differs,
-  and `make_shard_plan` then falls back to byte-count sharding, putting
-  record boundaries wherever the arithmetic lands.
-- The **planner** cuts each kernel group along its own planes, which is
-  correct for the plan and is what keeps a slot inside one layer.
+```text
+object group 0: [(1024, 4), (10000, 2)]      # 4 + 2*3 = 10 records at a 4096 cap
+```
 
-So the plan names pieces that were never stored as records. Measured on the
-`hybrid_kernel_groups_in_one_object_group` fixture case, 12 of 16 slots match
-no record at all. The other 4 are worse than the misses: byte-count
-boundaries that happen to land on a plane edge, so a naive implementation
-would serve part of a layer and report it ready.
+**On each write**, `choose_shard_plan` looks the payload size up and
+`make_layered_shard_plan` cuts every plane of every run against that run's
+own plane size, numbering records in payload order:
 
-`record_index_for` therefore refuses outright for such a model rather than
-returning a plausible index, and `test_slot_plan_parity.py` asserts both that
-it refuses and that the refusal is justified. A real `SlotDigestSource` built
-on it will raise, the fetch will fail loudly, and the caller falls back to a
-whole-request load -- the path `LayerArrivalStatus.UNSERVABLE` exists for.
+```text
+records 0-3   first run, one per 1024-byte plane
+records 4-6   second run, plane 0: 3334 / 3334 / 3332
+records 7-9   second run, plane 1: 3334 / 3334 / 3332
+```
 
-Closing this means making the write side shard per kernel group rather than
-per model, so that `set_kv_plane_bytes` carries a plane size per object group
-instead of one number. That is a change to `shard_plan` and the connector's
-record naming, so it is Track C's to make, but it is a separate piece of work
-from planning and is not started.
+The meta record stores the runs as a `runs` bin, e.g.
+`"1024:1024:4,10000:3334:2"`, so a reader recovers every range without
+knowing the model; `require_consistent_runs` rejects runs that do not cover
+the object's size in its record count.
+
+**On the read side**, `ModelLayout.record_index_for` applies the same
+numbering from `ModelLayout.plane_runs`. That `record_plane_runs` and
+`plane_runs` agree is pinned by `test_native_record_layouts.py`; that the
+numbering matches the writer's records is pinned by the parity fixture, which
+now includes three hybrid cases and maps every one of their slots to a stored
+record.
+
+Three properties are deliberate:
+
+- **Uniform models are unchanged.** When every run shares one plane size,
+  `make_layered_shard_plan` returns exactly the plan `make_shard_plan` builds
+  from that size -- same records, same indices, no `runs` bin -- so existing
+  objects stay readable and readers that predate runs can read new uniform
+  objects. A reader that predates runs fails loudly on a *hybrid* object,
+  because `read_payload_record` checks each record's size.
+- **An ambiguous size is not guessed.** If two object groups have the same
+  payload size but different runs, the writer cannot tell which layout a
+  payload has, so `record_layouts_by_payload` drops that size and it is
+  byte-count sharded. `record_index_for` refuses for those groups, and
+  `test_slot_plan_parity.py` asserts both that it refuses and that the
+  refusal is justified. The caller falls back to a whole-request load -- the
+  path `LayerArrivalStatus.UNSERVABLE` exists for.
+- **Layouts accumulate.** `set_record_layouts` adds to what earlier
+  registrations published rather than replacing it, so a second model sharing
+  a connector cannot re-cut the first model's records. The ambiguity rule is
+  applied across everything registered, which the Python side cannot see: a
+  reader for one model could, in principle, name records for a size another
+  model made ambiguous. That fails loudly (the record is missing or the wrong
+  size), not silently.
+
+If storage rejects the layout, registration logs a warning and continues;
+writes are then byte-count sharded as they were before layouts were
+published, and only layer-at-a-time fetch is lost.
 
 ## 11. What still has to come from the native side
 

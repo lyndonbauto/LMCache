@@ -59,7 +59,9 @@ end
 
 # One object group holding kernel groups of different geometry. This is the
 # case a single flattened stride gets wrong: the second group's layers would
-# be strided by the first group's plane size.
+# be strided by the first group's plane size. It is also the case the writer
+# used to give up on, sharding by byte count because no one plane size
+# described the payload.
 case hybrid_kernel_groups_in_one_object_group
 kernel 0 2 8 64 2 0 1
 kernel 0 2 32 64 2 2
@@ -67,6 +69,44 @@ kernel 0 1 8 64 4 3 4
 place 0 0 0
 place 1 0 1048576
 caps 4096 1048576
+end
+
+# A hybrid object whose second kernel group needs uneven pieces. The writer
+# cuts each kernel group against its own plane size, so record numbering
+# must restart its piece arithmetic at the second group rather than carry
+# the first group's one-piece-per-plane stride into it.
+case hybrid_later_group_split_into_uneven_pieces
+kernel 0 2 8 64 2 0 1
+kernel 0 2 10 500 2 2 3
+place 0 0 0
+place 1 0 1048576
+caps 4096 1048576
+end
+
+# Object groups of different shapes, one of them itself hybrid, as a
+# Mamba/GDN model produces: records are numbered per object, so each group's
+# numbering starts at zero regardless of the other's.
+case hybrid_object_groups_of_different_shapes
+kernel 0 2 16 128 2 0 2
+kernel 1 1 24 256 2 1 3
+kernel 1 2 4 64 2 5
+place 0 0 0
+place 0 1 1048576
+place 1 0 2097152
+place 1 1 3145728
+caps 4096 1048576
+end
+
+# Two object groups of the same payload size, laid out differently. The
+# writer picks a record layout by payload size, so it cannot tell these
+# apart and must fall back to byte-count sharding for both; the Python side
+# must refuse to name their records rather than assume alignment.
+case same_size_groups_laid_out_differently
+kernel 0 2 8 64 2 0 1
+kernel 1 1 32 64 2 2
+place 0 0 0
+place 0 1 1048576
+caps 1500 1048576
 end
 
 # Layers spread across two object groups with interleaved global indices, so

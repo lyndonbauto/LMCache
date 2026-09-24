@@ -35,6 +35,7 @@ from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
 )
+from lmcache.v1.layerwise.planner import record_plane_runs
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import create_event_notifier
 
@@ -227,7 +228,36 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         group_layout_descs: dict[int, MemoryLayoutDesc],
         group_kernel_layer_indices: dict[int, list[list[int]]] | None = None,
     ) -> None:
-        """Forward object-group layouts to the native client when supported."""
+        """Forward object-group layouts to the native client when supported.
+
+        Two independent consumers, each called only if the client has it:
+
+        - ``set_record_layouts`` receives each object group's plane runs, so
+          the backend cuts records along its own kernel groups' planes and a
+          layer can be fetched without its neighbours' bytes -- the only way
+          to align a hybrid model, whose planes differ in size.
+        - ``set_object_group_layouts`` receives the full shapes and layer
+          indices, for the pipelined fetch planner.
+
+        Args:
+            group_layout_descs: One layout per object group id.
+            group_kernel_layer_indices: Global layer indices per kernel
+                group, keyed by object group id and parallel to that group's
+                shapes; forwarded to the pipelined fetch planner.
+
+        Raises:
+            ValueError: If a layout has no kernel groups or an unsupported
+                shape.
+        """
+        record_setter = getattr(self._client, "set_record_layouts", None)
+        if record_setter is not None:
+            runs = record_plane_runs(group_layout_descs)
+            record_setter(
+                [
+                    [(run.plane_bytes, run.planes) for run in runs[group_id]]
+                    for group_id in sorted(runs)
+                ]
+            )
         setter = getattr(self._client, "set_object_group_layouts", None)
         if setter is None:
             return

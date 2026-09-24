@@ -28,9 +28,9 @@
 //
 // The plan says which bytes a slot carries. It does not say whether a record
 // holding exactly those bytes was ever stored. Those are separate questions
-// with separate arithmetic -- the writer shards through make_shard_plan(),
-// which is told a single uniform plane size for the whole model and falls
-// back to byte-count sharding when the kernel groups disagree about it.
+// with separate arithmetic -- the writer shards through choose_shard_plan(),
+// which picks a per-kernel-group layout by payload size and falls back to
+// byte-count sharding for a size it cannot attribute to one layout.
 //
 // So each slot is resolved against the write-side shard plan and reported as
 // the record index it corresponds to, or `none` when no record covers
@@ -51,7 +51,9 @@
 
 namespace {
 
-using lmcache::connector::make_shard_plan;
+using lmcache::connector::choose_shard_plan;
+using lmcache::connector::PlaneRun;
+using lmcache::connector::record_layouts_by_payload;
 using lmcache::connector::segment_range;
 using lmcache::connector::ShardPlan;
 using lmcache::connector::ShardRange;
@@ -77,26 +79,26 @@ struct Case {
   size_t max_write_bytes = 0;
 };
 
-// The plane size the writer is given: shared by every kernel group of every
-// object group, or 0 when they disagree.
+// The record layouts the writer is given: one list of plane runs per object
+// group, one run per kernel group in payload order.
 //
-// Mirrors uniform_kv_plane_bytes() in lmcache_driven_transfer.py, which is
-// what actually reaches the connector through set_plane_bytes(). It is one
-// number for the whole model, not one per object group, which is why a
-// single disagreeing kernel group turns off plane alignment everywhere.
-size_t uniform_plane_bytes(const std::vector<ObjectGroupLayout>& layouts) {
-  size_t shared = 0;
+// Derived here from the C++ layout rather than taken from Python on purpose.
+// Production hands the writer runs computed by ModelLayout.plane_runs(), and
+// the Python record numbering is built on the same runs; if the two
+// derivations ever disagreed, the record lines below would stop matching.
+std::map<size_t, std::vector<PlaneRun>> writer_layouts(
+    const std::vector<ObjectGroupLayout>& layouts) {
+  std::vector<std::vector<PlaneRun>> groups;
   for (const ObjectGroupLayout& layout : layouts) {
+    std::vector<PlaneRun> runs;
     for (const KernelGroupLayout& kernel : layout.kernel_groups) {
-      const size_t plane = lmcache::connector::rdma::plane_bytes(kernel);
-      if (shared == 0) {
-        shared = plane;
-      } else if (shared != plane) {
-        return 0;
-      }
+      runs.push_back({lmcache::connector::rdma::plane_bytes(kernel),
+                      static_cast<uint32_t>(kernel.kv_size *
+                                            kernel.layer_indices.size())});
     }
+    groups.push_back(runs);
   }
-  return shared;
+  return record_layouts_by_payload(groups);
 }
 
 // Index of the stored record covering exactly [offset, offset + length), or
@@ -140,8 +142,9 @@ void dump_case(const Case& current) {
 
   // The writer's knobs default to the record cap; see the connector, where
   // target_segment_bytes and single_record_threshold_bytes both fall back to
-  // max_record_bytes.
-  const size_t plane = uniform_plane_bytes(layouts);
+  // max_record_bytes. Production never sets the legacy uniform plane hint, so
+  // it is 0 here too.
+  const auto writer = writer_layouts(layouts);
   for (size_t index = 0; index < plan.slot_count(); ++index) {
     const auto& slot = plan.slot(static_cast<uint16_t>(index));
     const ChunkPlacement* owner = nullptr;
@@ -161,9 +164,9 @@ void dump_case(const Case& current) {
 
     const size_t payload =
         object_group_bytes(current.groups.at(owner->object_group_id));
-    const ShardPlan shard = make_shard_plan(payload, current.max_record_bytes,
-                                            current.max_record_bytes,
-                                            current.max_record_bytes, plane);
+    const ShardPlan shard = choose_shard_plan(
+        payload, writer, current.max_record_bytes, current.max_record_bytes,
+        current.max_record_bytes, /*plane_bytes=*/0);
     const long record = find_record(
         shard, payload, slot.offset - owner->dest_offset, slot.length);
 

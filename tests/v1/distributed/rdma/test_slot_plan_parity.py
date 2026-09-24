@@ -92,6 +92,22 @@ class _Case:
             {group: self.kernel_groups[group] for group in sorted(self.kernel_groups)}
         )
 
+    def writer_aligns_every_group(self) -> bool:
+        """Report whether Python can name a record for every object group.
+
+        Returns:
+            ``False`` if any object group is one the write side cannot
+            attribute a record layout to, so its records are byte-count
+            sharded.
+        """
+        layout = self.layout()
+        try:
+            for object_group_id in layout.object_group_ids():
+                layout.record_count(object_group_id, self.max_record_bytes)
+        except ValueError:
+            return False
+        return True
+
     def render_slots(self) -> list[str]:
         """Render this case's Python plan in the harness's ``slot`` form.
 
@@ -224,13 +240,27 @@ def test_the_fixture_exercises_more_than_one_geometry() -> None:
     worth running are asserted rather than assumed.
     """
     cases = _parse_fixture(_FIXTURE.read_text())
-    assert len(cases) >= 8
+    assert len(cases) >= 12
 
     assert any(
-        len(groups) > 1 for case in cases for groups in case.kernel_groups.values()
+        len({group.plane_bytes for group in groups}) > 1
+        for case in cases
+        for groups in case.kernel_groups.values()
     ), (
-        "no case puts two kernel groups in one object group, so hybrid "
-        "striding is untested"
+        "no case puts kernel groups of different plane sizes in one object "
+        "group, so hybrid striding and hybrid record layout are untested"
+    )
+    assert any(
+        len(groups) > 1
+        and any(group.plane_bytes > case.max_record_bytes for group in groups[1:])
+        for case in cases
+        for groups in case.kernel_groups.values()
+    ), (
+        "no hybrid case splits a later kernel group into pieces, so per-run "
+        "piece numbering is untested"
+    )
+    assert any(not case.writer_aligns_every_group() for case in cases), (
+        "no case covers a payload size the writer cannot attribute"
     )
     assert any(len(case.kernel_groups) > 1 for case in cases), (
         "no case spans two object groups"
@@ -287,11 +317,12 @@ def test_a_slot_maps_to_the_record_the_write_side_actually_stored(
 
     Which bytes a slot carries and which records exist are computed by
     different code. The planner cuts planes per kernel group; the writer
-    shards through ``make_shard_plan``, which is told one plane size for the
-    whole model. Where they line up, ``record_index_for`` must name the
-    record the harness finds by searching -- if it named a different one, the
-    fetch would pull a real record into the right address and the model would
-    read the wrong bytes.
+    shards through ``choose_shard_plan``, which cuts each kernel group
+    against its own plane size. For every case the writer can align --
+    hybrid ones included -- the harness must find a record covering exactly
+    each slot, and ``record_index_for`` must name that same record. If it
+    named a different one, the fetch would pull a real record into the
+    right address and the model would read the wrong bytes.
 
     Args:
         logic_harness_with_fixture: Fixture that builds and runs a harness
@@ -301,43 +332,50 @@ def test_a_slot_maps_to_the_record_the_write_side_actually_stored(
         logic_harness_with_fixture("slot_plan_dump", _FIXTURE).splitlines()
     )
 
-    checked = 0
+    checked: list[str] = []
     for case in _parse_fixture(_FIXTURE.read_text()):
-        if case.layout().uniform_plane_bytes() == 0:
+        if not case.writer_aligns_every_group():
             continue
         native_records = [
             line for line in native[case.name] if line.startswith("record ")
         ]
         assert "none" not in " ".join(native_records), (
-            f"case {case.name}: the layout is plane-aligned, so every slot "
+            f"case {case.name}: the writer aligns this layout, so every slot "
             "should correspond to a stored record"
         )
         assert case.render_records() == native_records, (
             f"case {case.name}: Python and the write side disagree about "
             "which record holds a slot"
         )
-        checked += 1
+        checked.append(case.name)
 
-    assert checked >= 7, "too few plane-aligned cases to be worth asserting"
+    assert len(checked) >= 11, "too few aligned cases to be worth asserting"
+    hybrid = {
+        "hybrid_kernel_groups_in_one_object_group",
+        "hybrid_later_group_split_into_uneven_pieces",
+        "hybrid_object_groups_of_different_shapes",
+    }
+    assert hybrid <= set(checked), (
+        "a hybrid case was skipped, so the per-kernel-group layout is not "
+        "being checked against the writer"
+    )
 
 
-def test_a_model_the_writer_does_not_plane_align_has_no_servable_records(
+def test_a_payload_size_the_writer_cannot_attribute_has_no_servable_records(
     logic_harness_with_fixture: Callable[[str, Path], str],
 ) -> None:
-    """Refusing to name records for a hybrid model is justified, not cautious.
+    """Refusing to name records for an ambiguous size is justified.
 
-    ``uniform_kv_plane_bytes`` yields one plane size for the whole model, so a
-    single kernel group that disagrees drops the writer back to byte-count
-    sharding for everything. Its record boundaries then fall wherever the
-    arithmetic puts them, while the planner still cuts each kernel group
-    along its own planes.
+    The writer picks a record layout by payload size alone. Two object
+    groups of the same size laid out differently leave it unable to tell
+    which a payload is, so it shards that size by byte count and its record
+    boundaries fall wherever the arithmetic puts them.
 
-    ``record_index_for`` refuses outright for such a model. This checks that
-    the refusal is not overcautious: the harness, which searches for a record
-    covering exactly a slot's range, finds none for most slots. The few it
-    does find are coincidences -- byte-count boundaries that happen to land on
-    a plane edge -- and serving only those would deliver part of a layer and
-    report it ready.
+    ``record_index_for`` refuses for such a group. This checks that the
+    refusal is not overcautious: the harness, which searches for a record
+    covering exactly a slot's range, finds none for some slots. Any it does
+    find are coincidences, and serving only those would deliver part of a
+    layer and report it ready.
 
     Args:
         logic_harness_with_fixture: Fixture that builds and runs a harness
@@ -347,17 +385,18 @@ def test_a_model_the_writer_does_not_plane_align_has_no_servable_records(
         logic_harness_with_fixture("slot_plan_dump", _FIXTURE).splitlines()
     )
 
-    hybrid = [
+    ambiguous = [
         case
         for case in _parse_fixture(_FIXTURE.read_text())
-        if case.layout().uniform_plane_bytes() == 0
+        if not case.writer_aligns_every_group()
     ]
-    assert hybrid, "no case covers a model the writer will not plane-align"
+    assert [case.name for case in ambiguous] == [
+        "same_size_groups_laid_out_differently"
+    ], "the set of cases the writer cannot align changed"
 
-    for case in hybrid:
+    for case in ambiguous:
         records = [line for line in native[case.name] if line.startswith("record ")]
-        unservable = [line for line in records if line.endswith(" none")]
-        assert unservable, (
+        assert any(line.endswith(" none") for line in records), (
             f"case {case.name}: every slot found a record, so refusing to "
             "name them is too strict"
         )

@@ -13,9 +13,15 @@ import torch
 
 
 class _FakeKVLayerGroupsManager:
-    """Minimal manager stub: one full-attention object group."""
+    """Minimal manager stub: one full-attention object group of two layers."""
 
     num_object_groups: int = 1
+    kernel_groups: list[types.SimpleNamespace] = [
+        types.SimpleNamespace(layer_indices=[0, 1])
+    ]
+    object_groups: list[types.SimpleNamespace] = [
+        types.SimpleNamespace(kernel_group_indices=[0])
+    ]
 
     def get_attn_desc(self) -> Any:
         """One full-attention object group."""
@@ -71,6 +77,104 @@ def stub_lmcache_native() -> Any:
         },
     ):
         yield
+
+
+def _registration_module(
+    monkeypatch: pytest.MonkeyPatch, ctx: Any, layout_desc: Any
+) -> Any:
+    """Build the transfer module with CUDA-touching collaborators stubbed out.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        ctx: Engine context the module is built with.
+        layout_desc: Layout descriptor every object group reports.
+
+    Returns:
+        A ``LMCacheDrivenTransferModule`` ready for ``register_kv_cache``.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.modules import (
+        lmcache_driven_transfer as lmcache_driven_transfer_mod,
+    )
+
+    monkeypatch.setattr(
+        lmcache_driven_transfer_mod,
+        "DeviceHostFuncDispatcher",
+        _FakeDeviceHostFuncDispatcher,
+    )
+    monkeypatch.setattr(
+        lmcache_driven_transfer_mod,
+        "create_cache_context",
+        lambda *args, **kwargs: _FakeGPUContext(),
+    )
+    monkeypatch.setattr(
+        lmcache_driven_transfer_mod,
+        "get_layout_desc",
+        lambda *args, **kwargs: layout_desc,
+    )
+    monkeypatch.setattr(
+        lmcache_driven_transfer_mod.torch_dev,
+        "empty_cache",
+        lambda: None,
+        raising=False,
+    )
+    return lmcache_driven_transfer_mod.LMCacheDrivenTransferModule(ctx)
+
+
+def test_registration_hands_storage_the_layout_and_layer_indices(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_lmcache_native: Any,
+) -> None:
+    """Storage learns each object group's layout when a worker registers.
+
+    Without this nothing ever tells the storage backend how a payload is laid
+    out, so every model -- uniform or hybrid -- is sharded by byte count and
+    no record follows a layer boundary.
+    """
+    # First Party
+    from lmcache.utils import EngineType
+    from lmcache.v1.distributed.api import MemoryLayoutDesc
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    layout_desc = MemoryLayoutDesc(
+        shapes=[torch.Size([2, 2, 16, 32])], dtypes=[torch.float16]
+    )
+    ctx = MagicMock()
+    ctx.chunk_size = 16
+    ctx.use_layerwise = False
+    ctx.layout_desc_registry = LayoutDescRegistry()
+
+    module = _registration_module(monkeypatch, ctx, layout_desc)
+    module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [], [])
+
+    ctx.storage_manager.set_object_group_layouts.assert_called_once_with(
+        {0: layout_desc}, {0: [[0, 1]]}
+    )
+
+
+def test_a_layout_storage_rejects_does_not_fail_registration(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_lmcache_native: Any,
+) -> None:
+    """Storage falls back to byte-count records; the worker still registers."""
+    # First Party
+    from lmcache.utils import EngineType
+    from lmcache.v1.distributed.api import MemoryLayoutDesc
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    layout_desc = MemoryLayoutDesc(
+        shapes=[torch.Size([2, 2, 16, 32])], dtypes=[torch.float16]
+    )
+    ctx = MagicMock()
+    ctx.chunk_size = 16
+    ctx.use_layerwise = False
+    ctx.layout_desc_registry = LayoutDescRegistry()
+    ctx.storage_manager.set_object_group_layouts.side_effect = ValueError("bad")
+
+    module = _registration_module(monkeypatch, ctx, layout_desc)
+    module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [], [])
+
+    assert ctx.layout_desc_registry.find("model", 1) is layout_desc
 
 
 def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(

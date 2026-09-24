@@ -584,6 +584,27 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             attn_desc,
             group_layout_descs=group_layout_descs,
         )
+        group_kernel_layer_indices = {
+            gid: [
+                list(kv_groups_manager.kernel_groups[kernel_index].layer_indices)
+                for kernel_index in object_group.kernel_group_indices
+            ]
+            for gid, object_group in enumerate(kv_groups_manager.object_groups)
+        }
+        try:
+            self._ctx.storage_manager.set_object_group_layouts(
+                group_layout_descs, group_kernel_layer_indices
+            )
+        except ValueError:
+            # Storage then shards this model's records by byte count, as it
+            # did before layouts were published: stores and whole-object
+            # loads are unaffected, only layer-at-a-time fetch is lost.
+            logger.warning(
+                "Storage could not use the KV layout of %s; records will not "
+                "follow layer boundaries",
+                model_name,
+                exc_info=True,
+            )
 
         layerwise_schedule: LayerwiseSchedule | None = None
         layer_progress: LayerProgressRecord | None = None

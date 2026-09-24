@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
+
+#include <utility>
+#include <vector>
+
 #include "../connector_pybind_utils.h"
 #include "connector.h"
 #include "l1_rdma_registration.h"
@@ -58,7 +63,25 @@ PYBIND11_MODULE(lmcache_aerospike, m) {
                py::arg("plane_bytes") = 0)
           .def("set_plane_bytes",
                &lmcache::connector::AerospikeNativeConnector::set_plane_bytes,
-               py::arg("plane_bytes"));
+               py::arg("plane_bytes"))
+          // One list per object group of (plane_bytes, planes) pairs, one
+          // pair per kernel group in payload order.
+          .def(
+              "set_record_layouts",
+              [](lmcache::connector::AerospikeNativeConnector& self,
+                 const std::vector<std::vector<std::pair<size_t, uint32_t>>>&
+                     object_groups) {
+                std::vector<std::vector<lmcache::connector::PlaneRun>> runs;
+                for (const auto& group : object_groups) {
+                  std::vector<lmcache::connector::PlaneRun> group_runs;
+                  for (const auto& [plane_bytes, planes] : group) {
+                    group_runs.push_back({plane_bytes, planes});
+                  }
+                  runs.push_back(std::move(group_runs));
+                }
+                self.set_record_layouts(runs);
+              },
+              py::arg("object_groups"));
 #ifdef LMCACHE_AEROSPIKE_RDMA
   aerospike_client
       .def("pipelined_fetch_ready",

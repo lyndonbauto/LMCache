@@ -40,10 +40,12 @@ from .planner import (
     FetchPlanner,
     KernelGroupGeometry,
     ModelLayout,
+    PlaneRun,
     PlanRequest,
     RecordKeyDigests,
     SlotDigestSource,
     plane_segment_bytes,
+    record_plane_runs,
 )
 from .pump import LayerArrivalPump
 
@@ -63,6 +65,7 @@ __all__ = [
     "LayerUnservableError",
     "LayerwiseContractError",
     "ModelLayout",
+    "PlaneRun",
     "PlanRequest",
     "RecordKeyDigests",
     "RecordingLayerLoadSink",
@@ -72,4 +75,5 @@ __all__ = [
     "StaleGenerationError",
     "UnservableLayerArrivalSource",
     "plane_segment_bytes",
+    "record_plane_runs",
 ]
