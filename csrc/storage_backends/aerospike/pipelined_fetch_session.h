@@ -40,6 +40,12 @@ namespace lmcache {
 namespace connector {
 namespace rdma {
 
+// Reserved generation meaning "no fetch". Never allocated to a live request,
+// so a zero-initialised or defaulted generation cannot alias a real one and
+// be credited with its arrivals. Matches NO_GENERATION in
+// lmcache/v1/layerwise/contract.py.
+constexpr uint16_t kNoGeneration = 0;
+
 // Which cluster node holds each participating chunk.
 struct ChunkNodeBinding {
   uint32_t chunk_id = 0;
@@ -123,7 +129,9 @@ class PipelinedFetchSession {
   // Layer readiness for the active request.
   //
   // Thread safety: takes `mu_`. When ``request_generation`` is non-zero and
-  // does not match the active request, returns false.
+  // does not match the active request, returns false. `kNoGeneration` skips
+  // the check; it is unambiguous because no live request is ever allocated
+  // that value.
   bool is_layer_ready(uint32_t layer_id, uint16_t request_generation = 0) const;
 
   // Layers marked unservable on the active request.
@@ -149,6 +157,8 @@ class PipelinedFetchSession {
 
   // Restore the generation counter after the session object is recreated.
   //
+  // `kNoGeneration` is coerced to 1, since it is never allocated.
+  //
   // Thread safety: takes `mu_`.
   void restore_generation_counter(uint16_t next_generation);
 
@@ -164,7 +174,7 @@ class PipelinedFetchSession {
   uint32_t max_notification_slots_;
 
   mutable std::mutex mu_;
-  uint16_t next_generation_ = 0;
+  uint16_t next_generation_ = 1;
   uint16_t last_abandoned_generation_ = 0;
 
   bool has_request_ = false;

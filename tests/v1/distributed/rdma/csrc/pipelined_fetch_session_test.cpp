@@ -26,6 +26,7 @@ using lmcache::connector::rdma::ChunkNodeBinding;
 using lmcache::connector::rdma::ChunkPlacement;
 using lmcache::connector::rdma::encode_immediate;
 using lmcache::connector::rdma::KernelGroupLayout;
+using lmcache::connector::rdma::kNoGeneration;
 using lmcache::connector::rdma::NodeRegistration;
 using lmcache::connector::rdma::NodeRegistry;
 using lmcache::connector::rdma::object_group_bytes;
@@ -363,6 +364,44 @@ void test_abandon_makes_late_reply_harmless() {
   session.finish_request();
 }
 
+void test_allocated_generations_are_never_the_reserved_value() {
+  std::cout << "allocated generations are never the reserved value\n";
+
+  const ObjectGroupLayout layout = single_group_layout(1);
+  const SlotPlanner planner({layout});
+  NodeRegistry registry;
+  register_node(registry, "node-a", 1);
+  PipelinedFetchSession session = make_session(planner, registry);
+
+  const std::vector<ChunkPlacement> placements = {ChunkPlacement{0, 0, 0}};
+  const std::vector<ChunkNodeBinding> nodes = {{0, "node-a"}};
+  const auto plan = planner.plan_request(placements, kRecordCap, kWriteCap, 0);
+
+  const uint16_t first_gen = session.begin_request(
+      placements, nodes,
+      digests_for_plan(planner, plan, placements, kRecordCap, "g0"));
+  check(first_gen != kNoGeneration,
+        "the first request of a fresh session does not get the reserved "
+        "generation");
+  session.finish_request();
+
+  // 65535 + 1 wraps to the reserved value, which is the only way a live
+  // request could otherwise be handed it.
+  session.restore_generation_counter(65535);
+  const uint16_t last_gen = session.begin_request(
+      placements, nodes,
+      digests_for_plan(planner, plan, placements, kRecordCap, "g1"));
+  check(last_gen == 65535, "the counter reaches the top of the 16-bit space");
+  session.finish_request();
+
+  const uint16_t wrapped_gen = session.begin_request(
+      placements, nodes,
+      digests_for_plan(planner, plan, placements, kRecordCap, "g2"));
+  check(wrapped_gen != kNoGeneration,
+        "the generation after a wrap skips the reserved value");
+  session.finish_request();
+}
+
 void test_kv_size_two_requires_both_planes() {
   std::cout << "kv_size two requires both planes before layer ready\n";
 
@@ -625,6 +664,7 @@ int main() {
     test_failed_slot_makes_one_layer_recompute();
     test_stale_generation_notifications_are_ignored();
     test_abandon_makes_late_reply_harmless();
+    test_allocated_generations_are_never_the_reserved_value();
     test_kv_size_two_requires_both_planes();
     test_begin_request_rejects_missing_digest();
     test_begin_request_rejects_second_active();

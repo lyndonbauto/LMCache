@@ -208,6 +208,9 @@ uint16_t PipelinedFetchSession::active_generation() const {
 }
 
 uint16_t PipelinedFetchSession::allocate_generation() {
+  if (next_generation_ == kNoGeneration) {
+    next_generation_ = 1;
+  }
   const uint16_t generation = next_generation_;
   next_generation_ = static_cast<uint16_t>(next_generation_ + 1);
   return generation;
@@ -425,7 +428,8 @@ void PipelinedFetchSession::abandon_request() {
 void PipelinedFetchSession::restore_generation_counter(
     uint16_t next_generation) {
   std::lock_guard<std::mutex> lock(mu_);
-  next_generation_ = next_generation;
+  next_generation_ =
+      next_generation == kNoGeneration ? uint16_t{1} : next_generation;
 }
 
 }  // namespace rdma

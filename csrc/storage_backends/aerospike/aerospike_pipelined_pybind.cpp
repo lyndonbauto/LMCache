@@ -131,6 +131,8 @@ void bind_pipelined_fetch(py::module& module,
       .def("issue_pipelined_fetch_by_keys", &issue_pipelined_fetch_by_keys,
            py::arg("placements"), py::arg("chunk_nodes"),
            py::arg("slot_record_keys"))
+      .def("pipelined_unservable_layers",
+           &AerospikeNativeConnector::pipelined_unservable_layers)
       .def("finish_pipelined_fetch",
            &AerospikeNativeConnector::finish_pipelined_fetch)
       .def("abandon_pipelined_fetch",

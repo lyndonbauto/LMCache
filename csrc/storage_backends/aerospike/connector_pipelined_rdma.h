@@ -102,7 +102,7 @@ class AerospikePipelinedRdmaDriver {
   bool fabric_ready_ = false;
   std::string init_error_;
 
-  uint16_t next_generation_ = 0;
+  uint16_t next_generation_ = 1;
 
   std::unique_ptr<rdma::RdmaContext> context_;
   rdma::NodeRegistry registry_;

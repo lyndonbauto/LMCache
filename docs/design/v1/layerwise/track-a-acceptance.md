@@ -33,6 +33,8 @@ the pump, or anything touching a GPU.
 
 `lmcache/v1/layerwise/contract.py::LayerArrivalSource`. That file is frozen;
 if it is wrong, say so and we change it together rather than working around it.
+Open blockers and questions raised so far are in
+[track-a-questions-for-track-c.md](track-a-questions-for-track-c.md).
 
 When it does change, the change is written up in
 [contract-changes.md](contract-changes.md) -- what moved, what breaks, and
@@ -130,6 +132,10 @@ is a plain frozen dataclass for exactly this reason.
 
 Device-free logic tests run with `make -C tests/v1/distributed/rdma
 logic-test`. The fabric tests need `RDMA_DEVICE=rxe0 RDMA_GID_INDEX=1`.
+
+Working from Windows: everything except A7 and A8 runs in an Ubuntu VM, set up
+in
+[rdma_testing_on_windows.md](../distributed/l2_adapters/rdma_testing_on_windows.md).
 
 ## Done
 

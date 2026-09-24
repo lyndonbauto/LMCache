@@ -601,6 +601,14 @@ bool AerospikeNativeConnector::is_pipelined_layer_ready(
   return pipelined_rdma_->is_layer_ready(layer_id, request_generation);
 }
 
+std::vector<uint32_t> AerospikeNativeConnector::pipelined_unservable_layers()
+    const {
+  if (!pipelined_rdma_) {
+    return {};
+  }
+  return pipelined_rdma_->unservable_layers();
+}
+
 void AerospikeNativeConnector::finish_pipelined_fetch() {
   if (!pipelined_rdma_) {
     return;

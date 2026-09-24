@@ -449,6 +449,14 @@ rejecting mismatched immediates stops LMCache from *acting* on a late writer.
 It does not prevent the stray write itself — only re-registration does that —
 and that gap is still open. See `ArrivalStatus::kStaleGeneration`.
 
+Generation `0` is reserved and never allocated to a live request
+(`kNoGeneration` in `pipelined_fetch_session.h`, matching `NO_GENERATION` in
+`lmcache/v1/layerwise/contract.py`). A zero-initialised or defaulted
+generation therefore fails to match any fetch instead of aliasing one — and
+`is_layer_ready`'s `request_generation = 0` "skip the check" default stays
+unambiguous, which it would not be if the first request of a process were
+handed generation 0. The counter skips 0 on wrap for the same reason.
+
 16 bits of slot index caps a request at 65536 slots. That is per *request* and
 not per fetch command, since a request spans every participating chunk:
 `chunks × layers × kv_size × pieces_per_plane`. An 80-layer model over 100
@@ -706,6 +714,10 @@ Soft-RoCE (`rdma_rxe`) presents a functional RDMA device over ordinary
 Ethernet or loopback, so the data path can be exercised without RDMA NICs. It
 supports RC but **not** SRD, which is why RC is the portable path.
 
+On a Windows workstation this needs a Linux VM, because `rdma_rxe` is a kernel
+module and neither WSL2 nor Docker Desktop ships one that has it. See
+[`rdma_testing_on_windows.md`](rdma_testing_on_windows.md).
+
 All of the following needs **root**.
 
 If you have Docker but not an interactive `sudo` — a common state on a shared
@@ -922,6 +934,8 @@ Aerospike**; no policy has been invented here.
   real KV layout maps onto the slots this document signals about, with an
   interactive walkthrough in
   [`layerwise-transfer-data-model.html`](layerwise-transfer-data-model.html).
+- [`rdma_testing_on_windows.md`](rdma_testing_on_windows.md) — standing up an
+  Ubuntu VM on a Windows workstation and running these suites in it.
 - `docs/design/v1/multiprocess/transport/request_transport.md` — the MP request
   transport, relevant to any future per-layer delivery.
 - `lmcache/v1/distributed/l2_adapters/mooncake_store_l2_adapter.py` — the

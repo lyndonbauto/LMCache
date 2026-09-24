@@ -171,6 +171,17 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
   bool is_pipelined_layer_ready(uint32_t layer_id,
                                 uint16_t request_generation = 0) const;
 
+  // Layers of the active pipelined fetch that a node declined or lost. Empty
+  // when pipelined fetch is not ready or no request is active.
+  //
+  // A caller cannot distinguish "still in flight" from "will never arrive"
+  // with is_pipelined_layer_ready alone: both report false. Without this the
+  // only available response to a declined slot is to keep polling until the
+  // deadline, which turns a recoverable miss into a stall.
+  //
+  // Thread safety: safe to call concurrently.
+  std::vector<uint32_t> pipelined_unservable_layers() const;
+
   // Finish or abandon the active pipelined fetch.
   //
   // Thread safety: safe to call concurrently; serialized on the driver lock.
