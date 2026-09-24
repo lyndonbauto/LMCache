@@ -1,187 +1,163 @@
-# Track A <-> Track C: blockers, answers, and meeting agenda
+# Track A <-> Track C: blockers, decisions, and meeting agenda
 
 Raised by Track A while scoping [A1](track-a-acceptance.md#a1-the-contract-is-implemented-and-passes-the-conformance-suite),
-then updated with Track C's reply and the contract changes in
+then updated with Track C's replies and the contract changes in
 [contract-changes.md](contract-changes.md). Track C owns `contract.py` and
-`tests/v1/layerwise/`, so contract items need a Track C decision rather than
-a Track A workaround. See
+`tests/v1/layerwise/`. See
 [track-c-acceptance.md](track-c-acceptance.md#on-changing-the-contracts) for
 how contract changes are made.
 
 ## Where things stand
 
-| Item | Status |
-|---|---|
-| BLK1: which side expands slots | Partly answered; superseded by M1 |
-| BLK2: `node_index` had no node list | Resolved: `LayerFetchPlan.node_names` |
-| BLK3: slot numbering | Resolved: a slot's position in `plan.slots` is its index |
-| Q1: what `SlotPlacement.offset` is relative to | Open: M2 |
-| Q2: digest encoding | Resolved: slots carry `record_key`; native hashes it |
-| Q3: how the planner learns `max_sinks` | Open |
-| Q4: distinct error for an oversized plan | Open |
-| S1: conformance-suite arrival driver | Open |
-| S2: shape test changed by Track A | Awaiting Track C review |
+| Item | Status | Owner of follow-up |
+|---|---|---|
+| BLK1 / M1: who expands slots | **Decided: Option 1** (the plan is the only source of truth) | Track A: native session |
+| BLK2: node list | Done: `LayerFetchPlan.node_names` | - |
+| BLK3: slot numbering | Done: position in `plan.slots`; plan rejects > 65536 slots | - |
+| Q1 / M2: offsets and window ownership | **Open for the meeting** (see M2) | Both |
+| Q2: digest encoding | Done: slots carry `record_key`; native hashes it | - |
+| Q3: planner and `max_sinks` | **Decided:** the planner does not need it | Track C: reword C5 |
+| Q4: oversized-plan error | **Decided:** `PlanTooLargeError(LayerwiseContractError)` | Track C: contract; Track A: raise it |
+| S1: conformance driver | **Decided:** `ArrivalDriver` as proposed | Track C: parametrize suite; Track A: fabric-free driver |
+| S2: shape test | **Decided:** Track A updates it with the implementation | Done |
+| M3: native numbering docstring | Resolved by Option 1 | - |
+| M4: retrieve wiring vs the pump | Open (see M4) | Track C |
 
-## Already done on Track A's side
+## Decisions
 
-No action needed; listed so Track C knows these invariants hold.
+### Option 1: the native session takes the plan's slots as given
 
-- **Generation `0` is never allocated.** `PipelinedFetchSession` used to hand
-  the first fetch of every process generation `0`, which `is_layer_ready`
-  also treats as "skip the generation check". It now starts at `1` and skips
-  `0` on wrap, matching `NO_GENERATION`. Pinned by
-  `test_allocated_generations_are_never_the_reserved_value`.
-- **Declined layers are visible from Python.** The connector exposes
-  `pipelined_unservable_layers()`, so `poll_layer` can return `UNSERVABLE`.
-- **The adapter is implemented except for native issue.**
-  `AerospikeLayerArrivalSource` implements `poll_layer`, `finish_fetch`,
-  `abandon_fetch`, the generation and layer checks, and native error
-  translation. `begin_fetch` issues through an injected `PlanIssuer`. The
-  production `NativePlanIssuer` raises `NotImplementedError` until M1 and M2
-  are settled; that method is the only code that changes once they are.
-  Tested in `tests/v1/layerwise/test_aerospike_layer_arrival_source.py`,
-  against the current contract (`record_key`, `plane`, `piece`,
-  `node_names`).
+The Python plan is the only source of truth for what is fetched. The native
+side no longer re-plans from chunk placements.
+
+`pipelined_fetch_arguments` flattens the plan into the node names plus one
+entry per slot, in plan order:
+
+```text
+(node_index, record_key, dest_offset, length, layer_id)
+```
+
+The native session's job becomes:
+
+1. hash each record key with `record_digest_hex`;
+2. group slots by `node_names[node_index]`, which fixes node ownership, since
+   each record's own partition decides its node;
+3. build `kv-sink-fetch-pipelined` commands using each slot's position as its
+   slot number, split to each node's `max_sinks`;
+4. count readiness per layer from the slots' `layer_id`.
+
+It keeps every check it does today: the device notification cap (A6), sinks
+inside the leased window, declined-slot handling (A4), and stale-generation
+rejection (A3). `SlotPlanner` and the chunk-placement entry point stay until
+the old path is removed.
+
+### Q3: `max_sinks` belongs to the transport
+
+The planner caps a request at 65536 slots. The per-command sink cap is the
+transport's concern, and Track A already splits commands to fit it (A5).
+Track C rewords C5 to say this.
+
+### Q4: `PlanTooLargeError`
+
+Track C adds `PlanTooLargeError(LayerwiseContractError)` to `contract.py`.
+Because it subclasses the existing error, current handlers still catch it.
+Track A raises it from `begin_fetch` when a plan exceeds the device's
+notification cap. For now the retrieve path treats it like any other contract
+error and falls back to a whole-object load.
+
+Track A note: the native session reports this case as a generic
+`std::runtime_error` today, so the adapter can't tell it apart from other
+failures. The native side needs a distinct exception type for it, or the
+adapter needs to check `len(plan.slots)` against a queried cap before issuing.
+
+### S1: conformance driver
+
+Track C parametrizes `tests/v1/layerwise/` over source implementations.
+Track A writes a fabric-free `ArrivalDriver` for the Aerospike source, which
+feeds encoded immediates and declined replies into the real session.
 
 ## Open for the meeting
 
-### M1. Node ownership: bind per record, by taking the plan's slots
+### M2. Window ownership: bounded windows or the whole L1 region?
 
-**Agreed problem.** The native session binds a whole chunk to one node
-(`ChunkNodeBinding`, `chunk_to_node_`) and builds each node's command from
-that map. Aerospike places each record by its own digest, and record keys
-differ per piece (`...|s|4`), so one chunk's records usually sit on several
-nodes. Today `pipelined_fetch_arguments` refuses such a request; without that
-guard a slot would be sent to a node that does not hold its record. The fix
-is on Track A's side, and the plan already carries a node per slot.
+**Track C's proposal:** offsets are relative to the start of the leased RDMA
+window, and Track A owns the lease. The window would be the registered L1
+region, so a destination offset is the L1 allocation's address minus the
+region base. That fits Track C's `ChunkPlacer`: the production placer turns L1
+allocations into offsets.
 
-**Track A's proposal: have the native session accept the plan's slots
-directly** instead of chunk placements it re-plans from. Each `SlotPlacement`
-already has everything the wire needs:
+**Agreed:** offsets are window-relative, and Track A owns the lease.
 
-```text
-sink    = <digest(record_key)>@<offset>:<length>#<position in plan.slots>
-node    = plan.node_names[slot.node_index]
-readiness: layer L is complete when every slot with layer_id == L has landed
-```
+**The conflict:** making the window the whole L1 region reverses a decision
+recorded in
+[aerospike_rdma.md](../distributed/l2_adapters/aerospike_rdma.md#registration-scope-bounded-windows).
+A slab-wide rkey was rejected there on purpose, because it lets any node write
+anywhere in the KV cache:
 
-What this buys:
+- A late write from an **abandoned** fetch still lands. The generation stops
+  LMCache from *counting* it, but the NIC performs the write anyway.
+- Once the abandoned fetch's L1 objects are freed and reallocated, that write
+  overwrites **another request's KV**. Nothing raises, and the model produces
+  confident wrong tokens.
+- Bounded windows keep the damage inside the abandoned request's own buffer,
+  which is the only reason the failure stays attributable.
 
-- **Per-record node binding for free**, because each slot names its own node.
-- **One planner on the fetch path.** Today the session re-derives slots from
-  `ChunkPlacement` with the C++ `SlotPlanner`, and the Python plan is only
-  equal to what is executed because the parity test keeps the two planners in
-  step (see M3).
-- **`begin_fetch(plan)` is enough.** The contract's `LayerArrivalSource`
-  receives only the plan, so a native call that also needs
-  `Sequence[ChunkPlacement]` (a Track C type) cannot be reached through the
-  contract at all. With slot-level issue, it doesn't need to be.
+So the real question is where a pipelined retrieve's L1 objects are allocated:
 
-The C++ `SlotPlanner` keeps its role as the reference the parity test checks
-the Python planner against; it just stops being on the fetch path.
+| Option | What it means | Cost |
+|---|---|---|
+| **A. Allocate inside a leased window** (Track A's preference) | For a pipelined retrieve, Track A leases a window and hands out destination offsets inside it. The production `ChunkPlacer` asks the transport, not the general L1 allocator. | L1 objects for pipelined retrieves live in the window pool. `window_count` caps concurrent pipelined fetches, and `window_bytes` caps the size of one. |
+| B. Whole L1 region as one window | The production `ChunkPlacer` turns ordinary L1 allocations into offsets from the region base. | Reverses the bounded-window decision. A late write from an abandoned fetch can corrupt an unrelated request, so abandon would have to re-register the memory region (expensive) or quarantine the freed objects until writes are known to have stopped. |
 
-**Question for Track C:** is `plan.slots` authoritative for what is fetched,
-so that the transport may issue it as-is? If yes, Track A changes the session
-and `native_fetch.py` shrinks to key hashing and node lookup.
+Needed from the meeting:
 
-### M2. Who owns L1 window allocation (was Q1)
-
-`SlotPlacement.offset` is documented as "within the destination host
-buffer". The native session checks sinks against `window_bytes` and treats
-offsets as relative to the **leased RDMA window**. Track C's stub supplies a
-per-object `dest_offset`, but nothing allocates windows yet.
-
-Needed decisions:
-
-1. Who leases the window for a fetch: the retrieve path (Track C) or the
-   transport (Track A)?
-2. Are plan offsets window-relative (Track A's preference, since that is what
-   the wire carries) or buffer-absolute?
-3. How the chosen window reaches `begin_fetch`. If the transport leases, it
-   needs only the plan's total extent; if the retrieve path leases, the window
-   has to travel with the plan.
-
-### M3. The native side does not number slots by list order
-
-`native_fetch.py` says `slot_record_keys` is passed "in plan order, so the
-native side's slot numbering matches the plan's". The session does not use
-that order: `digests_for_plan` looks keys up by `(chunk, layer, plane,
-piece)`, and slot numbers come from `SlotPlanner::plan_request`. The two
-numberings agree only because `test_slot_plan_parity.py` keeps the planners
-identical. Layer readiness stays internally consistent either way, so this is
-not a correctness bug today, but the docstring overstates the guarantee. M1
-removes the gap; until then the docstring should point at the parity test.
+1. Option A or B.
+2. Under A: how a window-resident object becomes an ordinary L1 object once
+   the fetch finishes. Either copy it out, or have the window pool be part of
+   L1's allocator so the object can stay where it is.
+3. Who writes the production `ChunkPlacer`. Under A it wraps a Track A lease
+   API, so Track A owns the offsets and Track C calls them.
 
 ### M4. Retrieve wiring and the pump disagree on who begins the fetch
 
-Track C's plan for retrieve (their step 3) is: build the plan, call
-`begin_pipelined_fetch`, and hand the resulting generation to the pump. But
-`LayerArrivalPump.run(plan)` calls `source.begin_fetch(plan)` itself and takes
-no generation. The storage-manager path also returns `0` for "unsupported"
-and a boolean for readiness, which are the two shapes
+Track C's retrieve plan builds the plan, calls `begin_pipelined_fetch`, and
+hands the resulting generation to the pump. But `LayerArrivalPump.run(plan)`
+calls `source.begin_fetch(plan)` itself and takes no generation. The
+storage-manager path also returns `0` for "unsupported" and a boolean for
+readiness, which are the two shapes
 [system-design.md](system-design.md#3-contract-1----layer-arrival) says the
 contract replaced.
 
 **Proposal:** retrieve builds the plan and calls
 `LayerArrivalPump(source, sink).run(plan)` with an `AerospikeLayerArrivalSource`.
-It catches `LayerwiseContractError` and falls back to a whole-object load. The
-storage-manager `begin_pipelined_fetch` / `is_pipelined_layer_ready` pair then
-either goes away or becomes an internal detail behind the source.
+It catches `LayerwiseContractError`, including `PlanTooLargeError`, and falls
+back to a whole-object load. The storage-manager `begin_pipelined_fetch` /
+`is_pipelined_layer_ready` pair then goes away, or becomes internal to the
+source.
 
-### Q3. How does the planner learn each node's `max_sinks`?
+## Work that follows
 
-Unchanged. Track A splits commands to fit `max_sinks` anyway (A5), so a plan
-never fails because of the cap. If C5 only means "don't exceed 65536 slots",
-its wording should say so; otherwise the planner needs a way to read the cap,
-which is known only after `kv-sink-register` on Track A's side.
+**Track A, now unblocked:**
 
-### Q4. Should an oversized plan get its own error?
+1. Native slot-level issue: a new session entry point taking the flattened
+   plan, plus its pybind binding. Logic-harness tests for per-slot node
+   grouping, including one chunk whose records sit on several nodes.
+2. `record_node(user_key)` from the C client's partition map, next to
+   `record_digest_hex`.
+3. `NativePlanIssuer.issue` on top of 1 and 2.
+4. A distinct native error for "plan exceeds notification cap", surfaced as
+   `PlanTooLargeError` once Track C adds it.
+5. The fabric-free `ArrivalDriver` (S1).
 
-Unchanged. A6 rejects a plan larger than the device's receive queue with
-`LayerwiseContractError`, the same exception as "backend cannot do pipelined
-fetch", so a caller cannot tell "shrink the plan" from "fall back". Proposal:
-a `PlanTooLargeError(LayerwiseContractError)` subclass.
+**Track A, after M2:** the window lease API, and a production `ChunkPlacer`
+on top of it if Option A is chosen.
 
-### S1. The conformance suite is hard-wired to the scripted source
+**Track C:** `PlanTooLargeError`, the C5 rewording, the parametrized suite,
+`pipelined_fetch_arguments` in the new flattened shape, the PR split, and
+retrieve wiring per M4.
 
-Unchanged. The pump tests drive `ScriptedLayerArrivalSource` with
-`deliver_layer` / `decline_layer`, which a real source does not have.
-Proposal: a source fixture parametrized over implementations, plus a
-slot-level driver:
+**Together:** C9 over Soft-RoCE.
 
-```python
-class ArrivalDriver(Protocol):
-    def land_slot(self, slot: SlotPlacement, generation: int) -> None: ...
-    def decline_slot(self, slot: SlotPlacement, generation: int) -> None: ...
-```
-
-Track A provides a device-free driver that feeds encoded immediates and
-declined replies into the real session, so the suite can pin A2 (a layer stays
-`PENDING` until its last slot) and A3 (a late slot from an old generation is
-not credited) for every implementation.
-
-### S2. The shape test was changed by Track A; please review
-
-`test_track_a_source_shape.py` built the source with no arguments and
-expected `poll_layer` to be unimplemented. Now the source is built as
-`AerospikeLayerArrivalSource(connector, issuer)`, and the `NotImplementedError`
-check is on `begin_fetch`, the one step still blocked. The signature-equality
-tests are unchanged.
-
-## After the meeting
-
-Track A, once M1 and M2 are decided:
-
-1. Change `PipelinedFetchSession` to take the plan's slots (or, if M1 is
-   rejected, bind nodes per slot within the current chunk-placement API).
-2. Add `record_node(user_key)` next to `record_digest_hex`, from the C
-   client's partition map.
-3. Implement `NativePlanIssuer.issue` and replace the fake issuer in the
-   adapter tests with the device-free S1 driver.
-
-Track C, in parallel: the PR split (build and CI fixes first), then retrieve
-wiring per M4. Both tracks then run C9 over Soft-RoCE.
-
-Suggested PR order: Track C's build/CI fixes, then Track A's small native
-changes (generation `0`, `pipelined_unservable_layers`) as their own PR, then
-the adapter.
+**Suggested PR order:** Track C's build and CI fixes, then Track A's small
+native fixes (generation `0`, `pipelined_unservable_layers`), then the adapter,
+then native slot-level issue.
