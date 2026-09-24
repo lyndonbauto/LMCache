@@ -15,12 +15,13 @@ answers into the contract's terms:
 - native ``RuntimeError`` / ``ValueError`` / ``IndexError`` become
   :class:`~lmcache.v1.layerwise.contract.LayerwiseContractError`.
 
-Turning a :class:`~lmcache.v1.layerwise.contract.LayerFetchPlan` into the
-native call's chunk placements, node bindings and digests is still open; see
-``docs/design/v1/layerwise/track-a-questions-for-track-c.md`` (BLK1-BLK3). It
-sits behind :class:`PlanIssuer` so the rest of the adapter is complete and
-tested today, and :class:`NativePlanIssuer` raises
-:class:`NotImplementedError` until that is decided.
+Issuing a :class:`~lmcache.v1.layerwise.contract.LayerFetchPlan` natively is
+still open: the native session binds whole chunks to one node and plans its
+own slots from chunk placements the plan does not carry. See "Open for the
+meeting" in ``docs/design/v1/layerwise/track-a-questions-for-track-c.md``.
+Issuing sits behind :class:`PlanIssuer` so the rest of the adapter is complete
+and tested today, and :class:`NativePlanIssuer` raises
+:class:`NotImplementedError` until that is settled.
 """
 
 # Standard
@@ -133,10 +134,12 @@ class PlanIssuer(Protocol):
 class NativePlanIssuer:
     """Issues a contract plan through the native client.
 
-    Not implemented yet: the contract plan is slot-level, while the native
-    ``issue_pipelined_fetch`` takes chunk placements, node bindings and
-    per-plane digests, and the plan lacks the fields to build them. See BLK1
-    to BLK3 in ``docs/design/v1/layerwise/track-a-questions-for-track-c.md``.
+    Not implemented yet. ``issue_pipelined_fetch_by_keys`` binds each chunk
+    to one node, but Aerospike places each record by its own digest, so one
+    chunk's records usually span several nodes. It also needs each object's
+    window offset (a ``ChunkPlacement``), which the plan does not carry. See
+    "Open for the meeting" in
+    ``docs/design/v1/layerwise/track-a-questions-for-track-c.md``.
     """
 
     def __init__(self, connector: PipelinedFetchConnector) -> None:
@@ -157,11 +160,12 @@ class NativePlanIssuer:
             The native generation.
 
         Raises:
-            NotImplementedError: Always, until BLK1 to BLK3 are decided.
+            NotImplementedError: Always, until per-record node binding and
+                window-offset ownership are settled.
         """
         raise NotImplementedError(
-            "Track A: LayerFetchPlan -> native placements is blocked on "
-            "BLK1-BLK3 in docs/design/v1/layerwise/"
+            "Track A: native issue needs per-record node binding and window "
+            "offsets; see 'Open for the meeting' in docs/design/v1/layerwise/"
             "track-a-questions-for-track-c.md"
         )
 

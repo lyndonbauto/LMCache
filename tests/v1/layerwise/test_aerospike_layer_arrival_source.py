@@ -7,9 +7,9 @@ declined commands, receive-queue sizing -- is covered by the C++ logic harness
 adapter adds on top: the three-valued status, generation and layer checks,
 error translation, and the abandon rules, all through the public contract.
 
-``begin_fetch`` goes through an injected issuer because translating a
-``LayerFetchPlan`` into the native call is blocked on Track C (BLK1-BLK3 in
-``docs/design/v1/layerwise/track-a-questions-for-track-c.md``).
+``begin_fetch`` goes through an injected issuer because issuing a
+``LayerFetchPlan`` natively is still open; see "Open for the meeting" in
+``docs/design/v1/layerwise/track-a-questions-for-track-c.md``.
 """
 
 # Standard
@@ -217,7 +217,7 @@ def test_the_native_issuer_is_not_disguised_as_a_backend_failure() -> None:
     """
     connector = FakeNativeConnector()
     source = AerospikeLayerArrivalSource(connector, NativePlanIssuer(connector))
-    with pytest.raises(NotImplementedError, match="BLK1"):
+    with pytest.raises(NotImplementedError, match="per-record node binding"):
         source.begin_fetch(make_plan({0: 1}))
 
 
