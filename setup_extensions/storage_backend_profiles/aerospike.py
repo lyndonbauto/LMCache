@@ -117,6 +117,8 @@ class AerospikeStorageBackend(StorageBackendProfile):
         sources = [
             "csrc/storage_backends/aerospike/pybind.cpp",
             "csrc/storage_backends/aerospike/connector.cpp",
+            # The connector shards every write through it, RDMA or not.
+            "csrc/storage_backends/aerospike/shard_plan.cpp",
         ]
         macros: list[tuple[str, str]] = []
 
@@ -132,7 +134,6 @@ class AerospikeStorageBackend(StorageBackendProfile):
             # harness. Not yet exposed through pybind.
             sources.append("csrc/storage_backends/aerospike/layer_pipeline.cpp")
             sources.append("csrc/storage_backends/aerospike/slot_planner.cpp")
-            sources.append("csrc/storage_backends/aerospike/shard_plan.cpp")
             sources.append(
                 "csrc/storage_backends/aerospike/pipelined_fetch_session.cpp"
             )
