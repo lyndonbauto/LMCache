@@ -21,6 +21,13 @@ No action needed; listed so Track C knows the invariants now hold.
 - **Declined layers are visible from Python.** The connector now exposes
   `pipelined_unservable_layers()`. Before, Python could only see ready or not
   ready, so `poll_layer` could never return `UNSERVABLE`.
+- **The adapter is implemented except for plan translation.**
+  `AerospikeLayerArrivalSource` implements `poll_layer`, `finish_fetch`,
+  `abandon_fetch`, the generation and layer checks, and native error
+  translation. `begin_fetch` issues through an injected `PlanIssuer`. The
+  production `NativePlanIssuer` raises `NotImplementedError` until BLK1-BLK3
+  are decided, and that method is the only code that changes once they are.
+  Tested in `tests/v1/layerwise/test_aerospike_layer_arrival_source.py`.
 
 ## Blockers
 
@@ -146,10 +153,12 @@ credited to the new one) for every implementation, not just Track A's.
 
 ### S2. The shape test pins the skeleton
 
-`test_track_a_source_shape.py` asserts that `poll_layer` raises
-`NotImplementedError`, and it builds the source with no arguments. Both stop
-being true when A1 lands. Track A would like to change it in the same commit
-as the implementation. Is that OK, or does Track C want to make that change?
+**Changed by Track A; please review.** The test asserted that `poll_layer`
+raises `NotImplementedError` and built the source with no arguments. Neither
+holds now that everything except the plan translation is implemented. The
+source is built as `AerospikeLayerArrivalSource(connector, issuer)`, and the
+`NotImplementedError` check moved to `begin_fetch`, which is the one step still
+blocked. The signature-equality tests are unchanged.
 
 ## What Track A needs back
 

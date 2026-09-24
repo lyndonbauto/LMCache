@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Track A's skeleton matches the frozen arrival contract.
+"""Track A's source matches the frozen arrival contract.
 
-These tests pin the *shape* of Track A's implementation before it has any
-behaviour, so that Track B and Track C can build against it. They are
-deliberately cheap; the real coverage is the conformance suite, which this
-implementation is expected to pass once the methods are filled in.
+These tests pin the *shape* of Track A's implementation so that Track B and
+Track C can build against it. Behaviour is covered in
+``test_aerospike_layer_arrival_source.py``.
 """
 
 # Standard
@@ -16,13 +15,50 @@ import pytest
 # First Party
 from lmcache.v1.distributed.l2_adapters.layerwise_source import (
     AerospikeLayerArrivalSource,
+    NativePlanIssuer,
+    PipelinedFetchConnector,
 )
 from lmcache.v1.layerwise import LayerArrivalSource
+
+# Local
+from .conftest import make_plan
+
+
+class _ReadyConnector:
+    """The smallest native client that reports pipelined fetch as ready."""
+
+    def pipelined_fetch_ready(self) -> bool:
+        return True
+
+    def pipelined_fetch_init_error(self) -> str:
+        return ""
+
+    def is_pipelined_layer_ready(self, layer_id: int, request_generation: int) -> bool:
+        return False
+
+    def pipelined_unservable_layers(self) -> list[int]:
+        return []
+
+    def finish_pipelined_fetch(self) -> None:
+        return None
+
+    def abandon_pipelined_fetch(self) -> None:
+        return None
+
+
+def _native_source() -> AerospikeLayerArrivalSource:
+    connector = _ReadyConnector()
+    return AerospikeLayerArrivalSource(connector, NativePlanIssuer(connector))
+
+
+def test_the_fake_connector_matches_the_native_surface() -> None:
+    """Keeps the stand-in used below honest about the protocol it replaces."""
+    assert isinstance(_ReadyConnector(), PipelinedFetchConnector)
 
 
 def test_the_aerospike_source_satisfies_the_arrival_protocol() -> None:
     """Track A's class is a LayerArrivalSource as far as the protocol can tell."""
-    assert isinstance(AerospikeLayerArrivalSource(), LayerArrivalSource)
+    assert isinstance(_native_source(), LayerArrivalSource)
 
 
 @pytest.mark.parametrize(
@@ -41,12 +77,11 @@ def test_the_source_signature_matches_the_contract(method_name: str) -> None:
     assert actual == expected
 
 
-def test_the_unimplemented_source_refuses_to_pretend_it_worked() -> None:
-    """An unfilled method raises rather than returning a plausible default.
+def test_the_unfinished_plan_translation_refuses_to_pretend_it_worked() -> None:
+    """The one unimplemented step raises rather than returning a generation.
 
-    A skeleton that returned ``PENDING`` would let a caller poll forever
-    against a transport that does not exist yet.
+    A generation from a fetch that was never issued would let a caller poll
+    forever against slots nobody asked for.
     """
-    source = AerospikeLayerArrivalSource()
     with pytest.raises(NotImplementedError):
-        source.poll_layer(0, 1)
+        _native_source().begin_fetch(make_plan({0: 1}))
