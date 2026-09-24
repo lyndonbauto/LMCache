@@ -33,6 +33,7 @@ from .fakes import (
     ScriptedLayerArrivalSource,
     UnservableLayerArrivalSource,
 )
+from .native_fetch import PipelinedFetchArguments, pipelined_fetch_arguments
 from .planner import (
     MAX_SLOTS_PER_REQUEST,
     ByteRange,
@@ -42,8 +43,8 @@ from .planner import (
     ModelLayout,
     PlaneRun,
     PlanRequest,
-    RecordKeyDigests,
-    SlotDigestSource,
+    RecordKeys,
+    RecordKeySource,
     plane_segment_bytes,
     record_plane_runs,
 )
@@ -65,15 +66,17 @@ __all__ = [
     "LayerUnservableError",
     "LayerwiseContractError",
     "ModelLayout",
+    "PipelinedFetchArguments",
     "PlaneRun",
     "PlanRequest",
-    "RecordKeyDigests",
+    "RecordKeySource",
+    "RecordKeys",
     "RecordingLayerLoadSink",
     "ScriptedLayerArrivalSource",
-    "SlotDigestSource",
     "SlotPlacement",
     "StaleGenerationError",
     "UnservableLayerArrivalSource",
+    "pipelined_fetch_arguments",
     "plane_segment_bytes",
     "record_plane_runs",
 ]

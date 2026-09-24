@@ -12,8 +12,7 @@ or a fabric would mean something had leaked across a contract boundary.
 """
 
 # Standard
-from collections.abc import Callable, Iterable, Sequence
-import hashlib
+from collections.abc import Iterable, Sequence
 
 # Third Party
 import pytest
@@ -30,7 +29,7 @@ from lmcache.v1.layerwise.planner import (
     ModelLayout,
     PlaneRun,
     PlanRequest,
-    RecordKeyDigests,
+    RecordKeys,
     plane_segment_bytes,
 )
 
@@ -39,24 +38,25 @@ from lmcache.v1.layerwise.planner import (
 OBJECT_STRIDE = 1 << 20
 
 
-class FakeDigests:
+class FakeRecordKeys:
     """Names a distinct record for every ``(chunk, layer, plane, piece)``.
 
-    The real write side stores one record per slot and derives its digest
-    from that record's key. This reproduces only the property the planner
-    depends on -- that the identity is four-valued and the digests are
-    distinct -- so that a slot given another slot's digest is detectable.
+    The real write side stores one record per slot under its own key. This
+    reproduces only the property the planner depends on -- that the identity
+    is four-valued and the keys are distinct -- so that a slot given another
+    slot's key is detectable.
     """
 
-    def digest_for(self, chunk_id: int, layer_id: int, plane: int, piece: int) -> bytes:
-        """Return a distinct 20-byte digest for one record identity."""
-        key = f"{chunk_id}:{layer_id}:{plane}:{piece}".encode()
-        return hashlib.blake2b(key, digest_size=20).digest()
+    def record_key_for(
+        self, chunk_id: int, layer_id: int, plane: int, piece: int
+    ) -> str:
+        """Return a distinct key for one record identity."""
+        return f"record-{chunk_id}:{layer_id}:{plane}:{piece}"
 
 
 #: Shared because it is stateless; a test needing different behaviour builds
 #: its own.
-DIGESTS = FakeDigests()
+KEYS = FakeRecordKeys()
 
 
 def uniform_layout(
@@ -300,7 +300,7 @@ def test_slots_tile_every_chunks_object_exactly_once(
     placements = place(range(num_chunks))
     plan = FetchPlanner(layout).plan(
         request_for(placements, max_record_bytes=max_record_bytes),
-        DIGESTS,
+        KEYS,
     )
 
     object_bytes = layout.object_group_bytes(0)
@@ -321,7 +321,7 @@ def test_a_hybrid_object_group_tiles_exactly_across_kernel_groups() -> None:
     )
     placements = place([0, 1])
     plan = FetchPlanner(layout).plan(
-        request_for(placements, max_record_bytes=4096), DIGESTS
+        request_for(placements, max_record_bytes=4096), KEYS
     )
 
     for placement in placements:
@@ -336,30 +336,30 @@ def test_each_slot_is_addressed_to_the_node_holding_its_own_chunk() -> None:
     """
     placements = place([0, 1, 2])
     by_chunk = {placement.chunk_id: placement for placement in placements}
-    plan = FetchPlanner(uniform_layout()).plan(request_for(placements), DIGESTS)
+    plan = FetchPlanner(uniform_layout()).plan(request_for(placements), KEYS)
 
     for slot in plan.slots:
         assert slot.node_index == by_chunk[slot.chunk_id].node_index
         assert plan.node_name_for(slot) == f"node-{slot.node_index}"
 
 
-def test_each_slot_carries_the_digest_of_the_record_it_names() -> None:
-    """A slot's digest is looked up by its own four-part record identity.
+def test_each_slot_carries_the_key_of_the_record_it_names() -> None:
+    """A slot's record key is looked up by its own four-part identity.
 
-    A per-chunk or per-layer digest would be wrong in the same silent way a
+    A per-chunk or per-layer key would be wrong in the same silent way a
     coverage gap is: the transport would fetch a real record into the right
     address, and the model would read another piece's bytes. So every slot
     is checked against the source rather than against its neighbours.
     """
     plan = FetchPlanner(uniform_layout(num_layers=3, kv_planes=2)).plan(
-        request_for(place([0, 1]), max_record_bytes=1024), DIGESTS
+        request_for(place([0, 1]), max_record_bytes=1024), KEYS
     )
 
     for slot in plan.slots:
-        assert slot.digest == DIGESTS.digest_for(
+        assert slot.record_key == KEYS.record_key_for(
             slot.chunk_id, slot.layer_id, slot.plane, slot.piece
         )
-    assert len({slot.digest for slot in plan.slots}) == len(plan.slots)
+    assert len({slot.record_key for slot in plan.slots}) == len(plan.slots)
 
 
 def test_a_source_that_cannot_name_a_record_fails_the_whole_plan() -> None:
@@ -370,12 +370,12 @@ def test_a_source_that_cannot_name_a_record_fails_the_whole_plan() -> None:
     """
 
     class MissingOnePiece:
-        def digest_for(
+        def record_key_for(
             self, chunk_id: int, layer_id: int, plane: int, piece: int
-        ) -> bytes:
+        ) -> str:
             if layer_id == 1 and plane == 1:
                 raise KeyError("no record")
-            return DIGESTS.digest_for(chunk_id, layer_id, plane, piece)
+            return KEYS.record_key_for(chunk_id, layer_id, plane, piece)
 
     with pytest.raises(KeyError):
         FetchPlanner(uniform_layout(num_layers=3)).plan(
@@ -383,17 +383,17 @@ def test_a_source_that_cannot_name_a_record_fails_the_whole_plan() -> None:
         )
 
 
-def test_a_source_returning_an_empty_digest_is_rejected() -> None:
-    """An empty digest names no record, so it cannot reach the transport."""
+def test_a_source_returning_an_empty_key_is_rejected() -> None:
+    """An empty key names no record, so it cannot reach the transport."""
 
-    class EmptyDigests:
-        def digest_for(
+    class EmptyKeys:
+        def record_key_for(
             self, chunk_id: int, layer_id: int, plane: int, piece: int
-        ) -> bytes:
-            return b""
+        ) -> str:
+            return ""
 
-    with pytest.raises(ValueError, match="empty digest"):
-        FetchPlanner(uniform_layout()).plan(request_for(place([0])), EmptyDigests())
+    with pytest.raises(ValueError, match="empty record key"):
+        FetchPlanner(uniform_layout()).plan(request_for(place([0])), EmptyKeys())
 
 
 def test_layers_of_an_unplaced_object_group_contribute_no_slots() -> None:
@@ -410,7 +410,7 @@ def test_layers_of_an_unplaced_object_group_contribute_no_slots() -> None:
     )
     plan = FetchPlanner(layout).plan(
         request_for(place([0], object_group_id=1), max_record_bytes=4096),
-        DIGESTS,
+        KEYS,
     )
     assert plan.layer_ids() == (2, 3)
 
@@ -421,7 +421,7 @@ def test_a_request_placing_no_covered_group_is_rejected() -> None:
     with pytest.raises(ValueError, match="no writes"):
         FetchPlanner(layout).plan(
             request_for(place([0], object_group_id=9), max_record_bytes=4096),
-            DIGESTS,
+            KEYS,
         )
 
 
@@ -442,7 +442,7 @@ def test_layers_from_several_object_groups_interleave_by_layer_id() -> None:
             place([0], object_group_id=0) + place([0], object_group_id=1),
             max_record_bytes=4096,
         ),
-        DIGESTS,
+        KEYS,
     )
     assert [slot.layer_id for slot in plan.slots] == [0, 1, 2, 3]
 
@@ -558,7 +558,7 @@ def test_a_small_plane_does_not_borrow_a_larger_groups_piece_count() -> None:
 def test_every_slot_of_a_hybrid_plan_names_a_distinct_record() -> None:
     """The plan and the numbering agree: each record is fetched exactly once."""
     layout = hybrid_layout()
-    plan = FetchPlanner(layout).plan(request_for(place([0, 1])), DIGESTS)
+    plan = FetchPlanner(layout).plan(request_for(place([0, 1])), KEYS)
 
     by_chunk: dict[int, list[int]] = {}
     for slot in plan.slots:
@@ -626,7 +626,7 @@ def test_every_slot_of_a_plan_names_a_distinct_record() -> None:
     chunk's object and two chunks reuse the same numbers.
     """
     layout = uniform_layout(num_layers=3, kv_planes=2, plane_bytes=10_000)
-    plan = FetchPlanner(layout).plan(request_for(place([0, 1])), DIGESTS)
+    plan = FetchPlanner(layout).plan(request_for(place([0, 1])), KEYS)
 
     by_chunk: dict[int, list[int]] = {}
     for slot in plan.slots:
@@ -643,30 +643,13 @@ def test_every_slot_of_a_plan_names_a_distinct_record() -> None:
 # --------------------------------------------------------------------------
 
 
-def key_recorder() -> tuple[Callable[[str], bytes], list[str]]:
-    """Return a digest function and the list of keys it was asked for.
-
-    Returns:
-        A hashing callable standing in for the Aerospike client, and the
-        keys it saw, in order.
-    """
-    seen: list[str] = []
-
-    def digest_of(user_key: str) -> bytes:
-        seen.append(user_key)
-        return hashlib.blake2b(user_key.encode(), digest_size=20).digest()
-
-    return digest_of, seen
-
-
 def test_a_sharded_object_names_its_records_by_index() -> None:
     """Record keys follow the write side's segment naming."""
     layout = uniform_layout(num_layers=2, kv_planes=2, plane_bytes=4096)
-    digest_of, seen = key_recorder()
-    source = RecordKeyDigests(layout, 4096, {(7, 0): "cache-key"}, digest_of)
+    source = RecordKeys(layout, 4096, {(7, 0): "cache-key"})
 
-    source.digest_for(chunk_id=7, layer_id=1, plane=1, piece=0)
-    assert seen == ["cache-key|s|3"]
+    key = source.record_key_for(chunk_id=7, layer_id=1, plane=1, piece=0)
+    assert key == "cache-key|s|3"
 
 
 def test_an_object_stored_as_one_record_uses_its_meta_key() -> None:
@@ -678,50 +661,41 @@ def test_an_object_stored_as_one_record_uses_its_meta_key() -> None:
     """
     layout = uniform_layout(num_layers=1, kv_planes=1, plane_bytes=4096)
     assert layout.record_count(0, 4096) == 1
-    digest_of, seen = key_recorder()
-    source = RecordKeyDigests(layout, 4096, {(0, 0): "cache-key"}, digest_of)
+    source = RecordKeys(layout, 4096, {(0, 0): "cache-key"})
 
-    source.digest_for(chunk_id=0, layer_id=0, plane=0, piece=0)
-    assert seen == ["cache-key|m"]
+    key = source.record_key_for(chunk_id=0, layer_id=0, plane=0, piece=0)
+    assert key == "cache-key|m"
 
 
 def test_each_chunk_is_named_by_its_own_stored_object() -> None:
     """Chunks are separate objects, so they must not share a cache key."""
     layout = uniform_layout(num_layers=2, kv_planes=2, plane_bytes=4096)
-    digest_of, seen = key_recorder()
-    source = RecordKeyDigests(
-        layout, 4096, {(0, 0): "key-a", (1, 0): "key-b"}, digest_of
-    )
+    source = RecordKeys(layout, 4096, {(0, 0): "key-a", (1, 0): "key-b"})
 
-    first = source.digest_for(chunk_id=0, layer_id=0, plane=0, piece=0)
-    second = source.digest_for(chunk_id=1, layer_id=0, plane=0, piece=0)
-    assert seen == ["key-a|s|0", "key-b|s|0"]
-    assert first != second
+    first = source.record_key_for(chunk_id=0, layer_id=0, plane=0, piece=0)
+    second = source.record_key_for(chunk_id=1, layer_id=0, plane=0, piece=0)
+    assert (first, second) == ("key-a|s|0", "key-b|s|0")
 
 
 def test_a_chunk_with_no_stored_object_is_reported_not_guessed() -> None:
     """A miss must reach the planner, which refuses the whole fetch."""
     layout = uniform_layout(num_layers=2, kv_planes=2, plane_bytes=4096)
-    digest_of, _ = key_recorder()
-    source = RecordKeyDigests(layout, 4096, {(0, 0): "key-a"}, digest_of)
+    source = RecordKeys(layout, 4096, {(0, 0): "key-a"})
 
     with pytest.raises(KeyError, match="chunk 4"):
-        source.digest_for(chunk_id=4, layer_id=0, plane=0, piece=0)
+        source.record_key_for(chunk_id=4, layer_id=0, plane=0, piece=0)
 
 
 def test_a_planned_fetch_asks_for_every_record_of_every_chunk_once() -> None:
     """End to end: the plan's slots name each stored record exactly once."""
     layout = uniform_layout(num_layers=2, kv_planes=2, plane_bytes=10_000)
-    digest_of, seen = key_recorder()
-    source = RecordKeyDigests(
-        layout, 4096, {(0, 0): "key-a", (1, 0): "key-b"}, digest_of
-    )
+    source = RecordKeys(layout, 4096, {(0, 0): "key-a", (1, 0): "key-b"})
 
     plan = FetchPlanner(layout).plan(request_for(place([0, 1])), source)
 
     records = layout.record_count(0, 4096)
     assert len(plan.slots) == 2 * records
-    assert sorted(seen) == sorted(
+    assert sorted(slot.record_key for slot in plan.slots) == sorted(
         f"{key}|s|{index}" for key in ("key-a", "key-b") for index in range(records)
     )
 
@@ -729,11 +703,12 @@ def test_a_planned_fetch_asks_for_every_record_of_every_chunk_once() -> None:
 def test_a_hybrid_fetch_asks_for_every_record_of_its_object_once() -> None:
     """End to end for a hybrid object: every stored record, none twice."""
     layout = hybrid_layout()
-    digest_of, seen = key_recorder()
-    source = RecordKeyDigests(layout, 4096, {(0, 0): "key-a"}, digest_of)
+    source = RecordKeys(layout, 4096, {(0, 0): "key-a"})
 
-    FetchPlanner(layout).plan(request_for(place([0])), source)
-    assert sorted(seen) == sorted(f"key-a|s|{index}" for index in range(10))
+    plan = FetchPlanner(layout).plan(request_for(place([0])), source)
+    assert sorted(slot.record_key for slot in plan.slots) == sorted(
+        f"key-a|s|{index}" for index in range(10)
+    )
 
 
 def test_an_unattributable_payload_size_cannot_be_named_at_all() -> None:
@@ -744,8 +719,7 @@ def test_an_unattributable_payload_size_cannot_be_named_at_all() -> None:
             1: [KernelGroupGeometry((2,), kv_planes=1, plane_bytes=4096)],
         }
     )
-    digest_of, _ = key_recorder()
-    source = RecordKeyDigests(layout, 4096, {(0, 0): "key-a"}, digest_of)
+    source = RecordKeys(layout, 4096, {(0, 0): "key-a"})
 
     with pytest.raises(ValueError, match="cannot tell"):
         FetchPlanner(layout).plan(request_for(place([0])), source)
@@ -769,7 +743,7 @@ def test_a_layer_occupies_one_range_per_plane_and_they_are_not_adjacent() -> Non
     num_layers, plane_bytes = 3, 4096
     layout = uniform_layout(num_layers, kv_planes=2, plane_bytes=plane_bytes)
     plan = FetchPlanner(layout).plan(
-        request_for(place([0]), max_record_bytes=4096), DIGESTS
+        request_for(place([0]), max_record_bytes=4096), KEYS
     )
 
     for layer_id in range(num_layers):
@@ -798,7 +772,7 @@ def test_each_kernel_group_is_strided_by_its_own_geometry() -> None:
         }
     )
     plan = FetchPlanner(layout).plan(
-        request_for(place([0]), max_record_bytes=4096), DIGESTS
+        request_for(place([0]), max_record_bytes=4096), KEYS
     )
 
     def stride_of(layer_id: int) -> int:
@@ -818,7 +792,7 @@ def test_a_single_plane_layout_yields_one_range_per_layer() -> None:
     """With one plane per layer the layer is contiguous, as MLA expects."""
     layout = uniform_layout(num_layers=2, kv_planes=1)
     plan = FetchPlanner(layout).plan(
-        request_for(place([0]), max_record_bytes=4096), DIGESTS
+        request_for(place([0]), max_record_bytes=4096), KEYS
     )
     for layer_id in (0, 1):
         assert plan.slots_for_layer(layer_id) == 1
@@ -840,7 +814,7 @@ def test_slot_position_is_unique_across_the_whole_request() -> None:
     placements = place([0, 1, 2], nodes=(0, 1, 0))
     plan = FetchPlanner(uniform_layout()).plan(
         request_for(placements, max_record_bytes=4096),
-        DIGESTS,
+        KEYS,
     )
 
     positions_by_node: dict[int, set[int]] = {}
@@ -860,7 +834,7 @@ def test_slots_are_ordered_layer_major() -> None:
     """
     plan = FetchPlanner(uniform_layout(num_layers=3)).plan(
         request_for(place([0, 1]), max_record_bytes=4096),
-        DIGESTS,
+        KEYS,
     )
     layer_sequence = [slot.layer_id for slot in plan.slots]
     assert layer_sequence == sorted(layer_sequence)
@@ -870,7 +844,7 @@ def test_planning_the_same_request_twice_gives_identical_slot_order() -> None:
     """Slot position is the wire identity, so it cannot vary between runs."""
     planner = FetchPlanner(uniform_layout())
     request = request_for(place([0, 1]), max_record_bytes=4096)
-    assert planner.plan(request, DIGESTS).slots == planner.plan(request, DIGESTS).slots
+    assert planner.plan(request, KEYS).slots == planner.plan(request, KEYS).slots
 
 
 def test_slot_count_per_layer_matches_what_the_transport_will_wait_for() -> None:
@@ -883,7 +857,7 @@ def test_slot_count_per_layer_matches_what_the_transport_will_wait_for() -> None
     placements = place([0, 1])
     plan = FetchPlanner(layout).plan(
         request_for(placements, max_record_bytes=4096),
-        DIGESTS,
+        KEYS,
     )
     pieces_per_plane = 3
     for layer_id in (0, 1):
@@ -906,7 +880,7 @@ def test_a_plane_larger_than_the_record_cap_becomes_several_slots() -> None:
     """
     layout = uniform_layout(num_layers=1, kv_planes=1, plane_bytes=10_000)
     plan = FetchPlanner(layout).plan(
-        request_for(place([0]), max_record_bytes=4096), DIGESTS
+        request_for(place([0]), max_record_bytes=4096), KEYS
     )
 
     lengths = [slot.length for slot in plan.slots]
@@ -924,7 +898,7 @@ def test_a_plane_is_cut_into_evenly_sized_records() -> None:
     """
     layout = uniform_layout(num_layers=1, kv_planes=1, plane_bytes=5000)
     plan = FetchPlanner(layout).plan(
-        request_for(place([0]), max_record_bytes=4096), DIGESTS
+        request_for(place([0]), max_record_bytes=4096), KEYS
     )
     assert [slot.length for slot in plan.slots] == [2500, 2500]
 
@@ -962,7 +936,7 @@ def test_a_plan_is_splittable_into_per_node_commands_within_the_sink_cap() -> No
     layout = uniform_layout(num_layers=40)
     plan = FetchPlanner(layout).plan(
         request_for(place([0, 1]), max_record_bytes=4096),
-        DIGESTS,
+        KEYS,
     )
 
     covered: set[int] = set()
@@ -992,7 +966,7 @@ def test_a_request_exceeding_the_slot_space_is_rejected_not_truncated() -> None:
     with pytest.raises(ValueError, match="slots"):
         FetchPlanner(layout).plan(
             request_for(placements, max_record_bytes=4096),
-            DIGESTS,
+            KEYS,
         )
 
 
@@ -1059,7 +1033,7 @@ def test_a_windowed_group_plans_only_its_own_chunks() -> None:
     """
     planner = FetchPlanner(uniform_layout(num_layers=2))
     windowed = planner.participating_chunks((0, 1, 2, 3), 32, 63, 16)
-    plan = planner.plan(request_for(place(windowed), max_record_bytes=4096), DIGESTS)
+    plan = planner.plan(request_for(place(windowed), max_record_bytes=4096), KEYS)
     assert {slot.chunk_id for slot in plan.slots} == {2, 3}
 
 

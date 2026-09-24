@@ -10,6 +10,7 @@ from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
 from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
     NativeConnectorL2Adapter,
 )
+from lmcache.v1.layerwise import ChunkPlacement, LayerFetchPlan, SlotPlacement
 from lmcache.v1.platform import create_event_notifier
 
 
@@ -65,6 +66,16 @@ def test_native_adapter_without_binding_returns_false() -> None:
     assert adapter.is_pipelined_layer_ready(0) is False
 
 
+def test_native_adapter_without_binding_cannot_begin_a_fetch() -> None:
+    """Without the pipelined binding, beginning a fetch reports generation 0."""
+    adapter = NativeConnectorL2Adapter(native_client=_PlainClient(), type_name="t")
+    plan = LayerFetchPlan(
+        slots=(SlotPlacement(0, 0, 0, "obj|m", 0, 0, 0, 8),),
+        node_names=("node-a",),
+    )
+    assert adapter.begin_pipelined_fetch(plan, (ChunkPlacement(0, 0, 0, 0),)) == 0
+
+
 def test_native_adapter_forwards_pipelined_fetch_lifecycle() -> None:
     """Begin, finish, and init-error surface delegate to the native client."""
 
@@ -75,6 +86,7 @@ def test_native_adapter_forwards_pipelined_fetch_lifecycle() -> None:
             self.finished = False
             self.abandoned = False
             self.generation = 7
+            self.issued: tuple[object, ...] = ()
 
         def event_fd(self) -> int:
             return self._efd.fileno()
@@ -85,13 +97,13 @@ def test_native_adapter_forwards_pipelined_fetch_lifecycle() -> None:
         def set_object_group_layouts(self, layouts: dict) -> None:
             self.layouts = layouts
 
-        def issue_pipelined_fetch(
+        def issue_pipelined_fetch_by_keys(
             self,
-            placements: list[object],
-            chunk_nodes: list[object],
-            digests: list[object],
+            placements: list[tuple[int, int, int]],
+            chunk_nodes: list[tuple[int, str]],
+            slot_record_keys: list[tuple[int, int, int, int, str]],
         ) -> int:
-            del placements, chunk_nodes, digests
+            self.issued = (placements, chunk_nodes, slot_record_keys)
             return self.generation
 
         def finish_pipelined_fetch(self) -> None:
@@ -103,7 +115,28 @@ def test_native_adapter_forwards_pipelined_fetch_lifecycle() -> None:
     client = _PipelinedClient()
     adapter = NativeConnectorL2Adapter(native_client=client, type_name="test")
     assert adapter.pipelined_fetch_init_error() == "verbs init failed"
-    assert adapter.begin_pipelined_fetch([], [], []) == 7
+    placements = (ChunkPlacement(3, 0, 1, 4096),)
+    plan = LayerFetchPlan(
+        slots=(
+            SlotPlacement(
+                layer_id=0,
+                chunk_id=3,
+                node_index=1,
+                record_key="obj|s|0",
+                plane=0,
+                piece=0,
+                offset=4096,
+                length=64,
+            ),
+        ),
+        node_names=("node-a", "node-b"),
+    )
+    assert adapter.begin_pipelined_fetch(plan, placements) == 7
+    assert client.issued == (
+        [(3, 0, 4096)],
+        [(3, "node-b")],
+        [(3, 0, 0, 0, "obj|s|0")],
+    )
     adapter.finish_pipelined_fetch()
     assert client.finished is True
     adapter.abandon_pipelined_fetch()

@@ -447,6 +447,29 @@ void AerospikeNativeConnector::set_record_layouts(
   record_layouts_ = std::move(layouts);
 }
 
+std::string AerospikeNativeConnector::record_digest_hex(
+    const std::string& user_key) const {
+  if (user_key.empty()) {
+    throw std::invalid_argument("record_digest_hex: user key is empty");
+  }
+  as_key key;
+  as_key_init_str(&key, ns_.c_str(), set_name_.c_str(), user_key.c_str());
+  const as_digest* digest = as_key_digest(&key);
+  if (digest == nullptr || !digest->init) {
+    as_key_destroy(&key);
+    throw std::runtime_error("record_digest_hex: client computed no digest");
+  }
+  static constexpr char kHex[] = "0123456789abcdef";
+  std::string hex;
+  hex.reserve(2 * AS_DIGEST_VALUE_SIZE);
+  for (size_t i = 0; i < AS_DIGEST_VALUE_SIZE; ++i) {
+    hex.push_back(kHex[digest->value[i] >> 4]);
+    hex.push_back(kHex[digest->value[i] & 0x0f]);
+  }
+  as_key_destroy(&key);
+  return hex;
+}
+
 #ifdef LMCACHE_AEROSPIKE_RDMA
 
 namespace {
@@ -551,6 +574,19 @@ uint16_t AerospikeNativeConnector::issue_pipelined_fetch(
         return send_pipelined_info_command(&as_, node_name, command);
       },
       placements, chunk_nodes, slot_digests);
+}
+
+uint16_t AerospikeNativeConnector::issue_pipelined_fetch_by_keys(
+    const std::vector<rdma::ChunkPlacement>& placements,
+    const std::vector<rdma::ChunkNodeBinding>& chunk_nodes,
+    const std::vector<SlotRecordKey>& slot_record_keys) {
+  std::vector<rdma::SlotDigest> slot_digests;
+  slot_digests.reserve(slot_record_keys.size());
+  for (const SlotRecordKey& slot : slot_record_keys) {
+    slot_digests.push_back({slot.chunk_id, slot.layer_id, slot.plane,
+                            slot.piece, record_digest_hex(slot.record_key)});
+  }
+  return issue_pipelined_fetch(placements, chunk_nodes, slot_digests);
 }
 
 bool AerospikeNativeConnector::is_pipelined_layer_ready(

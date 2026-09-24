@@ -22,6 +22,7 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
+from collections.abc import Sequence
 from typing import Any
 import select
 import threading
@@ -35,7 +36,9 @@ from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
 )
-from lmcache.v1.layerwise.planner import record_plane_runs
+from lmcache.v1.layerwise.contract import LayerFetchPlan
+from lmcache.v1.layerwise.native_fetch import pipelined_fetch_arguments
+from lmcache.v1.layerwise.planner import ChunkPlacement, record_plane_runs
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import create_event_notifier
 
@@ -72,7 +75,7 @@ def _native_object_group_layouts(
 _KEY_SEP = "@"
 
 
-def _object_key_to_string(key: ObjectKey) -> str:
+def object_key_to_string(key: ObjectKey) -> str:
     """Serialize an ObjectKey to the native-connector wire format.
 
     Unsalted::
@@ -82,6 +85,12 @@ def _object_key_to_string(key: ObjectKey) -> str:
     Salted (trailing ``cache_salt``)::
 
         <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>
+
+    Args:
+        key: The object key to serialize.
+
+    Returns:
+        The string the native connector stores the object under.
     """
     base = (
         f"{key.model_name}{_KEY_SEP}{key.kv_rank:08x}"
@@ -90,6 +99,9 @@ def _object_key_to_string(key: ObjectKey) -> str:
     if key.cache_salt:
         return f"{base}{_KEY_SEP}{key.cache_salt}"
     return base
+
+
+_object_key_to_string = object_key_to_string
 
 
 def _obj_to_memoryview(
@@ -280,20 +292,34 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         return str(getter())
 
     def begin_pipelined_fetch(
-        self,
-        placements: list[object],
-        chunk_nodes: list[object],
-        slot_digests: list[object],
+        self, plan: LayerFetchPlan, placements: Sequence[ChunkPlacement]
     ) -> int:
-        """Issue a pipelined fetch through the native client when supported."""
-        issuer = getattr(self._client, "issue_pipelined_fetch", None)
+        """Issue a pipelined fetch through the native client when supported.
+
+        Records are handed over by user key; the native client derives each
+        digest itself.
+
+        Args:
+            plan: Every slot the fetch expects, in slot-number order.
+            placements: The placements ``plan`` was built from.
+
+        Returns:
+            The native request generation, or ``0`` when the client was built
+            without the pipelined path.
+
+        Raises:
+            ValueError: If one chunk is placed on more than one node, which
+                the native session cannot express.
+        """
+        issuer = getattr(self._client, "issue_pipelined_fetch_by_keys", None)
         if issuer is None:
             return 0
+        arguments = pipelined_fetch_arguments(plan, placements)
         return int(
             issuer(
-                placements,
-                chunk_nodes,
-                slot_digests,
+                arguments.placements,
+                arguments.chunk_nodes,
+                arguments.slot_record_keys,
             )
         )
 

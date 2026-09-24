@@ -4,7 +4,8 @@
 The unit and parity tests prove the writer's arithmetic and the planner's
 agree. These prove the records a real server ends up holding are the ones
 the planner names: every slot of a planned fetch, looked up by the digest
-the Aerospike client computes, must hold exactly that slot's bytes.
+the native connector computes from the slot's record key, must hold exactly
+that slot's bytes.
 
 Requires Aerospike CE and the BUILD_AEROSPIKE=1 extension; skipped otherwise.
 """
@@ -23,12 +24,15 @@ import torch
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.l2_adapters.base import L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.factory import create_l2_adapter_from_registry
+from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
+    object_key_to_string,
+)
 from lmcache.v1.layerwise import (
     ChunkPlacement,
     FetchPlanner,
     ModelLayout,
     PlanRequest,
-    RecordKeyDigests,
+    RecordKeys,
 )
 from lmcache.v1.memory_management import (
     MemoryFormat,
@@ -82,7 +86,7 @@ def _native_extension_available() -> bool:
         # First Party
         from lmcache.lmcache_aerospike import LMCacheAerospikeClient
 
-        return hasattr(LMCacheAerospikeClient, "set_record_layouts")
+        return hasattr(LMCacheAerospikeClient, "record_digest_hex")
     except ImportError:
         return False
 
@@ -129,15 +133,6 @@ def _payload(num_bytes: int) -> torch.Tensor:
     return torch.arange(num_bytes // 4, dtype=torch.int32).view(torch.float32)
 
 
-def _cache_key(key: ObjectKey) -> str:
-    """The connector's key for an unsalted object, per its documented format:
-    ``<model>@<kv_rank:08x>@<object_group_id:x>@<chunk_hash_hex>``."""
-    return (
-        f"{key.model_name}@{key.kv_rank:08x}@{key.object_group_id:x}"
-        f"@{key.chunk_hash.hex()}"
-    )
-
-
 @pytest.fixture
 def set_name() -> str:
     """A fresh set per test, so no test reads another's records."""
@@ -163,6 +158,21 @@ def adapter(set_name: str) -> Iterator[L2AdapterInterface]:
         yield built
     finally:
         built.close()
+
+
+@pytest.fixture
+def native_client(set_name: str) -> Iterator[object]:
+    """The native connector on the test's set, for its key-to-digest call."""
+    # First Party
+    from lmcache.lmcache_aerospike import LMCacheAerospikeClient
+
+    client = LMCacheAerospikeClient(
+        f"{AEROSPIKE_HOST}:{AEROSPIKE_PORT}", AEROSPIKE_NAMESPACE, set_name, 1
+    )
+    try:
+        yield client
+    finally:
+        client.close()
 
 
 @pytest.fixture
@@ -195,7 +205,7 @@ def _load(adapter: L2AdapterInterface, key: ObjectKey, like: torch.Tensor) -> bo
 
 def _meta(inspector: object, set_name: str, key: ObjectKey) -> dict[str, object]:
     _, _, bins = inspector.get(  # type: ignore[attr-defined]
-        (AEROSPIKE_NAMESPACE, set_name, f"{_cache_key(key)}|m")
+        (AEROSPIKE_NAMESPACE, set_name, f"{object_key_to_string(key)}|m")
     )
     return bins
 
@@ -206,7 +216,7 @@ def _record_sizes(
     sizes = []
     for index in range(count):
         _, _, bins = inspector.get(  # type: ignore[attr-defined]
-            (AEROSPIKE_NAMESPACE, set_name, f"{_cache_key(key)}|s|{index}")
+            (AEROSPIKE_NAMESPACE, set_name, f"{object_key_to_string(key)}|s|{index}")
         )
         sizes.append(len(bins["b"]))
     return sizes
@@ -230,28 +240,23 @@ def test_a_hybrid_object_is_stored_one_plane_piece_per_record(
 
 
 def test_every_planned_slot_names_a_record_holding_exactly_its_bytes(
-    adapter: L2AdapterInterface, inspector: object, set_name: str
+    adapter: L2AdapterInterface,
+    inspector: object,
+    native_client: object,
+    set_name: str,
 ) -> None:
-    """End to end: planner slot -> record key -> client digest -> stored bytes.
+    """End to end: planner slot -> record key -> native digest -> stored bytes.
 
     This is the whole join a layerwise fetch depends on. A slot that named a
     real record holding other bytes would load a plausible, wrong tensor.
+    Records are read by the digest the *native* connector derives from each
+    slot's key, which is what the pipelined fetch hands the server.
     """
     adapter.set_object_group_layouts({0: HYBRID})
     key = ObjectKey(ObjectKey.IntHash2Bytes(2), MODEL, 0)
     values = _payload(HYBRID_BYTES)
     _store(adapter, key, values)
     payload = values.view(torch.uint8)
-
-    # Third Party
-    import aerospike
-
-    record_of_digest: dict[bytes, str] = {}
-
-    def digest_of(user_key: str) -> bytes:
-        digest = bytes(aerospike.calc_digest(AEROSPIKE_NAMESPACE, set_name, user_key))
-        record_of_digest[digest] = user_key
-        return digest
 
     layout = ModelLayout.from_registration({0: HYBRID})
     plan = FetchPlanner(layout).plan(
@@ -260,22 +265,48 @@ def test_every_planned_slot_names_a_record_holding_exactly_its_bytes(
             node_names=("node",),
             max_record_bytes=MAX_RECORD_BYTES,
         ),
-        RecordKeyDigests(
-            layout, MAX_RECORD_BYTES, {(0, 0): _cache_key(key)}, digest_of
-        ),
+        RecordKeys(layout, MAX_RECORD_BYTES, {(0, 0): object_key_to_string(key)}),
     )
 
     assert len(plan.slots) == 8
-    assert len(record_of_digest) == 8, "two slots named the same record"
+    assert len({slot.record_key for slot in plan.slots}) == 8, (
+        "two slots named the same record"
+    )
     for slot in plan.slots:
+        digest = bytes.fromhex(
+            native_client.record_digest_hex(slot.record_key)  # type: ignore[attr-defined]
+        )
         _, _, bins = inspector.get(  # type: ignore[attr-defined]
-            (AEROSPIKE_NAMESPACE, set_name, None, bytearray(slot.digest))
+            (AEROSPIKE_NAMESPACE, set_name, None, bytearray(digest))
         )
         expected = payload[slot.offset : slot.offset + slot.length]
         assert bytes(bins["b"]) == expected.numpy().tobytes(), (
             f"layer {slot.layer_id} plane {slot.plane} piece {slot.piece}: "
-            f"{record_of_digest[slot.digest]} holds other bytes"
+            f"{slot.record_key} holds other bytes"
         )
+
+
+@pytest.mark.parametrize(
+    "user_key",
+    ["model@00000000@0@ab|m", "model@00000001@2@cd|s|17", "salted@0@0@ef@user-1|m"],
+)
+def test_the_native_digest_is_the_clients_digest_of_the_key(
+    native_client: object, set_name: str, user_key: str
+) -> None:
+    """The connector names the same record the reference client would."""
+    # Third Party
+    import aerospike
+
+    expected = bytes(aerospike.calc_digest(AEROSPIKE_NAMESPACE, set_name, user_key))
+    actual = native_client.record_digest_hex(user_key)  # type: ignore[attr-defined]
+    assert actual == expected.hex()
+    assert len(actual) == 40 and actual == actual.lower()
+
+
+def test_an_empty_key_has_no_digest(native_client: object) -> None:
+    """An empty key names no record, so the connector refuses it."""
+    with pytest.raises(ValueError, match="empty"):
+        native_client.record_digest_hex("")  # type: ignore[attr-defined]
 
 
 def test_a_uniform_object_keeps_the_meta_record_older_readers_understand(
@@ -324,7 +355,7 @@ def test_a_corrupt_runs_bin_fails_the_read(
     assert _load(adapter, key, values)
 
     inspector.put(  # type: ignore[attr-defined]
-        (AEROSPIKE_NAMESPACE, set_name, f"{_cache_key(key)}|m"),
+        (AEROSPIKE_NAMESPACE, set_name, f"{object_key_to_string(key)}|m"),
         {"runs": "2048:2048:4,1228800:614400:3"},
     )
     assert not _load(adapter, key, values)

@@ -23,7 +23,7 @@ def make_slot(
         layer_id=layer_id,
         chunk_id=chunk_id,
         node_index=0,
-        digest=b"digest",
+        record_key="record",
         plane=plane,
         piece=piece,
         offset=0,

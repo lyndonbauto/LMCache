@@ -37,19 +37,21 @@ from lmcache.v1.layerwise import (
 _FIXTURE = Path(__file__).resolve().parent / "fixtures" / "slot_plans.txt"
 
 #: The parity check is about geometry, so the Python planner is given a
-#: digest source that is valid and otherwise uninteresting. Digests are
+#: record key source that is valid and otherwise uninteresting. Records are
 #: joined onto the plan after planning on the C++ side, so they are not
 #: something the two could disagree about.
-_PLACEHOLDER_DIGEST = b"\x01" * 20
+_PLACEHOLDER_RECORD_KEY = "placeholder"
 
 
-class _ConstantDigests:
-    """A digest source that names one record for every slot."""
+class _ConstantRecordKeys:
+    """A record key source that names one record for every slot."""
 
-    def digest_for(self, chunk_id: int, layer_id: int, plane: int, piece: int) -> bytes:
-        """Return a fixed digest, since parity does not depend on digests."""
+    def record_key_for(
+        self, chunk_id: int, layer_id: int, plane: int, piece: int
+    ) -> str:
+        """Return a fixed key, since parity does not depend on record names."""
         del chunk_id, layer_id, plane, piece
-        return _PLACEHOLDER_DIGEST
+        return _PLACEHOLDER_RECORD_KEY
 
 
 class _Case:
@@ -80,7 +82,7 @@ class _Case:
             node_names=("node-a",),
             max_record_bytes=self.max_record_bytes,
         )
-        return FetchPlanner(layout).plan(request, _ConstantDigests())
+        return FetchPlanner(layout).plan(request, _ConstantRecordKeys())
 
     def layout(self) -> ModelLayout:
         """Build this case's model layout.

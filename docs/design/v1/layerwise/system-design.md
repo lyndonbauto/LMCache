@@ -224,15 +224,15 @@ times and change at different rates:
   hazard in a hybrid model is not that strides are unpredictable but that one
   kernel group's stride gets applied to another group's layers, which yields a
   plausible tensor and no error.
-- `FetchPlanner(layout).plan(request, digests)` runs per request. `PlanRequest`
-  carries only what the request decides -- which chunks, on which nodes, at
-  which destination offsets, under which record cap.
+- `FetchPlanner(layout).plan(request, record_keys)` runs per request.
+  `PlanRequest` carries only what the request decides -- which chunks, on
+  which nodes, at which destination offsets, under which record cap.
 
-Digests are looked up rather than passed in. A slot is exactly one stored
+Record keys are looked up rather than passed in. A slot is exactly one stored
 record, identified by `(chunk_id, layer_id, plane, piece)` -- the same key the
-native `pipelined_fetch_session` joins digests on. The caller cannot enumerate
-those keys before planning, because which pieces exist depends on how the
-planner cuts planes, so the planner asks a `SlotDigestSource` as it goes.
+native `pipelined_fetch_session` joins records on. The caller cannot enumerate
+those records before planning, because which pieces exist depends on how the
+planner cuts planes, so the planner asks a `RecordKeySource` as it goes.
 Note that the key has no object-group field: a layer belongs to exactly one
 object group, which is why `ModelLayout` rejects a layer appearing in two
 kernel groups.
@@ -334,27 +334,32 @@ published, and only layer-at-a-time fetch is lost.
 
 ## 11. What still has to come from the native side
 
-Planning is complete; issuing a plan is not. A `PlanRequest` needs three
-facts per chunk that Track C cannot produce, and it is worth being precise
-about why, so nobody re-attempts them in Python:
+A plan names records by **user key**. `RecordKeys` resolves a slot to a
+record index via `record_index_for` and forms the key the way `connector.cpp`
+does (`<cache key>|m` for a one-record object, `<cache key>|s|<index>`
+otherwise). Turning a key into a digest is the client's job:
+`issue_pipelined_fetch_by_keys` calls `record_digest_hex` for each slot and
+hands the session the digests it has always taken. Python never hashes --
+most OpenSSL builds disable RIPEMD-160 -- and when the transport stops using
+an info command, only the native side changes.
 
-- **Digests.** An Aerospike digest is RIPEMD-160 over the key. Python cannot
-  compute one -- most OpenSSL builds disable RIPEMD-160, and this one does,
-  so `hashlib.new("ripemd160")` raises. `RecordKeyDigests` therefore does
-  everything except the hash: it resolves a slot to a record index via
-  `record_index_for`, forms the record's user key the way
-  `connector.cpp` does, and calls an injected `digest_of`. Only that
-  callable needs to come from the client, which already links RIPEMD-160.
-- **Nodes.** Which node owns a chunk comes from the cluster's partition map,
+Two facts per chunk still cannot come from Track C, and it is worth being
+precise about why, so nobody re-attempts them in Python:
+
+- **Nodes.** Which node owns a record comes from the cluster's partition map,
   which only the C client has. It reaches the plan as a name in
-  `LayerFetchPlan.node_names`.
+  `LayerFetchPlan.node_names`. Note that ownership is per *record*: each
+  `|s|<i>` segment hashes to its own partition, so one chunk's records are
+  generally spread across nodes. The native session currently binds a whole
+  chunk to one node (`ChunkNodeBinding`), and `pipelined_fetch_arguments`
+  refuses a plan that would need otherwise.
 - **Destination offsets.** Chosen by the L1 allocator when it places a
   chunk's object in the registered window, so they are an input to planning
   rather than something planning derives.
 
-Note the record cap `RecordKeyDigests` is built with must be the cap the
-object was *written* under, not today's. It decides how many records exist,
-so a cap that changed between write and read renames every record.
+Note the record cap `RecordKeys` is built with must be the cap the object
+was *written* under, not today's. It decides how many records exist, so a
+cap that changed between write and read renames every record.
 
 ## 8. Invariants that are not negotiable
 
@@ -387,8 +392,8 @@ Each of these was a real bug. Losing one reintroduces it.
 7. A node accepts at most `max_sinks` sinks per command, advertised in the
    `kv-sink-register` reply and defaulting to 256. Commands are chunked to fit.
    The server hard-refuses more, so an unchunked command fails the whole fetch.
-8. A slot's digest is looked up per `(chunk_id, layer_id, plane, piece)`, never
-   per chunk. Reusing one chunk's digest across its slots is not a type error
+8. A slot's record is looked up per `(chunk_id, layer_id, plane, piece)`, never
+   per chunk. Reusing one chunk's record across its slots is not a type error
    and not a coverage gap -- the transport fetches a record that really exists
    into an address that is really in the window, and the model reads another
    piece's bytes. `SlotPlacement` therefore carries `plane` and `piece`, so a

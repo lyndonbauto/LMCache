@@ -11,6 +11,55 @@ defect coming back.
 
 ---
 
+## Slots name records by Aerospike key, not digest
+
+**Who is affected:** Track A.
+
+**What changed.** `SlotPlacement.digest: bytes` is now
+`SlotPlacement.record_key: str`, the user key the record was stored under:
+
+```python
+SlotPlacement(layer_id=0, chunk_id=3, node_index=1,
+              record_key="model@00000000@0@9f2c...|s|4",
+              plane=0, piece=0, offset=4096, length=2048)
+```
+
+The planner side follows: `SlotDigestSource.digest_for` is
+`RecordKeySource.record_key_for` (returns `str`), `RecordKeyDigests(layout,
+cap, cache_keys, digest_of)` is `RecordKeys(layout, cap, cache_keys)`, and
+`FetchPlanner.plan(request, record_keys)`.
+
+On the native side:
+
+- `LMCacheAerospikeClient.record_digest_hex(user_key)` returns the client's
+  own RIPEMD-160 digest of the key in the connector's namespace and set, as 40
+  lowercase hex characters. It is bound in every build.
+- `issue_pipelined_fetch_by_keys(placements, chunk_nodes, slot_record_keys)`
+  (RDMA builds) takes plain tuples -- `(chunk_id, object_group_id,
+  dest_offset)`, `(chunk_id, node_name)`, `(chunk_id, layer_id, plane, piece,
+  record_key)` -- turns each key into a digest with `record_digest_hex`, and
+  calls the existing `issue_pipelined_fetch`. `PipelinedFetchSession` and the
+  info-call sink format are unchanged: the session still receives
+  `SlotDigest.digest_hex`.
+- `begin_pipelined_fetch` on the storage manager and L2 adapters now takes
+  `(plan: LayerFetchPlan, placements: Sequence[ChunkPlacement])` instead of
+  three untyped lists. `pipelined_fetch_arguments` in
+  `lmcache/v1/layerwise/native_fetch.py` does the flattening, and refuses a
+  chunk placed on two nodes, since `ChunkNodeBinding` cannot express it.
+
+**What breaks.** Anything constructing `SlotPlacement(digest=...)`, reading
+`slot.digest`, or calling `begin_pipelined_fetch` with three lists. The
+`issue_pipelined_fetch` binding taking `PipelinedSlotDigest` still exists.
+
+**Why.** Hashing a key into a digest is the Aerospike client's job, and
+most OpenSSL builds disable RIPEMD-160, so Python had to be handed a hash
+function to compute something the client already knows how to compute. Keys
+are also what every other part of the system uses to name a record, which
+makes a plan readable in a log. Keeping the digest behind a native call means
+that when the transport stops using an info command, only the native side
+changes. The session keeps taking digests so Track A's tested code is
+untouched.
+
 ## Hybrid models are servable: records follow each kernel group's planes
 
 **Who is affected:** Track A (the meta record gained a bin); nobody's

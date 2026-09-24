@@ -10,7 +10,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Mapping
+from typing import TYPE_CHECKING, Mapping, Sequence
 import threading
 
 if TYPE_CHECKING:
@@ -18,6 +18,8 @@ if TYPE_CHECKING:
     from lmcache.lmcache_native import Bitmap
     from lmcache.v1.distributed.api import KeyListPage, MemoryLayoutDesc, ObjectKey
     from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
+    from lmcache.v1.layerwise.contract import LayerFetchPlan
+    from lmcache.v1.layerwise.planner import ChunkPlacement
     from lmcache.v1.memory_management import MemoryObj
 
 # First Party
@@ -427,18 +429,20 @@ class L2AdapterInterface(ABC):
         return ""
 
     def begin_pipelined_fetch(
-        self,
-        placements: list[object],
-        chunk_nodes: list[object],
-        slot_digests: list[object],
+        self, plan: LayerFetchPlan, placements: Sequence[ChunkPlacement]
     ) -> int:
         """Start a pipelined fetch when the backend supports one.
+
+        Args:
+            plan: Every slot the fetch expects, each naming its record by
+                user key.
+            placements: The placements ``plan`` was built from.
 
         Returns:
             Request generation for ``is_pipelined_layer_ready``, or ``0`` when
             pipelined fetch is unavailable.
         """
-        del placements, chunk_nodes, slot_digests
+        del plan, placements
         return 0
 
     def finish_pipelined_fetch(self) -> None:

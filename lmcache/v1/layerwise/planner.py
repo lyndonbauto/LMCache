@@ -26,7 +26,7 @@ see ``docs/design/v1/layerwise/system-design.md`` section 7.
 """
 
 # Standard
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -258,13 +258,13 @@ class PlanRequest:
 
 
 @runtime_checkable
-class SlotDigestSource(Protocol):
+class RecordKeySource(Protocol):
     """Names the stored record behind each slot.
 
-    A digest is what the cluster is actually asked for, and it is derived
-    from the record's key rather than from its geometry. The planner
-    therefore knows which records a fetch needs but not what they are
-    called, and asks this.
+    A record is named by the key it was stored under, which depends on the
+    request's cache keys rather than on geometry. The planner therefore
+    knows which records a fetch needs but not what they are called, and asks
+    this.
 
     Keeping it a lookup rather than a field on the request also resolves an
     ordering problem: which records exist depends on how planes are cut into
@@ -272,8 +272,10 @@ class SlotDigestSource(Protocol):
     the keys before planning.
     """
 
-    def digest_for(self, chunk_id: int, layer_id: int, plane: int, piece: int) -> bytes:
-        """Return the digest of one stored record.
+    def record_key_for(
+        self, chunk_id: int, layer_id: int, plane: int, piece: int
+    ) -> str:
+        """Return the user key of one stored record.
 
         Args:
             chunk_id: Index of the KV chunk within the request.
@@ -283,7 +285,7 @@ class SlotDigestSource(Protocol):
                 ascending offset order.
 
         Returns:
-            The record digest, which must not be empty.
+            The record's user key, which must not be empty.
 
         Raises:
             KeyError: If no record was stored under that identity, since the
@@ -653,9 +655,9 @@ class ModelLayout:
         The plan says which bytes a slot carries; it does not say whether a
         record holding exactly those bytes was ever written. This is the join
         between the two, and it is what a real
-        :class:`SlotDigestSource` needs in order to name a record: the write
+        :class:`RecordKeySource` needs in order to name a record: the write
         side stores an object's records under keys ending in their index, so
-        the index is the last thing missing between a slot and its digest.
+        the index is the last thing missing between a slot and its key.
 
         Records are numbered in payload order, one kernel group at a time:
         every piece of the first kernel group's first plane, then its second
@@ -799,15 +801,13 @@ class ModelLayout:
             )
 
 
-class RecordKeyDigests:
+class RecordKeys:
     """Names records by the keys the write side stored them under.
 
-    Composes the two halves of the answer. Which record a slot needs comes
-    from the layout; what that record is called comes from the key naming the
-    connector uses; and turning a key into a digest is RIPEMD-160 over the
-    Aerospike key, which is the client's job and is not available in Python
-    -- most builds of OpenSSL disable RIPEMD-160 outright. So the hash is
-    injected and everything around it is testable without a cluster.
+    Composes the two halves of the answer: which record a slot needs comes
+    from the layout, and what that record is called comes from the key
+    naming the connector uses. Nothing here hashes; the native client turns
+    a key into a digest when it asks the server for the record.
 
     The key layout mirrors ``meta_user_key`` and ``segment_user_key`` in
     ``csrc/storage_backends/aerospike/connector.cpp``. An object stored as a
@@ -821,9 +821,8 @@ class RecordKeyDigests:
         layout: ModelLayout,
         max_record_bytes: int,
         cache_keys: Mapping[tuple[int, int], str],
-        digest_of: Callable[[str], bytes],
     ) -> None:
-        """Build a digest source for one request.
+        """Build a record key source for one request.
 
         Args:
             layout: Where each layer lives within its object group.
@@ -831,8 +830,7 @@ class RecordKeyDigests:
                 the value the object was *written* under, since it decides
                 how many records exist.
             cache_keys: The stored object's cache key per ``(chunk id, object
-                group id)``.
-            digest_of: Maps a record's user key to its Aerospike digest.
+                group id)``, as the connector serializes it.
 
         Raises:
             ValueError: If ``max_record_bytes`` is not positive.
@@ -844,10 +842,11 @@ class RecordKeyDigests:
         self._layout = layout
         self._max_record_bytes = max_record_bytes
         self._cache_keys = dict(cache_keys)
-        self._digest_of = digest_of
 
-    def digest_for(self, chunk_id: int, layer_id: int, plane: int, piece: int) -> bytes:
-        """Return the digest of the record holding one slot.
+    def record_key_for(
+        self, chunk_id: int, layer_id: int, plane: int, piece: int
+    ) -> str:
+        """Return the user key of the record holding one slot.
 
         Args:
             chunk_id: Index of the KV chunk within the request.
@@ -856,13 +855,13 @@ class RecordKeyDigests:
             piece: Which record of that plane, counting from zero.
 
         Returns:
-            The record's Aerospike digest.
+            The record's user key.
 
         Raises:
             KeyError: If no object was stored for this chunk and object
                 group, or the layout does not cover ``layer_id``.
             ValueError: If the model is one the write side does not shard
-                along layer boundaries, or ``digest_of`` returns nothing.
+                along layer boundaries.
         """
         object_group_id = self._layout.object_group_of_layer(layer_id)
         cache_key = self._cache_keys.get((chunk_id, object_group_id))
@@ -876,14 +875,8 @@ class RecordKeyDigests:
             layer_id, plane, piece, self._max_record_bytes
         )
         if self._layout.record_count(object_group_id, self._max_record_bytes) == 1:
-            user_key = f"{cache_key}|m"
-        else:
-            user_key = f"{cache_key}|s|{index}"
-
-        digest = self._digest_of(user_key)
-        if not digest:
-            raise ValueError(f"no digest for record {user_key!r}")
-        return digest
+            return f"{cache_key}|m"
+        return f"{cache_key}|s|{index}"
 
 
 class FetchPlanner:
@@ -901,7 +894,9 @@ class FetchPlanner:
         """
         self._layout = layout
 
-    def plan(self, request: PlanRequest, digests: SlotDigestSource) -> LayerFetchPlan:
+    def plan(
+        self, request: PlanRequest, record_keys: RecordKeySource
+    ) -> LayerFetchPlan:
         """Lay out every slot the fetch will request.
 
         Slots are appended layer-major -- every participating chunk's pieces
@@ -922,7 +917,7 @@ class FetchPlanner:
 
         Args:
             request: Which chunks to fetch and where they were placed.
-            digests: Names the stored record behind each slot.
+            record_keys: Names the stored record behind each slot.
 
         Returns:
             A plan whose slots cover exactly the requested bytes, with no gaps
@@ -931,10 +926,10 @@ class FetchPlanner:
         Raises:
             ValueError: If the placements cover none of the layout's layers,
                 if the fetch needs more slots than the RDMA immediate can
-                address, or if ``digests`` returns an empty digest. The
+                address, or if ``record_keys`` returns an empty key. The
                 device's own limit on writes in flight is checked by the
                 transport, not here.
-            KeyError: If ``digests`` has no record for a slot the fetch
+            KeyError: If ``record_keys`` has no record for a slot the fetch
                 needs, which means the write side stored the chunk under a
                 different geometry than this layout describes.
         """
@@ -960,7 +955,7 @@ class FetchPlanner:
                             plane_index,
                             plane,
                             request.max_record_bytes,
-                            digests,
+                            record_keys,
                         )
                     )
                     if len(slots) > MAX_SLOTS_PER_REQUEST:
@@ -1038,7 +1033,7 @@ class FetchPlanner:
         plane_index: int,
         plane: ByteRange,
         max_record_bytes: int,
-        digests: SlotDigestSource,
+        record_keys: RecordKeySource,
     ) -> list[SlotPlacement]:
         """Cut one plane of one layer of one chunk into record-sized slots.
 
@@ -1048,21 +1043,21 @@ class FetchPlanner:
             plane_index: Which K/V plane of the layer this is.
             plane: The plane's range within the object group's payload.
             max_record_bytes: Largest record the cluster will hold.
-            digests: Names the stored record behind each slot.
+            record_keys: Names the stored record behind each slot.
 
         Returns:
             One slot per record of the plane, ascending by offset.
 
         Raises:
-            ValueError: If ``digests`` returns an empty digest, which names
+            ValueError: If ``record_keys`` returns an empty key, which names
                 no record.
-            KeyError: If ``digests`` has no record for one of the pieces.
+            KeyError: If ``record_keys`` has no record for one of the pieces.
         """
         record_bytes = plane_segment_bytes(plane.length, max_record_bytes)
         base = placement.dest_offset + plane.offset
         slots: list[SlotPlacement] = []
         for piece, piece_offset in enumerate(range(0, plane.length, record_bytes)):
-            digest = digests.digest_for(
+            record_key = record_keys.record_key_for(
                 chunk_id=placement.chunk_id,
                 layer_id=layer_id,
                 plane=plane_index,
@@ -1073,7 +1068,7 @@ class FetchPlanner:
                     layer_id=layer_id,
                     chunk_id=placement.chunk_id,
                     node_index=placement.node_index,
-                    digest=digest,
+                    record_key=record_key,
                     plane=plane_index,
                     piece=piece,
                     offset=base + piece_offset,

@@ -81,7 +81,10 @@ PYBIND11_MODULE(lmcache_aerospike, m) {
                 }
                 self.set_record_layouts(runs);
               },
-              py::arg("object_groups"));
+              py::arg("object_groups"))
+          .def("record_digest_hex",
+               &lmcache::connector::AerospikeNativeConnector::record_digest_hex,
+               py::arg("user_key"));
 #ifdef LMCACHE_AEROSPIKE_RDMA
   aerospike_client
       .def("pipelined_fetch_ready",

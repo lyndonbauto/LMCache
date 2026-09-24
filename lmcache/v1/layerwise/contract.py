@@ -109,9 +109,14 @@ class SlotPlacement:
 
     One slot is exactly one stored record, and ``(chunk_id, layer_id, plane,
     piece)`` is that record's identity -- the same four fields the native
-    fetch path keys digests by. There is deliberately no object group in that
+    fetch path keys records by. There is deliberately no object group in that
     key: a layer belongs to exactly one object group, so naming the layer
     already names the group.
+
+    The record is named by its Aerospike *user key*, not its digest. Turning
+    a key into a digest (and a digest into a partition and a node) is the
+    client's job; carrying keys keeps that in one place and keeps the plan
+    independent of how the transport asks the server for a record.
 
     Attributes:
         layer_id: Global layer index in the model.
@@ -120,7 +125,8 @@ class SlotPlacement:
             which cluster node holds this slot. Slot indices are
             request-scoped, so two slots on different nodes still have
             distinct indices.
-        digest: Record digest the transport asks the node for.
+        record_key: User key of the stored record this slot reads, e.g.
+            ``"<model>@<kv_rank:08x>@<object_group_id:x>@<chunk_hash>|s|3"``.
         plane: Which K/V plane of the layer this range belongs to. Zero for a
             format that stores a layer as a single plane.
         piece: Which record of that plane this range is, counting from zero
@@ -129,24 +135,24 @@ class SlotPlacement:
         length: Length of this range in bytes.
 
     Raises:
-        ValueError: If the digest is empty, or ``plane`` or ``piece`` is
+        ValueError: If the record key is empty, or ``plane`` or ``piece`` is
             negative, since none of those name a record that exists.
     """
 
     layer_id: int
     chunk_id: int
     node_index: int
-    digest: bytes
+    record_key: str
     plane: int
     piece: int
     offset: int
     length: int
 
     def __post_init__(self) -> None:
-        if not self.digest:
+        if not self.record_key:
             raise ValueError(
                 f"slot for layer {self.layer_id} of chunk {self.chunk_id} has "
-                "an empty digest, which names no record"
+                "an empty record key, which names no record"
             )
         if self.plane < 0 or self.piece < 0:
             raise ValueError(

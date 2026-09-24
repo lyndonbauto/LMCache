@@ -25,6 +25,16 @@
 namespace lmcache {
 namespace connector {
 
+// User key of the stored record behind one slot of a pipelined fetch,
+// identified the same way as rdma::SlotDigest.
+struct SlotRecordKey {
+  uint32_t chunk_id = 0;
+  uint32_t layer_id = 0;
+  uint32_t plane = 0;
+  uint32_t piece = 0;
+  std::string record_key;
+};
+
 struct WorkerAerospikeConn {
   aerospike* client = nullptr;
   std::string ns;
@@ -92,6 +102,18 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
   void set_record_layouts(
       const std::vector<std::vector<PlaneRun>>& object_groups);
 
+  // Digest of the record stored under `user_key` in this connector's
+  // namespace and set, as 40 lowercase hex characters.
+  //
+  // This is the client's own RIPEMD-160 over the Aerospike key, so it names
+  // exactly the record a get of that key would read. Callers hand over keys
+  // and let this produce the digest, instead of re-deriving it elsewhere.
+  //
+  // Thread safety: safe to call concurrently; touches no shared state.
+  //
+  // Throws std::invalid_argument if `user_key` is empty.
+  std::string record_digest_hex(const std::string& user_key) const;
+
 #ifdef LMCACHE_AEROSPIKE_RDMA
   // Report whether pipelined kv-sink-fetch is initialized and at least one
   // node registered. False when RDMA was not enabled at build time or in
@@ -121,6 +143,19 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
       const std::vector<rdma::ChunkPlacement>& placements,
       const std::vector<rdma::ChunkNodeBinding>& chunk_nodes,
       const std::vector<rdma::SlotDigest>& slot_digests);
+
+  // Same as issue_pipelined_fetch(), but each slot names its record by user
+  // key. Keys are turned into digests with record_digest_hex(), so the
+  // session sees exactly what it would have been given by digest.
+  //
+  // Thread safety: as issue_pipelined_fetch().
+  //
+  // Throws std::invalid_argument if any record key is empty, and whatever
+  // issue_pipelined_fetch() throws.
+  uint16_t issue_pipelined_fetch_by_keys(
+      const std::vector<rdma::ChunkPlacement>& placements,
+      const std::vector<rdma::ChunkNodeBinding>& chunk_nodes,
+      const std::vector<SlotRecordKey>& slot_record_keys);
 
   // Layer readiness for a pipelined fetch. False when pipelined fetch is not
   // ready, the generation does not match, or the layer is not complete.
