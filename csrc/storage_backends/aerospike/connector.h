@@ -114,6 +114,13 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
   // Throws std::invalid_argument if `user_key` is empty.
   std::string record_digest_hex(const std::string& user_key) const;
 
+  // Largest record this connector writes, in bytes: the server's record cap
+  // less a safety margin. Layer-aligned writes cut planes against this, so a
+  // reader naming records must plan with the same value.
+  //
+  // Thread safety: safe to call concurrently; fixed at construction.
+  size_t max_record_bytes() const;
+
 #ifdef LMCACHE_AEROSPIKE_RDMA
   // Report whether pipelined kv-sink-fetch is initialized and at least one
   // node registered. False when RDMA was not enabled at build time or in

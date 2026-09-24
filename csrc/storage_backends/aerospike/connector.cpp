@@ -447,6 +447,10 @@ void AerospikeNativeConnector::set_record_layouts(
   record_layouts_ = std::move(layouts);
 }
 
+size_t AerospikeNativeConnector::max_record_bytes() const {
+  return max_record_bytes_;
+}
+
 std::string AerospikeNativeConnector::record_digest_hex(
     const std::string& user_key) const {
   if (user_key.empty()) {

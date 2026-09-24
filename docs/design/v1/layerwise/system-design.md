@@ -359,7 +359,42 @@ precise about why, so nobody re-attempts them in Python:
 
 Note the record cap `RecordKeys` is built with must be the cap the object
 was *written* under, not today's. It decides how many records exist, so a
-cap that changed between write and read renames every record.
+cap that changed between write and read renames every record. The connector
+reports the cap it writes under as `max_record_bytes()`.
+
+### Planning from a real request
+
+`lmcache/v1/layerwise/request_fetch.py` builds a plan from exactly what the
+retrieve path already has, so a plan always names the objects a whole-object
+retrieve would have read:
+
+```text
+register_kv_cache
+  group_layout_descs, kernel layer indices  ─┬─> storage.set_object_group_layouts  (writer)
+                                             └─> ModelLayout.from_registration
+                                                 -> FetchModelRegistry[(model, world_size)]
+
+retrieve request (IPCCacheServerKey from vLLM)
+  resolve_obj_keys(key, range(num_object_groups))    one ObjectKey per chunk per group
+  -> request_cache_keys(keys, attn_desc)             aux groups skipped; window groups
+                                                     keep chunks >= first_in_window_chunk
+  -> ChunkPlacer.locate(chunk, group, object_bytes)  node + destination   <- stubbed
+  -> build_request_fetch(...)                        PlanRequest + LayerFetchPlan
+  -> storage.begin_pipelined_fetch(plan, placements)
+```
+
+`LMCacheDrivenTransferModule.fetch_model(model, world_size)` returns the
+registered `FetchModel`. It is released with the model's last registration,
+and it is absent (`KeyError`) for a layout that cannot be planned; such a
+request loads whole objects. `retrieve` and `request_cache_keys` share
+`first_in_window_chunk`, so the two cannot disagree about which chunks a
+sliding-window group reads.
+
+The `ChunkPlacer` is the only stand-in. `tests/v1/layerwise/test_request_fetch.py`
+drives the builder from a vLLM-shaped request (a hybrid model with a
+full-attention group, a two-chunk window group and an aux group, and a
+prompt that is not chunk-aligned), with keys from the production hasher. The
+real-server test stores those objects and reads every slot back by its key.
 
 ## 8. Invariants that are not negotiable
 

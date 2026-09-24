@@ -280,10 +280,109 @@ def test_every_planned_slot_names_a_record_holding_exactly_its_bytes(
             (AEROSPIKE_NAMESPACE, set_name, None, bytearray(digest))
         )
         expected = payload[slot.offset : slot.offset + slot.length]
-        assert bytes(bins["b"]) == expected.numpy().tobytes(), (
+        matches = bytes(bins["b"]) == expected.numpy().tobytes()
+        assert matches, (
             f"layer {slot.layer_id} plane {slot.plane} piece {slot.piece}: "
             f"{slot.record_key} holds other bytes"
         )
+
+
+def test_a_request_planned_from_its_cache_lookup_reads_back_its_objects(
+    adapter: L2AdapterInterface,
+    inspector: object,
+    native_client: object,
+    set_name: str,
+) -> None:
+    """C1 end to end: request keys -> plan -> records holding each slot's bytes.
+
+    Objects are stored under the keys the retrieve path resolves for a
+    request, the plan is built from that same lookup with the connector's
+    own record cap, and every slot is read back by the digest the connector
+    derives from the slot's key.
+    """
+    # First Party
+    from lmcache.v1.distributed.api import AttnWindowDesc, ipc_key_to_object_keys
+    from lmcache.v1.layerwise.request_fetch import (
+        ChunkLocation,
+        FetchModel,
+        build_request_fetch,
+    )
+    from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+    from lmcache.v1.multiprocess.token_hasher import TokenHasher
+
+    layouts = {0: HYBRID, 1: UNIFORM}
+    kernel_layers = {0: [[0, 1], [2]], 1: [[3, 4, 5, 6]]}
+    attn = AttnWindowDesc(num_chunks_in_sw=[-1, 1])
+    adapter.set_object_group_layouts(layouts, kernel_layers)
+    request = IPCCacheServerKey(
+        model_name=MODEL,
+        world_size=1,
+        worker_id=0,
+        token_ids=tuple(range(3 * 16 + 5)),
+        start=0,
+        end=3 * 16,
+        request_id="it-request",
+    )
+    hasher = TokenHasher(chunk_size=16)
+    chunk_hashes = [
+        TokenHasher.hash_to_bytes(h)
+        for h in hasher.compute_chunk_hashes(list(request.token_ids), end=request.end)
+    ]
+    keys = ipc_key_to_object_keys(request, chunk_hashes, [0, 1])
+
+    sizes = {0: HYBRID_BYTES, 1: 8 * 2048}
+    payloads: dict[tuple[int, int], torch.Tensor] = {}
+    for group_id, group_keys in enumerate(keys):
+        for chunk_id, key in enumerate(group_keys):
+            words = torch.arange(sizes[group_id] // 4, dtype=torch.int32)
+            values = (words + (chunk_id * 2 + group_id) * (1 << 24)).view(torch.float32)
+            payloads[(chunk_id, group_id)] = values
+            _store(adapter, key, values)
+
+    class _Placer:
+        def __init__(self) -> None:
+            self.next_offset = 0
+
+        def locate(
+            self, chunk_id: int, object_group_id: int, object_bytes: int
+        ) -> ChunkLocation:
+            offset = self.next_offset
+            self.next_offset += object_bytes
+            return ChunkLocation(node_name="node", dest_offset=offset)
+
+    layout = ModelLayout.from_registration(layouts, kernel_layers)
+    fetch = build_request_fetch(
+        FetchModel(layout, attn),
+        keys,
+        native_client.max_record_bytes(),  # type: ignore[attr-defined]
+        _Placer(),
+    )
+
+    destination_of = {
+        (p.chunk_id, p.object_group_id): p.dest_offset for p in fetch.request.placements
+    }
+    assert set(destination_of) == {(0, 0), (1, 0), (2, 0), (2, 1)}
+    for slot in fetch.plan.slots:
+        group_id = layout.object_group_of_layer(slot.layer_id)
+        start = slot.offset - destination_of[(slot.chunk_id, group_id)]
+        payload = payloads[(slot.chunk_id, group_id)].view(torch.uint8)
+        digest = bytes.fromhex(
+            native_client.record_digest_hex(slot.record_key)  # type: ignore[attr-defined]
+        )
+        _, _, bins = inspector.get(  # type: ignore[attr-defined]
+            (AEROSPIKE_NAMESPACE, set_name, None, bytearray(digest))
+        )
+        matches = (
+            bytes(bins["b"]) == payload[start : start + slot.length].numpy().tobytes()
+        )
+        assert matches, f"{slot.record_key} does not hold the bytes of {slot}"
+
+
+def test_the_connector_reports_the_record_cap_it_writes_under(
+    native_client: object,
+) -> None:
+    """The namespace's 1 MiB cap less the connector's 64 KiB margin."""
+    assert native_client.max_record_bytes() == MAX_RECORD_BYTES  # type: ignore[attr-defined]
 
 
 @pytest.mark.parametrize(

@@ -22,6 +22,12 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
+from lmcache.v1.layerwise.planner import ModelLayout
+from lmcache.v1.layerwise.request_fetch import (
+    FetchModel,
+    FetchModelRegistry,
+    first_in_window_chunk,
+)
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.event import Event, EventType, next_transfer_key
 from lmcache.v1.multiprocess.custom_types import (
@@ -255,6 +261,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         # ops -- never across context creation, layout-registry calls, or
         # empty_cache (leaf-lock invariant: no thread holds two locks).
         self._lock = threading.Lock()
+        self._fetch_models = FetchModelRegistry()
 
         # Route finish_write / finish_read_prefetched through a C++ host
         # callback so the driver thread doesn't acquire the GIL.
@@ -281,6 +288,25 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
     def context(self) -> MPCacheServerContext:
         """Return the shared engine context. Exposed for testing only."""
         return self._ctx
+
+    def fetch_model(self, model_name: str, world_size: int) -> FetchModel:
+        """Return what a layerwise fetch plan needs from a registered model.
+
+        Built once at ``register_kv_cache`` from the layouts published to
+        storage, and released with the model's last registration.
+
+        Args:
+            model_name: The model name.
+            world_size: The world size.
+
+        Returns:
+            The model's fetch layout and attention windows.
+
+        Raises:
+            KeyError: If the model is not registered or its layout cannot be
+                planned layer by layer.
+        """
+        return self._fetch_models.find(model_name, world_size)
 
     def get_and_touch_context_entry(self, instance_id: int) -> ContextEntry | None:
         """Return the entry for ``instance_id``, refreshing its last-seen time.
@@ -441,6 +467,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             self._ctx.layout_desc_registry.unregister(
                 entry.model_name, entry.world_size
             )
+            self._fetch_models.unregister(entry.model_name, entry.world_size)
         del entry
         entries.clear()
         # ipc_collect() only unmaps a CUDA-IPC-imported segment once its last
@@ -604,6 +631,21 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 "follow layer boundaries",
                 model_name,
                 exc_info=True,
+            )
+        try:
+            fetch_layout = ModelLayout.from_registration(
+                group_layout_descs, group_kernel_layer_indices
+            )
+        except ValueError:
+            logger.warning(
+                "Cannot plan layerwise fetches for %s; its retrieves load "
+                "whole objects",
+                model_name,
+                exc_info=True,
+            )
+        else:
+            self._fetch_models.register(
+                model_name, world_size, FetchModel(fetch_layout, attn_desc)
             )
 
         layerwise_schedule: LayerwiseSchedule | None = None
@@ -1103,7 +1145,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 g for g, kind in enumerate(attn_desc.group_kinds) if kind == "aux"
             }
             group_skips = [
-                0 if window < 0 else max(0, num_chunks - window)
+                first_in_window_chunk(num_chunks, window)
                 for window in attn_desc.num_chunks_in_sw
             ]
             expected_retained = sum(
