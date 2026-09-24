@@ -7,6 +7,7 @@ Track C can build against it. Behaviour is covered in
 """
 
 # Standard
+from collections.abc import Sequence
 import inspect
 
 # Third Party
@@ -17,6 +18,7 @@ from lmcache.v1.distributed.l2_adapters.layerwise_source import (
     AerospikeLayerArrivalSource,
     NativePlanIssuer,
     PipelinedFetchConnector,
+    PlannedFetchConnector,
 )
 from lmcache.v1.layerwise import LayerArrivalSource
 
@@ -45,6 +47,16 @@ class _ReadyConnector:
     def abandon_pipelined_fetch(self) -> None:
         return None
 
+    def issue_pipelined_fetch_by_slots(
+        self,
+        node_names: Sequence[str],
+        slots: Sequence[tuple[int, str, int, int, int]],
+    ) -> int:
+        return 7
+
+    def pipelined_max_slots_per_request(self) -> int:
+        return 4096
+
 
 def _native_source() -> AerospikeLayerArrivalSource:
     connector = _ReadyConnector()
@@ -52,8 +64,9 @@ def _native_source() -> AerospikeLayerArrivalSource:
 
 
 def test_the_fake_connector_matches_the_native_surface() -> None:
-    """Keeps the stand-in used below honest about the protocol it replaces."""
+    """Keeps the stand-in used below honest about the protocols it replaces."""
     assert isinstance(_ReadyConnector(), PipelinedFetchConnector)
+    assert isinstance(_ReadyConnector(), PlannedFetchConnector)
 
 
 def test_the_aerospike_source_satisfies_the_arrival_protocol() -> None:
@@ -77,11 +90,6 @@ def test_the_source_signature_matches_the_contract(method_name: str) -> None:
     assert actual == expected
 
 
-def test_the_unfinished_plan_translation_refuses_to_pretend_it_worked() -> None:
-    """The one unimplemented step raises rather than returning a generation.
-
-    A generation from a fetch that was never issued would let a caller poll
-    forever against slots nobody asked for.
-    """
-    with pytest.raises(NotImplementedError):
-        _native_source().begin_fetch(make_plan({0: 1}))
+def test_begin_fetch_returns_the_generation_the_native_issue_allocated() -> None:
+    """The generation callers poll with is the one on the wire."""
+    assert _native_source().begin_fetch(make_plan({0: 1})) == 7

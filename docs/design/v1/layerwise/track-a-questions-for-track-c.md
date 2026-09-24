@@ -11,13 +11,13 @@ how contract changes are made.
 
 | Item | Status | Owner of follow-up |
 |---|---|---|
-| BLK1 / M1: who expands slots | **Decided: Option 1** (the plan is the only source of truth) | Track A: native session |
+| BLK1 / M1: who expands slots | **Decided: Option 1** (the plan is the only source of truth) | Track A: done (see "Work that follows") |
 | BLK2: node list | Done: `LayerFetchPlan.node_names` | - |
 | BLK3: slot numbering | Done: position in `plan.slots`; plan rejects > 65536 slots | - |
 | Q1 / M2: offsets and window ownership | **Open for the meeting** (see M2) | Both |
 | Q2: digest encoding | Done: slots carry `record_key`; native hashes it | - |
 | Q3: planner and `max_sinks` | **Decided:** the planner does not need it | Track C: reword C5 |
-| Q4: oversized-plan error | **Decided:** `PlanTooLargeError(LayerwiseContractError)` | Track C: contract; Track A: raise it |
+| Q4: oversized-plan error | **Decided:** `PlanTooLargeError(LayerwiseContractError)` | Track C: contract; Track A: native side done |
 | S1: conformance driver | **Decided:** `ArrivalDriver` as proposed | Track C: parametrize suite; Track A: fabric-free driver |
 | S2: shape test | **Decided:** Track A updates it with the implementation | Done |
 | M3: native numbering docstring | Resolved by Option 1 | - |
@@ -65,10 +65,9 @@ Track A raises it from `begin_fetch` when a plan exceeds the device's
 notification cap. For now the retrieve path treats it like any other contract
 error and falls back to a whole-object load.
 
-Track A note: the native session reports this case as a generic
-`std::runtime_error` today, so the adapter can't tell it apart from other
-failures. The native side needs a distinct exception type for it, or the
-adapter needs to check `len(plan.slots)` against a queried cap before issuing.
+Track A has done both: the native side now throws a distinct
+`PlanTooLargeError`, and the adapter checks `len(plan.slots)` against
+`pipelined_max_slots_per_request()` before issuing.
 
 ### S1: conformance driver
 
@@ -137,17 +136,36 @@ source.
 
 ## Work that follows
 
-**Track A, now unblocked:**
+**Track A, unblocked by Option 1:**
 
-1. Native slot-level issue: a new session entry point taking the flattened
-   plan, plus its pybind binding. Logic-harness tests for per-slot node
-   grouping, including one chunk whose records sit on several nodes.
-2. `record_node(user_key)` from the C client's partition map, next to
-   `record_digest_hex`.
-3. `NativePlanIssuer.issue` on top of 1 and 2.
-4. A distinct native error for "plan exceeds notification cap", surfaced as
-   `PlanTooLargeError` once Track C adds it.
-5. The fabric-free `ArrivalDriver` (S1).
+1. **Done.** Native slot-level issue:
+   `PipelinedFetchSession::begin_request_from_slots` takes
+   `PlannedSlot{node_name, digest_hex, layer_id, offset, length}` in plan
+   order. It is exposed as `issue_pipelined_fetch_by_slots(node_names, slots)`
+   on the pybind client, where each slot is
+   `(node_index, record_key, dest_offset, length, layer_id)`. The
+   logic-harness tests cover one chunk whose records sit on two nodes,
+   per-layer readiness across nodes, declines, `max_sinks` splitting, stale
+   generations, input rejection, and an unreachable node.
+2. **Done, but not built yet.** `record_node(user_key)` returns the master
+   node from the C client's partition map (`as_partition_info_init` plus
+   `as_partition_get_node`, client 7.3.0), next to `record_digest_hex`.
+3. **Done.** `NativePlanIssuer.issue` flattens the plan and calls (1).
+   Track C's `pipelined_fetch_arguments` doesn't need the new shape for this
+   path: the issuer flattens the plan itself.
+4. **Done on the native side.** The session throws `rdma::PlanTooLargeError`,
+   which pybind raises as `PipelinedPlanTooLargeError(RuntimeError)`.
+   `NativePlanIssuer` also checks `len(plan.slots)` against
+   `pipelined_max_slots_per_request()` before sending anything. Both raise
+   `LayerwiseContractError` today and will switch to `PlanTooLargeError` once
+   it is in `contract.py`.
+5. **Waiting.** The fabric-free `ArrivalDriver` (S1) needs Track C's
+   protocol in the suite. It also needs a way to drive the real session from
+   Python without a device, which the pybind client doesn't offer today.
+
+Items 1 to 3 compile and pass only in the device-free logic harness. The
+connector, driver and pybind changes need a build with `libaerospike` and
+verbs, which Track A's workstation doesn't have.
 
 **Track A, after M2:** the window lease API, and a production `ChunkPlacer`
 on top of it if Option A is chosen.

@@ -18,6 +18,7 @@
   #include <aerospike/aerospike.h>
 
   #include <cstdint>
+  #include <functional>
   #include <map>
   #include <memory>
   #include <mutex>
@@ -70,6 +71,20 @@ class AerospikePipelinedRdmaDriver {
       const std::vector<rdma::ChunkNodeBinding>& chunk_nodes,
       const std::vector<rdma::SlotDigest>& slot_digests);
 
+  // Same as issue_pipelined_fetch(), for slots planned by the caller; see
+  // rdma::PipelinedFetchSession::begin_request_from_slots.
+  //
+  // Thread safety: as issue_pipelined_fetch(). Throws
+  // rdma::PlanTooLargeError when the plan exceeds max_slots_per_request().
+  uint16_t issue_planned_fetch(const rdma::PipelinedNodeInfoSender& send_info,
+                               const std::vector<rdma::PlannedSlot>& slots);
+
+  // Most slots one request may carry on this device, or 0 when pipelined
+  // fetch is not ready.
+  //
+  // Thread safety: takes `mu_`.
+  uint32_t max_slots_per_request() const;
+
   // Thread safety: polls the completion queue outside `mu_`, then takes `mu_`
   // to feed the session.
   void poll_notifications();
@@ -90,6 +105,12 @@ class AerospikePipelinedRdmaDriver {
   void abandon_request();
 
  private:
+  // Begin a request with `begin` under `mu_`, then send its commands without
+  // the lock and feed replies back; abandons the request if anything throws.
+  uint16_t begin_and_send(
+      const rdma::PipelinedNodeInfoSender& send_info,
+      const std::function<uint16_t(rdma::PipelinedFetchSession&)>& begin);
+
   void ensure_session();
   uint32_t desired_notification_depth() const;
 

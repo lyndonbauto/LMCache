@@ -33,6 +33,7 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -59,6 +60,30 @@ struct SlotDigest {
   uint32_t plane = 0;
   uint32_t piece = 0;
   std::string digest_hex;
+};
+
+// One slot of a plan built by the caller, issued exactly as given.
+//
+// Each slot names its own node because Aerospike places every record by its
+// own digest: one chunk's records usually sit on several nodes, so a node
+// cannot be inferred from the chunk.
+struct PlannedSlot {
+  std::string node_name;
+  std::string digest_hex;
+  uint32_t layer_id = 0;
+  // Relative to the base of the registered window.
+  size_t offset = 0;
+  size_t length = 0;
+};
+
+// A plan with more slots than this device can post receives for.
+//
+// Distinct from other begin_request failures because the caller's response
+// differs: a smaller plan can still succeed, whereas an unready backend
+// cannot. Derives from std::runtime_error so existing handlers still see it.
+class PlanTooLargeError : public std::runtime_error {
+ public:
+  using std::runtime_error::runtime_error;
 };
 
 // Owns one in-flight pipelined fetch at a time: plan, readiness, commands.
@@ -96,6 +121,25 @@ class PipelinedFetchSession {
   uint16_t begin_request(const std::vector<ChunkPlacement>& placements,
                          const std::vector<ChunkNodeBinding>& chunk_nodes,
                          const std::vector<SlotDigest>& slot_digests);
+
+  // Begin a request whose slots were planned by the caller.
+  //
+  // Nothing is re-planned: slot i of `slots` is sent with slot number i, to
+  // `slots[i].node_name`, and counts toward `slots[i].layer_id`. This is the
+  // entry point for LayerFetchPlan, whose slot order is the contract's slot
+  // numbering.
+  //
+  // Thread safety: takes `mu_`. Throws std::runtime_error if a request is
+  // already active, PlanTooLargeError if `slots.size()` exceeds the
+  // device-derived `max_notification_slots_`, and std::invalid_argument if
+  // `slots` is empty, a slot has an empty node or digest, a node is not
+  // registered, or a slot falls outside `window_bytes_`.
+  uint16_t begin_request_from_slots(const std::vector<PlannedSlot>& slots);
+
+  // Most slots one request may carry on this device.
+  //
+  // Thread safety: immutable after construction.
+  uint32_t max_slots_per_request() const { return max_notification_slots_; }
 
   // kv-sink-fetch-pipelined commands for the active plan. A node may appear
   // more than once when its sink count exceeds that node's
@@ -181,7 +225,7 @@ class PipelinedFetchSession {
   uint16_t active_generation_ = 0;
   RequestPlan plan_;
   LayerReadiness readiness_;
-  std::map<uint32_t, std::string> chunk_to_node_;
+  std::vector<std::string> node_per_slot_;
   std::map<std::string, std::set<uint16_t>> slots_by_node_;
   std::vector<std::string> digest_per_slot_;
 };

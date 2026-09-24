@@ -164,20 +164,38 @@ void validate_slots_in_window(const RequestPlan& plan, size_t window_bytes) {
   }
 }
 
-std::map<std::string, std::set<uint16_t>> slots_owned_by_node(
+std::vector<std::string> node_per_slot_from_chunks(
     const RequestPlan& plan,
     const std::map<uint32_t, std::string>& chunk_to_node) {
-  std::map<std::string, std::set<uint16_t>> out;
+  std::vector<std::string> out(plan.slot_count());
   for (uint32_t chunk_id : plan.chunk_ids()) {
-    const auto node_it = chunk_to_node.find(chunk_id);
-    if (node_it == chunk_to_node.end()) {
-      continue;
-    }
+    const std::string& node_name = chunk_to_node.at(chunk_id);
     for (const uint16_t slot_index : plan.slots_for_chunk(chunk_id)) {
-      out[node_it->second].insert(slot_index);
+      out[slot_index] = node_name;
     }
   }
   return out;
+}
+
+std::map<std::string, std::set<uint16_t>> slots_owned_by_node(
+    const std::vector<std::string>& node_per_slot) {
+  std::map<std::string, std::set<uint16_t>> out;
+  for (size_t i = 0; i < node_per_slot.size(); ++i) {
+    out[node_per_slot[i]].insert(static_cast<uint16_t>(i));
+  }
+  return out;
+}
+
+void throw_if_plan_too_large(size_t slot_count, uint32_t max_slots) {
+  if (slot_count > max_slots) {
+    throw PlanTooLargeError(
+        "PipelinedFetchSession: plan requires " + std::to_string(slot_count) +
+        " notification slots but at most " + std::to_string(max_slots) +
+        " can be posted on this device's queue pair (each pipelined write "
+        "consumes one receive work request). Use fewer chunks in one request, "
+        "raise the record cap so each K/V plane needs fewer pieces, or use "
+        "hardware that reports a higher max_recv_wr");
+  }
 }
 
 }  // namespace
@@ -229,16 +247,7 @@ uint16_t PipelinedFetchSession::begin_request(
   const uint16_t generation = allocate_generation();
   RequestPlan plan = planner_.plan_request(placements, max_record_bytes_,
                                            max_write_bytes_, generation);
-  if (plan.slot_count() > max_notification_slots_) {
-    throw std::runtime_error(
-        "PipelinedFetchSession: plan requires " +
-        std::to_string(plan.slot_count()) + " notification slots but at most " +
-        std::to_string(max_notification_slots_) +
-        " can be posted on this device's queue pair (each pipelined write "
-        "consumes one receive work request). Use fewer chunks in one request, "
-        "raise the record cap so each K/V plane needs fewer pieces, or use "
-        "hardware that reports a higher max_recv_wr");
-  }
+  throw_if_plan_too_large(plan.slot_count(), max_notification_slots_);
   validate_slots_in_window(plan, window_bytes_);
 
   std::map<uint32_t, std::string> nodes = chunk_node_map(chunk_nodes);
@@ -258,8 +267,64 @@ uint16_t PipelinedFetchSession::begin_request(
   active_generation_ = generation;
   plan_ = std::move(plan);
   readiness_ = LayerReadiness(plan_);
-  chunk_to_node_ = std::move(nodes);
-  slots_by_node_ = slots_owned_by_node(plan_, chunk_to_node_);
+  node_per_slot_ = node_per_slot_from_chunks(plan_, nodes);
+  slots_by_node_ = slots_owned_by_node(node_per_slot_);
+  digest_per_slot_ = std::move(digests);
+  return active_generation_;
+}
+
+uint16_t PipelinedFetchSession::begin_request_from_slots(
+    const std::vector<PlannedSlot>& slots) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (has_request_) {
+    throw std::runtime_error(
+        "PipelinedFetchSession: a pipelined fetch is already active");
+  }
+  if (slots.empty()) {
+    throw std::invalid_argument(
+        "PipelinedFetchSession: a planned request needs at least one slot");
+  }
+  throw_if_plan_too_large(slots.size(), max_notification_slots_);
+
+  std::set<std::string> registered;
+  for (const std::string& name : registry_.node_names()) {
+    registered.insert(name);
+  }
+  for (size_t i = 0; i < slots.size(); ++i) {
+    const PlannedSlot& slot = slots[i];
+    if (slot.node_name.empty() || slot.digest_hex.empty()) {
+      throw std::invalid_argument("PipelinedFetchSession: slot " +
+                                  std::to_string(i) +
+                                  " has an empty node name or digest");
+    }
+    if (registered.find(slot.node_name) == registered.end()) {
+      throw std::invalid_argument(
+          "PipelinedFetchSession: slot " + std::to_string(i) + " names node '" +
+          slot.node_name + "', which has no kv-sink registration");
+    }
+  }
+
+  const uint16_t generation = allocate_generation();
+  RequestPlan plan(generation);
+  std::vector<std::string> nodes;
+  std::vector<std::string> digests;
+  nodes.reserve(slots.size());
+  digests.reserve(slots.size());
+  for (const PlannedSlot& slot : slots) {
+    // chunk_id is unused on this path: nodes come from each slot, not from
+    // chunk bindings.
+    plan.add_slot(slot.layer_id, 0, slot.offset, slot.length);
+    nodes.push_back(slot.node_name);
+    digests.push_back(slot.digest_hex);
+  }
+  validate_slots_in_window(plan, window_bytes_);
+
+  has_request_ = true;
+  active_generation_ = generation;
+  plan_ = std::move(plan);
+  readiness_ = LayerReadiness(plan_);
+  node_per_slot_ = std::move(nodes);
+  slots_by_node_ = slots_owned_by_node(node_per_slot_);
   digest_per_slot_ = std::move(digests);
   return active_generation_;
 }
@@ -272,17 +337,15 @@ PipelinedFetchSession::pipelined_fetch_commands() const {
   }
 
   std::map<std::string, std::vector<SinkRequest>> sinks_by_node;
-  for (uint32_t chunk_id : plan_.chunk_ids()) {
-    const std::string& node_name = chunk_to_node_.at(chunk_id);
-    for (const uint16_t slot_index : plan_.slots_for_chunk(chunk_id)) {
-      const FetchSlot& slot = plan_.slot(slot_index);
-      SinkRequest sink;
-      sink.digest_hex = digest_per_slot_[slot_index];
-      sink.offset = slot.offset;
-      sink.length = slot.length;
-      sink.slot = slot_index;
-      sinks_by_node[node_name].push_back(sink);
-    }
+  for (size_t i = 0; i < plan_.slot_count(); ++i) {
+    const uint16_t slot_index = static_cast<uint16_t>(i);
+    const FetchSlot& slot = plan_.slot(slot_index);
+    SinkRequest sink;
+    sink.digest_hex = digest_per_slot_[slot_index];
+    sink.offset = slot.offset;
+    sink.length = slot.length;
+    sink.slot = slot_index;
+    sinks_by_node[node_per_slot_[slot_index]].push_back(sink);
   }
 
   for (auto& entry : sinks_by_node) {
@@ -407,7 +470,7 @@ void PipelinedFetchSession::finish_request() {
   active_generation_ = 0;
   plan_ = RequestPlan(0);
   readiness_ = LayerReadiness(plan_);
-  chunk_to_node_.clear();
+  node_per_slot_.clear();
   slots_by_node_.clear();
   digest_per_slot_.clear();
 }
@@ -420,7 +483,7 @@ void PipelinedFetchSession::abandon_request() {
   active_generation_ = 0;
   plan_ = RequestPlan(0);
   readiness_ = LayerReadiness(plan_);
-  chunk_to_node_.clear();
+  node_per_slot_.clear();
   slots_by_node_.clear();
   digest_per_slot_.clear();
 }

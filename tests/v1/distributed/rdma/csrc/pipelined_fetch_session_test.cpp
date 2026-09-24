@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <set>
@@ -32,6 +33,8 @@ using lmcache::connector::rdma::NodeRegistry;
 using lmcache::connector::rdma::object_group_bytes;
 using lmcache::connector::rdma::ObjectGroupLayout;
 using lmcache::connector::rdma::PipelinedFetchSession;
+using lmcache::connector::rdma::PlannedSlot;
+using lmcache::connector::rdma::PlanTooLargeError;
 using lmcache::connector::rdma::SlotDigest;
 using lmcache::connector::rdma::SlotPlanner;
 
@@ -655,6 +658,213 @@ void test_rejected_second_command_marks_unservable() {
   session.finish_request();
 }
 
+PlannedSlot planned(const std::string& node, uint32_t layer, size_t offset,
+                    const std::string& digest, size_t length = 64) {
+  PlannedSlot slot;
+  slot.node_name = node;
+  slot.digest_hex = digest;
+  slot.layer_id = layer;
+  slot.offset = offset;
+  slot.length = length;
+  return slot;
+}
+
+// Slots of one chunk whose records hash to different nodes, as Aerospike
+// places them: layer 0 on node-a then node-b, layer 1 on node-b then node-a.
+std::vector<PlannedSlot> one_chunk_across_two_nodes() {
+  return {
+      planned("node-a", 0, 0, "d0"),
+      planned("node-b", 0, 64, "d1"),
+      planned("node-b", 1, 128, "d2"),
+      planned("node-a", 1, 192, "d3"),
+  };
+}
+
+void test_planned_slots_go_to_their_own_node() {
+  std::cout << "planned slots go to their own node, not their chunk's\n";
+
+  const SlotPlanner planner({single_group_layout(1)});
+  NodeRegistry registry;
+  register_node(registry, "node-a", 10);
+  register_node(registry, "node-b", 20);
+  PipelinedFetchSession session = make_session(planner, registry);
+
+  session.begin_request_from_slots(one_chunk_across_two_nodes());
+  const auto commands = session.pipelined_fetch_commands();
+
+  const auto a = commands_for_node(commands, "node-a");
+  const auto b = commands_for_node(commands, "node-b");
+  check(a.size() == 1 && b.size() == 1, "each node gets one command");
+  check(slot_indices_in_command(a.at(0)) == std::vector<uint16_t>({0, 3}),
+        "node-a is asked for exactly the slots whose records it holds");
+  check(slot_indices_in_command(b.at(0)) == std::vector<uint16_t>({1, 2}),
+        "node-b is asked for the rest, even though they share a chunk");
+  check(a.at(0).find("d0@0:64#0") != std::string::npos,
+        "a sink carries the slot's digest, offset, length and position");
+  check(b.at(0).find("region=20") != std::string::npos,
+        "each command uses its own node's region");
+  session.finish_request();
+}
+
+void test_planned_readiness_counts_every_slot_of_a_layer() {
+  std::cout << "planned readiness counts every slot of a layer\n";
+
+  const SlotPlanner planner({single_group_layout(1)});
+  NodeRegistry registry;
+  register_node(registry, "node-a", 10);
+  register_node(registry, "node-b", 20);
+  PipelinedFetchSession session = make_session(planner, registry);
+
+  const uint16_t gen =
+      session.begin_request_from_slots(one_chunk_across_two_nodes());
+
+  session.on_notifications({encode_immediate(gen, 3)});
+  check(!session.is_layer_ready(1, gen),
+        "layer 1 is not ready when one of its two slots has landed");
+  check(!session.is_layer_ready(0, gen), "layer 0 has nothing yet");
+
+  session.on_notifications({encode_immediate(gen, 2)});
+  check(session.is_layer_ready(1, gen),
+        "layer 1 is ready once its slots on both nodes landed, out of order");
+  check(!session.is_layer_ready(0, gen),
+        "layer 1 finishing first does not make layer 0 ready");
+
+  session.on_notifications(
+      {encode_immediate(gen, 1), encode_immediate(gen, 0)});
+  check(session.is_layer_ready(0, gen), "layer 0 completes");
+  session.finish_request();
+}
+
+void test_planned_decline_marks_only_its_layer() {
+  std::cout << "planned decline marks only its layer\n";
+
+  const SlotPlanner planner({single_group_layout(1)});
+  NodeRegistry registry;
+  register_node(registry, "node-a", 10);
+  register_node(registry, "node-b", 20);
+  PipelinedFetchSession session = make_session(planner, registry);
+
+  const uint16_t gen =
+      session.begin_request_from_slots(one_chunk_across_two_nodes());
+  const auto commands = session.pipelined_fetch_commands();
+  const std::string command_b = commands_for_node(commands, "node-b").at(0);
+
+  session.on_node_reply("node-b", command_b, "n=2;accepted=1;failed=1;bytes=64",
+                        gen);
+  check(session.unservable_layers() == std::vector<uint32_t>({0}),
+        "node-b declining slot 1 makes layer 0 unservable");
+
+  bool threw = false;
+  const std::string command_a = commands_for_node(commands, "node-a").at(0);
+  try {
+    session.on_node_reply("node-a", command_a,
+                          "n=2;accepted=1;failed=1;bytes=64", gen);
+  } catch (const std::runtime_error&) {
+    threw = true;
+  }
+  check(threw, "a node cannot decline a slot another node owns");
+  session.abandon_request();
+}
+
+void test_planned_request_splits_to_max_sinks() {
+  std::cout << "planned request splits to max_sinks\n";
+
+  const SlotPlanner planner({single_group_layout(1)});
+  NodeRegistry registry;
+  register_node(registry, "node-a", 10, 2);
+  PipelinedFetchSession session = make_session(planner, registry);
+
+  std::vector<PlannedSlot> slots;
+  for (uint32_t i = 0; i < 5; ++i) {
+    slots.push_back(planned("node-a", i, i * 64, "d" + std::to_string(i)));
+  }
+  session.begin_request_from_slots(slots);
+  const auto commands =
+      commands_for_node(session.pipelined_fetch_commands(), "node-a");
+  check(commands.size() == 3, "5 sinks at max_sinks 2 become 3 commands");
+  check(all_slots_in_commands(commands).size() == 5,
+        "every slot is sent exactly once");
+  session.finish_request();
+}
+
+void test_planned_late_write_from_abandoned_request_is_ignored() {
+  std::cout << "planned late write from an abandoned request is ignored\n";
+
+  const SlotPlanner planner({single_group_layout(1)});
+  NodeRegistry registry;
+  register_node(registry, "node-a", 10);
+  PipelinedFetchSession session = make_session(planner, registry);
+
+  const std::vector<PlannedSlot> slots = {planned("node-a", 0, 0, "d0")};
+  const uint16_t old_gen = session.begin_request_from_slots(slots);
+  session.abandon_request();
+  const uint16_t new_gen = session.begin_request_from_slots(slots);
+
+  session.on_notifications({encode_immediate(old_gen, 0)});
+  check(!session.is_layer_ready(0, new_gen),
+        "the old generation's write does not complete the new request");
+  session.on_notifications({encode_immediate(new_gen, 0)});
+  check(session.is_layer_ready(0, new_gen), "the new request's write does");
+  session.finish_request();
+}
+
+template <typename Exception>
+bool throws(const std::function<void()>& action) {
+  try {
+    action();
+  } catch (const Exception&) {
+    return true;
+  } catch (...) {
+    return false;
+  }
+  return false;
+}
+
+void test_planned_request_rejects_bad_input() {
+  std::cout << "planned request rejects bad input\n";
+
+  const SlotPlanner planner({single_group_layout(1)});
+  NodeRegistry registry;
+  register_node(registry, "node-a", 10);
+  PipelinedFetchSession session = make_session(planner, registry);
+
+  check(throws<std::invalid_argument>(
+            [&] { session.begin_request_from_slots({}); }),
+        "an empty plan is refused");
+  check(throws<std::invalid_argument>([&] {
+          session.begin_request_from_slots({planned("node-z", 0, 0, "d")});
+        }),
+        "a node with no kv-sink registration is refused");
+  check(throws<std::invalid_argument>([&] {
+          session.begin_request_from_slots({planned("node-a", 0, 0, "")});
+        }),
+        "an empty digest is refused");
+  check(throws<std::invalid_argument>([&] {
+          session.begin_request_from_slots(
+              {planned("node-a", 0, kWindowBytes - 8, "d", 64)});
+        }),
+        "a slot outside the registered window is refused");
+  check(!session.has_active_request(),
+        "no rejected plan leaves a request active");
+
+  session.begin_request_from_slots({planned("node-a", 0, 0, "d")});
+  check(throws<std::runtime_error>([&] {
+          session.begin_request_from_slots({planned("node-a", 0, 0, "d")});
+        }),
+        "a second active request is refused");
+  session.finish_request();
+
+  PipelinedFetchSession small(planner, registry, "kv", kRecordCap, kWriteCap,
+                              kWindowBytes, 2);
+  check(small.max_slots_per_request() == 2, "the device slot cap is reported");
+  check(throws<PlanTooLargeError>([&] {
+          small.begin_request_from_slots({planned("node-a", 0, 0, "d0"),
+                                          planned("node-a", 0, 64, "d1"),
+                                          planned("node-a", 0, 128, "d2")});
+        }),
+        "a plan above the device slot cap raises PlanTooLargeError");
+}
+
 }  // namespace
 
 int main() {
@@ -674,6 +884,12 @@ int main() {
     test_chunking_preserves_ascending_slot_order_across_commands();
     test_two_nodes_chunk_with_independent_limits();
     test_rejected_second_command_marks_unservable();
+    test_planned_slots_go_to_their_own_node();
+    test_planned_readiness_counts_every_slot_of_a_layer();
+    test_planned_decline_marks_only_its_layer();
+    test_planned_request_splits_to_max_sinks();
+    test_planned_late_write_from_abandoned_request_is_ignored();
+    test_planned_request_rejects_bad_input();
   } catch (const std::exception& e) {
     std::cerr << "EXCEPTION: " << e.what() << "\n";
     return 1;

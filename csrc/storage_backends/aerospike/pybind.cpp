@@ -85,6 +85,9 @@ PYBIND11_MODULE(lmcache_aerospike, m) {
           .def("record_digest_hex",
                &lmcache::connector::AerospikeNativeConnector::record_digest_hex,
                py::arg("user_key"))
+          .def("record_node",
+               &lmcache::connector::AerospikeNativeConnector::record_node,
+               py::arg("user_key"))
           .def("max_record_bytes",
                &lmcache::connector::AerospikeNativeConnector::max_record_bytes);
 #ifdef LMCACHE_AEROSPIKE_RDMA

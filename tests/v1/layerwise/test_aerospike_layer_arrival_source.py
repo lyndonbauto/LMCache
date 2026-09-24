@@ -7,13 +7,13 @@ declined commands, receive-queue sizing -- is covered by the C++ logic harness
 adapter adds on top: the three-valued status, generation and layer checks,
 error translation, and the abandon rules, all through the public contract.
 
-``begin_fetch`` goes through an injected issuer because issuing a
-``LayerFetchPlan`` natively is still open; see "Open for the meeting" in
-``docs/design/v1/layerwise/track-a-questions-for-track-c.md``.
+Most tests issue through a fake issuer to isolate arrival accounting; the
+``NativePlanIssuer`` tests check how a plan is flattened for the native call.
 """
 
 # Standard
 from collections import deque
+from collections.abc import Sequence
 import threading
 
 # Third Party
@@ -32,12 +32,17 @@ from lmcache.v1.layerwise import (
     LayerUnservableError,
     LayerwiseContractError,
     RecordingLayerLoadSink,
+    SlotPlacement,
     StaleGenerationError,
 )
 from lmcache.v1.layerwise.contract import NO_GENERATION
 
 # Local
 from .conftest import make_plan
+
+#: One slot as the native call takes it:
+#: ``(node_index, record_key, dest_offset, length, layer_id)``.
+FlatSlot = tuple[int, str, int, int, int]
 
 
 class FakeNativeConnector:
@@ -60,6 +65,10 @@ class FakeNativeConnector:
         self.poll_error: Exception = RuntimeError("unset")
         self.raise_on_poll = False
         self.raise_on_finish = False
+        self.max_slots = 4096
+        self.next_generation = 1
+        self.issue_error: Exception | None = None
+        self.issued: list[tuple[tuple[str, ...], list[FlatSlot]]] = []
 
     def begin(self, generation: int) -> None:
         """Start a native request, as issue_pipelined_fetch would."""
@@ -103,6 +112,22 @@ class FakeNativeConnector:
     def abandon_pipelined_fetch(self) -> None:
         self.abandon_calls += 1
         self.active_generation = NO_GENERATION
+
+    def issue_pipelined_fetch_by_slots(
+        self,
+        node_names: Sequence[str],
+        slots: Sequence[FlatSlot],
+    ) -> int:
+        if self.issue_error is not None:
+            raise self.issue_error
+        self.issued.append((tuple(node_names), list(slots)))
+        generation = self.next_generation
+        self.next_generation += 1
+        self.begin(generation)
+        return generation
+
+    def pipelined_max_slots_per_request(self) -> int:
+        return self.max_slots
 
 
 class FakeIssuer:
@@ -209,16 +234,71 @@ def test_a_reserved_native_generation_is_refused_and_released() -> None:
     assert connector.abandon_calls == 1
 
 
-def test_the_native_issuer_is_not_disguised_as_a_backend_failure() -> None:
-    """The unfinished plan translation surfaces as NotImplementedError.
+# ---------------------------------------------------------- NativePlanIssuer
 
-    Wrapping it as LayerwiseContractError would send every caller down the
-    fallback path and hide that the adapter is incomplete.
+
+def _two_node_plan() -> LayerFetchPlan:
+    """One chunk whose records sit on different nodes, as digests place them."""
+
+    def slot(layer_id: int, node_index: int, key: str, offset: int) -> SlotPlacement:
+        return SlotPlacement(
+            layer_id=layer_id,
+            chunk_id=0,
+            node_index=node_index,
+            record_key=key,
+            plane=0,
+            piece=0,
+            offset=offset,
+            length=64,
+        )
+
+    return LayerFetchPlan(
+        (
+            slot(0, 1, "k-0", 0),
+            slot(0, 0, "k-1", 64),
+            slot(1, 1, "k-2", 128),
+        ),
+        ("node-a", "node-b"),
+    )
+
+
+def test_the_native_issuer_sends_the_plan_slot_for_slot() -> None:
+    """Position is the slot number, and each slot keeps its own node.
+
+    Re-ordering or re-binding here would make the immediates on the wire
+    name different slots than the plan the caller polls against.
     """
     connector = FakeNativeConnector()
     source = AerospikeLayerArrivalSource(connector, NativePlanIssuer(connector))
-    with pytest.raises(NotImplementedError, match="per-record node binding"):
-        source.begin_fetch(make_plan({0: 1}))
+    generation = source.begin_fetch(_two_node_plan())
+    assert generation == connector.active_generation
+    assert connector.issued == [
+        (
+            ("node-a", "node-b"),
+            [(1, "k-0", 0, 64, 0), (0, "k-1", 64, 64, 0), (1, "k-2", 128, 64, 1)],
+        )
+    ]
+
+
+def test_the_native_issuer_refuses_an_oversized_plan_before_sending() -> None:
+    """A6: nothing reaches a node when the device cannot post enough receives."""
+    connector = FakeNativeConnector()
+    connector.max_slots = 2
+    source = AerospikeLayerArrivalSource(connector, NativePlanIssuer(connector))
+    with pytest.raises(LayerwiseContractError, match="at most 2"):
+        source.begin_fetch(_two_node_plan())
+    assert connector.issued == []
+    connector.max_slots = 3
+    assert source.begin_fetch(_two_node_plan()) != NO_GENERATION
+
+
+def test_native_issuer_failures_become_contract_errors() -> None:
+    """A native rejection (bad node, slot outside the window) is a fallback."""
+    connector = FakeNativeConnector()
+    connector.issue_error = ValueError("node 'node-b' has no kv-sink registration")
+    source = AerospikeLayerArrivalSource(connector, NativePlanIssuer(connector))
+    with pytest.raises(LayerwiseContractError, match="no kv-sink registration"):
+        source.begin_fetch(_two_node_plan())
 
 
 # ---------------------------------------------------------------- poll_layer

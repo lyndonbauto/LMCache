@@ -35,6 +35,16 @@ struct SlotRecordKey {
   std::string record_key;
 };
 
+// One slot of a caller-planned pipelined fetch; see
+// AerospikeNativeConnector::issue_pipelined_fetch_by_slots.
+struct PlannedSlotKey {
+  uint32_t node_index = 0;
+  std::string record_key;
+  size_t dest_offset = 0;
+  size_t length = 0;
+  uint32_t layer_id = 0;
+};
+
 struct WorkerAerospikeConn {
   aerospike* client = nullptr;
   std::string ns;
@@ -114,6 +124,22 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
   // Throws std::invalid_argument if `user_key` is empty.
   std::string record_digest_hex(const std::string& user_key) const;
 
+  // Name of the node that currently masters the record stored under
+  // `user_key`, read from the client's partition map.
+  //
+  // Records of one chunk hash to independent partitions, so a planner must
+  // ask per record rather than per chunk. The answer is a snapshot: a
+  // migration may move the record before it is fetched, in which case the
+  // named node declines the slot and the layer reports unservable.
+  //
+  // Thread safety: safe to call concurrently; the client guards its
+  // partition map.
+  //
+  // Throws std::invalid_argument if `user_key` is empty, and
+  // std::runtime_error if the client is not connected or no node masters
+  // the record's partition.
+  std::string record_node(const std::string& user_key) const;
+
   // Largest record this connector writes, in bytes: the server's record cap
   // less a safety margin. Layer-aligned writes cut planes against this, so a
   // reader naming records must plan with the same value.
@@ -163,6 +189,31 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
       const std::vector<rdma::ChunkPlacement>& placements,
       const std::vector<rdma::ChunkNodeBinding>& chunk_nodes,
       const std::vector<SlotRecordKey>& slot_record_keys);
+
+  // Begin a pipelined fetch whose slots the caller has already planned, and
+  // return its generation.
+  //
+  // `slots[i]` is notification slot i: its record (by user key, hashed with
+  // record_digest_hex()) is written by node `node_names[slots[i].node_index]`
+  // to `dest_offset` in the registered window, and it counts toward
+  // `layer_id`'s readiness. Nothing is re-planned or re-ordered here.
+  //
+  // Thread safety: as issue_pipelined_fetch().
+  //
+  // Throws std::invalid_argument if a node index is out of range, a key is
+  // empty, a node has no kv-sink registration, or a slot leaves the window;
+  // rdma::PlanTooLargeError if there are more slots than
+  // pipelined_max_slots_per_request(); std::runtime_error if the RDMA path is
+  // not enabled or a fetch is already active.
+  uint16_t issue_pipelined_fetch_by_slots(
+      const std::vector<std::string>& node_names,
+      const std::vector<PlannedSlotKey>& slots);
+
+  // Most slots one pipelined fetch may carry, or 0 when pipelined fetch is
+  // not ready.
+  //
+  // Thread safety: safe to call concurrently.
+  uint32_t pipelined_max_slots_per_request() const;
 
   // Layer readiness for a pipelined fetch. False when pipelined fetch is not
   // ready, the generation does not match, or the layer is not complete.

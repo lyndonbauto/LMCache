@@ -4,13 +4,12 @@
 
 #include <aerospike/aerospike_info.h>
 #include <aerospike/aerospike_key.h>
+#include <aerospike/as_cluster.h>
 #include <aerospike/as_config.h>
+#include <aerospike/as_node.h>
+#include <aerospike/as_partition.h>
 #include <aerospike/as_record.h>
 #include <aerospike/as_status.h>
-#ifdef LMCACHE_AEROSPIKE_RDMA
-  #include <aerospike/as_cluster.h>
-  #include <aerospike/as_node.h>
-#endif
 
 #include <algorithm>
 #include <cassert>
@@ -474,6 +473,40 @@ std::string AerospikeNativeConnector::record_digest_hex(
   return hex;
 }
 
+std::string AerospikeNativeConnector::record_node(
+    const std::string& user_key) const {
+  if (user_key.empty()) {
+    throw std::invalid_argument("record_node: user key is empty");
+  }
+  if (as_.cluster == nullptr) {
+    throw std::runtime_error("record_node: client is not connected");
+  }
+  as_key key;
+  as_key_init_str(&key, ns_.c_str(), set_name_.c_str(), user_key.c_str());
+  as_error err;
+  as_error_init(&err);
+  as_partition_info partition;
+  if (as_partition_info_init(&partition, as_.cluster, &err, &key) !=
+      AEROSPIKE_OK) {
+    as_key_destroy(&key);
+    throw std::runtime_error(std::string("record_node: ") + err.message);
+  }
+  uint8_t replica_index = 0;
+  as_node* node = as_partition_get_node(
+      as_.cluster, partition.ns, partition.partition, nullptr,
+      AS_POLICY_REPLICA_MASTER, partition.replica_size, &replica_index);
+  as_key_destroy(&key);
+  if (node == nullptr) {
+    throw std::runtime_error("record_node: no node masters the partition of '" +
+                             user_key + "'");
+  }
+  // The map does not reserve the node; hold it while copying the name.
+  as_node_reserve(node);
+  std::string name(node->name);
+  as_node_release(node);
+  return name;
+}
+
 #ifdef LMCACHE_AEROSPIKE_RDMA
 
 namespace {
@@ -591,6 +624,42 @@ uint16_t AerospikeNativeConnector::issue_pipelined_fetch_by_keys(
                             slot.piece, record_digest_hex(slot.record_key)});
   }
   return issue_pipelined_fetch(placements, chunk_nodes, slot_digests);
+}
+
+uint16_t AerospikeNativeConnector::issue_pipelined_fetch_by_slots(
+    const std::vector<std::string>& node_names,
+    const std::vector<PlannedSlotKey>& slots) {
+  if (!pipelined_rdma_) {
+    throw std::runtime_error(
+        "Aerospike pipelined fetch: RDMA path is not enabled");
+  }
+  std::vector<rdma::PlannedSlot> planned;
+  planned.reserve(slots.size());
+  for (size_t i = 0; i < slots.size(); ++i) {
+    const PlannedSlotKey& slot = slots[i];
+    if (slot.node_index >= node_names.size()) {
+      throw std::invalid_argument(
+          "Aerospike pipelined fetch: slot " + std::to_string(i) +
+          " names node index " + std::to_string(slot.node_index) +
+          " but only " + std::to_string(node_names.size()) +
+          " nodes were given");
+    }
+    planned.push_back({node_names[slot.node_index],
+                       record_digest_hex(slot.record_key), slot.layer_id,
+                       slot.dest_offset, slot.length});
+  }
+  return pipelined_rdma_->issue_planned_fetch(
+      [this](const std::string& node_name, const std::string& command) {
+        return send_pipelined_info_command(&as_, node_name, command);
+      },
+      planned);
+}
+
+uint32_t AerospikeNativeConnector::pipelined_max_slots_per_request() const {
+  if (!pipelined_rdma_) {
+    return 0;
+  }
+  return pipelined_rdma_->max_slots_per_request();
 }
 
 bool AerospikeNativeConnector::is_pipelined_layer_ready(

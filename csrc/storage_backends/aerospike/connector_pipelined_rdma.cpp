@@ -132,6 +132,27 @@ uint16_t AerospikePipelinedRdmaDriver::issue_pipelined_fetch(
     const std::vector<rdma::ChunkPlacement>& placements,
     const std::vector<rdma::ChunkNodeBinding>& chunk_nodes,
     const std::vector<rdma::SlotDigest>& slot_digests) {
+  return begin_and_send(send_info, [&](rdma::PipelinedFetchSession& session) {
+    return session.begin_request(placements, chunk_nodes, slot_digests);
+  });
+}
+
+uint16_t AerospikePipelinedRdmaDriver::issue_planned_fetch(
+    const rdma::PipelinedNodeInfoSender& send_info,
+    const std::vector<rdma::PlannedSlot>& slots) {
+  return begin_and_send(send_info, [&](rdma::PipelinedFetchSession& session) {
+    return session.begin_request_from_slots(slots);
+  });
+}
+
+uint32_t AerospikePipelinedRdmaDriver::max_slots_per_request() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return session_ ? session_->max_slots_per_request() : 0;
+}
+
+uint16_t AerospikePipelinedRdmaDriver::begin_and_send(
+    const rdma::PipelinedNodeInfoSender& send_info,
+    const std::function<uint16_t(rdma::PipelinedFetchSession&)>& begin) {
   uint16_t generation = 0;
   std::vector<std::pair<std::string, std::string>> commands;
   {
@@ -140,7 +161,7 @@ uint16_t AerospikePipelinedRdmaDriver::issue_pipelined_fetch(
       throw std::runtime_error(
           "Aerospike pipelined RDMA: pipelined fetch is not ready");
     }
-    generation = session_->begin_request(placements, chunk_nodes, slot_digests);
+    generation = begin(*session_);
     next_generation_ = static_cast<uint16_t>(generation + 1);
     commands = session_->pipelined_fetch_commands();
   }

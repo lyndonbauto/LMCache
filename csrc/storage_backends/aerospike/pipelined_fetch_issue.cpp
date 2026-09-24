@@ -27,22 +27,9 @@ std::string build_declined_reply(uint32_t requested,
   return oss.str();
 }
 
-}  // namespace
-
-std::string declined_reply_for_command(const std::string& command) {
-  const std::vector<uint16_t> owned_slots =
-      pipelined_command_slot_indices(command);
-  return build_declined_reply(static_cast<uint32_t>(owned_slots.size()),
-                              owned_slots);
-}
-
-uint16_t issue_pipelined_fetch(PipelinedFetchSession& session,
-                               const PipelinedNodeInfoSender& send_info,
-                               const std::vector<ChunkPlacement>& placements,
-                               const std::vector<ChunkNodeBinding>& chunk_nodes,
-                               const std::vector<SlotDigest>& slot_digests) {
-  const uint16_t generation =
-      session.begin_request(placements, chunk_nodes, slot_digests);
+uint16_t send_commands(PipelinedFetchSession& session,
+                       const PipelinedNodeInfoSender& send_info,
+                       uint16_t generation) {
   try {
     const std::vector<std::pair<std::string, std::string>> commands =
         session.pipelined_fetch_commands();
@@ -67,6 +54,32 @@ uint16_t issue_pipelined_fetch(PipelinedFetchSession& session,
     }
     throw;
   }
+}
+
+}  // namespace
+
+std::string declined_reply_for_command(const std::string& command) {
+  const std::vector<uint16_t> owned_slots =
+      pipelined_command_slot_indices(command);
+  return build_declined_reply(static_cast<uint32_t>(owned_slots.size()),
+                              owned_slots);
+}
+
+uint16_t issue_pipelined_fetch(PipelinedFetchSession& session,
+                               const PipelinedNodeInfoSender& send_info,
+                               const std::vector<ChunkPlacement>& placements,
+                               const std::vector<ChunkNodeBinding>& chunk_nodes,
+                               const std::vector<SlotDigest>& slot_digests) {
+  return send_commands(
+      session, send_info,
+      session.begin_request(placements, chunk_nodes, slot_digests));
+}
+
+uint16_t issue_planned_fetch(PipelinedFetchSession& session,
+                             const PipelinedNodeInfoSender& send_info,
+                             const std::vector<PlannedSlot>& slots) {
+  return send_commands(session, send_info,
+                       session.begin_request_from_slots(slots));
 }
 
 }  // namespace rdma

@@ -652,6 +652,33 @@ generations, abandon, transport-level node failures, and layout conversion —
 without libibverbs or a cluster. That is **implemented** logic, not fabric
 proof.
 
+#### Two ways to begin a request
+
+`begin_request(placements, chunk_nodes, slot_digests)` plans slots itself with
+`SlotPlanner` and binds each chunk to one node. That binding is wrong in
+general: Aerospike places every record by its own digest, so one chunk's
+records usually sit on several nodes.
+
+`begin_request_from_slots(slots)` takes a caller-planned list instead.
+`slots[i]` is notification slot `i` and names its own node, digest, layer and
+window range:
+
+```text
+slot 0: node-a  <digest k-0>  layer 0  offset 0    length 64
+slot 1: node-b  <digest k-1>  layer 0  offset 64   length 64
+slot 2: node-a  <digest k-2>  layer 1  offset 128  length 64
+-> node-a: gen=G;sinks=<k-0>@0:64#0,<k-2>@128:64#2
+   node-b: gen=G;sinks=<k-1>@64:64#1
+```
+
+Nothing is re-ordered, so the slot numbers on the wire are the caller's. This
+is what the layerwise `LayerFetchPlan` uses (Python:
+`NativePlanIssuer` → `issue_pipelined_fetch_by_slots`). The caller learns
+each record's node from `record_node(user_key)`, which reads the client's
+partition map. Both entry points enforce the same device slot cap. They throw
+`PlanTooLargeError` (pybind: `PipelinedPlanTooLargeError`) when a plan exceeds
+the cap, so callers can tell that case apart from other failures.
+
 Two things this format does **not** yet settle, both needing the server
 team's input:
 

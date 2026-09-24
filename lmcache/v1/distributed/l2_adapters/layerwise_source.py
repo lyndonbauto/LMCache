@@ -15,17 +15,15 @@ answers into the contract's terms:
 - native ``RuntimeError`` / ``ValueError`` / ``IndexError`` become
   :class:`~lmcache.v1.layerwise.contract.LayerwiseContractError`.
 
-Issuing a :class:`~lmcache.v1.layerwise.contract.LayerFetchPlan` natively is
-still open: the native session binds whole chunks to one node and plans its
-own slots from chunk placements the plan does not carry. See "Open for the
-meeting" in ``docs/design/v1/layerwise/track-a-questions-for-track-c.md``.
-Issuing sits behind :class:`PlanIssuer` so the rest of the adapter is complete
-and tested today, and :class:`NativePlanIssuer` raises
-:class:`NotImplementedError` until that is settled.
+:class:`NativePlanIssuer` issues a
+:class:`~lmcache.v1.layerwise.contract.LayerFetchPlan` slot for slot: each
+slot goes to the node the plan names, and its position in the plan is its
+notification slot. Issuing sits behind :class:`PlanIssuer` so the arrival
+accounting can be tested without a native client.
 """
 
 # Standard
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from typing import Protocol, runtime_checkable
 import threading
@@ -76,8 +74,8 @@ class PipelinedFetchConnector(Protocol):
 
     Matches the methods ``lmcache_aerospike.LMCacheAerospikeClient`` exposes
     when built with ``LMCACHE_AEROSPIKE_RDMA``. Declared here so the adapter
-    can be tested without the native extension. ``issue_pipelined_fetch`` is
-    deliberately absent: it is reached only through :class:`PlanIssuer`.
+    can be tested without the native extension. Issuing is deliberately
+    absent: it is reached only through :class:`PlanIssuer`.
     """
 
     def pipelined_fetch_ready(self) -> bool:
@@ -106,12 +104,38 @@ class PipelinedFetchConnector(Protocol):
 
 
 @runtime_checkable
+class PlannedFetchConnector(Protocol):
+    """The native entry point that issues a caller-planned fetch.
+
+    Matches ``issue_pipelined_fetch_by_slots`` and
+    ``pipelined_max_slots_per_request`` on
+    ``lmcache_aerospike.LMCacheAerospikeClient`` built with
+    ``LMCACHE_AEROSPIKE_RDMA``.
+    """
+
+    def issue_pipelined_fetch_by_slots(
+        self,
+        node_names: Sequence[str],
+        slots: Sequence[tuple[int, str, int, int, int]],
+    ) -> int:
+        """Begin a fetch of exactly ``slots`` and return its generation.
+
+        ``slots[i]`` is notification slot ``i`` and reads
+        ``(node_index, record_key, dest_offset, length, layer_id)``.
+        """
+        ...
+
+    def pipelined_max_slots_per_request(self) -> int:
+        """Return the most slots one fetch may carry, or 0 when not ready."""
+        ...
+
+
+@runtime_checkable
 class PlanIssuer(Protocol):
     """Starts the native fetch described by a contract plan.
 
-    The one seam in this adapter that depends on how
-    :class:`~lmcache.v1.layerwise.contract.LayerFetchPlan` maps onto the
-    native call, which Track C has not decided yet.
+    Kept as a seam so the arrival accounting can be tested without a native
+    client; production uses :class:`NativePlanIssuer`.
     """
 
     def issue(self, plan: LayerFetchPlan) -> int:
@@ -124,25 +148,23 @@ class PlanIssuer(Protocol):
             The generation the native session allocated.
 
         Raises:
-            RuntimeError, ValueError, IndexError: Native failures, including
-                a plan larger than the device's receive queue can accept.
-            NotImplementedError: While the plan translation is undecided.
+            LayerwiseContractError: If the plan is larger than the device's
+                receive queue can accept.
+            RuntimeError, ValueError, IndexError: Other native failures.
         """
         ...
 
 
 class NativePlanIssuer:
-    """Issues a contract plan through the native client.
+    """Issues a contract plan through the native client, slot for slot.
 
-    Not implemented yet. ``issue_pipelined_fetch_by_keys`` binds each chunk
-    to one node, but Aerospike places each record by its own digest, so one
-    chunk's records usually span several nodes. It also needs each object's
-    window offset (a ``ChunkPlacement``), which the plan does not carry. See
-    "Open for the meeting" in
-    ``docs/design/v1/layerwise/track-a-questions-for-track-c.md``.
+    The plan is the only source of truth: each slot is sent to the node the
+    plan names, at the offset the plan gives, as the notification slot its
+    position gives. Nothing is re-planned natively, so the slot numbers on
+    the wire are the plan's.
     """
 
-    def __init__(self, connector: PipelinedFetchConnector) -> None:
+    def __init__(self, connector: PlannedFetchConnector) -> None:
         """Build an issuer over one native client.
 
         Args:
@@ -151,23 +173,35 @@ class NativePlanIssuer:
         self._connector = connector
 
     def issue(self, plan: LayerFetchPlan) -> int:
-        """Translate ``plan`` and issue it.
+        """Flatten ``plan`` and issue it.
 
         Args:
-            plan: The slots to fetch.
+            plan: The slots to fetch. ``plan.slots[i]`` becomes notification
+                slot ``i``; offsets are relative to the registered window.
 
         Returns:
             The native generation.
 
         Raises:
-            NotImplementedError: Always, until per-record node binding and
-                window-offset ownership are settled.
+            LayerwiseContractError: If the plan has more slots than the
+                device can post receives for. Checked before anything is
+                sent, because on RC with ``rnr_retry = 7`` a shortfall is an
+                infinite retry rather than an error.
+            RuntimeError, ValueError, IndexError: Native failures, e.g. a
+                node with no kv-sink registration or a slot outside the
+                window.
         """
-        raise NotImplementedError(
-            "Track A: native issue needs per-record node binding and window "
-            "offsets; see 'Open for the meeting' in docs/design/v1/layerwise/"
-            "track-a-questions-for-track-c.md"
-        )
+        max_slots = self._connector.pipelined_max_slots_per_request()
+        if max_slots and len(plan.slots) > max_slots:
+            raise LayerwiseContractError(
+                f"fetch plan has {len(plan.slots)} slots but the device accepts "
+                f"at most {max_slots} per request; split the fetch"
+            )
+        slots = [
+            (s.node_index, s.record_key, s.offset, s.length, s.layer_id)
+            for s in plan.slots
+        ]
+        return self._connector.issue_pipelined_fetch_by_slots(plan.node_names, slots)
 
 
 class AerospikeLayerArrivalSource:
