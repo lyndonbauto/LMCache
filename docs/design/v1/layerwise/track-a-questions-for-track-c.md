@@ -28,6 +28,10 @@ how contract changes are made.
 | W4: fallback after a failed fetch | **Decided:** reload into fresh general-L1 objects | Track A: `abort_write` and pool choice done; Track C: retrieve wiring |
 | N1: an object's records are not on one node | **Open, raised by Track A** | Track C: node per record in the planner; Track A: destination placer |
 | P1: publishing every window | **Done: one registration covering all windows** | - |
+| L1: lease offsets are window-relative, the wire needs slab offsets | **Open, raised by Track A** (from `1280926c`) | Track C: see proposal |
+| L2: `ObjectToPlace` has no object key | **Open, raised by Track A** | Track C: add `key` |
+| L3: releasing a lease as `NEVER_FETCHED` | Track A's change | Track A |
+| L4: sizing `window_bytes` from `request_bytes` | **Open:** windows are reserved before the layout arrives | Track C: doc; Track A: use it in the check |
 
 ## Decisions
 
@@ -343,6 +347,95 @@ once per node.
 
 A per-window server check (`kv-sink-add-window` plus `window=<i>` on fetch)
 can follow as hardening. **Done** as item 11.
+
+## Track C's lease interface (`track/c-planning` at `1280926c`)
+
+Track A checked the seven commits after `4c634404`. They merge into
+`track/a-transport` without conflicts. With them merged, `tests/v1/layerwise/`
+and `tests/v1/distributed/` pass (1243 passed), and the Aerospike source
+passes all 18 source conformance tests, including the three that pin "the
+first reply for a slot is final".
+
+Track A will implement `ChunkPlacer` and `WindowLease` on top of
+`RdmaWindowPlacer`. Four points first.
+
+### L1. Lease offsets are window-relative; the wire needs slab offsets (open)
+
+`ChunkLocation.dest_offset` is window-relative, and `build_request_fetch`
+rejects an object outside `[0, window_bytes)`. Since P1, the native side
+expects slab offsets. All windows are one registration, so a slot's offset is
+its distance from the start of the slab. `PipelinedFetchPool` picks the
+window as `offset / window_bytes` (W3), and the session refuses a slot
+outside the first slot's window.
+
+A window-relative plan would send every fetch to window 0 and write into it.
+A slab-offset lease fails your check for every window but 0.
+
+**Proposal:** keep `ChunkLocation.dest_offset` window-relative, so your check
+stays as it is, and add the base when building the plan:
+
+```python
+class WindowLease(Protocol):
+    def window_base(self) -> int:
+        """Slab offset of the leased window's first byte."""
+
+# in build_request_fetch, after the window check:
+ChunkPlacement(..., dest_offset=lease.window_base() + location.dest_offset)
+```
+
+The plan then carries slab offsets, which is what the wire and
+`memory_obj.meta.address` use. `system-design.md` section 11 ("offsets
+are relative to the leased window") would change to match.
+
+### L2. `ObjectToPlace` has no object key (open)
+
+Placing an object means reserving it in L1, and `reserve_write` needs the
+object's `ObjectKey`. `ObjectToPlace` has only `chunk_id`, `object_group_id`
+and `object_bytes`, and `request_cache_keys` returns serialized strings.
+
+**Proposal:** add `key: ObjectKey` to `ObjectToPlace`. `objects_to_place`
+fills it from `obj_keys_per_obj_group[group][chunk]`. The layouts the placer
+also needs come from the registered model, so the placer takes them at
+construction. Track A's own `ObjectToPlace` in `rdma_window_placer.py` then
+goes away, so the name isn't defined twice.
+
+### L3. Releasing a lease as `NEVER_FETCHED` (Track A)
+
+`WindowPlacement` has `complete()`, which keeps the objects, and `abandon()`,
+which aborts the writes and quarantines the window. `NEVER_FETCHED` needs a
+third path: abort the writes without quarantine, since nothing was issued.
+Track A adds it. No change is needed from Track C.
+
+### L4. Sizing `window_bytes` from `request_bytes` (open)
+
+`system-design.md` says the connector sizes `window_bytes` as
+`request_bytes(max_pipelined_chunks, slab_alignment)`. It can't, as done
+item 8 explains: the windows are carved out when L1 is built, and the layout
+only arrives when a worker registers its KV cache. So `window_bytes` stays in
+config. Track A will use `request_bytes` for the check at registration and
+report the size needed. Please change the doc to say "checks" rather than
+"sizes".
+
+### N1 still applies
+
+`ChunkLocation` still has one `node_name` per object. An object's records
+are usually on different nodes, so the node has to be per record, as N1
+describes. Until the planner takes a node per record, Track A's lease can
+place objects but can't give a correct node.
+
+### Out of date in `track-c-status.md`
+
+These are listed as blocked on Track A but are done:
+
+- the fabric-free `ArrivalDriver` (S1);
+- publishing every window (P1);
+- `StorageManager.begin_pipelined_fetch`, removed in M4. The native
+  `issue_pipelined_fetch_by_keys` is still there, and Track A removes it once
+  `chunk_fetch_arguments` goes.
+
+`fetch-start-proposal.md` open question 3 calls concurrent fetches "a later
+Track A item". W3 is done, so one lease per (request, rank) is possible now.
+Track A's review of the proposal follows separately.
 
 ## Work that follows
 
