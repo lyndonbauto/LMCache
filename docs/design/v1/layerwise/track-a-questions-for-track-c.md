@@ -22,9 +22,10 @@ how contract changes are made.
 | S2: shape test | Done | - |
 | M3: native numbering docstring | Resolved by Option 1 | - |
 | M4: retrieve wiring vs the pump | **Decided 2026-09-25: the pump begins the fetch** | Track C: retrieve wiring; Track A: retire the storage-manager pair |
-| W1: windows run out when data stays in place | **Open** (Track A agrees, with conditions) | Both |
-| W2: which error the placer raises | **Proposed by Track A** | Track C to confirm |
-| W3: one fetch at a time | Known limit, not yet scheduled | Track A |
+| W1: windows run out when data stays in place | **Decided:** `lease()` reclaims a whole idle window | Track A: lease API, all-or-nothing delete |
+| W2: which error the placer raises | **Decided** as proposed | Track A: placer; Track C: one handler in retrieve |
+| W3: one fetch at a time | Known limit; a concurrent retrieve falls back | Track A, later |
+| W4: fallback after a failed fetch | **Decided:** reload into fresh general-L1 objects | Track A: abort-write in L1; Track C: retrieve wiring |
 
 ## Decisions
 
@@ -123,9 +124,16 @@ The production `ChunkPlacer` runs *before* the pump, so retrieve catches a
 placer refusal and falls back there too. Track C builds that into the
 retrieve wiring.
 
-## Open points
+## Window lifecycle (W1 to W4, agreed after the meeting)
+
+Track C recorded W1 to W4 in commit `4c634404`, in the "Window ownership" part
+of [system-design.md](system-design.md#window-ownership-decided-2026-09-25-m2)
+and in [contract-changes.md](contract-changes.md).
 
 ### W1. Windows run out when data stays in place
+
+**Decided:** Track C proposed this and Track A added the five conditions
+below.
 
 **Track C's proposal:** a window is free again only once every object in it
 has been evicted. Cache entries live a long time, so after `window_count`
@@ -135,7 +143,7 @@ objects to reclaim it. Those objects were just read from Aerospike, so they
 are unmodified and can be read again from L2. Only objects currently being
 read hold a window.
 
-**Track A agrees, with five conditions:**
+**The five conditions:**
 
 1. **Reclaim a whole window or nothing.** Evicting half a window's objects
    throws away cache entries and frees nothing. The check "no object in this
@@ -162,7 +170,11 @@ read hold a window.
    slot neither landed nor was declined, a write may still be on the wire, so
    the release counts as an abandon and goes through quarantine.
    `release(window_id, abandoned)` states this rule; the caller doesn't
-   decide it.
+   decide it. The pump finishes a fetch only after every layer is resident,
+   so a pump-finished fetch is clean by construction, and every other exit
+   abandons. A fetch with a declined slot is therefore quarantined too.
+   That's more cautious than needed, since a declined slot is never written,
+   but it's safe and keeps the rule to one line.
 
 **Cost:** a delete changes metadata only, with no I/O, so reclaiming inside
 `lease()` adds no network time to retrieve. Evicted entries become L2 hits
@@ -175,6 +187,9 @@ layer has reached the GPU by then. It's not needed unless measurements say
 so.
 
 ### W2. Which error the placer raises
+
+**Decided** as below. The `PlanTooLargeError` docstring now says the placer
+can raise it too.
 
 With the placer running before the pump, the two refusals mean different
 things to the caller:
@@ -196,7 +211,45 @@ all fetches share one receive queue. Concurrency needs:
 - routing each immediate to its session by generation, which then has to be
   unique across sessions.
 
-Until that exists, `lease()` also refuses while another fetch is in flight.
+Until that exists, `lease()` also refuses while another fetch is in flight,
+and the second retrieve falls back to a whole-object load. **Under load the
+pipelined path serves only a fraction of retrieves.** Any early benchmark has
+to report the share of retrieves that went pipelined, or its TTFT numbers
+will understate the pipelined path and mix in fallback latency.
+
+### W4. Fallback after a failed fetch goes into fresh objects
+
+**Decided (Track C, 4c634404).** The meeting first said the fallback reloads
+whole objects "into the same L1 objects". That conflicts with W1.5: those
+objects sit in the failed fetch's window, which is quarantined because RDMA
+writes may still land there. A fallback written into them could be
+overwritten after it finished, with no error. Instead:
+
+1. The failed fetch's window objects are deleted.
+2. The window is released as abandoned, which quarantines it.
+3. The whole-object load goes into **fresh objects in general L1**.
+
+What this requires of Track A's code:
+
+- **An abort-write call in `l1_manager`.** Step 1 deletes objects the failed
+  fetch still holds *write-locked*, and neither existing call does that
+  cleanly:
+  - `finish_write` followed by `delete` briefly makes the half-written object
+    readable, and emits a write-finished event for data that never finished.
+  - `delete(force=True)` drops locks it doesn't own, including other readers'.
+
+  The allocator PR adds a narrow "abandon these write reservations" call. It
+  removes only objects write-locked by this retrieve, emits no write-finished
+  event, and returns their memory to the window allocator, which doesn't
+  reuse it until the quarantine ends.
+- **The caller chooses the pool.** The allocator API takes the pool
+  explicitly: the window of a lease, or general L1. The fallback's
+  `reserve_write` must land in general L1 even though the same keys were
+  just in a window. General L1 is the default, so existing callers don't
+  change.
+- **Order matters.** Abort the window objects before reserving the fresh
+  ones, because L1 holds one object per key. In between, a lookup sees a
+  miss, which is correct.
 
 ## Work that follows
 
@@ -238,9 +291,13 @@ That needs an Aerospike server, and for the slot path, one built from the
 2. Raise `PlanTooLargeError` from `NativePlanIssuer` for both the pre-check
    and the native error.
 3. A fabric-free `ArrivalDriver` over the real session, registered in
-   `SOURCE_HARNESS_FACTORIES`. It needs a native test hook to feed immediates
-   and declined replies from Python.
-4. The allocator reservation PR, including the all-or-nothing delete (W1.1).
+   `SOURCE_HARNESS_FACTORIES`. This is the item that affects Track C's suite.
+   It needs a test-only Python binding that feeds landed and declined slots
+   into the real native session, with no device or cluster.
+4. The allocator reservation PR, with three `l1_manager` additions:
+   - the window range reserved;
+   - the all-or-nothing delete (W1.1);
+   - abort-write and an explicit choice of pool (W4).
 5. Size `window_bytes` at init from the KV layout.
 6. The lease API with reclaim (W1) and quarantine. Publish every window to
    every node.
@@ -249,8 +306,8 @@ That needs an Aerospike server, and for the slot path, one built from the
    (M4).
 9. Later: concurrent fetches (W3).
 
-**Track C:** retrieve wiring per M4, with the fallback around the placer too,
-and confirmation of W1 and W2.
+**Track C:** retrieve wiring per M4 and W4. One handler covers the placer and
+the pump, and the fallback goes into fresh general-L1 objects.
 
 **Together:** C9 over Soft-RoCE.
 
