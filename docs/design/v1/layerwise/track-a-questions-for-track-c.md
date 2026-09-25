@@ -30,8 +30,8 @@ how contract changes are made.
 The Python plan is the only source of truth for what is fetched. The native
 side no longer re-plans from chunk placements.
 
-`pipelined_fetch_arguments` flattens the plan into the node names plus one
-entry per slot, in plan order:
+`NativePlanIssuer` flattens the plan into the node names plus one entry per
+slot, in plan order:
 
 ```text
 (node_index, record_key, dest_offset, length, layer_id)
@@ -147,9 +147,10 @@ source.
    logic-harness tests cover one chunk whose records sit on two nodes,
    per-layer readiness across nodes, declines, `max_sinks` splitting, stale
    generations, input rejection, and an unreachable node.
-2. **Done, but not built yet.** `record_node(user_key)` returns the master
-   node from the C client's partition map (`as_partition_info_init` plus
-   `as_partition_get_node`, client 7.3.0), next to `record_digest_hex`.
+2. **Done, built, not yet run against a server.** `record_node(user_key)`
+   returns the master node from the C client's partition map
+   (`as_partition_info_init` plus `as_partition_get_node`, client 7.3.0), next
+   to `record_digest_hex`.
 3. **Done.** `NativePlanIssuer.issue` flattens the plan and calls (1).
    Track C's `pipelined_fetch_arguments` doesn't need the new shape for this
    path: the issuer flattens the plan itself.
@@ -163,16 +164,26 @@ source.
    protocol in the suite. It also needs a way to drive the real session from
    Python without a device, which the pybind client doesn't offer today.
 
-Items 1 to 3 compile and pass only in the device-free logic harness. The
-connector, driver and pybind changes need a build with `libaerospike` and
-verbs, which Track A's workstation doesn't have.
+Verified on the Soft-RoCE VM
+([rdma_testing_on_windows.md](../distributed/l2_adapters/rdma_testing_on_windows.md)):
+
+- `lmcache_aerospike` builds with `BUILD_WITH_AEROSPIKE_RDMA=1` against
+  C client 7.3.0 and exposes the new methods.
+- Device-free logic harness: 298 checks pass.
+- Fabric harness over `rxe0`: 341 checks pass.
+- `tests/v1/layerwise/` and `tests/v1/distributed/rdma/` pass under pytest.
+
+`record_node` and `issue_pipelined_fetch_by_slots` have not run end to end.
+That needs an Aerospike server, and for the slot path, one built from the
+`kv-sink` branch (A8).
 
 **Track A, after M2:** the window lease API, and a production `ChunkPlacer`
 on top of it if Option A is chosen.
 
 **Track C:** `PlanTooLargeError`, the C5 rewording, the parametrized suite,
-`pipelined_fetch_arguments` in the new flattened shape, the PR split, and
-retrieve wiring per M4.
+the PR split, and retrieve wiring per M4. `pipelined_fetch_arguments` no longer
+needs the flattened shape. `NativePlanIssuer` does the flattening, so the helper
+can stay as it is for the old chunk path or be removed along with that path.
 
 **Together:** C9 over Soft-RoCE.
 
