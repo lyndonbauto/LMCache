@@ -74,8 +74,8 @@ All done (2026-09-25):
   checks `[window_start, window_start + window_bytes)`.
 - ~~**Nodes per record (N1).**~~ Deferred to the client-server owner; the
   pipelined path is single-node only until then (see "Future work").
-- **Who checks what vLLM does when a retrieve fails mid-step (Track B's R5,
-  the proposal's open question 1).** Not yet assigned.
+- **What vLLM does when a retrieve fails mid-step (Track B's R5, the
+  proposal's open question 1).** Assigned to Track C (2026-09-25).
 - **Track B's questions, answered 2026-09-25** (details in
   [fetch-start-proposal.md](fetch-start-proposal.md) and
   [contract-changes.md](contract-changes.md)):

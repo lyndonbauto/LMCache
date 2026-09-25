@@ -206,7 +206,7 @@ It can ship in three PRs, each behind the pipelined-fetch flag:
    unwritten, and return `False`. vLLM then recomputes them, provided it
    discards a same-step load failure's output. That behaviour needs checking
    against the pinned vLLM version. This is the same question as Track B's
-   R5; who investigates it is not yet agreed.
+   R5. Track C investigates it.
 2. **Fallback budget.** Is the time left after the pump gives up (2.5 s by
    default) enough for a whole-object fallback on the largest eligible
    request, or does eligibility need a byte cap below the window size?
