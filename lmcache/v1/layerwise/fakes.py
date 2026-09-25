@@ -127,7 +127,9 @@ class ScriptedLayerArrivalSource:
 
     Every layer starts ``PENDING``. A layer is ``RESIDENT`` once every one of
     its slots has landed, and ``UNSERVABLE`` as soon as any of them is
-    declined. A test moves slots on with :meth:`land_slot` and
+    declined. The first reply for a slot is final, as in the native session:
+    a landing after a decline, or a decline after a landing, is a duplicate
+    and is dropped. A test moves slots on with :meth:`land_slot` and
     :meth:`decline_slot`, or a whole layer at once with :meth:`deliver_layer`
     and :meth:`decline_layer`. Because nothing arrives on its own, a test
     that forgets to deliver a layer hangs its pump rather than passing by
@@ -229,7 +231,8 @@ class ScriptedLayerArrivalSource:
         """Land one slot of the active fetch.
 
         An arrival quoting any other generation, or arriving with no fetch
-        active, is dropped, as a late write on the wire would be.
+        active, is dropped, as a late write on the wire would be. So is an
+        arrival for a slot that already landed or was declined.
 
         Args:
             slot_index: Position of the slot in the active plan.
@@ -247,7 +250,9 @@ class ScriptedLayerArrivalSource:
     def decline_slot(self, slot_index: int, generation: int) -> None:
         """Decline one slot of the active fetch, making its layer unservable.
 
-        A reply quoting any other generation is dropped.
+        A reply quoting any other generation is dropped, and so is a decline
+        for a slot that already landed or was declined: the first reply for a
+        slot is final.
 
         Args:
             slot_index: Position of the slot in the active plan.
@@ -259,7 +264,12 @@ class ScriptedLayerArrivalSource:
         with self._lock:
             if generation == 0 or generation != self._generation:
                 return
-            self._declined_layers.add(self._layer_of_slot(slot_index))
+            layer_id = self._layer_of_slot(slot_index)
+            pending = self._pending_slots[layer_id]
+            if slot_index not in pending:
+                return
+            pending.discard(slot_index)
+            self._declined_layers.add(layer_id)
 
     def deliver_layer(self, layer_id: int) -> None:
         """Land every remaining slot of ``layer_id`` in the active fetch.
@@ -431,14 +441,20 @@ class RecordingLayerLoadSink:
 
         Args:
             generation: The fetch generation these layers belong to.
-            layer_ids: Global layer indices in the order they will be loaded.
+            layer_ids: Global layer indices in the order they will be loaded;
+                strictly ascending.
 
         Raises:
-            LayerwiseContractError: If a load is already in progress.
+            LayerwiseContractError: If a load is already in progress, or
+                ``layer_ids`` is not strictly ascending.
         """
         if self._generation != 0:
             raise LayerwiseContractError(
                 f"load for generation {self._generation} is still active"
+            )
+        if any(a >= b for a, b in zip(layer_ids, layer_ids[1:], strict=False)):
+            raise LayerwiseContractError(
+                f"layers must be strictly ascending, got {list(layer_ids)}"
             )
         self._generation = generation
         self._expected = tuple(layer_ids)

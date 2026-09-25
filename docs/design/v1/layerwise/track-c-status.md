@@ -59,10 +59,15 @@ All done (2026-09-25):
   called from production code. **Proposal written:**
   [fetch-start-proposal.md](fetch-start-proposal.md) (report the remote hit
   at lookup, fetch at retrieve, fall back inside the daemon).
-- **One flattener or two.** Track A's `NativePlanIssuer` flattens the plan
-  itself, duplicating `pipelined_fetch_arguments`. Keep one.
-- **A declined slot that later lands.** Proposed: the layer stays
-  `UNSERVABLE`. Once agreed, pin it in the conformance suite.
+- ~~**One flattener or two.**~~ Decided with Track A: keep
+  `pipelined_fetch_arguments`. `NativePlanIssuer` will call it and keep only
+  its slot-count pre-check (Track A's change).
+- ~~**A declined slot that later lands.**~~ Decided with Track A: the first
+  reply for a slot is final, in both orders. It is pinned in the source
+  suite (see [contract-changes.md](contract-changes.md)).
+- ~~**Loader launch order.**~~ Raised by Track B: loads are strictly
+  ascending, and a loader refuses any other order. Pinned in the loader
+  suite.
 
 ## Blocked on other tracks
 

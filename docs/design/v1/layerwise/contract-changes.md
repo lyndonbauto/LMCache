@@ -11,6 +11,41 @@ defect coming back.
 
 ---
 
+## Loads are strictly ascending; the first reply for a slot is final
+
+**Who is affected:** Track B (the loader must refuse non-ascending loads);
+Track A (the rule the native session already follows is now pinned).
+
+**What changed.**
+
+- **`LayerLoadSink.begin_load`** (in `contract.py`): `layer_ids` is strictly
+  ascending, as `LayerFetchPlan.layer_ids()` returns it. A loader raises
+  `LayerwiseContractError` for any other order, issuing nothing and leaving
+  any active load alone. `RecordingLayerLoadSink` enforces this.
+- **The loader suite** no longer asks a sink to honour `(0, 2, 1, 3)`. It
+  checks the refusal instead (interleaved, descending, repeated), and checks
+  that a load with gaps, `(0, 2, 3)`, tracks readiness by layer, not by
+  position.
+- **Arrival sources:** the first reply for a slot is final. A landing after a
+  decline leaves the layer `UNSERVABLE`; a decline after a landing leaves the
+  landed slot counted, so a fully landed layer stays `RESIDENT`.
+  `ScriptedLayerArrivalSource` now follows this; before, a decline after a
+  landing made the layer unservable. Three source-suite tests pin it.
+
+**What breaks.** A loader that accepted any order, and a caller that passed
+a non-ascending order. The pump always passes the plan's ascending order, so
+no current caller breaks.
+
+**Why.** Track B pointed out that the suite demanded a hazard. Their loader
+publishes readiness as a watermark over positions in its launch schedule,
+which is ascending by global layer, hybrid models included. Given
+`(0, 2, 1, 3)`, issuing layers 0 and 2 moves the watermark two positions,
+and the worker then reads layer 1 as ready before its copy was queued. The
+old test's claim that a hybrid schedule is non-ascending was wrong: the
+schedule interleaves kernel groups *by* global layer index. For slots, Track
+A confirmed that the native session marks a slot seen on its first reply, so
+the fake and the suite now agree with it.
+
 ## A conformance suite for loaders, driven through a `LoadObserver`
 
 **Who is affected:** Track B (registers its loader). Nothing in `contract.py`
@@ -29,8 +64,9 @@ changes.
   `SINK_HARNESS_FACTORIES` (in `conftest.py`) through the rules the worker
   relies on:
   - a layer is never ready before its copy is issued;
-  - copies are issued in the order given to `begin_load`, and every
-    ordering violation is refused without making a layer ready;
+  - copies are issued in the order given to `begin_load`, which is
+    strictly ascending (see the entry above), and every ordering violation
+    is refused without making a layer ready;
   - `finish_load` refuses missing layers and stale generations, and leaves
     the active load intact;
   - `abandon_load` fails every layer not yet issued, is safe with no load

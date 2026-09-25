@@ -6,8 +6,9 @@ contract's methods and a :class:`LoadObserver`. A new loader passes this
 suite before it is wired into the retrieve path.
 
 What is checked is what the GPU worker relies on: a layer never looks ready
-before its copy is issued, copies are issued in the order the load was begun
-with, and an abandoned load fails its waiters instead of leaving them hung.
+before its copy is issued, copies are issued in ascending layer order (and any
+other order is refused at ``begin_load``), and an abandoned load fails its
+waiters instead of leaving them hung.
 """
 
 # Third Party
@@ -34,7 +35,7 @@ READY = LayerWaitOutcome.READY
 PENDING = LayerWaitOutcome.PENDING
 FAILED = LayerWaitOutcome.FAILED
 
-#: Hybrid launch order: global layer index, not kernel-group order.
+#: Loads are always ascending by global layer index, as plans are.
 LAYERS = (0, 1, 2, 3)
 
 
@@ -95,17 +96,58 @@ def test_a_finished_load_leaves_every_layer_ready(sink_harness: SinkHarness) -> 
     assert _outcomes(sink_harness.observer, 7) == dict.fromkeys(LAYERS, READY)
 
 
-def test_the_launch_order_given_at_begin_is_the_issue_order(
+@pytest.mark.parametrize(
+    "order",
+    [(0, 2, 1, 3), (3, 2, 1, 0), (0, 1, 1, 2)],
+    ids=["interleaved", "descending", "repeated"],
+)
+def test_a_load_whose_layers_are_not_ascending_is_refused(
+    sink_harness: SinkHarness, order: tuple[int, ...]
+) -> None:
+    """Accepting it would let a schedule-position loader report layers early.
+
+    Plans are always ascending, so refusing costs nothing; the sink stays
+    free for a correct load.
+    """
+    with pytest.raises(LayerwiseContractError):
+        sink_harness.sink.begin_load(7, order)
+
+    assert sink_harness.observer.issued_layers(7) == ()
+    sink_harness.sink.begin_load(8, LAYERS)
+    for layer in LAYERS:
+        sink_harness.sink.load_layer(layer)
+    sink_harness.sink.finish_load(8)
+
+
+def test_a_refused_order_leaves_the_active_load_alone(
     sink_harness: SinkHarness,
 ) -> None:
-    """A non-ascending order (e.g. a hybrid schedule) is honoured as given."""
-    order = (0, 2, 1, 3)
-    sink_harness.sink.begin_load(7, order)
-    for layer in order:
-        sink_harness.sink.load_layer(layer)
-    sink_harness.sink.finish_load(7)
+    """The refusal is checked without disturbing a load already running."""
+    sink = _begun(sink_harness)
+    sink.load_layer(0)
 
-    assert sink_harness.observer.issued_layers(7) == order
+    with pytest.raises(LayerwiseContractError):
+        sink.begin_load(8, (0, 2, 1, 3))
+
+    for layer in LAYERS[1:]:
+        sink.load_layer(layer)
+    sink.finish_load(7)
+    assert sink_harness.observer.issued_layers(7) == LAYERS
+
+
+def test_a_load_with_gaps_in_its_layers_tracks_the_layers_it_was_given(
+    sink_harness: SinkHarness,
+) -> None:
+    """Ascending with gaps is allowed; readiness follows layers, not positions."""
+    layers = (0, 2, 3)
+    sink_harness.sink.begin_load(7, layers)
+    sink_harness.sink.load_layer(0)
+
+    assert _outcomes(sink_harness.observer, 7, layers) == {
+        0: READY,
+        2: PENDING,
+        3: PENDING,
+    }
 
 
 def test_a_generation_that_was_never_begun_is_pending(

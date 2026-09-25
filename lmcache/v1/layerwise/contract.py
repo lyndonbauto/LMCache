@@ -401,12 +401,23 @@ class LayerLoadSink(Protocol):
     def begin_load(self, generation: int, layer_ids: Sequence[int]) -> None:
         """Prepare to load ``layer_ids`` for one fetch.
 
+        ``layer_ids`` is strictly ascending, as
+        :meth:`LayerFetchPlan.layer_ids` returns it. That is also the order a
+        loader's launch schedule follows (global layer index, even for hybrid
+        models), so a loader that tracks readiness by position in its schedule
+        stays correct. It must refuse any other order rather than accept it:
+        issuing layers 0 and 2 of ``(0, 2, 1, 3)`` would advance such a loader
+        two positions and report layer 1 ready before its copy was queued.
+
         Args:
             generation: The fetch generation these layers belong to.
-            layer_ids: Global layer indices in the order they will be loaded.
+            layer_ids: Global layer indices in the order they will be loaded;
+                strictly ascending.
 
         Raises:
-            LayerwiseContractError: If a load is already in progress.
+            LayerwiseContractError: If a load is already in progress, or
+                ``layer_ids`` is not strictly ascending. Nothing is issued and
+                any active load is left as it was.
         """
         ...
 
