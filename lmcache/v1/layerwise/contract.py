@@ -115,7 +115,13 @@ class LayerArrivalStatus(Enum):
 
     #: Some slot of this layer has not landed yet. Poll again.
     PENDING = "pending"
-    #: Every slot of this layer landed. Safe to read the host buffer.
+    #: Every slot of this layer landed. Safe to read the host buffer. The plan
+    #: has a slot for every K/V plane of this layer in every chunk the
+    #: retrieve reads for the layer's group (sliding-window groups read only
+    #: their in-window chunks), and each slot lands at the offset the same
+    #: bytes have in a normally loaded object. A layer's bytes are therefore
+    #: complete but not contiguous: each plane sits where the object layout
+    #: puts it.
     RESIDENT = "resident"
     #: A slot of this layer was declined or lost. It will never arrive.
     UNSERVABLE = "unservable"

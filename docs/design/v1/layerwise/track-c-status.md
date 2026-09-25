@@ -74,6 +74,26 @@ All done (2026-09-25):
   checks `[window_start, window_start + window_bytes)`.
 - ~~**Nodes per record (N1).**~~ Deferred to the client-server owner; the
   pipelined path is single-node only until then (see "Future work").
+- **Who checks what vLLM does when a retrieve fails mid-step (Track B's R5,
+  the proposal's open question 1).** Not yet assigned.
+- **Track B's questions, answered 2026-09-25** (details in
+  [fetch-start-proposal.md](fetch-start-proposal.md) and
+  [contract-changes.md](contract-changes.md)):
+  - *Fallback vs. abandon:* neither abandon nor a new generation works; the
+    fallback continues the same sink load, and the pump will abandon only
+    the source on a transport failure. Lands with the proposal's PR 2.
+  - *When live traffic reaches Track B's sink:* after the fetch-start
+    proposal is accepted. PR 2 wires retrieve with the recording sink, PR 3
+    swaps in Track B's.
+  - *Reading objects still landing:* through the placement's own memory
+    handles (`memory_obj`), which retrieve passes to the sink; not through
+    L1 reads, which refuse write-reserved objects.
+  - *Layout:* confirmed on the planner side and written into
+    `LayerArrivalStatus.RESIDENT`. Track A should confirm the transport
+    side (a slot lands exactly at its plan offset).
+  - *Timeout order (R6):* the pump's default is now 2.5 s, below the
+    worker's 5 s. A startup check needs the worker's value in the
+    registration, which lands with C9.
 
 ## Future work
 

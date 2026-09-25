@@ -11,6 +11,40 @@ defect coming back.
 
 ---
 
+## The pump gives up before the worker; RESIDENT spelled out
+
+**Who is affected:** Track B (raised all three; one stricter suite test).
+
+**What changed.**
+
+- **`DEFAULT_LAYER_TIMEOUT_SECONDS`** (in `pump.py`) is 2.5 s, down from
+  30 s. It must stay below the worker's per-layer wait,
+  `lmcache.mp.layerwise_wait_timeout_seconds` (5 s).
+- **`LayerArrivalStatus.RESIDENT`** now says what "every slot landed"
+  covers: every K/V plane of the layer in every chunk the retrieve reads for
+  the layer's group, each at the offset those bytes have in a normally
+  loaded object. So a layer is complete but not contiguous.
+- **The loader suite's gap test** loads past the gap and finishes, instead
+  of stopping after layer 0.
+
+**What breaks.** A loader that marks layers ready by counting copies now
+fails the gap test. No caller passes the pump's default timeout yet.
+
+**Why.** With 30 s against the worker's 5 s, the worker could time out and
+leave attention while the pump went on copying layers into GPU blocks vLLM
+no longer expected to be written. The pump starts waiting for a layer
+before the worker does, so a shorter timeout makes it give up first, and
+its abandon reaches the worker as a failure flag. Nothing checks the two
+timeouts against each other at startup yet: the daemon never learns the
+worker's value, because the registration does not carry it. When retrieve
+builds the pump (C9), the registration should carry the worker's timeout so
+retrieve can derive the pump's from it and refuse a bad pair.
+
+The old gap test stopped after layer 0, where copy counting and layer
+tracking agree, so the copy-counting loader it was meant to catch passed.
+
+---
+
 ## Destination offsets are registration offsets; a lease reports its start
 
 **Who is affected:** Track A (the production lease must implement

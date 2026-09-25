@@ -138,7 +138,12 @@ def test_a_refused_order_leaves_the_active_load_alone(
 def test_a_load_with_gaps_in_its_layers_tracks_the_layers_it_was_given(
     sink_harness: SinkHarness,
 ) -> None:
-    """Ascending with gaps is allowed; readiness follows layers, not positions."""
+    """Ascending with gaps is allowed; readiness follows layers, not positions.
+
+    Loading past the gap is what tells the two apart: after copying layers 0
+    and 2, a loader that treats "two copies done" as "layers below 2 ready"
+    would still call layer 2 pending.
+    """
     layers = (0, 2, 3)
     sink_harness.sink.begin_load(7, layers)
     sink_harness.sink.load_layer(0)
@@ -148,6 +153,20 @@ def test_a_load_with_gaps_in_its_layers_tracks_the_layers_it_was_given(
         2: PENDING,
         3: PENDING,
     }
+
+    sink_harness.sink.load_layer(2)
+
+    assert _outcomes(sink_harness.observer, 7, layers) == {
+        0: READY,
+        2: READY,
+        3: PENDING,
+    }
+
+    sink_harness.sink.load_layer(3)
+    sink_harness.sink.finish_load(7)
+
+    assert sink_harness.observer.issued_layers(7) == layers
+    assert _outcomes(sink_harness.observer, 7, layers) == dict.fromkeys(layers, READY)
 
 
 def test_a_generation_that_was_never_begun_is_pending(
