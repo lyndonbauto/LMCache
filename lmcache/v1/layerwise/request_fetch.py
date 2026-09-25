@@ -205,7 +205,9 @@ class FetchModel:
         chunks: every object the retrieve reads, each rounded up to
         ``align_bytes``. Sliding-window groups contribute only their window,
         and aux groups nothing, exactly as :func:`request_cache_keys` selects
-        objects. The transport sizes ``window_bytes`` from this at init.
+        objects. The transport checks its configured ``window_bytes``
+        against this when a model registers, since the windows are carved
+        out before any layout is known.
 
         Args:
             num_chunks: Chunks in the request.

@@ -35,8 +35,10 @@ All done (2026-09-25):
    WindowLease`, released with a `LeaseOutcome`. The builder rejects
    placements outside the window or overlapping. Track A implements the
    production placer against it.
-3. **Window sizing input for Track A.** Done:
-   `FetchModel.request_bytes(num_chunks, align_bytes)`.
+3. **Window size check for Track A.** Done:
+   `FetchModel.request_bytes(num_chunks, align_bytes)`. `window_bytes`
+   stays in config, since the windows exist before any layout does; Track A
+   checks it against this at registration (L4).
 4. **PR split plan** for upstreaming this branch (below).
 5. **Loader conformance suite.** Done: `test_load_sink_conformance.py`,
    `LoadObserver` and `SINK_HARNESS_FACTORIES`, running against the
@@ -138,7 +140,7 @@ is the part that would change.
 | Item | Waiting on | Owner |
 |---|---|---|
 | Aerospike source in the conformance suite | Fabric-free `ArrivalDriver`, which needs a test-only binding feeding the real native session | Track A |
-| Production `ChunkPlacer` / `WindowLease` | Allocator reservation PR (with all-or-nothing delete), publishing every window, sizing `window_bytes` with `request_bytes` | Track A |
+| Production `ChunkPlacer` / `WindowLease` | Allocator reservation PR (with all-or-nothing delete), publishing every window, checking `window_bytes` with `request_bytes` at registration | Track A |
 | Pipelined retrieve enabled for real | A working `LayerLoadSink`; Track B's branch has only the stub (`layerwise_sink.py`, 2026-09-22) | Track B |
 | Hooking orchestration into `retrieve` | The fetch-start decision above | Us + Track A + storage-manager maintainers |
 | Removing the chunk-level path (`chunk_fetch_arguments`, `issue_pipelined_fetch_by_keys`, `StorageManager.begin_pipelined_fetch`) | Track A on the slot-level path and rebased onto this branch | Track A |

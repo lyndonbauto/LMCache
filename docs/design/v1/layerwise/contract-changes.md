@@ -177,8 +177,9 @@ changes.
 - `build_request_fetch(model, keys, max_record_bytes, lease)` takes the
   lease and raises `ValueError` for an object outside the window or
   overlapping another.
-- New `FetchModel.request_bytes(num_chunks, align_bytes=1)` for sizing
-  `window_bytes` from the model.
+- New `FetchModel.request_bytes(num_chunks, align_bytes=1)` for checking
+  the configured `window_bytes` against the model at registration (the
+  windows exist before the layout, so it cannot size them).
 - New `pipelined_retrieve.run_pipelined_retrieve(model, keys,
   max_record_bytes, placer, pump)`: lease, plan, pump, release, with every
   refusal surfacing as `LayerwiseContractError`.
