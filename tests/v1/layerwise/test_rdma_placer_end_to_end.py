@@ -56,6 +56,7 @@ from lmcache.v1.layerwise.request_fetch import (
     ObjectToPlace,
     objects_to_place,
 )
+from lmcache.v1.memory_management import MemoryObj
 
 # Local
 from .aerospike_harness import WINDOW_BYTES, FabricFreeClient, fabric_free_connector
@@ -97,6 +98,9 @@ class _RdmaLease:
         return ChunkLocation(
             self._node_name, self.placement.dest_offset(chunk_id, object_group_id)
         )
+
+    def memory_obj(self, chunk_id: int, object_group_id: int) -> MemoryObj:
+        return self.placement.memory_obj(chunk_id, object_group_id)
 
     def release(self, outcome: LeaseOutcome) -> None:
         if outcome == LeaseOutcome.FINISHED:
@@ -268,6 +272,18 @@ def test_a_later_window_is_planned_with_slab_offsets(two_windows: _Setup) -> Non
     assert max(s.offset + s.length for s in plan.slots) <= 2 * WINDOW_BYTES
     assert sink.loaded_layers() == plan.layer_ids()
     held.abandon()
+
+
+def test_each_objects_memory_sits_at_its_planned_offset(one_window: _Setup) -> None:
+    objects = objects_to_place(fetch_model(), one_window.keys)
+    lease = one_window.placer.lease(objects)
+
+    for obj in objects:
+        location = lease.locate(obj.chunk_id, obj.object_group_id)
+        memory_obj = lease.memory_obj(obj.chunk_id, obj.object_group_id)
+        assert memory_obj.meta.address == location.dest_offset
+        assert memory_obj.get_size() >= obj.object_bytes
+    lease.release(LeaseOutcome.NEVER_FETCHED)
 
 
 def test_a_declined_slot_falls_back_and_quarantines_the_window(

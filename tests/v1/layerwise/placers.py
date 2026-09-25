@@ -4,12 +4,21 @@
 # Standard
 from collections.abc import Callable, Sequence
 
+# Third Party
+import torch
+
 # First Party
 from lmcache.v1.layerwise import LayerwiseContractError, PlanTooLargeError
 from lmcache.v1.layerwise.request_fetch import (
     ChunkLocation,
     LeaseOutcome,
     ObjectToPlace,
+)
+from lmcache.v1.memory_management import (
+    MemoryFormat,
+    MemoryObj,
+    MemoryObjMetadata,
+    TensorMemoryObj,
 )
 
 
@@ -40,6 +49,26 @@ class PackingLease:
 
     def locate(self, chunk_id: int, object_group_id: int) -> ChunkLocation:
         return self.locations[(chunk_id, object_group_id)]
+
+    def memory_obj(self, chunk_id: int, object_group_id: int) -> MemoryObj:
+        """An empty object whose address is the placed offset; no real memory."""
+        address = self.locations[(chunk_id, object_group_id)].dest_offset
+        shape = torch.Size([0])
+        metadata = MemoryObjMetadata(
+            shape=shape,
+            dtype=torch.uint8,
+            address=address,
+            phy_size=0,
+            ref_count=1,
+            fmt=MemoryFormat.BINARY_BUFFER,
+            shapes=[shape],
+            dtypes=[torch.uint8],
+        )
+        return TensorMemoryObj(
+            raw_data=torch.empty(0, dtype=torch.uint8),
+            metadata=metadata,
+            parent_allocator=None,
+        )
 
     def release(self, outcome: LeaseOutcome) -> None:
         self.outcomes.append(outcome)
