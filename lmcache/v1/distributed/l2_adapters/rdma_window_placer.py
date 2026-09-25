@@ -1,10 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Places a pipelined retrieve's L1 objects in one leased RDMA window.
+"""The layerwise ``ChunkPlacer`` over leased RDMA windows.
 
-This is the destination half of the layerwise ``ChunkPlacer``: it decides
-where each object lands, not which node serves it. Nodes are per record and
-come from the planner (see N1 in
-``docs/design/v1/layerwise/track-a-questions-for-track-c.md``).
+:class:`RdmaWindowPlacer` implements
+:class:`~lmcache.v1.layerwise.request_fetch.ChunkPlacer` and
+:class:`WindowPlacement` implements
+:class:`~lmcache.v1.layerwise.request_fetch.WindowLease`: a retrieve's
+objects are reserved in L1 inside one leased window, and each is fetched
+from the one node of the cluster. Pipelined fetches run on single-node
+clusters only (N1 in
+``docs/design/v1/layerwise/track-a-questions-for-track-c.md``); the
+connector refuses to initialize them on a larger one.
 
 Every window is published to the nodes as one registration covering the
 whole window range, which starts at slab offset 0. So an object's destination
@@ -13,7 +18,6 @@ offset is its slab offset, ``memory_obj.meta.address``.
 
 # Standard
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
 import enum
 
 # First Party
@@ -24,10 +28,56 @@ from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.rdma_window_leaser import (
     FetchOutcome,
     RdmaWindowLeaser,
-    WindowLease,
+)
+from lmcache.v1.distributed.l2_adapters.rdma_window_leaser import (
+    WindowLease as LeasedWindow,
 )
 from lmcache.v1.layerwise.contract import LayerwiseContractError, PlanTooLargeError
+from lmcache.v1.layerwise.request_fetch import (
+    ChunkLocation,
+    FetchModel,
+    LeaseOutcome,
+    ObjectToPlace,
+)
 from lmcache.v1.memory_management import MemoryObj
+
+
+def check_window_holds_request(
+    window_bytes: int,
+    model: FetchModel,
+    max_pipelined_chunks: int,
+    align_bytes: int,
+) -> None:
+    """Check that one RDMA window holds a model's largest pipelined retrieve.
+
+    Called when a model registers. The windows are carved out of L1 before
+    any layout is known, so ``window_bytes`` comes from config and can only
+    be checked here, not derived.
+
+    Args:
+        window_bytes: The configured size of each RDMA window.
+        model: The registered model's fetch model.
+        max_pipelined_chunks: The most chunks one pipelined retrieve may
+            read.
+        align_bytes: The L1 slab alignment each object is rounded up to.
+
+    Raises:
+        ValueError: If ``max_pipelined_chunks`` is not positive, or the
+            window is smaller than
+            ``model.request_bytes(max_pipelined_chunks, align_bytes)``. The
+            message states the window size needed.
+    """
+    if max_pipelined_chunks <= 0:
+        raise ValueError(
+            f"max_pipelined_chunks must be positive, got {max_pipelined_chunks}"
+        )
+    needed = model.request_bytes(max_pipelined_chunks, align_bytes)
+    if needed > window_bytes:
+        raise ValueError(
+            f"an RDMA window of {window_bytes} bytes cannot hold a pipelined "
+            f"retrieve of {max_pipelined_chunks} chunks; set rdma_window_bytes "
+            f"to at least {needed}"
+        )
 
 
 def _align_up(size: int, align_bytes: int) -> int:
@@ -37,35 +87,18 @@ def _align_up(size: int, align_bytes: int) -> int:
     return -(-size // align_bytes) * align_bytes
 
 
-@dataclass(frozen=True)
-class ObjectToPlace:
-    """One object a pipelined retrieve reads.
-
-    Attributes:
-        chunk_id: Index of the chunk within the request.
-        object_group_id: Object group the object belongs to.
-        key: The key the object is cached under in L1.
-    """
-
-    chunk_id: int
-    object_group_id: int
-    key: ObjectKey
-
-
 class _PlacementState(enum.Enum):
     """Where a placement is in its life."""
 
     PLACED = enum.auto()
-    COMPLETED = enum.auto()
-    ABANDONED = enum.auto()
+    RELEASED = enum.auto()
 
 
 class WindowPlacement:
     """A retrieve's objects, reserved for write inside one leased window.
 
-    Created by :meth:`RdmaWindowPlacer.place`. The objects stay write-locked
-    until the placement ends with exactly one of :meth:`complete` or
-    :meth:`abandon`.
+    Created by :meth:`RdmaWindowPlacer.lease`. The objects stay write-locked
+    until :meth:`release` is called exactly once.
 
     Not thread-safe: one retrieve drives it.
     """
@@ -74,43 +107,50 @@ class WindowPlacement:
         self,
         l1_manager: L1Manager,
         leaser: RdmaWindowLeaser,
-        lease: WindowLease,
+        window: LeasedWindow,
+        node_name: str,
         objects: Mapping[tuple[int, int], tuple[ObjectKey, MemoryObj]],
     ) -> None:
-        """Wrap reserved objects; use :meth:`RdmaWindowPlacer.place` instead.
+        """Wrap reserved objects; use :meth:`RdmaWindowPlacer.lease` instead.
 
         Args:
             l1_manager: The L1 holding the reservations.
-            leaser: The leaser ``lease`` came from.
-            lease: The window the objects are in.
+            leaser: The leaser ``window`` came from.
+            window: The leased window the objects are in.
+            node_name: The node every object is fetched from.
             objects: ``{(chunk_id, object_group_id): (key, memory_obj)}``.
         """
         self._l1_manager = l1_manager
         self._leaser = leaser
-        self._lease = lease
+        self._window = window
+        self._node_name = node_name
         self._objects = dict(objects)
         self._state = _PlacementState.PLACED
 
-    @property
-    def lease(self) -> WindowLease:
-        """The window this placement's objects are in."""
-        return self._lease
+    def window_start(self) -> int:
+        """Return where the leased window begins, as a slab offset."""
+        return self._window.base_offset
 
-    def dest_offset(self, chunk_id: int, object_group_id: int) -> int:
-        """Return where one object lands, as a slab offset.
+    def window_bytes(self) -> int:
+        """Return the size of the leased window."""
+        return self._window.size_bytes
+
+    def locate(self, chunk_id: int, object_group_id: int) -> ChunkLocation:
+        """Return where one placed object comes from and where it lands.
 
         Args:
             chunk_id: Index of the chunk within the request.
             object_group_id: Object group the object belongs to.
 
         Returns:
-            The object's byte offset from the start of the L1 slab, which is
-            the offset within the published window registration.
+            The node the placer was built with, and the object's slab offset,
+            which lies inside ``[window_start, window_start + window_bytes)``.
 
         Raises:
             KeyError: If the object was not placed.
         """
-        return self._memory_obj(chunk_id, object_group_id).meta.address
+        memory_obj = self._memory_obj(chunk_id, object_group_id)
+        return ChunkLocation(self._node_name, memory_obj.meta.address)
 
     def memory_obj(self, chunk_id: int, object_group_id: int) -> MemoryObj:
         """Return one object's L1 memory, e.g. for the layer loader.
@@ -135,43 +175,55 @@ class WindowPlacement:
         """
         return [self._objects[pair][0] for pair in sorted(self._objects)]
 
-    def complete(self) -> None:
-        """End a fetch in which every layer became resident.
+    def release(self, outcome: LeaseOutcome) -> None:
+        """End the placement, stating how its fetch ended.
 
-        Finishes the writes, so the objects become readable L1 cache entries,
-        and releases the window as :attr:`FetchOutcome.FINISHED`, leaving it
-        reclaimable at once.
+        - ``FINISHED``: every layer became resident. The writes are
+          finished, so the objects become readable L1 cache entries, and the
+          window is reusable at once.
+        - ``NEVER_FETCHED``: nothing was issued, so no write can be on the
+          wire. The reservations are aborted and the window is reusable at
+          once.
+        - ``ABANDONED``: issued but not finished, so writes may still
+          arrive. The reservations are aborted, so no half-written object
+          becomes readable, and the window is quarantined until the fetch
+          timeout has passed. A fallback load must reserve fresh objects in
+          general L1 (W4).
+
+        Args:
+            outcome: How the fetch that used the window ended.
 
         Raises:
-            ValueError: If the placement already ended.
-            RuntimeError: If L1 refuses to finish a write, e.g. a write lock
-                expired; the window is still released.
+            ValueError: If the placement was already released.
+            RuntimeError: On ``FINISHED``, if L1 refuses to finish a write,
+                e.g. a write lock expired; the window is still released.
         """
-        self._end(_PlacementState.COMPLETED)
+        if self._state is not _PlacementState.PLACED:
+            raise ValueError("placement already released")
+        self._state = _PlacementState.RELEASED
+        if outcome is LeaseOutcome.FINISHED:
+            self._finish()
+        elif outcome is LeaseOutcome.NEVER_FETCHED:
+            self._abort(FetchOutcome.FINISHED)
+        else:
+            self._abort(FetchOutcome.ABANDONED)
+
+    def _finish(self) -> None:
+        """Finish every write and release the window as reusable."""
         try:
             results = self._l1_manager.finish_write(self.keys())
         finally:
-            self._leaser.release(self._lease, FetchOutcome.FINISHED)
+            self._leaser.release(self._window, FetchOutcome.FINISHED)
         failed = {k: e for k, e in results.items() if e != L1Error.SUCCESS}
         if failed:
             raise RuntimeError(f"L1 refused to finish writes: {failed}")
 
-    def abandon(self) -> None:
-        """End a fetch that did not finish, for any reason.
-
-        Aborts the write reservations, so no half-written object becomes
-        readable, and releases the window as :attr:`FetchOutcome.ABANDONED`,
-        which quarantines it. A fallback load must then reserve fresh objects
-        in general L1 (W4).
-
-        Raises:
-            ValueError: If the placement already ended.
-        """
-        self._end(_PlacementState.ABANDONED)
+    def _abort(self, window_outcome: FetchOutcome) -> None:
+        """Abort every write and release the window with ``window_outcome``."""
         try:
             self._l1_manager.abort_write(self.keys())
         finally:
-            self._leaser.release(self._lease, FetchOutcome.ABANDONED)
+            self._leaser.release(self._window, window_outcome)
 
     def _memory_obj(self, chunk_id: int, object_group_id: int) -> MemoryObj:
         """Return one placed object's memory. Raises ``KeyError`` if absent."""
@@ -182,52 +234,60 @@ class WindowPlacement:
             )
         return self._objects[pair][1]
 
-    def _end(self, state: _PlacementState) -> None:
-        """Move from PLACED to ``state``, or raise if already ended."""
-        if self._state is not _PlacementState.PLACED:
-            raise ValueError(f"placement already ended as {self._state.name}")
-        self._state = state
-
 
 class RdmaWindowPlacer:
     """Reserves every object of a pipelined retrieve inside one leased window.
 
     Thread-safe to the extent its collaborators are: each call to
-    :meth:`place` works on its own lease, and the leaser never leases one
+    :meth:`lease` works on its own window, and the leaser never leases one
     window twice at once.
     """
 
-    def __init__(self, l1_manager: L1Manager, leaser: RdmaWindowLeaser) -> None:
-        """Create a placer.
+    def __init__(
+        self,
+        l1_manager: L1Manager,
+        leaser: RdmaWindowLeaser,
+        layouts: Mapping[int, MemoryLayoutDesc],
+        node_name: str,
+    ) -> None:
+        """Create a placer for one registered model on a single-node cluster.
 
         Args:
             l1_manager: The L1 whose windows ``leaser`` hands out.
             leaser: Hands out the windows.
+            layouts: ``{object_group_id: layout}``, the L1 memory layout of
+                each object group, as a retrieve would reserve it in general
+                L1.
+            node_name: The cluster's one node, which every object is fetched
+                from.
+
+        Raises:
+            ValueError: If ``layouts`` is empty or ``node_name`` is empty.
         """
+        if not layouts:
+            raise ValueError("a placer needs the layout of every object group")
+        if not node_name:
+            raise ValueError("a placer needs the name of the node to fetch from")
         self._l1_manager = l1_manager
         self._leaser = leaser
+        self._layouts = dict(layouts)
+        self._node_name = node_name
         self._align_bytes = l1_manager.get_l1_memory_desc().align_bytes
 
-    def place(
-        self,
-        objects: Sequence[ObjectToPlace],
-        layouts: Mapping[int, MemoryLayoutDesc],
-    ) -> WindowPlacement:
+    def lease(self, objects: Sequence[ObjectToPlace]) -> WindowPlacement:
         """Lease a window and reserve every object in it, all or nothing.
 
         Args:
             objects: The objects the retrieve reads, each ``(chunk_id,
                 object_group_id)`` at most once.
-            layouts: The L1 memory layout of each object group in
-                ``objects``, as the retrieve would reserve it in general L1.
 
         Returns:
-            The placement. End it with :meth:`WindowPlacement.complete` or
-            :meth:`WindowPlacement.abandon`.
+            The placement. End it with :meth:`WindowPlacement.release`.
 
         Raises:
-            ValueError: If ``objects`` is empty, repeats a pair, or names an
-                object group missing from ``layouts``.
+            ValueError: If ``objects`` is empty, repeats a pair, names an
+                object group with no layout, or is larger than its group's
+                L1 layout, so the fetched bytes would overrun the object.
             PlanTooLargeError: If the objects, each rounded up to the L1
                 alignment, do not fit in one window. The caller can split
                 the request.
@@ -235,20 +295,18 @@ class RdmaWindowPlacer:
                 a reservation, e.g. because a key is already cached. Nothing
                 is left reserved or leased. The caller falls back.
         """
-        request_bytes = self._request_bytes(objects, layouts)
-        lease = self._leaser.lease(request_bytes)
+        request_bytes = self._request_bytes(objects)
+        window = self._leaser.lease(request_bytes)
         try:
-            reserved = self._reserve_all(objects, layouts, lease)
+            reserved = self._reserve_all(objects, window)
         except BaseException:
-            self._leaser.release(lease, FetchOutcome.FINISHED)
+            self._leaser.release(window, FetchOutcome.FINISHED)
             raise
-        return WindowPlacement(self._l1_manager, self._leaser, lease, reserved)
+        return WindowPlacement(
+            self._l1_manager, self._leaser, window, self._node_name, reserved
+        )
 
-    def _request_bytes(
-        self,
-        objects: Sequence[ObjectToPlace],
-        layouts: Mapping[int, MemoryLayoutDesc],
-    ) -> int:
+    def _request_bytes(self, objects: Sequence[ObjectToPlace]) -> int:
         """Return the window bytes ``objects`` need, validating the input."""
         if not objects:
             raise ValueError("a placement needs at least one object")
@@ -257,18 +315,23 @@ class RdmaWindowPlacer:
             raise ValueError(f"objects repeat a (chunk, object group) pair: {pairs}")
         total = 0
         for obj in objects:
-            layout = layouts.get(obj.object_group_id)
+            layout = self._layouts.get(obj.object_group_id)
             if layout is None:
                 raise ValueError(f"no L1 layout for object group {obj.object_group_id}")
             raw = get_size_bytes(layout.shapes, layout.dtypes)
+            if obj.object_bytes > raw:
+                raise ValueError(
+                    f"object group {obj.object_group_id} objects are "
+                    f"{obj.object_bytes} bytes, larger than its {raw}-byte "
+                    f"L1 layout"
+                )
             total += _align_up(raw, self._align_bytes)
         return total
 
     def _reserve_all(
         self,
         objects: Sequence[ObjectToPlace],
-        layouts: Mapping[int, MemoryLayoutDesc],
-        lease: WindowLease,
+        window: LeasedWindow,
     ) -> dict[tuple[int, int], tuple[ObjectKey, MemoryObj]]:
         """Reserve ``objects`` in the leased window, undoing all on failure.
 
@@ -287,9 +350,9 @@ class RdmaWindowPlacer:
             results = self._l1_manager.reserve_write(
                 keys,
                 [False] * len(keys),
-                layouts[group_id],
+                self._layouts[group_id],
                 mode="new",
-                pool=lease.pool(),
+                pool=window.pool(),
             )
             for obj in group_objects:
                 err, memory_obj = results[obj.key]
@@ -301,10 +364,10 @@ class RdmaWindowPlacer:
                 if L1Error.OUT_OF_MEMORY in errors.values():
                     raise PlanTooLargeError(
                         f"the request's objects do not fit in RDMA window "
-                        f"{lease.window_index}"
+                        f"{window.window_index}"
                     )
                 raise LayerwiseContractError(
                     f"L1 refused to reserve objects in RDMA window "
-                    f"{lease.window_index}: {errors}"
+                    f"{window.window_index}: {errors}"
                 )
         return reserved

@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """``run_pipelined_retrieve`` over Track A's real window placer and source.
 
-The adapter below is the shape Track A's production ``ChunkPlacer`` needs;
-it moves into production code with that placer. The L1 is pinned CPU memory
-with real RDMA windows, and the source is the native pipelined session over
-the fabric-free client, so no device, fabric or cluster is needed.
-
-Skipped until Track A's placer is on the branch.
+``RdmaWindowPlacer`` is Track A's production ``ChunkPlacer``. The L1 is
+pinned CPU memory with real RDMA windows, and the source is the native
+pipelined session over the fabric-free client, so no device, fabric or
+cluster is needed.
 """
 
 # Standard
@@ -16,10 +14,8 @@ import threading
 # Third Party
 import pytest
 
-pytest.importorskip("lmcache.v1.distributed.l2_adapters.rdma_window_placer")
-
 # First Party
-from lmcache.v1.distributed.api import ObjectKey  # noqa: E402
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
 from lmcache.v1.distributed.l1_manager import L1Manager
@@ -33,9 +29,6 @@ from lmcache.v1.distributed.l2_adapters.rdma_registration import (
     RdmaWindowPlan,
 )
 from lmcache.v1.distributed.l2_adapters.rdma_window_leaser import RdmaWindowLeaser
-from lmcache.v1.distributed.l2_adapters.rdma_window_placer import (
-    ObjectToPlace as RdmaObjectToPlace,
-)
 from lmcache.v1.distributed.l2_adapters.rdma_window_placer import (
     RdmaWindowPlacer,
     WindowPlacement,
@@ -51,7 +44,6 @@ from lmcache.v1.layerwise import (
 from lmcache.v1.layerwise.fakes import RecordingLayerLoadSink
 from lmcache.v1.layerwise.pipelined_retrieve import run_pipelined_retrieve
 from lmcache.v1.layerwise.request_fetch import (
-    ChunkLocation,
     LeaseOutcome,
     ObjectToPlace,
     objects_to_place,
@@ -80,45 +72,15 @@ class _Clock:
         return self.now
 
 
-class _RdmaLease:
-    """Our ``WindowLease`` over Track A's ``WindowPlacement``."""
+class _RecordingPlacer:
+    """Records the leases the production placer hands out."""
 
-    def __init__(self, placement: WindowPlacement, node_name: str) -> None:
-        self.placement = placement
-        self._node_name = node_name
-
-    def window_start(self) -> int:
-        return self.placement.lease.base_offset
-
-    def window_bytes(self) -> int:
-        return self.placement.lease.size_bytes
-
-    def locate(self, chunk_id: int, object_group_id: int) -> ChunkLocation:
-        return ChunkLocation(
-            self._node_name, self.placement.dest_offset(chunk_id, object_group_id)
-        )
-
-    def release(self, outcome: LeaseOutcome) -> None:
-        if outcome == LeaseOutcome.FINISHED:
-            self.placement.complete()
-        else:
-            self.placement.abandon()
-
-
-class _RdmaPlacer:
-    """Our ``ChunkPlacer`` over Track A's ``RdmaWindowPlacer``; one node."""
-
-    def __init__(self, placer: RdmaWindowPlacer, node_name: str) -> None:
+    def __init__(self, placer: RdmaWindowPlacer) -> None:
         self._placer = placer
-        self._node_name = node_name
-        self.leases: list[_RdmaLease] = []
+        self.leases: list[WindowPlacement] = []
 
-    def lease(self, objects: Sequence[ObjectToPlace]) -> _RdmaLease:
-        placement = self._placer.place(
-            [RdmaObjectToPlace(o.chunk_id, o.object_group_id, o.key) for o in objects],
-            GROUP_LAYOUTS,
-        )
-        lease = _RdmaLease(placement, self._node_name)
+    def lease(self, objects: Sequence[ObjectToPlace]) -> WindowPlacement:
+        lease = self._placer.lease(objects)
         self.leases.append(lease)
         return lease
 
@@ -158,8 +120,7 @@ class _Setup:
         self.clock = _Clock()
         self.l1 = L1Manager(
             L1ManagerConfig(
-                # The rdma_window_* fields come with Track A's L1 windows.
-                memory_config=L1MemoryManagerConfig(  # type: ignore[call-arg]
+                memory_config=L1MemoryManagerConfig(
                     size_in_bytes=4 * 1024 * 1024,
                     use_lazy=False,
                     align_bytes=4096,
@@ -177,9 +138,12 @@ class _Setup:
             fetch_timeout_seconds=FETCH_TIMEOUT,
         )
         self.rdma_placer = RdmaWindowPlacer(
-            self.l1, RdmaWindowLeaser(self.l1, rdma, self.clock)
+            self.l1,
+            RdmaWindowLeaser(self.l1, rdma, self.clock),
+            GROUP_LAYOUTS,
+            TEST_NODE_NAMES[0],
         )
-        self.placer = _RdmaPlacer(self.rdma_placer, TEST_NODE_NAMES[0])
+        self.placer = _RecordingPlacer(self.rdma_placer)
         self.connector: FabricFreeClient = fabric_free_connector(window_count)
         self.keys = resolve_obj_keys(vllm_request())
 
@@ -254,10 +218,9 @@ def test_a_landed_retrieve_loads_every_layer_and_keeps_the_data(
 
 
 def test_a_later_window_is_planned_with_slab_offsets(two_windows: _Setup) -> None:
-    held = two_windows.rdma_placer.place(
-        [RdmaObjectToPlace(0, 0, ObjectKey(b"held", "m", 0))], GROUP_LAYOUTS
-    )
-    assert held.lease.base_offset == 0
+    held_object = ObjectToPlace(0, 0, ObjectKey(b"held", "m", 0), 1)
+    held = two_windows.rdma_placer.lease([held_object])
+    assert held.window_start() == 0
 
     sink, errors, plan = two_windows.retrieve()
 
@@ -267,7 +230,7 @@ def test_a_later_window_is_planned_with_slab_offsets(two_windows: _Setup) -> Non
     assert min(s.offset for s in plan.slots) >= WINDOW_BYTES
     assert max(s.offset + s.length for s in plan.slots) <= 2 * WINDOW_BYTES
     assert sink.loaded_layers() == plan.layer_ids()
-    held.abandon()
+    held.release(LeaseOutcome.ABANDONED)
 
 
 def test_a_declined_slot_falls_back_and_quarantines_the_window(

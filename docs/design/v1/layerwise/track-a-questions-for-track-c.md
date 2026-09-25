@@ -26,12 +26,12 @@ how contract changes are made.
 | W2: which error the placer raises | **Decided** as proposed | Track A: placer; Track C: one handler in retrieve |
 | W3: one fetch at a time | **Done: one fetch per window**, up to `window_count` at once | Track C: one source per retrieve |
 | W4: fallback after a failed fetch | **Decided:** reload into fresh general-L1 objects | Track A: `abort_write` and pool choice done; Track C: retrieve wiring |
-| N1: an object's records are not on one node | **Open, raised by Track A** | Track C: node per record in the planner; Track A: destination placer |
+| N1: an object's records are not on one node | **Deferred:** single-node only for now; the connector refuses pipelined fetches on a larger cluster | Owner of the client-server interaction (future work) |
 | P1: publishing every window | **Done: one registration covering all windows** | - |
-| L1: lease offsets are window-relative, the wire needs slab offsets | **Open, raised by Track A** (from `1280926c`) | Track C: see proposal |
-| L2: `ObjectToPlace` has no object key | **Open, raised by Track A** | Track C: add `key` |
-| L3: releasing a lease as `NEVER_FETCHED` | Track A's change | Track A |
-| L4: sizing `window_bytes` from `request_bytes` | **Open:** windows are reserved before the layout arrives | Track C: doc; Track A: use it in the check |
+| L1: lease offsets are window-relative, the wire needs slab offsets | **Done:** `dest_offset` is a slab offset, `WindowLease.window_start()` (Track C, `2a3c104d`) | - |
+| L2: `ObjectToPlace` has no object key | **Done:** Track C added `key`; Track A's copy is gone | - |
+| L3: releasing a lease as `NEVER_FETCHED` | **Done:** aborts the writes without quarantine | - |
+| L4: sizing `window_bytes` from `request_bytes` | **Done:** `check_window_holds_request` | Track C: call it at registration |
 
 ## Decisions
 
@@ -437,6 +437,47 @@ These are listed as blocked on Track A but are done:
 Track A item". W3 is done, so one lease per (request, rank) is possible now.
 Track A's review of the proposal follows separately.
 
+## Track C's replies on L1 to L4 (`track/c-planning` at `2a3c104d`)
+
+Merged into `track/a-transport`. Track A's answers:
+
+- **L1 and L2:** `RdmaWindowPlacer` is now the production `ChunkPlacer` and
+  `WindowPlacement` the `WindowLease`, so `_RdmaPlacer` and `_RdmaLease`
+  moved into production code without a separate adapter. The placer takes
+  the layouts and the one node name at construction. Track A's
+  `ObjectToPlace` is gone. The placer also refuses an `ObjectToPlace` whose
+  `object_bytes` exceeds its group's L1 layout, since the writes would
+  overrun the object.
+- **`test_rdma_placer_end_to_end.py`:** Track A changed it, since it
+  imported the removed `ObjectToPlace`. It now uses `RdmaWindowPlacer`
+  through a small wrapper that records the leases. The `type: ignore` and
+  the `importorskip` are gone. Please take these edits as yours.
+- **L3:** `release(LeaseOutcome.NEVER_FETCHED)` aborts the writes and frees
+  the window at once, without quarantine.
+- **L4:** `check_window_holds_request(window_bytes, model,
+  max_pipelined_chunks, align_bytes)` in `rdma_window_placer.py` raises
+  `ValueError` with the size needed. Nothing defines `max_pipelined_chunks`
+  yet, so Track C's registration wiring should decide where it comes from
+  and call the check. The native one-chunk check (done item 8) stays as the
+  readiness gate.
+- **Single node:** the native driver refuses to initialize pipelined
+  fetches unless the cluster has exactly one node. The error becomes
+  `pipelined_fetch_init_error`, so every retrieve falls back, and nothing is
+  registered with any node. The count is taken only at init; a node added
+  later isn't detected.
+- **A slot lands at its plan offset and nowhere else: confirmed** for
+  everything on the client side, and for the mock server:
+  - `NativePlanIssuer` passes `SlotPlacement.offset` through unchanged, and
+    the native client sends it as `<digest>@<offset>:<length>`
+    (`kv_sink_client.cpp`). No other destination exists in the request.
+  - `validate_slots_in_one_window` refuses a plan whose slots leave the
+    first slot's window before anything is sent.
+  - The mock server writes at `client_addr + offset` and refuses anything
+    outside the registered window. `rdma_equivalence_test` checks that no
+    bytes land outside the requested offsets.
+  - Caveat: the real server's side, that it writes exactly `length` bytes at
+    `offset`, is unverified until A8.
+
 ## Work that follows
 
 **Track A, done:**
@@ -557,6 +598,13 @@ Track A's review of the proposal follows separately.
       **Not run yet: it needs an EFA instance with RDMA write.** If
       it reports `data_without_notification=yes`, the wire contract may need
       a handshake, which would change the plan format.
+15. The production `ChunkPlacer` (L1 to L4). `RdmaWindowPlacer.lease(objects)
+    -> WindowPlacement` implements Track C's `ChunkPlacer` and
+    `WindowLease`. It releases as `FINISHED`, `NEVER_FETCHED` (no
+    quarantine) or `ABANDONED`. `check_window_holds_request` is the
+    registration check. The native driver refuses pipelined fetches on a
+    cluster of more than one node. See
+    [Track C's replies on L1 to L4](#track-cs-replies-on-l1-to-l4-trackc-planning-at-2a3c104d).
 
 These were verified on the Soft-RoCE VM
 ([rdma_testing_on_windows.md](../distributed/l2_adapters/rdma_testing_on_windows.md)):
@@ -565,9 +613,10 @@ These were verified on the Soft-RoCE VM
   C client 7.3.0;
 - device-free logic harness: 364 checks pass;
 - fabric harness over `rxe0`: 415 checks pass;
-- `tests/v1/layerwise/` and `tests/v1/distributed/` pass (1202 passed, 92
-  skipped), including the conformance suite over both sources and
-  concurrent fetches over the real native pool;
+- `tests/v1/layerwise/` and `tests/v1/distributed/` pass (1277 passed, 92
+  skipped, with Track C's `2a3c104d` merged), including the conformance
+  suite over both sources, concurrent fetches over the real native pool, and
+  Track C's end-to-end retrieve over the production placer;
 - the pytest wrappers in `tests/v1/distributed/rdma/` pass.
 
 `record_node` and `issue_pipelined_fetch_by_slots` have not run end to end.
@@ -581,8 +630,8 @@ That needs an Aerospike server, and for the slot path, one built from the
    check rather than sizing.
 3. ~~The lease API with reclaim (W1) and quarantine.~~ Done as item 9.
    ~~Publish every window to every node.~~ Done as item 11.
-4. ~~The production `ChunkPlacer` on top of the lease.~~ The destination
-   half is done as item 10. The node half is Track C's planner change (N1).
+4. ~~The production `ChunkPlacer` on top of the lease.~~ Done as items 10
+   and 15, single-node only (N1 deferred).
 5. ~~Retire or internalize `begin_pipelined_fetch` /
    `is_pipelined_layer_ready` (M4).~~ Done as item 12.
 6. ~~Later: concurrent fetches (W3).~~ Done as item 13.
@@ -604,6 +653,7 @@ needs the ones before it unless noted.
 | 5 | Lease and placer (items 9-10) | `0703d954`, `d4a5651b` | 4 |
 | 6 | One registration covering every window (P1, item 11) | `1c33157a` | 2, 4 |
 | 7 | Concurrent fetches, one per window (W3, item 13) | `6fd5fc4d` | 3, 5, 6 |
+| 8 | Production `ChunkPlacer`, `NEVER_FETCHED`, registration check, single-node gate (item 15) | the commit after the merge of `2a3c104d` | 5, 7, and Track C's lease interface (`1280926c` to `2a3c104d`) |
 
 Why this order: 2 and 3 touch only the transport and the adapters, so they
 can merge while 4 waits on `l1_manager` review. PR 4 is the only one that

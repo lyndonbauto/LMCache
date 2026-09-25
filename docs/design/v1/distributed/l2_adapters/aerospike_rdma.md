@@ -314,26 +314,38 @@ leaser.release(lease, FetchOutcome.FINISHED)   # or ABANDONED on any other exit
 
 ### Placing a retrieve's objects
 
-`RdmaWindowPlacer` (`rdma_window_placer.py`) is the destination half of the
-layerwise `ChunkPlacer`. It leases a window and reserves every object of the
-retrieve in it, all or nothing:
+`RdmaWindowPlacer` (`rdma_window_placer.py`) is the layerwise `ChunkPlacer`,
+and the `WindowPlacement` it returns is the `WindowLease` (both protocols
+are in `lmcache/v1/layerwise/request_fetch.py`). It leases a window and
+reserves every object of the retrieve in it, all or nothing:
 
 ```python
-placement = placer.place(
-    [ObjectToPlace(chunk_id, group_id, key), ...],
-    layouts,                                      # {group_id: MemoryLayoutDesc}
-)
-placement.dest_offset(chunk_id, group_id)         # slab offset for the plan
-...                                               # fetch, pump
-placement.complete()   # finish_write + release FINISHED
-# or
-placement.abandon()    # abort_write + release ABANDONED (quarantine), then
-                       # the fallback reserves fresh objects in general L1
+placer = RdmaWindowPlacer(l1_manager, leaser, layouts, node_name)
+#   layouts: {group_id: MemoryLayoutDesc} of the registered model
+#   node_name: the cluster's one node
+lease = placer.lease(objects_to_place(model, obj_keys))
+lease.locate(chunk_id, group_id)   # ChunkLocation(node_name, slab offset)
+...                                # build_request_fetch, pump
+lease.release(LeaseOutcome.FINISHED)       # finish_write; window reusable
+lease.release(LeaseOutcome.NEVER_FETCHED)  # abort_write; window reusable
+lease.release(LeaseOutcome.ABANDONED)      # abort_write; window quarantined,
+                                           # fallback uses general L1 (W4)
 ```
 
 - **Size check.** Each object is rounded up to the L1 alignment, as the
   window allocator does, and a total over `window_bytes` raises
-  `PlanTooLargeError` before anything is leased.
+  `PlanTooLargeError` before anything is leased. An object larger than its
+  group's L1 layout raises `ValueError`, since its writes would overrun the
+  object.
+- **Window size at registration.** The windows are carved out of L1 before
+  any layout is known, so `rdma_window_bytes` stays in config.
+  `check_window_holds_request(window_bytes, model, max_pipelined_chunks,
+  align_bytes)` compares it with
+  `model.request_bytes(max_pipelined_chunks, align_bytes)` and raises
+  `ValueError` stating the size needed (L4). The registration wiring calls it.
+  The native driver's own check, that one chunk fits (see
+  [Sizing `window_bytes`](#sizing-window_bytes)), still decides whether the
+  pipelined path is ready at all.
 - **All or nothing.** If L1 refuses any key, for example because it's
   already cached, every reservation is aborted and the lease is released
   as `FINISHED`, since no fetch was issued. It then raises
@@ -343,9 +355,20 @@ placement.abandon()    # abort_write + release ABANDONED (quarantine), then
   "P1" in the
   [questions doc](../../layerwise/track-a-questions-for-track-c.md#p1-every-window-is-published-as-one-registration-decided).
 
-The node half isn't here. An object's records are spread over the nodes by
-their own digests, so the node is chosen per record in the planner (N1 in
-the questions doc).
+- **Single node only.** `locate` returns the one node the placer was built
+  with. That is correct only on a single-node cluster: an object's records
+  are spread over the nodes by their own digests (N1 in the questions doc).
+  So the native driver refuses to initialize pipelined fetches when the
+  cluster has more than one node. The refusal becomes
+  `pipelined_fetch_init_error`, every fetch falls back, and nothing is
+  registered with any node. The node count is checked only at init.
+- **A slot lands at its plan offset and nowhere else.** The plan's
+  `SlotPlacement.offset` goes to the wire unchanged as `<digest>@<offset>:<length>`
+  (`kv_sink_client.cpp`), and the session refuses a plan whose slots leave
+  the first slot's window (`validate_slots_in_one_window`). The mock server
+  writes at `client_addr + offset` and refuses anything outside the window,
+  and `rdma_equivalence_test` checks that no bytes land outside the requested
+  offsets. The real server's side is unverified until A8.
 
 Every window is reachable: each node's `kv-sink-register` publishes the whole
 window range, and the session keeps each request inside its window. See

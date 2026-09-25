@@ -7,6 +7,8 @@
   #include "kv_sink_fanout.h"
   #include "notification_depth.h"
 
+  #include <aerospike/as_cluster.h>
+
   #include <stdexcept>
   #include <utility>
 
@@ -20,6 +22,16 @@ rdma::WindowPlan window_plan_from_registration(
   plan.window_count = registration.window_count;
   plan.window_bytes = registration.window_bytes;
   return plan;
+}
+
+uint32_t cluster_node_count(aerospike* client) {
+  as_nodes* nodes = as_nodes_reserve(client->cluster);
+  if (nodes == nullptr) {
+    return 0;
+  }
+  const uint32_t count = nodes->size;
+  as_nodes_release(nodes);
+  return count;
 }
 
 }  // namespace
@@ -75,6 +87,18 @@ void AerospikePipelinedRdmaDriver::initialize(aerospike* client) {
   }
 
   try {
+    // A plan names one node per object, but an object's records are spread
+    // over the cluster by the partition map, so pipelined fetches are only
+    // correct on a single-node cluster (N1). The node count is checked only
+    // here, before anything is registered with a node.
+    const uint32_t node_count = cluster_node_count(client);
+    if (node_count != 1) {
+      throw std::runtime_error(
+          "Aerospike pipelined RDMA: pipelined fetches need a single-node "
+          "cluster, but the cluster has " +
+          std::to_string(node_count) + " nodes");
+    }
+
     const rdma::Transport transport =
         rdma::transport_from_string(registration_.transport);
     context_ = std::make_unique<rdma::RdmaContext>(
