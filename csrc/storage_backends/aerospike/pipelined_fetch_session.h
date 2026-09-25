@@ -95,11 +95,16 @@ class PipelinedFetchSession {
  public:
   // `planner` and `registry` must outlive this session and must not change
   // while the session exists. `namespace_name` is embedded in fetch commands.
+  //
+  // Slot offsets are relative to the registered range, which holds
+  // `window_count` windows of `window_bytes` each. Every slot of one request
+  // must fall inside a single window: the one its first slot is in.
   PipelinedFetchSession(const SlotPlanner& planner,
                         const NodeRegistry& registry,
                         std::string namespace_name, size_t max_record_bytes,
                         size_t max_write_bytes, size_t window_bytes,
-                        uint32_t max_notification_slots);
+                        uint32_t max_notification_slots,
+                        uint32_t window_count = 1);
 
   // Report whether a request is currently active.
   //
@@ -115,7 +120,7 @@ class PipelinedFetchSession {
   //
   // Thread safety: takes `mu_`. Throws std::runtime_error if a request is
   // already active, if `slot_count()` exceeds the device-derived
-  // `max_notification_slots_`, if a planned slot falls outside `window_bytes_`,
+  // `max_notification_slots_`, if the planned slots do not share one window,
   // if a digest is missing, or if any exception SlotPlanner::plan_request may
   // throw. Throws std::invalid_argument if a chunk lacks a node binding.
   uint16_t begin_request(const std::vector<ChunkPlacement>& placements,
@@ -133,7 +138,7 @@ class PipelinedFetchSession {
   // already active, PlanTooLargeError if `slots.size()` exceeds the
   // device-derived `max_notification_slots_`, and std::invalid_argument if
   // `slots` is empty, a slot has an empty node or digest, a node is not
-  // registered, or a slot falls outside `window_bytes_`.
+  // registered, or the slots do not share one window.
   uint16_t begin_request_from_slots(const std::vector<PlannedSlot>& slots);
 
   // Most slots one request may carry on this device.
@@ -215,6 +220,7 @@ class PipelinedFetchSession {
   size_t max_record_bytes_;
   size_t max_write_bytes_;
   size_t window_bytes_;
+  uint32_t window_count_;
   uint32_t max_notification_slots_;
 
   mutable std::mutex mu_;

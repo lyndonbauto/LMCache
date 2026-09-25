@@ -7,9 +7,10 @@ that was already abandoned, then silently overwrites an unrelated request's KV.
 Corrupted KV does not crash; it produces confidently wrong tokens, which is the
 hardest possible failure to attribute.
 
-So this module registers a fixed pool of bounded windows at initialization and
-hands out one window per in-flight request. A misdirected write is still
-possible, but its blast radius is one request's own buffer. See
+So this module describes a fixed pool of bounded windows at the start of the
+slab, registered once at initialization, and each pipelined request stays
+inside one window. A misdirected write is still possible, but its blast radius
+is one request's own buffer. See
 ``docs/design/v1/distributed/l2_adapters/aerospike_rdma.md`` for the full
 rationale and the alternatives that were rejected.
 """
@@ -69,14 +70,15 @@ class RdmaTransport(enum.Enum):
 class RdmaWindowPlan:
     """A pool of equally sized registration windows inside the L1 slab.
 
-    Each window is registered once at initialization with
-    ``LOCAL_WRITE | REMOTE_WRITE`` and is leased to at most one in-flight
-    request at a time, so the rkey published to a remote writer never covers
-    more than that one request's destination buffer.
+    The whole range is registered once at initialization with
+    ``LOCAL_WRITE | REMOTE_WRITE`` and published to every node as one region,
+    because a server allows only a few registrations in total. Each window is
+    leased to at most one request at a time, and the native session refuses a
+    request whose writes leave its window.
 
     Attributes:
-        window_count: Number of windows to register. Also the maximum number of
-            concurrently outstanding RDMA fetches.
+        window_count: Number of windows. Also how many pipelined retrieves'
+            data can stay resident at once.
         window_bytes: Size of each window in bytes. Must hold at least one
             whole chunk of the model; a request larger than its window is not
             pipelined.

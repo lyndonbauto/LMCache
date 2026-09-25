@@ -9,8 +9,8 @@
 // bytes itself. What it must do is:
 //
 //   1. open a device, allocate a protection domain,
-//   2. register bounded windows of the L1 slab once, at init, with
-//      LOCAL_WRITE | REMOTE_WRITE, producing the rkeys we publish outward,
+//   2. register the window range of the L1 slab once, at init, with
+//      LOCAL_WRITE | REMOTE_WRITE, producing the rkey we publish outward,
 //   3. create a queue pair and drive it INIT -> RTR -> RTS,
 //   4. create an address handle for the server peer.
 //
@@ -59,25 +59,19 @@ enum class Transport {
 // Throws std::invalid_argument on an unknown name.
 Transport transport_from_string(const std::string& name);
 
-// A pool of equally sized registration windows inside the L1 slab.
+// A pool of equally sized windows at the start of the L1 slab.
 //
-// One window is leased per in-flight request so the rkey handed to a remote
-// writer never covers more than that request's own destination buffer. See
-// docs/design/v1/distributed/l2_adapters/aerospike_rdma.md for why this is
-// preferred over a single slab-wide registration.
+// One window is leased per pipelined request, and L1 allocates nothing else
+// in the window range, so no remote write can reach an ordinary L1 object.
+// The whole range is registered as one memory region and published once per
+// node: an Aerospike server holds one (rkey, addr, size) per registration and
+// allows only 16 registrations in total, so a registration per window does
+// not scale. The client keeps each request inside its window instead; see
+// PipelinedFetchSession. docs/design/v1/distributed/l2_adapters/
+// aerospike_rdma.md explains the trade-off.
 struct WindowPlan {
   uint32_t window_count = 0;
   size_t window_bytes = 0;
-};
-
-// One registered window: what we publish and where it points.
-struct RegisteredWindow {
-  // Byte offset of this window from the base of the L1 slab. Chosen by
-  // LMCache, never by the server.
-  size_t offset = 0;
-  size_t size = 0;
-  // Remote key for this window, published to the Aerospike server.
-  uint32_t rkey = 0;
 };
 
 // Local addressing information published to the server in
@@ -87,9 +81,14 @@ struct LocalEndpoint {
   std::string gid_hex;
   uint32_t qpn = 0;
   uint32_t psn = 0;
+  // Address of the L1 slab, which is also the start of window 0.
   uint64_t base_addr = 0;
+  // Bytes registered from base_addr: window_count * window_bytes.
   size_t total_bytes = 0;
-  std::vector<RegisteredWindow> windows;
+  // Remote key of the window range, published to every node.
+  uint32_t rkey = 0;
+  uint32_t window_count = 0;
+  size_t window_bytes = 0;
 };
 
 // Server addressing information parsed out of the register reply.
@@ -129,11 +128,11 @@ class RdmaContext {
   RdmaContext(const RdmaContext&) = delete;
   RdmaContext& operator=(const RdmaContext&) = delete;
 
-  // Register the window pool over the L1 slab, exactly once.
+  // Register the window range of the L1 slab, exactly once.
   //
-  // Each window is registered with LOCAL_WRITE | REMOTE_WRITE. Registration
-  // is expensive enough to erase the entire benefit of the RDMA path, so it
-  // happens here at init and never per request.
+  // The range is one memory region with LOCAL_WRITE | REMOTE_WRITE.
+  // Registration is expensive enough to erase the entire benefit of the RDMA
+  // path, so it happens here at init and never per request.
   //
   // Throws std::runtime_error if called twice, if the plan does not fit in
   // `size`, or if ibv_reg_mr fails (commonly because the slab is not pinned
@@ -171,10 +170,8 @@ class RdmaContext {
   // Receive-path limits from ibv_query_device at device open time.
   const RdmaDeviceCaps& device_caps() const { return device_caps_; }
 
-  // Number of registered windows, i.e. the max concurrent RDMA fetches.
-  uint32_t window_count() const {
-    return static_cast<uint32_t>(local_.windows.size());
-  }
+  // Number of windows in the registered range.
+  uint32_t window_count() const { return local_.window_count; }
 
   // Size the receive path so the server can signal per-layer progress with
   // RDMA_WRITE_WITH_IMM instead of a single reply at the end.

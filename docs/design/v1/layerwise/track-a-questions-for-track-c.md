@@ -14,7 +14,7 @@ how contract changes are made.
 | BLK1 / M1: who expands slots | **Decided: Option 1** (the plan is the only source of truth) | Track A: done |
 | BLK2: node list | Done: `LayerFetchPlan.node_names` | - |
 | BLK3: slot numbering | Done: position in `plan.slots`; `LayerFetchPlan` rejects > 65536 slots | - |
-| Q1 / M2: offsets and window ownership | **Decided 2026-09-25: bounded windows, data stays in place** | Track A: reservation, lease and destination placer done; publishing every window next |
+| Q1 / M2: offsets and window ownership | **Decided 2026-09-25: bounded windows, data stays in place** | Track A: reservation, lease, destination placer and publishing done |
 | Q2: digest encoding | Done: slots carry `record_key`; native hashes it | - |
 | Q3: planner and `max_sinks` | Done: C5 reworded | - |
 | Q4: oversized-plan error | Done: in `contract.py`, raised by the adapter and the native session | - |
@@ -27,7 +27,7 @@ how contract changes are made.
 | W3: one fetch at a time | Known limit; a concurrent retrieve falls back | Track A, later |
 | W4: fallback after a failed fetch | **Decided:** reload into fresh general-L1 objects | Track A: `abort_write` and pool choice done; Track C: retrieve wiring |
 | N1: an object's records are not on one node | **Open, raised by Track A** | Track C: node per record in the planner; Track A: destination placer |
-| P1: publishing every window | **Decided (Track A): one registration covering all windows** | Track A |
+| P1: publishing every window | **Done: one registration covering all windows** | - |
 
 ## Decisions
 
@@ -131,7 +131,9 @@ allocator.
   This is pending review by the `l1_manager` maintainers.
 - `RdmaWindowLeaser` hands out windows with reclaim and quarantine (done
   item 9). Nothing calls it yet; the production `ChunkPlacer` will.
-- Only window 0 is published to the nodes.
+- Every window is published, as one registration per node (done item 11).
+  Plan offsets are slab offsets, not window-relative, so the
+  "offsets are window-relative" point above no longer holds.
 
 ### M4: the pump begins the fetch
 
@@ -332,8 +334,7 @@ once per node.
   quarantined window.
 
 A per-window server check (`kv-sink-add-window` plus `window=<i>` on fetch)
-can follow as hardening. Until the client change lands, only window 0 is
-reachable, so run with `rdma.window_count = 1`.
+can follow as hardening. **Done** as item 11.
 
 ## Work that follows
 
@@ -397,6 +398,12 @@ reachable, so run with `rdma.window_count = 1`.
     - `abandon` performs W4's first two steps: abort the writes, then
       quarantine the window.
     - The node half waits on N1.
+11. Every window is published (P1). `RdmaContext::register_l1` registers the
+    whole window range as one memory region, and each node's
+    `kv-sink-register` publishes it, so the register command has no window
+    index. `PipelinedFetchSession` refuses a request whose slots aren't all
+    inside the window of its first slot. On the Soft-RoCE VM, a fetch into
+    window 2 lands byte-identical, and a write past the range is refused.
 
 These were verified on the Soft-RoCE VM
 ([rdma_testing_on_windows.md](../distributed/l2_adapters/rdma_testing_on_windows.md)):
@@ -420,8 +427,7 @@ That needs an Aerospike server, and for the slot path, one built from the
 2. ~~Size `window_bytes` at init from the KV layout.~~ Done as item 8, as a
    check rather than sizing.
 3. ~~The lease API with reclaim (W1) and quarantine.~~ Done as item 9.
-   Still open: publish every window to every node, as one registration per
-   node (P1). Until then only window 0 is usable by a fetch.
+   ~~Publish every window to every node.~~ Done as item 11.
 4. ~~The production `ChunkPlacer` on top of the lease.~~ The destination
    half is done as item 10. The node half is Track C's planner change (N1).
 5. Retire or internalize `begin_pipelined_fetch` / `is_pipelined_layer_ready`

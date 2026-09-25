@@ -61,28 +61,24 @@ struct ClusterRegistrationResult {
 //   as: connected Aerospike client.
 //   policy: info policy, or nullptr for the client default.
 //   local: our endpoint, valid after RdmaContext::create_queue_pair().
-//   window_index: which registered window's rkey to publish.
 //   registry: receives one region handle per node.
 //
 // Returns the per-node outcome. Throws std::runtime_error only when the
 // cluster-wide info call itself fails (for example the client is not
-// connected), and std::out_of_range if `window_index` is not registered.
+// connected), and std::invalid_argument if `local` has no registered range.
 ClusterRegistrationResult register_all_nodes(aerospike* as,
                                              const as_policy_info* policy,
                                              const LocalEndpoint& local,
-                                             uint32_t window_index,
                                              NodeRegistry* registry);
 
 // Register using one queue pair per node in `context`.
 //
 // For each cluster node the fanout creates a dedicated queue pair, sends that
 // node's qpn/psn in kv-sink-register, records the reply, and leaves connection
-// to the caller. `window_index` is fixed at 0 today; additional windows are
-// deferred until the driver leases non-zero indices.
+// to the caller. Every node gets the whole window range, as one region.
 ClusterRegistrationResult register_all_nodes(aerospike* as,
                                              const as_policy_info* policy,
                                              RdmaContext* context,
-                                             uint32_t window_index,
                                              NodeRegistry* registry);
 
 }  // namespace rdma

@@ -150,15 +150,33 @@ std::vector<std::string> digests_for_plan(
   return out;
 }
 
-void validate_slots_in_window(const RequestPlan& plan, size_t window_bytes) {
+// The whole window range is one registration, so the server would accept a
+// write anywhere in it. Keeping a request inside one window is what stops a
+// wrong offset or a late write from reaching another request's objects.
+void validate_slots_in_one_window(const RequestPlan& plan, size_t window_bytes,
+                                  uint32_t window_count) {
+  if (plan.slot_count() == 0) {
+    return;
+  }
+  const size_t window = plan.slot(0).offset / window_bytes;
+  if (window >= window_count) {
+    std::ostringstream os;
+    os << "PipelinedFetchSession: slot 0 starts at " << plan.slot(0).offset
+       << ", past the " << window_count << " registered windows of "
+       << window_bytes << " bytes";
+    throw std::invalid_argument(os.str());
+  }
+  const size_t begin = window * window_bytes;
+  const size_t end_of_window = begin + window_bytes;
   for (size_t i = 0; i < plan.slot_count(); ++i) {
     const FetchSlot& slot = plan.slot(static_cast<uint16_t>(i));
     const size_t end = slot.offset + slot.length;
-    if (end > window_bytes || slot.length == 0) {
+    if (slot.length == 0 || slot.offset < begin || end > end_of_window) {
       std::ostringstream os;
       os << "PipelinedFetchSession: slot " << i << " write [" << slot.offset
-         << ", " << end << ") falls outside the " << window_bytes
-         << "-byte registered window";
+         << ", " << end << ") is not inside window " << window << " [" << begin
+         << ", " << end_of_window
+         << "), where slot 0 is; one request must stay in one window";
       throw std::invalid_argument(os.str());
     }
   }
@@ -203,13 +221,14 @@ void throw_if_plan_too_large(size_t slot_count, uint32_t max_slots) {
 PipelinedFetchSession::PipelinedFetchSession(
     const SlotPlanner& planner, const NodeRegistry& registry,
     std::string namespace_name, size_t max_record_bytes, size_t max_write_bytes,
-    size_t window_bytes, uint32_t max_notification_slots)
+    size_t window_bytes, uint32_t max_notification_slots, uint32_t window_count)
     : planner_(planner),
       registry_(registry),
       namespace_name_(std::move(namespace_name)),
       max_record_bytes_(max_record_bytes),
       max_write_bytes_(max_write_bytes),
       window_bytes_(window_bytes),
+      window_count_(window_count),
       max_notification_slots_(max_notification_slots),
       plan_(0),
       readiness_(plan_) {}
@@ -248,7 +267,7 @@ uint16_t PipelinedFetchSession::begin_request(
   RequestPlan plan = planner_.plan_request(placements, max_record_bytes_,
                                            max_write_bytes_, generation);
   throw_if_plan_too_large(plan.slot_count(), max_notification_slots_);
-  validate_slots_in_window(plan, window_bytes_);
+  validate_slots_in_one_window(plan, window_bytes_, window_count_);
 
   std::map<uint32_t, std::string> nodes = chunk_node_map(chunk_nodes);
   for (uint32_t chunk_id : plan.chunk_ids()) {
@@ -317,7 +336,7 @@ uint16_t PipelinedFetchSession::begin_request_from_slots(
     nodes.push_back(slot.node_name);
     digests.push_back(slot.digest_hex);
   }
-  validate_slots_in_window(plan, window_bytes_);
+  validate_slots_in_one_window(plan, window_bytes_, window_count_);
 
   has_request_ = true;
   active_generation_ = generation;

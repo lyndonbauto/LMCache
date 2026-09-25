@@ -76,7 +76,6 @@ bool on_node_reply(const as_error* err, const as_node* node, const char* req,
 ClusterRegistrationResult register_all_nodes(aerospike* as,
                                              const as_policy_info* policy,
                                              const LocalEndpoint& local,
-                                             uint32_t window_index,
                                              NodeRegistry* registry) {
   if (as == nullptr) {
     throw std::runtime_error("register_all_nodes: null aerospike client");
@@ -85,8 +84,8 @@ ClusterRegistrationResult register_all_nodes(aerospike* as,
     throw std::runtime_error("register_all_nodes: null node registry");
   }
 
-  // Throws std::out_of_range before any I/O if the window is not registered.
-  const std::string command = build_register_command(local, window_index);
+  // Throws std::invalid_argument before any I/O if nothing is registered.
+  const std::string command = build_register_command(local);
 
   ClusterRegistrationResult result;
   FanoutState state;
@@ -114,7 +113,6 @@ struct PerNodeRegisterState {
   aerospike* as = nullptr;
   const as_policy_info* policy = nullptr;
   RdmaContext* context = nullptr;
-  uint32_t window_index = 0;
   NodeRegistry* registry = nullptr;
   ClusterRegistrationResult* result = nullptr;
 };
@@ -144,8 +142,7 @@ bool register_one_node_callback(const as_error* err, const as_node* node,
     state->context->create_queue_pair_for_node(node_name);
     const LocalEndpoint local =
         state->context->local_endpoint_for_node(node_name);
-    const std::string command =
-        build_register_command(local, state->window_index);
+    const std::string command = build_register_command(local);
 
     as_error node_err;
     char* response = nullptr;
@@ -186,7 +183,6 @@ bool register_one_node_callback(const as_error* err, const as_node* node,
 ClusterRegistrationResult register_all_nodes(aerospike* as,
                                              const as_policy_info* policy,
                                              RdmaContext* context,
-                                             uint32_t window_index,
                                              NodeRegistry* registry) {
   if (as == nullptr) {
     throw std::runtime_error("register_all_nodes: null aerospike client");
@@ -203,7 +199,6 @@ ClusterRegistrationResult register_all_nodes(aerospike* as,
   state.as = as;
   state.policy = policy;
   state.context = context;
-  state.window_index = window_index;
   state.registry = registry;
   state.result = &result;
 

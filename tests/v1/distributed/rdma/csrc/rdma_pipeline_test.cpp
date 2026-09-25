@@ -235,7 +235,7 @@ int main(int argc, char** argv) {
     // ---- Handshake. ----
     const LocalEndpoint& local = sink.local_endpoint();
     const std::string register_reply = writer.handle_register(
-        lmcache::connector::rdma::build_register_command(local, 0));
+        lmcache::connector::rdma::build_register_command(local));
     const NodeRegistration registration =
         lmcache::connector::rdma::parse_register_reply("mock-node",
                                                        register_reply);

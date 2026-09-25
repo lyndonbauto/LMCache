@@ -144,11 +144,12 @@ int main(int argc, char** argv) {
     writer.add_record(MockRecord{digest_b, payload_b});
 
     // ---- Handshake, in the order the protocol forces. ----
-    // We publish window 0's rkey; the register command must carry our qpn and
+    // We publish the window range's rkey; the register command must carry our
+    // qpn and
     // psn, and only the reply tells us the peer's.
     const LocalEndpoint& local = sink.local_endpoint();
     const std::string register_cmd =
-        lmcache::connector::rdma::build_register_command(local, 0);
+        lmcache::connector::rdma::build_register_command(local);
     const std::string register_reply = writer.handle_register(register_cmd);
 
     NodeRegistration registration =
@@ -197,14 +198,27 @@ int main(int argc, char** argv) {
     }
     check(tail_clean, "no bytes landed outside the requested offsets");
 
-    // A sink outside the registered window must be refused, not written.
+    // Every window is reachable through the one registration.
+    const size_t window_2 = 2 * kWindowBytes;
+    std::vector<SinkRequest> into_window_2;
+    into_window_2.push_back(SinkRequest{digest_b, window_2, kPayloadBytes});
+    const FetchReply second = lmcache::connector::rdma::parse_fetch_reply(
+        writer.handle_fetch(lmcache::connector::rdma::build_fetch_command(
+            "lmcache", registration.region, into_window_2)));
+    check(second.all_ok(), "a fetch into window 2 is accepted");
+    check(std::memcmp(landed + window_2, payload_b.data(), kPayloadBytes) == 0,
+          "chunk B landed byte-identical in window 2");
+
+    // A sink past the registered range must be refused, not written.
     std::vector<SinkRequest> overrun;
-    overrun.push_back(SinkRequest{digest_a, kWindowBytes, kPayloadBytes});
+    overrun.push_back(
+        SinkRequest{digest_a, kWindowCount * kWindowBytes, kPayloadBytes});
     const FetchReply refused = lmcache::connector::rdma::parse_fetch_reply(
         writer.handle_fetch(lmcache::connector::rdma::build_fetch_command(
             "lmcache", registration.region, overrun)));
     check(!refused.all_ok() && refused.ok == 0,
-          "a write past the window is refused, bounding the blast radius");
+          "a write past the window range is refused, bounding the blast "
+          "radius");
 
     munlock(slab, kSlabBytes);
     std::free(slab);

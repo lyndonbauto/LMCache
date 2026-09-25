@@ -865,6 +865,53 @@ void test_planned_request_rejects_bad_input() {
         "a plan above the device slot cap raises PlanTooLargeError");
 }
 
+void test_planned_request_stays_in_one_window() {
+  std::cout << "planned request stays in one window\n";
+
+  const SlotPlanner planner({single_group_layout(1)});
+  NodeRegistry registry;
+  register_node(registry, "node-a", 10);
+  PipelinedFetchSession session(planner, registry, "kv", kRecordCap, kWriteCap,
+                                kWindowBytes, kNotifyCap, 3);
+  const size_t w1 = kWindowBytes;
+  const size_t w2 = 2 * kWindowBytes;
+
+  session.begin_request_from_slots(
+      {planned("node-a", 0, w1, "d0"), planned("node-a", 0, w2 - 64, "d1")});
+  session.finish_request();
+  session.begin_request_from_slots({planned("node-a", 0, w2, "d0")});
+  session.finish_request();
+
+  check(throws<std::invalid_argument>([&] {
+          session.begin_request_from_slots(
+              {planned("node-a", 0, w1, "d0"), planned("node-a", 0, w2, "d1")});
+        }),
+        "slots in two windows are refused");
+  check(throws<std::invalid_argument>([&] {
+          session.begin_request_from_slots(
+              {planned("node-a", 0, w2, "d0"), planned("node-a", 0, 0, "d1")});
+        }),
+        "a slot before the first slot's window is refused");
+  check(throws<std::invalid_argument>([&] {
+          session.begin_request_from_slots(
+              {planned("node-a", 0, w2 - 8, "d0", 64)});
+        }),
+        "a slot straddling a window boundary is refused");
+  check(throws<std::invalid_argument>([&] {
+          session.begin_request_from_slots(
+              {planned("node-a", 0, 3 * kWindowBytes, "d0")});
+        }),
+        "a slot past the last window is refused");
+  check(!session.has_active_request(),
+        "no rejected plan leaves a request active");
+
+  PipelinedFetchSession one_window = make_session(planner, registry);
+  check(throws<std::invalid_argument>([&] {
+          one_window.begin_request_from_slots({planned("node-a", 0, w1, "d0")});
+        }),
+        "with one window, window 1 does not exist");
+}
+
 }  // namespace
 
 int main() {
@@ -890,6 +937,7 @@ int main() {
     test_planned_request_splits_to_max_sinks();
     test_planned_late_write_from_abandoned_request_is_ignored();
     test_planned_request_rejects_bad_input();
+    test_planned_request_stays_in_one_window();
   } catch (const std::exception& e) {
     std::cerr << "EXCEPTION: " << e.what() << "\n";
     return 1;

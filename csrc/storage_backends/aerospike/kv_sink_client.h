@@ -96,10 +96,11 @@ struct NodeRegistration {
 
 // Build the "kv-sink-register" info command for a local endpoint.
 //
-// `window_index` selects which registered window's rkey to publish.
-// Throws std::out_of_range if `window_index` is not a registered window.
-std::string build_register_command(const LocalEndpoint& local,
-                                   uint32_t window_index);
+// Publishes the whole registered window range: its rkey, its start address,
+// and window_count * window_bytes as its size.
+//
+// Throws std::invalid_argument if `local` has no registered range.
+std::string build_register_command(const LocalEndpoint& local);
 
 // Build the "kv-sink-fetch" info command.
 //

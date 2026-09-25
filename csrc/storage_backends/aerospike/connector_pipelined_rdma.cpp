@@ -79,8 +79,8 @@ void AerospikePipelinedRdmaDriver::initialize(aerospike* client) {
                           registration_.size,
                           window_plan_from_registration(registration_));
 
-    const rdma::ClusterRegistrationResult result = rdma::register_all_nodes(
-        client, nullptr, context_.get(), 0, &registry_);
+    const rdma::ClusterRegistrationResult result =
+        rdma::register_all_nodes(client, nullptr, context_.get(), &registry_);
     if (result.registered == 0) {
       throw std::runtime_error(
           "Aerospike pipelined RDMA: kv-sink-register fanout registered no "
@@ -275,7 +275,8 @@ void AerospikePipelinedRdmaDriver::ensure_session() {
   }
   session_ = std::make_unique<rdma::PipelinedFetchSession>(
       *planner_, registry_, namespace_name_, max_record_bytes_,
-      max_record_bytes_, registration_.window_bytes, max_notification_slots_);
+      max_record_bytes_, registration_.window_bytes, max_notification_slots_,
+      registration_.window_count);
   session_->restore_generation_counter(next_generation_);
 }
 

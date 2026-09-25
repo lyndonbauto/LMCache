@@ -146,9 +146,32 @@ possible failure to attribute and would likely be blamed on the model.
 
 Bounded windows do not make misdirected writes impossible; they bound the blast
 radius to one request's own buffer, which keeps the failure attributable. The
-cost is a cap on concurrency (`window_count` is the maximum number of
-concurrently outstanding RDMA fetches) and a fixed `window_bytes` that must be
-large enough for the largest single fetch.
+cost is a fixed `window_bytes` that must be large enough for the largest single
+fetch, and `window_count` bounds how many retrieves' data can stay resident.
+
+**The window range is one registration, and the client keeps each request in
+its window.** An Aerospike server holds one `(rkey, addr, size)` per
+`kv-sink-register`, and each registration costs it a queue pair. It also
+allows only 16 registrations in total, across all clients (`MAX_REGIONS` in
+`as/src/base/kv_sink.c` on the server branch). A registration per window would
+use half of a node's 16 with 8 windows. So `register_l1` registers
+`[0, window_count × window_bytes)` of the slab as one memory region, and every
+node gets that range once.
+
+The bound moves to the client and to L1:
+
+- L1 allocates nothing but window objects in the range, so the server's own
+  bounds check keeps every write out of general L1.
+- `PipelinedFetchSession` refuses a request whose slots don't all fall inside
+  one window: the window of its first slot. Plan offsets are slab offsets,
+  which equal `memory_obj.meta.address`.
+- A late write from an abandoned fetch still targets that fetch's own window,
+  which the leaser quarantines.
+
+Compared with a registration per window, what's lost is protection against a
+*server* bug that writes outside the offsets it was sent. A per-window server
+check (`kv-sink-add-window` plus `window=<i>` on fetch) can restore that
+without a queue pair per window.
 
 Either way, registration happens **exactly once, at initialization**.
 `ibv_reg_mr` is expensive enough to erase the entire benefit of the RDMA path,
@@ -322,9 +345,9 @@ The node half isn't here. An object's records are spread over the nodes by
 their own digests, so the node is chosen per record in the planner (N1 in
 the questions doc).
 
-Not done yet: registering the whole window range as one region per node.
-Today a node's `kv-sink-register` publishes window 0 only. Until that changes,
-run with `rdma.window_count = 1`.
+Every window is reachable: each node's `kv-sink-register` publishes the whole
+window range, and the session keeps each request inside its window. See
+[Registration scope](#registration-scope-bounded-windows).
 
 ## Transport-agnostic registration handle
 
@@ -439,10 +462,10 @@ with missing immediates and the request hangs. The RdmaContext overload that
 takes `RdmaContext*` creates a dedicated queue pair per node before issuing
 `aerospike_info_node` with that node's endpoint.
 
-**Window index.** Registration always publishes window `0` today. Additional
-windows in the pool are reserved for concurrent requests but are not yet leased
-by the driver; treating `window_index` as configurable would imply multi-window
-operation that is still deferred.
+**One range per node.** Registration publishes the whole window range, not a
+window, so the register command takes no window index. Which window a request
+uses is decided by its slot offsets, which the session checks against one
+window.
 
 The legacy overload that accepts a single `LocalEndpoint` remains for baseline
 tests that exercise one mock node with `create_queue_pair()` /

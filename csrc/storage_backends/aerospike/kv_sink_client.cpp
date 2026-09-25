@@ -61,19 +61,16 @@ std::vector<std::string> split_csv(const std::string& text) {
 
 }  // namespace
 
-std::string build_register_command(const LocalEndpoint& local,
-                                   uint32_t window_index) {
-  if (window_index >= local.windows.size()) {
-    throw std::out_of_range("window index " + std::to_string(window_index) +
-                            " is not registered (" +
-                            std::to_string(local.windows.size()) + " windows)");
+std::string build_register_command(const LocalEndpoint& local) {
+  if (local.base_addr == 0 || local.total_bytes == 0) {
+    throw std::invalid_argument(
+        "kv-sink-register needs a registered window range");
   }
-  const RegisteredWindow& window = local.windows[window_index];
   std::ostringstream os;
   os << "kv-sink-register:transport=verbs"
      << ";gid=" << local.gid_hex << ";qpn=" << local.qpn << ";psn=" << local.psn
-     << ";rkey=" << window.rkey << ";addr=" << (local.base_addr + window.offset)
-     << ";size=" << window.size;
+     << ";rkey=" << local.rkey << ";addr=" << local.base_addr
+     << ";size=" << local.total_bytes;
   return os.str();
 }
 
