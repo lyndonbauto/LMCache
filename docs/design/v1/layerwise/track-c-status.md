@@ -77,6 +77,29 @@ All done (2026-09-25):
 
 ## PR split for upstream
 
+**What upstream already has (checked 2026-09-25 against `dev` at
+`57afd4c0`).** The native Aerospike L2 adapter is upstream (#3458). The
+foundation this branch sits on is not upstream and not in review: RDMA
+registration and the pipelined fetch session, plane-aligned record sharding,
+and multiprocess layerwise load (`layer_progress.py`, per-layer H2D, the vLLM
+per-layer wait). So:
+
+- **PR 1 stands alone.** It is prepared on branch
+  `fix/aerospike-libyaml-soname`, based on `dev`:
+  - the libyaml soname fix, with a build-profile test that fails on `dev`'s
+    profile;
+  - the registry-test unflake, which reproduces on `dev`.
+
+  The empty-`layer_indices` fix is dropped from it, because `dev` has no
+  `layer_indices`.
+- **The layerwise package stands alone too.** Copied onto `dev`, all 254
+  tests in `tests/v1/layerwise/` pass once
+  `native_connector_l2_adapter._object_key_to_string` is made public.
+  Nothing in production would call it yet.
+- **PR 2 and the wiring half of PR 4 need the foundation first.** These are
+  the per-kernel-group record layouts, fetch-model registration in
+  `register_kv_cache`, and `max_record_bytes()`.
+
 Each PR is independently reviewable and leaves `dev` working. Order matters:
 later ones build on earlier ones.
 
