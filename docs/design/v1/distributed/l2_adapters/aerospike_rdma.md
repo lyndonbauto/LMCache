@@ -212,6 +212,54 @@ introspect allocator internals, `L1MemoryDesc` now carries a
 This replaces the standing `TODO(ApostaC)` in `l1_memory_manager.py` with an
 enforced contract instead of an untested assumption.
 
+### The windows are reserved outside the general allocator
+
+A window only bounds the blast radius if nothing else lives in it. So when an
+adapter enables RDMA, L1 splits its slab at startup:
+
+```text
+slab offset 0                 W = window_bytes        N = window_count
+|  window 0  |  window 1  | ... | window N-1 |  general L1 ...................|
+|<------------ N * W, one allocator each --->|<- MixedMemoryAllocator heap -->|
+```
+
+- `normalize_storage_manager_config` copies the adapter's `RdmaWindowPlan`
+  into `L1MemoryManagerConfig.rdma_window_count` / `rdma_window_bytes`, because
+  L1 is built before any adapter. More than one RDMA adapter, or RDMA with a
+  GDS or Device-DAX L1, raises `ValueError`.
+- `MixedMemoryAllocator(reserved_prefix_bytes=N*W)` allocates the prefix once
+  at construction and never frees it. The general heap keeps its whole-slab
+  address space, so `meta.address` stays a slab offset for every object and
+  the Nixl adapters and `gpu_ops`, which rely on that, are unaffected.
+- Each window gets a `RangeMemoryAllocator` over its own range, with
+  slab-absolute addresses. `L1MemoryManager.free` routes each object back to
+  its allocator by data pointer.
+- `get_memory_usage` reports the general pool only, and
+  `L1Manager.is_key_evictable` is false for window objects, so memory-pressure
+  eviction never touches the windows.
+- An RDMA adapter added at runtime is refused by `validate_windows_reserved`
+  unless L1 reserved exactly its plan at startup.
+
+The caller picks the pool per reservation. General L1 is the default, so no
+existing caller changes:
+
+```python
+l1.reserve_write(keys, temps, layout, mode="new", pool=L1Pool.rdma_window(i))
+```
+
+Two `L1Manager` calls support the window lifecycle
+([W1 and W4](../../layerwise/track-a-questions-for-track-c.md#window-lifecycle-w1-to-w4-agreed-after-the-meeting)):
+
+| Call | Does | Used by |
+|---|---|---|
+| `delete_if_none_locked(keys)` | Deletes every existing key, or none if any is read- or write-locked, in one step under the L1 lock. | `lease()` reclaiming a whole idle window. |
+| `abort_write(keys)` | Deletes write-locked keys without making them readable and without a write-finished event. Leaves other keys alone. | The fallback after a failed fetch, before it reserves fresh general-L1 objects. |
+
+Both emit the same eviction events as `delete`.
+
+Not done yet: the lease API with reclaim and quarantine, and publishing every
+window rather than window 0.
+
 ## Transport-agnostic registration handle
 
 `L1MemoryDesc` gained a `registration: MemoryRegistration` field.
@@ -888,6 +936,7 @@ Being precise about this, because the gap matters:
 | Connector + Python pipelined path | **Implemented (device-free).** `AerospikeNativeConnector::issue_pipelined_fetch` performs begin, per-node `aerospike_info_node`, and reply feeding without holding the driver lock across I/O; `set_object_group_layouts` converts registered `MemoryLayoutDesc` shapes in C++; `finish_pipelined_fetch` / `abandon_pipelined_fetch` and `pipelined_fetch_init_error` are bound through pybind and threaded via `StorageManager` and `NativeConnectorL2Adapter`. Python hands over record user keys through `issue_pipelined_fetch_by_keys`, and the connector derives each sink's digest with `record_digest_hex` (verified against the reference client on a real server). Covered by `pipelined_fetch_issue_test` and Python adapter tests. **Not verified over a fabric** with real digests from a prefetch load. |
 | Adapter plumbing, descriptor, window plan | **Implemented and unit-tested.** |
 | Write-lock TTL invariant | **Implemented and unit-tested** (startup check). |
+| Windows reserved outside general L1; `delete_if_none_locked`, `abort_write` | **Implemented and unit-tested** on pinned CPU memory. No lease yet, so nothing allocates in a window in production. |
 | Mock RDMA writer | **Verified.** Posts real `ibv_post_send` writes and fences on its own send CQ. |
 | Real RDMA write landing in L1 | **Verified** over Soft-RoCE (`rxe0` on `lo`, GID index 1). |
 | Byte-equivalence assertion | **Verified.** Both chunks byte-identical, nothing outside the requested offsets, out-of-window write refused. |

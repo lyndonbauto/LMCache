@@ -284,6 +284,59 @@ DISABLED_L1_RDMA = L1RdmaConfig()
 """Shared default: RDMA reception turned off."""
 
 
+def rdma_config_of(adapter_config: object) -> L1RdmaConfig:
+    """Return the RDMA settings an L2 adapter config carries.
+
+    Args:
+        adapter_config: Any L2 adapter config. Only adapters that support RDMA
+            reception have an ``rdma`` attribute.
+
+    Returns:
+        The adapter's :class:`L1RdmaConfig`, or :data:`DISABLED_L1_RDMA` when
+        it has none.
+    """
+    rdma = getattr(adapter_config, "rdma", None)
+    return rdma if isinstance(rdma, L1RdmaConfig) else DISABLED_L1_RDMA
+
+
+def validate_windows_reserved(
+    adapter_config: object, reserved_window_count: int, reserved_window_bytes: int
+) -> None:
+    """Check that L1 reserved exactly the windows an RDMA adapter will use.
+
+    The windows are carved out of the general L1 allocator when L1 is built.
+    An RDMA adapter whose plan L1 did not reserve would register windows over
+    memory that ordinary L1 objects also use, so a remote writer could reach
+    them. That happens when an RDMA adapter is added after startup.
+
+    Does nothing when ``adapter_config`` has RDMA disabled.
+
+    Args:
+        adapter_config: An L2 adapter config.
+        reserved_window_count: ``L1MemoryManagerConfig.rdma_window_count``.
+        reserved_window_bytes: ``L1MemoryManagerConfig.rdma_window_bytes``.
+
+    Raises:
+        ValueError: If RDMA is enabled and L1 reserved a different plan, or
+            none.
+    """
+    rdma = rdma_config_of(adapter_config)
+    if not rdma.is_enabled():
+        return
+    plan = rdma.window_plan
+    if (plan.window_count, plan.window_bytes) != (
+        reserved_window_count,
+        reserved_window_bytes,
+    ):
+        raise ValueError(
+            f"the adapter's RDMA windows ({plan.window_count} x "
+            f"{plan.window_bytes} bytes) are not the ones L1 reserved "
+            f"({reserved_window_count} x {reserved_window_bytes} bytes). "
+            "L1 reserves windows only at startup, so an RDMA adapter must be "
+            "configured then, not added at runtime."
+        )
+
+
 def validate_fetch_timeout_against_write_ttl(
     adapter_config: object,
     write_ttl_seconds: int,
@@ -317,8 +370,8 @@ def validate_fetch_timeout_against_write_ttl(
         ValueError: If RDMA is enabled and the fetch timeout is greater than or
             equal to the write-lock TTL, or if the TTL is not positive.
     """
-    rdma = getattr(adapter_config, "rdma", None)
-    if not isinstance(rdma, L1RdmaConfig) or not rdma.is_enabled():
+    rdma = rdma_config_of(adapter_config)
+    if not rdma.is_enabled():
         return
 
     if write_ttl_seconds <= 0:

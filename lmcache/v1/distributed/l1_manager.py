@@ -14,7 +14,12 @@ from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, get_configured_capacity_bytes
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.internal_api import L1ManagerListener, L1ObjectMeta
+from lmcache.v1.distributed.internal_api import (
+    GENERAL_L1_POOL,
+    L1ManagerListener,
+    L1ObjectMeta,
+    L1Pool,
+)
 from lmcache.v1.distributed.memory_manager import (
     GDSL1MemoryManager,
     L1ManagerProtocol,
@@ -443,6 +448,7 @@ class L1Manager:
         is_temporary: list[bool],
         layout_desc: MemoryLayoutDesc,
         mode: Literal["new", "update", "all"] = "all",
+        pool: L1Pool = GENERAL_L1_POOL,
     ) -> dict[ObjectKey, L1OperationResult]:
         """Reserve write access for the given keys.
 
@@ -456,15 +462,28 @@ class L1Manager:
             - "new": Reserve only new objects that do not exist.
             - "update": Reserve only existing objects for update.
             - "all": Reserve all writable objects regardless of existence.
+            pool: Where new objects are allocated. General L1 by default. An
+                RDMA window pool allocates inside that window only, and
+                requires ``mode="new"``: an existing key's memory lies
+                outside the window.
 
         Returns:
             A dictionary mapping each object key to a tuple of
             (L1Error, Optional[MemoryObj]).
 
+        Raises:
+            ValueError: If ``pool`` is an RDMA window and ``mode`` is not
+                ``"new"``, or the window does not exist.
+
         Errors:
             KEY_NOT_WRITABLE: The key exists but is not writable.
             OUT_OF_MEMORY: Not enough memory to allocate for the object.
         """
+        if not pool.is_general() and mode != "new":
+            raise ValueError(
+                f"reserving in RDMA window {pool.window_index} requires "
+                f"mode='new', got mode={mode!r}"
+            )
         need_to_allocate: list[tuple[ObjectKey, bool]] = []
         ret: dict[ObjectKey, L1OperationResult] = {}
         successful_keys: list[ObjectKey] = []
@@ -498,7 +517,7 @@ class L1Manager:
             return ret
 
         err, allocated_objs = self._memory_manager.allocate(
-            layout_desc, len(need_to_allocate)
+            layout_desc, len(need_to_allocate), pool
         )
 
         if err != L1Error.SUCCESS:
@@ -718,17 +737,83 @@ class L1Manager:
             ret[key] = L1Error.SUCCESS
             successful_keys.append(key)
 
-        freed_meta = [self._object_meta(obj) for obj in need_to_free]
-        self._memory_manager.free(need_to_free)
+        self._free_and_publish_evicted(successful_keys, need_to_free)
+        return ret
 
-        for listener in self._registered_listeners:
-            listener.on_l1_keys_deleted_by_manager(successful_keys)
-        self._event_bus.publish(
-            Event(
-                event_type=EventType.L1_KEYS_EVICTED,
-                metadata={"keys": successful_keys, "meta": freed_meta},
-            )
-        )
+    @l1_mgr_synchronized
+    def delete_if_none_locked(self, keys: list[ObjectKey]) -> L1Error:
+        """Delete all of ``keys``, or none of them if any is locked.
+
+        The lock check and the delete happen in one step under the L1 lock,
+        so no key can become locked in between. Reclaiming an RDMA window
+        needs this: deleting only some of its objects discards cache entries
+        without freeing the window.
+
+        Keys that do not exist are skipped and do not block the delete.
+        Deleted keys emit the same events as :meth:`delete`.
+
+        Args:
+            keys: The keys to delete.
+
+        Returns:
+            ``L1Error.SUCCESS`` if every existing key was deleted, or
+            ``L1Error.KEY_IS_LOCKED`` if any existing key is read- or
+            write-locked, in which case nothing was deleted.
+        """
+        present = [key for key in keys if key in self._objects]
+        for key in present:
+            entry = self._objects[key]
+            if entry.read_lock.is_locked() or entry.write_lock.is_locked():
+                return L1Error.KEY_IS_LOCKED
+
+        need_to_free = [self._objects.pop(key).memory_obj for key in present]
+        self._free_and_publish_evicted(present, need_to_free)
+        return L1Error.SUCCESS
+
+    @l1_mgr_synchronized
+    def abort_write(self, keys: list[ObjectKey]) -> dict[ObjectKey, L1Error]:
+        """Abandon write reservations: delete write-locked keys unfinished.
+
+        For a write that will never finish, such as an RDMA fetch that
+        failed. Unlike :meth:`finish_write` followed by :meth:`delete`, the
+        object never becomes readable and no write-finished event is emitted
+        for data that never finished. Unlike ``delete(force=True)``, a key
+        that is not write-locked, or is also read-locked, is left alone.
+
+        Aborted keys emit the same eviction events as :meth:`delete`, so
+        listeners that saw the write reservation forget the key. Their memory
+        returns to the pool it came from.
+
+        Args:
+            keys: The write-reserved keys to abandon.
+
+        Returns:
+            A dictionary mapping each key to an L1Error.
+
+        Errors:
+            KEY_NOT_EXIST: The key does not exist.
+            KEY_IN_WRONG_STATE: The key is not write-locked, or is also
+                read-locked.
+        """
+        ret: dict[ObjectKey, L1Error] = {}
+        aborted_keys: list[ObjectKey] = []
+        need_to_free: list[MemoryObj] = []
+
+        for key in keys:
+            entry = self._objects.get(key, None)
+            if entry is None:
+                ret[key] = L1Error.KEY_NOT_EXIST
+                continue
+            if not entry.write_lock.is_locked() or entry.read_lock.is_locked():
+                ret[key] = L1Error.KEY_IN_WRONG_STATE
+                continue
+
+            del self._objects[key]
+            need_to_free.append(entry.memory_obj)
+            aborted_keys.append(key)
+            ret[key] = L1Error.SUCCESS
+
+        self._free_and_publish_evicted(aborted_keys, need_to_free)
         return ret
 
     def touch_keys(self, keys: list[ObjectKey]):
@@ -827,11 +912,16 @@ class L1Manager:
             key: The object key to check.
 
         Returns:
-            True if the key exists and is not locked (neither read-locked
-            nor write-locked), False otherwise.
+            True if the key exists, is not locked (neither read-locked nor
+            write-locked), and lives in general L1, False otherwise. Objects in
+            an RDMA window are never evictable here: memory pressure is in the
+            general pool, and windows are reclaimed whole with
+            :meth:`delete_if_none_locked`.
         """
         entry = self._objects.get(key, None)
         if entry is None:
+            return False
+        if not self._memory_manager.get_pool(entry.memory_obj).is_general():
             return False
         return not entry.read_lock.is_locked() and not entry.write_lock.is_locked()
 
@@ -927,6 +1017,25 @@ class L1Manager:
             num_read_locked,
         )
         return mem_check_result
+
+    def _free_and_publish_evicted(
+        self, keys: list[ObjectKey], memory_objs: list[MemoryObj]
+    ) -> None:
+        """Free objects already removed from ``_objects`` and announce it.
+
+        Must be called with the L1 lock held.
+        """
+        freed_meta = [self._object_meta(obj) for obj in memory_objs]
+        self._memory_manager.free(memory_objs)
+
+        for listener in self._registered_listeners:
+            listener.on_l1_keys_deleted_by_manager(keys)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L1_KEYS_EVICTED,
+                metadata={"keys": keys, "meta": freed_meta},
+            )
+        )
 
     def _object_meta(self, memory_obj: MemoryObj) -> L1ObjectMeta:
         """Build the listener-facing metadata for one resident object."""

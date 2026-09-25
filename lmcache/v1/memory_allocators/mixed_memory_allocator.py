@@ -33,11 +33,22 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
     """
 
     def __init__(
-        self, size: int, use_paging: bool = False, use_hugepages: bool = False, **kwargs
+        self,
+        size: int,
+        use_paging: bool = False,
+        use_hugepages: bool = False,
+        reserved_prefix_bytes: int = 0,
+        **kwargs,
     ) -> None:
         """
         :param int size: The size of the pinned memory in bytes.
         :param bool use_hugepages: Whether to use hugepages.
+        :param int reserved_prefix_bytes: Bytes at the start of the pinned
+            buffer that this allocator never hands out, so another allocator
+            can own them. Must be a multiple of the alignment and smaller
+            than ``size``. Not supported with paging.
+        :raises ValueError: If ``reserved_prefix_bytes`` is negative,
+            unaligned, not smaller than ``size``, or combined with paging.
         """
 
         self.numa_mapping = kwargs.get("numa_mapping", None)
@@ -45,6 +56,18 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
         self.align_bytes = kwargs.get("align_bytes", AddressManager.ALIGN_BYTES)
         if self.align_bytes <= 0 or self.align_bytes & (self.align_bytes - 1) != 0:
             raise ValueError("align_bytes must be a positive power of two")
+        if reserved_prefix_bytes < 0 or reserved_prefix_bytes % self.align_bytes:
+            raise ValueError(
+                "reserved_prefix_bytes must be a non-negative multiple of "
+                f"align_bytes ({self.align_bytes}), got {reserved_prefix_bytes}"
+            )
+        if reserved_prefix_bytes >= size and reserved_prefix_bytes > 0:
+            raise ValueError(
+                f"reserved_prefix_bytes ({reserved_prefix_bytes}) must be "
+                f"smaller than the buffer ({size} bytes)"
+            )
+        if reserved_prefix_bytes > 0 and use_paging:
+            raise ValueError("reserved_prefix_bytes is not supported with paging")
 
         # Extract shm_name from config.extra_config if available
         config = kwargs.get("config", None)
@@ -79,9 +102,20 @@ class MixedMemoryAllocator(MemoryAllocatorInterface):
                 fmt=kwargs["fmt"],
             )
         else:
-            self.pin_allocator = TensorMemoryAllocator(
+            tensor_allocator = TensorMemoryAllocator(
                 self.buffer, align_bytes=self.align_bytes
             )
+            if reserved_prefix_bytes > 0:
+                # The heap is fresh and first-fit, so this block is [0, n).
+                # It is never freed, which keeps the prefix out of reach.
+                start, _ = tensor_allocator.address_manager.allocate(
+                    reserved_prefix_bytes
+                )
+                if start != 0:
+                    raise RuntimeError(
+                        f"reserved prefix landed at offset {start}, not 0"
+                    )
+            self.pin_allocator = tensor_allocator
 
         self.host_mem_lock = threading.Lock() if not use_paging else nullcontext()
 

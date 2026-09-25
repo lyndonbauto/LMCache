@@ -89,6 +89,77 @@ UNREGISTERED_MEMORY = MemoryRegistration()
 """Shared sentinel for memory that no transport has registered."""
 
 
+class L1PoolKind(enum.Enum):
+    """Which part of the L1 slab an allocation draws from."""
+
+    GENERAL = enum.auto()
+    """The general allocator: every ordinary L1 object."""
+
+    RDMA_WINDOW = enum.auto()
+    """One reserved RDMA receive window, for pipelined retrieves only."""
+
+
+@dataclass(frozen=True)
+class L1Pool:
+    """An allocation pool inside L1.
+
+    When RDMA reception is enabled, the start of the slab is reserved for
+    ``window_count`` receive windows. The general allocator never hands out
+    memory there, and each window has its own allocator, so a remote writer
+    holding one window's rkey can only reach that window's objects.
+
+    Attributes:
+        kind: General L1 or one RDMA window.
+        window_index: The window, in ``[0, window_count)``. Always ``0`` for
+            ``GENERAL``.
+
+    Raises:
+        ValueError: If ``window_index`` is negative, or non-zero for
+            ``GENERAL``.
+    """
+
+    kind: L1PoolKind
+    window_index: int = 0
+
+    def __post_init__(self) -> None:
+        if self.window_index < 0:
+            raise ValueError(
+                f"window_index must be non-negative, got {self.window_index}"
+            )
+        if self.kind is L1PoolKind.GENERAL and self.window_index != 0:
+            raise ValueError(
+                "the general L1 pool has no window index, got "
+                f"window_index={self.window_index}"
+            )
+
+    @classmethod
+    def rdma_window(cls, window_index: int) -> "L1Pool":
+        """Return the pool of one RDMA receive window.
+
+        Args:
+            window_index: The window, in ``[0, window_count)``.
+
+        Returns:
+            An ``RDMA_WINDOW`` pool.
+
+        Raises:
+            ValueError: If ``window_index`` is negative.
+        """
+        return cls(kind=L1PoolKind.RDMA_WINDOW, window_index=window_index)
+
+    def is_general(self) -> bool:
+        """Report whether this is the general L1 pool.
+
+        Returns:
+            ``True`` for ``GENERAL``.
+        """
+        return self.kind is L1PoolKind.GENERAL
+
+
+GENERAL_L1_POOL = L1Pool(kind=L1PoolKind.GENERAL)
+"""The default pool: every allocation that is not a pipelined retrieve."""
+
+
 class MemoryGrowthPolicy(enum.Enum):
     """Whether an L1 slab can move or grow after it is first described.
 

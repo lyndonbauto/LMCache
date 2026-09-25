@@ -38,10 +38,13 @@ class DevDaxL1MemoryManager(L1MemoryManager):
             config: L1 memory configuration with ``devdax_path`` set.
 
         Raises:
-            ValueError: If ``devdax_path`` is not configured.
+            ValueError: If ``devdax_path`` is not configured, or RDMA windows
+                are reserved (Device-DAX L1 has no single pinned slab).
         """
         if not config.devdax_path:
             raise ValueError("DevDaxL1MemoryManager requires devdax_path")
+        if config.rdma_window_count > 0:
+            raise ValueError("Device-DAX L1 cannot reserve RDMA windows")
 
         devdax_size = config.devdax_size_in_bytes or config.size_in_bytes
         local_size = config.size_in_bytes if config.devdax_size_in_bytes else 0

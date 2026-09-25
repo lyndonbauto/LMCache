@@ -14,7 +14,7 @@ how contract changes are made.
 | BLK1 / M1: who expands slots | **Decided: Option 1** (the plan is the only source of truth) | Track A: done |
 | BLK2: node list | Done: `LayerFetchPlan.node_names` | - |
 | BLK3: slot numbering | Done: position in `plan.slots`; `LayerFetchPlan` rejects > 65536 slots | - |
-| Q1 / M2: offsets and window ownership | **Decided 2026-09-25: bounded windows, data stays in place** | Track A: reservation, lease API, placer |
+| Q1 / M2: offsets and window ownership | **Decided 2026-09-25: bounded windows, data stays in place** | Track A: reservation done, pending `l1_manager` review; lease API and placer next |
 | Q2: digest encoding | Done: slots carry `record_key`; native hashes it | - |
 | Q3: planner and `max_sinks` | Done: C5 reworded | - |
 | Q4: oversized-plan error | Done: in `contract.py`, raised by the adapter and the native session | - |
@@ -22,10 +22,10 @@ how contract changes are made.
 | S2: shape test | Done | - |
 | M3: native numbering docstring | Resolved by Option 1 | - |
 | M4: retrieve wiring vs the pump | **Decided 2026-09-25: the pump begins the fetch** | Track C: retrieve wiring; Track A: retire the storage-manager pair |
-| W1: windows run out when data stays in place | **Decided:** `lease()` reclaims a whole idle window | Track A: lease API, all-or-nothing delete |
+| W1: windows run out when data stays in place | **Decided:** `lease()` reclaims a whole idle window | Track A: lease API; `delete_if_none_locked` done |
 | W2: which error the placer raises | **Decided** as proposed | Track A: placer; Track C: one handler in retrieve |
 | W3: one fetch at a time | Known limit; a concurrent retrieve falls back | Track A, later |
-| W4: fallback after a failed fetch | **Decided:** reload into fresh general-L1 objects | Track A: abort-write in L1; Track C: retrieve wiring |
+| W4: fallback after a failed fetch | **Decided:** reload into fresh general-L1 objects | Track A: `abort_write` and pool choice done; Track C: retrieve wiring |
 
 ## Decisions
 
@@ -120,14 +120,15 @@ In short:
 the slab minus the window range, and the windows get their own small
 allocator.
 
-**Where the code stands.** None of this exists yet:
+**Where the code stands.**
 
-- nothing reserves the windows, so ordinary L1 objects can be allocated inside
-  them;
-- only window 0 is published to the nodes;
-- there is no lease API.
-
-Until the reservation lands, the blast-radius argument does not hold.
+- The windows are reserved: when an adapter enables RDMA, the general
+  allocator never hands out memory in `[0, window_count * window_bytes)`, and
+  each window has its own allocator. See
+  [aerospike_rdma.md](../distributed/l2_adapters/aerospike_rdma.md#the-windows-are-reserved-outside-the-general-allocator).
+  This is pending review by the `l1_manager` maintainers.
+- Only window 0 is published to the nodes.
+- There is no lease API, so nothing allocates in a window yet.
 
 ### M4: the pump begins the fetch
 
@@ -289,6 +290,16 @@ What this requires of Track A's code:
    session (Q4).
 5. Rebased onto Track C's `4c634404`.
 6. The fabric-free conformance harness (S1).
+7. The allocator reservation, pending `l1_manager` review:
+   - the window range is carved out of the general allocator, one
+     `RangeMemoryAllocator` per window, with slab-absolute addresses;
+   - `reserve_write(..., pool=L1Pool.rdma_window(i))` (general L1 is the
+     default, and a window pool requires `mode="new"`);
+   - `L1Manager.delete_if_none_locked(keys)` (W1.1);
+   - `L1Manager.abort_write(keys)` (W4). It frees memory straight back to
+     the window allocator. Holding the window back until quarantine ends
+     is the lease's job, since only the lease hands a window out again;
+   - window objects are never picked by memory-pressure eviction (W1.4).
 
 These were verified on the Soft-RoCE VM
 ([rdma_testing_on_windows.md](../distributed/l2_adapters/rdma_testing_on_windows.md)):
@@ -308,10 +319,7 @@ That needs an Aerospike server, and for the slot path, one built from the
 
 **Track A, next:**
 
-1. The allocator reservation PR, with three `l1_manager` additions:
-   - the window range reserved;
-   - the all-or-nothing delete (W1.1);
-   - abort-write and an explicit choice of pool (W4).
+1. Get the allocator reservation (done item 7) through `l1_manager` review.
 2. Size `window_bytes` at init from the KV layout.
 3. The lease API with reclaim (W1) and quarantine. Publish every window to
    every node.

@@ -10,7 +10,7 @@ from lmcache.utils import get_size_bytes
 from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc
 from lmcache.v1.distributed.config import GdsL1Config
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.internal_api import L1MemoryDesc
+from lmcache.v1.distributed.internal_api import GENERAL_L1_POOL, L1MemoryDesc, L1Pool
 from lmcache.v1.memory_management import (
     AddressManager,
     GDSMemoryObject,
@@ -52,7 +52,10 @@ class GDSL1MemoryManager:
         self._address_manager = AddressManager(config.size_in_bytes, config.align_bytes)
 
     def allocate(
-        self, layout_desc: MemoryLayoutDesc, count: int
+        self,
+        layout_desc: MemoryLayoutDesc,
+        count: int,
+        pool: L1Pool = GENERAL_L1_POOL,
     ) -> tuple[L1Error, list[MemoryObj]]:
         """Reserve ``count`` slab regions for the given layout.
 
@@ -63,11 +66,17 @@ class GDSL1MemoryManager:
             layout_desc: Layout descriptor; all ``count`` chunks share its
                 shape/dtype, and its byte size sets each chunk's size.
             count: Number of chunks to reserve.
+            pool: Must be the general pool; the GDS tier has no RDMA windows.
 
         Returns:
             ``(L1Error.SUCCESS, objects)`` on success, otherwise
             ``(L1Error.OUT_OF_MEMORY, [])``.
+
+        Raises:
+            ValueError: If ``pool`` is an RDMA window.
         """
+        if not pool.is_general():
+            raise ValueError("the GDS L1 tier has no RDMA windows")
         chunk_bytes = get_size_bytes(layout_desc.shapes, layout_desc.dtypes)
         shape = layout_desc.shapes[0]
         dtype = layout_desc.dtypes[0]
@@ -104,6 +113,17 @@ class GDSL1MemoryManager:
         for mo in mem_objs:
             self._address_manager.free(mo.metadata.address, mo.get_physical_size())
         return L1Error.SUCCESS
+
+    def get_pool(self, memory_obj: MemoryObj) -> L1Pool:
+        """Return the pool ``memory_obj`` was allocated from.
+
+        Args:
+            memory_obj: An object allocated by this manager.
+
+        Returns:
+            :data:`GENERAL_L1_POOL`; the GDS tier has no RDMA windows.
+        """
+        return GENERAL_L1_POOL
 
     def get_backend_type(self, memory_obj: MemoryObj) -> L1BackendType:
         """Return the storage medium backing ``memory_obj``.

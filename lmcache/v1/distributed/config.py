@@ -20,6 +20,7 @@ from lmcache.v1.distributed.l2_adapters.config import (
     get_type_name_for_config,
     parse_args_to_l2_adapters_config,
 )
+from lmcache.v1.distributed.l2_adapters.rdma_registration import rdma_config_of
 from lmcache.v1.platform import current_device_spec
 
 logger = init_logger(__name__)
@@ -102,6 +103,54 @@ def _infer_l1_devdax_overflow_from_dax_adapter(
     l2_adapter_config.adapters = remaining_adapters
 
 
+def _reserve_rdma_windows_for_adapter(
+    l1_config: "L1ManagerConfig",
+    l2_adapter_config: L2AdaptersConfig,
+) -> None:
+    """Copy the RDMA window plan of an RDMA-enabled adapter into L1's config.
+
+    L1 is built before any L2 adapter, and the windows must be carved out of
+    the general allocator when L1 is built, so the plan is copied here.
+
+    Args:
+        l1_config: L1 config whose ``memory_config`` receives the windows.
+        l2_adapter_config: The configured L2 adapters.
+
+    Raises:
+        ValueError: If more than one adapter enables RDMA, if the L1 tier is
+            GDS or Device-DAX (neither is one pinned slab), or if the memory
+            config already reserves a different plan.
+    """
+    plans = [
+        rdma.window_plan
+        for adapter_config in l2_adapter_config.adapters
+        if (rdma := rdma_config_of(adapter_config)).is_enabled()
+    ]
+    if not plans:
+        return
+    if len(plans) > 1:
+        raise ValueError(
+            f"{len(plans)} L2 adapters enable RDMA reception, but L1 reserves "
+            "windows for only one"
+        )
+    memory_config = l1_config.memory_config
+    if l1_config.gds_l1_config is not None or memory_config.devdax_path:
+        raise ValueError(
+            "RDMA reception needs a pinned-DRAM L1 slab; it cannot be used "
+            "with gds-l1-path or l1-devdax-path"
+        )
+    plan = plans[0]
+    reserved = (memory_config.rdma_window_count, memory_config.rdma_window_bytes)
+    if reserved != (0, 0) and reserved != (plan.window_count, plan.window_bytes):
+        raise ValueError(
+            f"L1 already reserves {reserved[0]} x {reserved[1]} bytes of RDMA "
+            f"windows, but the adapter asks for {plan.window_count} x "
+            f"{plan.window_bytes}"
+        )
+    memory_config.rdma_window_count = plan.window_count
+    memory_config.rdma_window_bytes = plan.window_bytes
+
+
 @dataclass
 class L1MemoryManagerConfig:
     """
@@ -129,8 +178,26 @@ class L1MemoryManagerConfig:
     devdax_size_in_bytes: int = 0
     """ Optional Device-DAX overflow size for hybrid DRAM + DAX L1. """
 
+    rdma_window_count: int = 0
+    """ RDMA receive windows reserved at the start of the slab, outside the
+    general allocator. ``0`` reserves nothing. Filled in by
+    ``normalize_storage_manager_config`` from the RDMA-enabled L2 adapter. """
+
+    rdma_window_bytes: int = 0
+    """ Size of each reserved RDMA window. ``0`` exactly when
+    ``rdma_window_count`` is ``0``. """
+
     def __post_init__(self):
         self.init_size_in_bytes = min(self.init_size_in_bytes, self.size_in_bytes)
+
+        if self.rdma_window_count < 0 or self.rdma_window_bytes < 0:
+            raise ValueError("rdma_window_count and rdma_window_bytes must be >= 0")
+        if (self.rdma_window_count == 0) != (self.rdma_window_bytes == 0):
+            raise ValueError(
+                "rdma_window_count and rdma_window_bytes must both be zero or "
+                f"both be positive, got {self.rdma_window_count} and "
+                f"{self.rdma_window_bytes}"
+            )
 
         if self.devdax_path is not None:
             self.devdax_path = self.devdax_path.strip()
@@ -322,7 +389,8 @@ def normalize_storage_manager_config(config: StorageManagerConfig) -> None:
     """Normalize storage manager configuration.
 
     This consumes a matching DAX adapter as hybrid L1 Device-DAX overflow
-    capacity.
+    capacity, and reserves the RDMA receive windows of an RDMA-enabled
+    adapter in the L1 memory config.
 
     Args:
         config: Storage manager configuration to normalize in place.
@@ -331,10 +399,15 @@ def normalize_storage_manager_config(config: StorageManagerConfig) -> None:
         None.
 
     Raises:
-        ValueError: If more than one DAX device matches ``l1-devdax-path``.
+        ValueError: If more than one DAX device matches ``l1-devdax-path``, or
+            the RDMA windows cannot be reserved (see
+            :func:`_reserve_rdma_windows_for_adapter`).
     """
     memory_config = config.l1_manager_config.memory_config
     _infer_l1_devdax_overflow_from_dax_adapter(memory_config, config.l2_adapter_config)
+    _reserve_rdma_windows_for_adapter(
+        config.l1_manager_config, config.l2_adapter_config
+    )
 
 
 def validate_storage_manager_config(config: StorageManagerConfig) -> None:

@@ -7,7 +7,7 @@ from typing import Optional, Protocol, runtime_checkable
 # First Party
 from lmcache.v1.distributed.api import L1BackendType, MemoryLayoutDesc
 from lmcache.v1.distributed.error import L1Error
-from lmcache.v1.distributed.internal_api import L1MemoryDesc
+from lmcache.v1.distributed.internal_api import GENERAL_L1_POOL, L1MemoryDesc, L1Pool
 from lmcache.v1.memory_management import MemoryObj
 
 
@@ -21,13 +21,24 @@ class L1ManagerProtocol(Protocol):
     """
 
     def allocate(
-        self, layout_desc: MemoryLayoutDesc, count: int
+        self,
+        layout_desc: MemoryLayoutDesc,
+        count: int,
+        pool: L1Pool = GENERAL_L1_POOL,
     ) -> tuple[L1Error, list[MemoryObj]]:
-        """Allocate ``count`` memory objects for the given layout."""
+        """Allocate ``count`` memory objects for the given layout in ``pool``.
+
+        Raises ``ValueError`` if ``pool`` names an RDMA window the tier does
+        not have.
+        """
         ...
 
     def free(self, mem_objs: list[MemoryObj]) -> L1Error:
-        """Free the given memory objects."""
+        """Free the given memory objects, each back to its own pool."""
+        ...
+
+    def get_pool(self, memory_obj: MemoryObj) -> L1Pool:
+        """Return the pool ``memory_obj`` was allocated from."""
         ...
 
     def get_memory_usage(self) -> tuple[int, int]:

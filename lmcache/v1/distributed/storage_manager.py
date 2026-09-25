@@ -38,6 +38,7 @@ from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInter
 from lmcache.v1.distributed.l2_adapters.config import L2AdapterConfigBase
 from lmcache.v1.distributed.l2_adapters.rdma_registration import (
     validate_fetch_timeout_against_write_ttl,
+    validate_windows_reserved,
 )
 from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2ReconfigurableAdapter,
@@ -1317,6 +1318,10 @@ class StorageManager:
         # here so a mismatch fails on boot rather than silently corrupting KV.
         validate_fetch_timeout_against_write_ttl(
             config, self._l1_config.write_ttl_seconds
+        )
+        memory_config = self._l1_config.memory_config
+        validate_windows_reserved(
+            config, memory_config.rdma_window_count, memory_config.rdma_window_bytes
         )
 
         adapter_id = self._next_adapter_id
