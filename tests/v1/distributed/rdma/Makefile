@@ -121,6 +121,26 @@ DUMP_SOURCES := \
 	$(CONNECTOR_DIR)/shard_plan.cpp
 LOGIC_BINS := $(SHARD_BIN) $(PLAN_BIN) $(PLANNER_BIN) $(CODEC_BIN) $(SESSION_BIN) $(ISSUE_BIN) $(POOL_BIN) $(DEPTH_BIN) $(DUMP_BIN)
 
+# Acceptance A7: does a write-with-immediate consume a posted receive?
+# Standalone, libibverbs only. EFA=1 adds the SRD path (needs efadv.h and
+# libefa) and builds a separately named binary. The unsolicited write-receive
+# mode is compiled only when efadv.h declares it (newer rdma-core).
+PROBE_SOURCES := $(SRC_DIR)/efa_imm_probe.cpp
+PROBE_FLAGS :=
+PROBE_LIBS := -libverbs
+ifeq ($(EFA),1)
+PROBE_BIN := $(BUILD_DIR)/efa_imm_probe_efa
+PROBE_FLAGS += -DLMCACHE_AEROSPIKE_EFA
+PROBE_LIBS += -lefa
+HASH := \#
+EFA_UNSOLICITED := $(shell printf '$(HASH)include <infiniband/efadv.h>\nint f(efadv_cq* c) { return EFADV_QP_FLAGS_UNSOLICITED_WRITE_RECV + EFADV_WC_EX_WITH_IS_UNSOLICITED + efadv_wc_is_unsolicited(c); }\n' | $(CXX) $(INCLUDES) -fsyntax-only -x c++ - 2>/dev/null && echo 1)
+ifeq ($(EFA_UNSOLICITED),1)
+PROBE_FLAGS += -DLMCACHE_EFA_UNSOLICITED
+endif
+else
+PROBE_BIN := $(BUILD_DIR)/efa_imm_probe
+endif
+
 # Test-only Python module over the real session, driven by the layerwise
 # conformance suite (tests/v1/layerwise/aerospike_harness.py). Needs pybind11
 # in the interpreter named by PYTHON; built only by `make pyharness`.
@@ -135,14 +155,21 @@ PYHARNESS_SOURCES := \
 	$(CONNECTOR_DIR)/slot_planner.cpp \
 	$(CONNECTOR_DIR)/shard_plan.cpp
 
-.PHONY: all test logic logic-test pyharness clean
+.PHONY: all test logic logic-test pyharness efa-probe clean
 
 pyharness: $(PYHARNESS_SOURCES) | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -shared -fPIC $(INCLUDES) \
 		$$($(PYTHON) -m pybind11 --includes) $(PYHARNESS_SOURCES) \
 		-o $(BUILD_DIR)/fabric_free_session$$($(PYTHON) -c \
 		"import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))")
-all: $(BIN) $(PIPELINE_BIN) $(LOGIC_BINS)
+all: $(BIN) $(PIPELINE_BIN) $(PROBE_BIN) $(LOGIC_BINS)
+
+# Build the A7 probe. On EFA: make efa-probe EFA=1, then
+#   build/efa_imm_probe_efa <device> 0 --transport srd
+efa-probe: $(PROBE_BIN)
+
+$(PROBE_BIN): $(PROBE_SOURCES) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(PROBE_FLAGS) $(INCLUDES) $(PROBE_SOURCES) $(LDFLAGS) $(PROBE_LIBS) -o $@
 
 # Build the device-independent harnesses without running them.
 logic: $(LOGIC_BINS)
@@ -199,7 +226,7 @@ $(BUILD_DIR):
 # RDMA_DEVICE to be set too since the two are positional. Soft-RoCE on `lo`
 # needs the IPv4-mapped entry, usually index 1:
 #   make test RDMA_DEVICE=rxe0 RDMA_GID_INDEX=1
-test: $(BIN) $(PIPELINE_BIN) $(LOGIC_BINS)
+test: $(BIN) $(PIPELINE_BIN) $(PROBE_BIN) $(LOGIC_BINS)
 	$(SHARD_BIN)
 	$(PLAN_BIN)
 	$(PLANNER_BIN)
@@ -210,6 +237,7 @@ test: $(BIN) $(PIPELINE_BIN) $(LOGIC_BINS)
 	$(DEPTH_BIN)
 	$(BIN) $(RDMA_DEVICE) $(RDMA_GID_INDEX)
 	$(PIPELINE_BIN) $(RDMA_DEVICE) $(RDMA_GID_INDEX)
+	$(PROBE_BIN) $(RDMA_DEVICE) $(RDMA_GID_INDEX) --expect-consumes
 
 clean:
 	rm -rf $(BUILD_DIR)

@@ -452,6 +452,18 @@ can follow as hardening. **Done** as item 11.
         layer stays unservable. Please also pin the reverse order in the
         conformance suite: a slot that lands and is then declined leaves its
         layer resident.
+14. A7 is ready to run on hardware. `efa_imm_probe` checks whether a
+    write-with-immediate consumes a posted receive: it starves the receive
+    queue, then posts the missing receives. See
+    [aerospike_rdma.md](../distributed/l2_adapters/aerospike_rdma.md#receive-queue-depth-and-device-limits).
+    - RC baseline on Soft-RoCE: yes. A starved write stalls and lands no
+      bytes until a receive is posted; with `rnr_retry 0` the writer fails.
+      `make test` pins this.
+    - SRD: the probe builds with `EFA=1` against rdma-core 50, and also
+      checks the unsolicited write-receive mode when `efadv.h` declares it.
+      **Not run yet: it needs an EFA instance with RDMA write.** If
+      it reports `data_without_notification=yes`, the wire contract may need
+      a handshake, which would change the plan format.
 
 These were verified on the Soft-RoCE VM
 ([rdma_testing_on_windows.md](../distributed/l2_adapters/rdma_testing_on_windows.md)):
@@ -487,10 +499,21 @@ the pump, and the fallback goes into fresh general-L1 objects.
 
 **Together:** C9 over Soft-RoCE.
 
-**Suggested PR order:**
+**Suggested PR order** into `dev`, following `track/a-transport`. Each PR
+needs the ones before it unless noted.
 
-1. Track C's build and CI fixes.
-2. Track A's small native fixes (generation `0`, `pipelined_unservable_layers`).
-3. The adapter and native slot-level issue.
-4. The allocator reservation.
-5. Lease and placer.
+| # | PR | Commits | Needs |
+|---|---|---|---|
+| 1 | Track C: planner, contract, conformance suite, build fixes | up to `4c634404` | - |
+| 2 | Slot-level native issue, `record_node`, `NativePlanIssuer`, `PlanTooLargeError`, fabric-free harness (done items 1-6) | `d6d48818` (lyndon's shape test) through `83210bf1`, with the decision-doc commits between them | 1 |
+| 3 | Retire the storage-manager pipelined pair (M4, item 12) | `a3b4fef3` | 2 only; can go before 4-6 |
+| 4 | L1 window reservation, `delete_if_none_locked`, `abort_write`, `window_bytes` check (items 7-8) | `83f391d3`, `7b7cee99` | 1; needs `l1_manager` review |
+| 5 | Lease and placer (items 9-10) | `0703d954`, `d4a5651b` | 4 |
+| 6 | One registration covering every window (P1, item 11) | `1c33157a` | 2, 4 |
+| 7 | Concurrent fetches, one per window (W3, item 13) | `6fd5fc4d` | 3, 5, 6 |
+
+Why this order: 2 and 3 touch only the transport and the adapters, so they
+can merge while 4 waits on `l1_manager` review. PR 4 is the only one that
+changes the general L1 allocator, so it stays small and separate. 7 changes
+native signatures used by 2's source and 5's leaser, so it goes last. The
+commit hashes change if the branch is rebased; the grouping does not.

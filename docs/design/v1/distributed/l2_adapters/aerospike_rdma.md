@@ -817,6 +817,53 @@ work requests on that path, the `max_recv_wr` clamp documented here becomes a
 conservative no-op rather than a binding limit. That has not been measured on a
 real EFA instance.
 
+**How to measure it (A7):** `tests/v1/distributed/rdma/csrc/efa_imm_probe.cpp`
+is a standalone probe that needs only libibverbs. A sender and a receiver
+queue pair on one device run three scenarios:
+
+- `fits`: 8 receives posted for 8 write-with-immediates, as a sanity check.
+- `starved`: 4 receives posted for 8 writes, with infinite RNR retry. After
+  `--wait-ms` (default 1000) the probe posts the 4 missing receives and
+  watches again. This is the A7 question.
+- `starved_no_retry`: 0 receives, 1 write, `rnr_retry 0`. It shows what the
+  writer sees.
+
+For each scenario it reports receive completions before and after the
+repost, sender errors, and which slots' bytes landed. On an EFA instance
+with RDMA write:
+
+```bash
+make -C tests/v1/distributed/rdma efa-probe EFA=1
+tests/v1/distributed/rdma/build/efa_imm_probe_efa <efa-device> 0 --transport srd
+# with rdma-core new enough to declare the unsolicited write-receive API:
+tests/v1/distributed/rdma/build/efa_imm_probe_efa <efa-device> 0 --transport srd --unsolicited
+```
+
+The RC baseline over Soft-RoCE, which `make test` also runs with
+`--expect-consumes`:
+
+```text
+RESULT transport=rc scenario=starved posted=4 writes=8 rnr_retry=7 recv_before_repost=4 recv_after_repost=4 ... send_error=0 ... landed_before_repost=4 landed_final=8
+RESULT transport=rc scenario=starved_no_retry posted=0 writes=1 rnr_retry=0 ... send_error=1 first_send_error="RNR retry counter exceeded" ... landed_final=0
+VERDICT transport=rc consumes_recv_wr=yes data_without_notification=no fits_clean=1
+```
+
+So on RC each immediate consumes a receive. A write with no receive posted
+stalls, lands no bytes, and resumes once a receive is posted; with a finite
+retry count it fails the writer. Reading the SRD run:
+
+| VERDICT | Meaning for the client |
+|---|---|
+| `consumes_recv_wr=yes` | Same as RC: the depth derived from the plan and clamped to `max_qp_wr` stays binding. |
+| `consumes_recv_wr=no` | Immediates need no posted receive. The clamp becomes a conservative no-op. |
+| `data_without_notification=yes` | Bytes landed with no completion. A starved slot would never report and its layer would wait for the fetch timeout. The receive queue must never run short, or the wire contract needs a handshake. |
+| `consumes_recv_wr=unclear` | Read the RESULT lines. For example, an out-of-range or repeated immediate sets `bad_immediate=1`. |
+
+The probe exits 2 when the device can't run it: not an EFA device, no RDMA
+write capability, or `--unsolicited` on a build whose `efadv.h` lacks that
+API. rdma-core 50, as shipped with Ubuntu 24.04, lacks it. The SRD path
+compiles against rdma-core 50 but has not run on hardware.
+
 **Device-free verification:** `notification_depth_test` (via `make -C
 tests/v1/distributed/rdma logic-test`) injects device caps and checks clamping,
 the derived slot limit, and `begin_request` acceptance/rejection — without
