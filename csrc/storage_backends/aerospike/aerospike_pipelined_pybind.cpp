@@ -118,8 +118,12 @@ uint16_t issue_pipelined_fetch_by_slots(
 
 void bind_pipelined_fetch(py::module& module,
                           py::class_<AerospikeNativeConnector>& connector) {
+  // Subclassing the contract's error lets callers catch one type whether the
+  // adapter's pre-check or the native session refused the plan.
   py::register_exception<rdma::PlanTooLargeError>(
-      module, "PipelinedPlanTooLargeError", PyExc_RuntimeError);
+      module, "PipelinedPlanTooLargeError",
+      py::module_::import("lmcache.v1.layerwise.contract")
+          .attr("PlanTooLargeError"));
 
   py::class_<rdma::ChunkPlacement>(module, "PipelinedChunkPlacement")
       .def(py::init<>())

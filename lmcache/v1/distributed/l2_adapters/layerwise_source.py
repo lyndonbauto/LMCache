@@ -35,6 +35,7 @@ from lmcache.v1.layerwise.contract import (
     LayerFetchPlan,
     LayerNotInPlanError,
     LayerwiseContractError,
+    PlanTooLargeError,
     StaleGenerationError,
 )
 
@@ -148,7 +149,7 @@ class PlanIssuer(Protocol):
             The generation the native session allocated.
 
         Raises:
-            LayerwiseContractError: If the plan is larger than the device's
+            PlanTooLargeError: If the plan is larger than the device's
                 receive queue can accept.
             RuntimeError, ValueError, IndexError: Other native failures.
         """
@@ -183,17 +184,18 @@ class NativePlanIssuer:
             The native generation.
 
         Raises:
-            LayerwiseContractError: If the plan has more slots than the
-                device can post receives for. Checked before anything is
-                sent, because on RC with ``rnr_retry = 7`` a shortfall is an
-                infinite retry rather than an error.
+            PlanTooLargeError: If the plan has more slots than the device can
+                post receives for. Checked before anything is sent, because
+                on RC with ``rnr_retry = 7`` a shortfall is an infinite retry
+                rather than an error. The native session's own refusal is
+                bound as a subclass of the same error.
             RuntimeError, ValueError, IndexError: Native failures, e.g. a
                 node with no kv-sink registration or a slot outside the
                 window.
         """
         max_slots = self._connector.pipelined_max_slots_per_request()
         if max_slots and len(plan.slots) > max_slots:
-            raise LayerwiseContractError(
+            raise PlanTooLargeError(
                 f"fetch plan has {len(plan.slots)} slots but the device accepts "
                 f"at most {max_slots} per request; split the fetch"
             )
@@ -253,9 +255,10 @@ class AerospikeLayerArrivalSource:
             A non-zero generation for this fetch.
 
         Raises:
+            PlanTooLargeError: If the plan exceeds what the device can
+                accept. Nothing was issued, and a smaller plan may succeed.
             LayerwiseContractError: If a fetch is already active, if the
-                backend has no pipelined path, if the plan exceeds what the
-                device can accept, or if issuing fails.
+                backend has no pipelined path, or if issuing fails.
         """
         with self._lock:
             if self._generation != NO_GENERATION:

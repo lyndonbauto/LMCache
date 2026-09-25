@@ -31,6 +31,7 @@ from lmcache.v1.layerwise import (
     LayerNotInPlanError,
     LayerUnservableError,
     LayerwiseContractError,
+    PlanTooLargeError,
     RecordingLayerLoadSink,
     SlotPlacement,
     StaleGenerationError,
@@ -191,10 +192,7 @@ def test_begin_fetch_reports_an_unavailable_backend_as_a_contract_error() -> Non
 @pytest.mark.parametrize(
     "native_error",
     [
-        RuntimeError(
-            "PipelinedFetchSession: plan requires 9000 notification slots but "
-            "at most 4096 can be posted on this device's queue pair"
-        ),
+        RuntimeError("PipelinedFetchSession: a request is already active"),
         ValueError("PipelinedFetchSession: chunk 3 has no node binding"),
         IndexError("layer 99 is not in the layout"),
     ],
@@ -202,17 +200,29 @@ def test_begin_fetch_reports_an_unavailable_backend_as_a_contract_error() -> Non
 def test_native_issue_failures_become_contract_errors(
     native_error: Exception,
 ) -> None:
-    """Callers catch LayerwiseContractError to fall back; natives must not leak.
-
-    The first case is A6: a plan too large for the device's receive queue is
-    rejected at begin_fetch rather than deadlocking at runtime.
-    """
+    """Callers catch LayerwiseContractError to fall back; natives must not leak."""
     source, _, issuer = _make_source()
     issuer.raise_on_issue = True
     issuer.error = native_error
     with pytest.raises(LayerwiseContractError) as caught:
         source.begin_fetch(make_plan({0: 1}))
     assert caught.value.__cause__ is native_error
+
+
+def test_a_plan_too_large_reaches_the_caller_as_itself() -> None:
+    """A6: the caller can tell "split the request" from "fall back".
+
+    The native session's refusal is bound as a PlanTooLargeError subclass;
+    re-wrapping it as a plain contract error would erase that distinction.
+    """
+    source, _, issuer = _make_source()
+    issuer.raise_on_issue = True
+    issuer.error = PlanTooLargeError("plan requires 9000 notification slots")
+    with pytest.raises(PlanTooLargeError) as caught:
+        source.begin_fetch(make_plan({0: 1}))
+    assert caught.value is issuer.error
+    issuer.raise_on_issue = False
+    assert source.begin_fetch(make_plan({0: 1})) != NO_GENERATION
 
 
 def test_a_failed_begin_fetch_leaves_the_source_idle() -> None:
@@ -285,7 +295,7 @@ def test_the_native_issuer_refuses_an_oversized_plan_before_sending() -> None:
     connector = FakeNativeConnector()
     connector.max_slots = 2
     source = AerospikeLayerArrivalSource(connector, NativePlanIssuer(connector))
-    with pytest.raises(LayerwiseContractError, match="at most 2"):
+    with pytest.raises(PlanTooLargeError, match="at most 2"):
         source.begin_fetch(_two_node_plan())
     assert connector.issued == []
     connector.max_slots = 3

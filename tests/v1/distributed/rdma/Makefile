@@ -104,7 +104,26 @@ DUMP_SOURCES := \
 	$(CONNECTOR_DIR)/shard_plan.cpp
 LOGIC_BINS := $(SHARD_BIN) $(PLAN_BIN) $(PLANNER_BIN) $(CODEC_BIN) $(SESSION_BIN) $(ISSUE_BIN) $(DEPTH_BIN) $(DUMP_BIN)
 
-.PHONY: all test logic logic-test clean
+# Test-only Python module over the real session, driven by the layerwise
+# conformance suite (tests/v1/layerwise/aerospike_harness.py). Needs pybind11
+# in the interpreter named by PYTHON; built only by `make pyharness`.
+PYTHON ?= python3
+PYHARNESS_SOURCES := \
+	$(SRC_DIR)/fabric_free_session_pybind.cpp \
+	$(CONNECTOR_DIR)/pipelined_fetch_session.cpp \
+	$(CONNECTOR_DIR)/pipelined_fetch_issue.cpp \
+	$(CONNECTOR_DIR)/kv_sink_client.cpp \
+	$(CONNECTOR_DIR)/layer_pipeline.cpp \
+	$(CONNECTOR_DIR)/slot_planner.cpp \
+	$(CONNECTOR_DIR)/shard_plan.cpp
+
+.PHONY: all test logic logic-test pyharness clean
+
+pyharness: $(PYHARNESS_SOURCES) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -shared -fPIC $(INCLUDES) \
+		$$($(PYTHON) -m pybind11 --includes) $(PYHARNESS_SOURCES) \
+		-o $(BUILD_DIR)/fabric_free_session$$($(PYTHON) -c \
+		"import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))")
 all: $(BIN) $(PIPELINE_BIN) $(LOGIC_BINS)
 
 # Build the device-independent harnesses without running them.

@@ -17,8 +17,8 @@ how contract changes are made.
 | Q1 / M2: offsets and window ownership | **Decided 2026-09-25: bounded windows, data stays in place** | Track A: reservation, lease API, placer |
 | Q2: digest encoding | Done: slots carry `record_key`; native hashes it | - |
 | Q3: planner and `max_sinks` | Done: C5 reworded | - |
-| Q4: oversized-plan error | Done in `contract.py` | Track A: raise it from the adapter |
-| S1: conformance driver | Done: `ArrivalDriver` and the parametrized suite | Track A: register the Aerospike source |
+| Q4: oversized-plan error | Done: in `contract.py`, raised by the adapter and the native session | - |
+| S1: conformance driver | Done: the Aerospike source passes the suite over the real native session | - |
 | S2: shape test | Done | - |
 | M3: native numbering docstring | Resolved by Option 1 | - |
 | M4: retrieve wiring vs the pump | **Decided 2026-09-25: the pump begins the fetch** | Track C: retrieve wiring; Track A: retire the storage-manager pair |
@@ -63,20 +63,36 @@ transport's concern, and Track A already splits commands to fit it (A5).
 ### Q4: `PlanTooLargeError`
 
 `PlanTooLargeError(LayerwiseContractError)` is in `contract.py`. Because it
-subclasses the existing error, current handlers still catch it. Native
-already throws a distinct `rdma::PlanTooLargeError` (pybind:
-`PipelinedPlanTooLargeError`), and `NativePlanIssuer` checks `len(plan.slots)`
-against `pipelined_max_slots_per_request()` before sending. Both still surface
-as plain `LayerwiseContractError`; switching them to `PlanTooLargeError` is on
-Track A's list.
+subclasses the existing error, current handlers still catch it. Two places
+raise it, and both reach the caller as `PlanTooLargeError`:
+
+- `NativePlanIssuer` checks `len(plan.slots)` against
+  `pipelined_max_slots_per_request()` before sending anything.
+- The native session throws `rdma::PlanTooLargeError`. pybind binds it as
+  `PipelinedPlanTooLargeError`, whose Python base is the contract's
+  `PlanTooLargeError`, so the adapter passes it through without special
+  handling.
 
 ### S1: conformance driver
 
 `ArrivalDriver` in `fakes.py` has `land_slot(slot_index, generation)` and
 `decline_slot(slot_index, generation)`. `test_arrival_source_conformance.py`
-runs once per entry in `SOURCE_HARNESS_FACTORIES`. Track A registers the
-Aerospike source there with a fabric-free driver that feeds encoded
-immediates and declined replies into the real native session.
+runs once per entry in `SOURCE_HARNESS_FACTORIES`.
+
+The `aerospike` entry (`tests/v1/layerwise/aerospike_harness.py`) runs
+`AerospikeLayerArrivalSource` and `NativePlanIssuer` over the real native
+`PipelinedFetchSession`, with no fabric, device, or cluster. The connector is
+a test-only pybind module,
+`tests/v1/distributed/rdma/csrc/fabric_free_session_pybind.cpp`, built by
+`make -C tests/v1/distributed/rdma pyharness`. It also acts as the driver:
+
+| Driver call | What it feeds the session |
+|---|---|
+| `land_slot(slot, generation)` | an encoded immediate, as `RdmaContext::poll_notifications` would |
+| `decline_slot(slot, generation)` | the reply of the command carrying `slot`, with `failed=<slot>` |
+
+The factory skips when `make`, a C++ compiler, or pybind11 is missing. All 15
+conformance tests pass for it on the Soft-RoCE VM.
 
 ### M2: bounded windows, data stays in place
 
@@ -269,7 +285,10 @@ What this requires of Track A's code:
 2. `record_node(user_key)`: the master node from the C client's partition map
    (`as_partition_info_init` plus `as_partition_get_node`, client 7.3.0).
 3. `NativePlanIssuer.issue` flattens the plan and calls (1).
-4. A distinct native `PlanTooLargeError` and a pre-send slot-count check.
+4. `PlanTooLargeError` from both the pre-send slot-count check and the native
+   session (Q4).
+5. Rebased onto Track C's `4c634404`.
+6. The fabric-free conformance harness (S1).
 
 These were verified on the Soft-RoCE VM
 ([rdma_testing_on_windows.md](../distributed/l2_adapters/rdma_testing_on_windows.md)):
@@ -278,7 +297,10 @@ These were verified on the Soft-RoCE VM
   C client 7.3.0;
 - device-free logic harness: 298 checks pass;
 - fabric harness over `rxe0`: 341 checks pass;
-- `tests/v1/layerwise/` and `tests/v1/distributed/rdma/` pass under pytest.
+- 322 Python tests pass: `tests/v1/layerwise/` (including the conformance
+  suite over both sources), pipelined readiness through the real extension,
+  RDMA registration, and adapter configuration;
+- the pytest wrappers in `tests/v1/distributed/rdma/` pass.
 
 `record_node` and `issue_pipelined_fetch_by_slots` have not run end to end.
 That needs an Aerospike server, and for the slot path, one built from the
@@ -286,25 +308,17 @@ That needs an Aerospike server, and for the slot path, one built from the
 
 **Track A, next:**
 
-1. Rebase onto Track C's branch (`PlanTooLargeError`, `ArrivalDriver`,
-   `chunk_fetch_arguments`).
-2. Raise `PlanTooLargeError` from `NativePlanIssuer` for both the pre-check
-   and the native error.
-3. A fabric-free `ArrivalDriver` over the real session, registered in
-   `SOURCE_HARNESS_FACTORIES`. This is the item that affects Track C's suite.
-   It needs a test-only Python binding that feeds landed and declined slots
-   into the real native session, with no device or cluster.
-4. The allocator reservation PR, with three `l1_manager` additions:
+1. The allocator reservation PR, with three `l1_manager` additions:
    - the window range reserved;
    - the all-or-nothing delete (W1.1);
    - abort-write and an explicit choice of pool (W4).
-5. Size `window_bytes` at init from the KV layout.
-6. The lease API with reclaim (W1) and quarantine. Publish every window to
+2. Size `window_bytes` at init from the KV layout.
+3. The lease API with reclaim (W1) and quarantine. Publish every window to
    every node.
-7. The production `ChunkPlacer` on top of the lease, raising per W2.
-8. Retire or internalize `begin_pipelined_fetch` / `is_pipelined_layer_ready`
+4. The production `ChunkPlacer` on top of the lease, raising per W2.
+5. Retire or internalize `begin_pipelined_fetch` / `is_pipelined_layer_ready`
    (M4).
-9. Later: concurrent fetches (W3).
+6. Later: concurrent fetches (W3).
 
 **Track C:** retrieve wiring per M4 and W4. One handler covers the placer and
 the pump, and the fallback goes into fresh general-L1 objects.
