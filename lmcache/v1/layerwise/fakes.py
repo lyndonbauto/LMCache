@@ -15,6 +15,7 @@ a bug in the real implementation, not in its own assumptions.
 
 # Standard
 from collections.abc import Sequence
+from enum import Enum
 from typing import Protocol, runtime_checkable
 import threading
 
@@ -63,6 +64,60 @@ class ArrivalDriver(Protocol):
         Args:
             slot_index: Position of the slot in the fetch's plan.
             generation: The generation the reply is tagged with.
+        """
+        ...
+
+
+class LayerWaitOutcome(Enum):
+    """What a consumer waiting on one layer of a load would see right now."""
+
+    #: The layer's copy was issued; a waiter proceeds.
+    READY = "ready"
+    #: The copy has not been issued yet; a waiter keeps waiting.
+    PENDING = "pending"
+    #: The load was abandoned before the copy was issued; a waiter fails
+    #: instead of hanging.
+    FAILED = "failed"
+
+
+@runtime_checkable
+class LoadObserver(Protocol):
+    """Reads what a :class:`LayerLoadSink` has done, as its consumers see it.
+
+    The conformance suite in ``tests/v1/layerwise/`` checks every sink
+    through this, so the same tests pin the same behaviour for the recording
+    sink and the real loader. The real loader's observer reads the state the
+    GPU worker polls -- the generation, the watermark and the failure flag --
+    without a GPU worker.
+
+    Neither method blocks.
+    """
+
+    def issued_layers(self, generation: int) -> tuple[int, ...]:
+        """Return the layers whose copies were issued for one load.
+
+        Args:
+            generation: The generation passed to ``begin_load``.
+
+        Returns:
+            Global layer indices in issue order; empty for a generation that
+            was never begun.
+        """
+        ...
+
+    def wait_outcome(self, layer_id: int, generation: int) -> LayerWaitOutcome:
+        """Return what a consumer waiting on one layer would see now.
+
+        Args:
+            layer_id: Global layer index in the model, one the load covers.
+            generation: The generation the consumer is waiting on.
+
+        Returns:
+            ``READY`` once the layer's copy was issued, ``FAILED`` if the load
+            was abandoned before that, ``PENDING`` otherwise -- including for
+            a generation that has not been begun yet. A layer issued before
+            its load was abandoned may report either ``READY`` or ``FAILED``;
+            the real loader fails every wait once the failure flag is set.
         """
         ...
 
@@ -356,6 +411,8 @@ class RecordingLayerLoadSink:
     contract's ordering rule, so a caller that issues layers out of order
     fails here rather than producing a silently wrong result on real hardware,
     where out-of-order issue merely makes a layer look ready early.
+
+    It is also its own :class:`LoadObserver`.
     """
 
     def __init__(self) -> None:
@@ -366,6 +423,8 @@ class RecordingLayerLoadSink:
         self._loaded: list[int] = []
         self._finished_generations: list[int] = []
         self._abandoned_generations: list[int] = []
+        self._issued_by_generation: dict[int, list[int]] = {}
+        self._failed_generations: set[int] = set()
 
     def begin_load(self, generation: int, layer_ids: Sequence[int]) -> None:
         """Record the start of a load.
@@ -385,6 +444,8 @@ class RecordingLayerLoadSink:
         self._expected = tuple(layer_ids)
         self._next_index = 0
         self._loaded = []
+        self._issued_by_generation[generation] = []
+        self._failed_generations.discard(generation)
 
     def load_layer(self, layer_id: int) -> None:
         """Record a copy of ``layer_id``.
@@ -410,6 +471,7 @@ class RecordingLayerLoadSink:
             raise LayerNotInPlanError(f"expected layer {expected} next, got {layer_id}")
         self._next_index += 1
         self._loaded.append(layer_id)
+        self._issued_by_generation[self._generation].append(layer_id)
 
     def finish_load(self, generation: int) -> None:
         """Record a clean completion.
@@ -443,8 +505,37 @@ class RecordingLayerLoadSink:
             generation: The generation passed to :meth:`begin_load`.
         """
         self._abandoned_generations.append(generation)
-        if generation == self._generation:
+        if generation == self._generation and generation != 0:
+            self._failed_generations.add(generation)
             self._reset()
+
+    def issued_layers(self, generation: int) -> tuple[int, ...]:
+        """Return the layers issued for one load; see :class:`LoadObserver`.
+
+        Args:
+            generation: The generation passed to :meth:`begin_load`.
+
+        Returns:
+            Global layer indices in issue order.
+        """
+        return tuple(self._issued_by_generation.get(generation, ()))
+
+    def wait_outcome(self, layer_id: int, generation: int) -> LayerWaitOutcome:
+        """Return what a waiter on one layer would see; see :class:`LoadObserver`.
+
+        Args:
+            layer_id: Global layer index in the model.
+            generation: The generation the waiter is waiting on.
+
+        Returns:
+            ``READY`` if the layer was issued for ``generation``, ``FAILED``
+            if that load was abandoned first, ``PENDING`` otherwise.
+        """
+        if layer_id in self._issued_by_generation.get(generation, ()):
+            return LayerWaitOutcome.READY
+        if generation in self._failed_generations:
+            return LayerWaitOutcome.FAILED
+        return LayerWaitOutcome.PENDING
 
     def loaded_layers(self) -> tuple[int, ...]:
         """Return the layers issued during the active or last-finished load.

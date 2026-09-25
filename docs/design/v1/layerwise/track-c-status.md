@@ -38,6 +38,12 @@ All done (2026-09-25):
 3. **Window sizing input for Track A.** Done:
    `FetchModel.request_bytes(num_chunks, align_bytes)`.
 4. **PR split plan** for upstreaming this branch (below).
+5. **Loader conformance suite.** Done: `test_load_sink_conformance.py`,
+   `LoadObserver` and `SINK_HARNESS_FACTORIES`, running against the
+   recording sink. Track B registers its loader there (see
+   [contract-changes.md](contract-changes.md)).
+6. **Fetch-start proposal.** Written:
+   [fetch-start-proposal.md](fetch-start-proposal.md). Waiting on review.
 
 ## Needs a decision
 
@@ -83,8 +89,9 @@ later ones build on earlier ones.
    `fakes.py`, `pump.py`, with the keys contract and the slot ceiling.
 4. **Planning from real requests (C1).** `request_fetch.py`, registration
    of fetch models, `max_record_bytes()`.
-5. **Conformance suite and native flattening.** `ArrivalDriver`,
-   `test_arrival_source_conformance.py`, `native_fetch.py`.
+5. **Conformance suites and native flattening.** `ArrivalDriver`,
+   `LoadObserver`, `test_arrival_source_conformance.py`,
+   `test_load_sink_conformance.py`, `native_fetch.py`.
 6. **Request-level orchestration.** `pipelined_retrieve.py`, the lease
    interface in `request_fetch.py`, `request_bytes`.
 

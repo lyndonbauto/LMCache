@@ -11,6 +11,48 @@ defect coming back.
 
 ---
 
+## A conformance suite for loaders, driven through a `LoadObserver`
+
+**Who is affected:** Track B (registers its loader). Nothing in `contract.py`
+changes.
+
+**What changed.**
+
+- New `LoadObserver` protocol and `LayerWaitOutcome` enum in `fakes.py`:
+  - `issued_layers(generation)` gives the copies issued for a load, in
+    order;
+  - `wait_outcome(layer_id, generation)` gives `READY`, `PENDING` or
+    `FAILED`: what a GPU worker waiting on that layer would see. It never
+    blocks.
+- `RecordingLayerLoadSink` is its own observer.
+- `tests/v1/layerwise/test_load_sink_conformance.py` runs every sink in
+  `SINK_HARNESS_FACTORIES` (in `conftest.py`) through the rules the worker
+  relies on:
+  - a layer is never ready before its copy is issued;
+  - copies are issued in the order given to `begin_load`, and every
+    ordering violation is refused without making a layer ready;
+  - `finish_load` refuses missing layers and stale generations, and leaves
+    the active load intact;
+  - `abandon_load` fails every layer not yet issued, is safe with no load
+    active, and does not disturb a newer load or revoke a finished one;
+  - driven by the real pump, the sink sees plan order, and a transport
+    decline leaves no waiter hanging.
+
+**How Track B registers.** Add a factory to `SINK_HARNESS_FACTORIES`
+returning `SinkHarness(sink, observer)`. The observer reads the layer
+progress record the worker polls, and maps it to an outcome: `FAILED` if the
+failure flag is set for the generation, `READY` if the watermark covers the
+layer's ordinal, `PENDING` otherwise. The factory calls `pytest.skip` where
+the loader cannot be built, e.g. without a GPU.
+
+**Deliberately unpinned.** For a layer issued *before* an abandon, either
+`READY` or `FAILED` is allowed. The real loader fails every wait once the
+failure flag is set, and the recording sink keeps it `READY`.
+
+**Why.** The source suite let Track A find contract gaps against a fake
+before wiring. Track B has only a skeleton, so the same suite on the loader
+side keeps them from discovering the rules through the pump.
+
 ## The placer leases one window per request; `run_pipelined_retrieve`
 
 **Who is affected:** Track A (implements `ChunkPlacer` and `WindowLease`,
