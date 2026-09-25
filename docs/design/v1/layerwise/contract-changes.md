@@ -11,6 +11,45 @@ defect coming back.
 
 ---
 
+## The placer leases one window per request; `run_pipelined_retrieve`
+
+**Who is affected:** Track A (implements `ChunkPlacer` and `WindowLease`,
+and sizes windows); Track C (retrieve wiring). Nothing in `contract.py`
+changes.
+
+**What changed** (all in `request_fetch.py` unless noted):
+
+- `ChunkPlacer.locate(chunk, group, object_bytes)` is replaced by
+  `ChunkPlacer.lease(objects: Sequence[ObjectToPlace]) -> WindowLease`. It
+  raises `PlanTooLargeError` if the objects fit no window, and a plain
+  `LayerwiseContractError` if no window is free.
+- New `WindowLease` protocol: `window_bytes()`, `locate(chunk_id,
+  object_group_id) -> ChunkLocation` (raises `KeyError` for an object it did
+  not place), and `release(outcome: LeaseOutcome)`, called exactly once.
+- New `LeaseOutcome`: `NEVER_FETCHED` (reuse at once), `FINISHED`
+  (reclaimable at once), `ABANDONED` (quarantine).
+- `ChunkLocation.dest_offset` is window-relative.
+- New `objects_to_place(model, keys)` lists what to lease, ordered by chunk,
+  then group, with each object's true (unrounded) size. Alignment is the
+  placer's choice.
+- `build_request_fetch(model, keys, max_record_bytes, lease)` takes the
+  lease and raises `ValueError` for an object outside the window or
+  overlapping another.
+- New `FetchModel.request_bytes(num_chunks, align_bytes=1)` for sizing
+  `window_bytes` from the model.
+- New `pipelined_retrieve.run_pipelined_retrieve(model, keys,
+  max_record_bytes, placer, pump)`: lease, plan, pump, release, with every
+  refusal surfacing as `LayerwiseContractError`.
+
+**What breaks.** Anything implementing the old per-object `locate()`; only
+test stand-ins did.
+
+**Why.** The window is leased per request, so a per-object `locate()` had no
+place to take or give back the window, and no way to say how the fetch
+ended. Stating the outcome at release is what lets the placer follow reclaim
+rule 5 without guessing. The window check exists because a bad offset
+fails silently on RDMA.
+
 ## Decided 2026-09-25: the pump begins the fetch; windows are leased and reserved
 
 **Who is affected:** Track A (lease API, production `ChunkPlacer`,

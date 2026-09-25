@@ -10,7 +10,7 @@ items are in [system-design.md](system-design.md) section 11 and
 
 | Criterion | State |
 |---|---|
-| C1 plans from real requests | Done, except the production `ChunkPlacer` (Track A) |
+| C1 plans from real requests | Done, including the lease interface; the production `ChunkPlacer` is Track A's |
 | C2 disjoint K/V ranges | Done |
 | C3 sliding windows | Done |
 | C4 request-scoped slot indices | Done |
@@ -23,21 +23,20 @@ items are in [system-design.md](system-design.md) section 11 and
 
 ## Doable now
 
-1. **Request-level orchestration.** One function that, for one retrieve,
-   leases a window from the placer, plans the fetch, runs the pump, and
-   releases the window as finished or abandoned -- with a single error
-   handler, so the caller falls back on any `LayerwiseContractError`
-   (including `PlanTooLargeError`) wherever it was raised. Tested with fakes
-   for the placer, source and sink.
-2. **A per-request `ChunkPlacer`.** Today `locate()` is called per object,
-   but the window lease is per request. The placer becomes `lease(objects) ->
-   WindowLease`, the lease answers `locate()` with window-relative offsets and
-   is released with an explicit outcome. Track A implements it; we define it
-   and validate what it returns (inside the window, no overlaps).
-3. **Window sizing input for Track A.** A helper giving the bytes a pipelined
-   retrieve of `n` chunks needs for a registered model, respecting sliding
-   windows and skipping aux groups, so the connector can size `window_bytes`
-   from the KV layout.
+All done (2026-09-25):
+
+1. **Request-level orchestration.** Done: `run_pipelined_retrieve` in
+   `pipelined_retrieve.py`. One call leases, plans, pumps and releases, and
+   every refusal is a `LayerwiseContractError`. Its tests use the real pump
+   with the scripted source and recording sink, covering every exit (system
+   design section 11 has the table). 23 of 23 deliberate mutations of the
+   orchestration and window checks are caught.
+2. **A per-request `ChunkPlacer`.** Done: `ChunkPlacer.lease(objects) ->
+   WindowLease`, released with a `LeaseOutcome`. The builder rejects
+   placements outside the window or overlapping. Track A implements the
+   production placer against it.
+3. **Window sizing input for Track A.** Done:
+   `FetchModel.request_bytes(num_chunks, align_bytes)`.
 4. **PR split plan** for upstreaming this branch (below).
 
 ## Needs a decision
@@ -62,7 +61,7 @@ items are in [system-design.md](system-design.md) section 11 and
 | Item | Waiting on | Owner |
 |---|---|---|
 | Aerospike source in the conformance suite | Fabric-free `ArrivalDriver`, which needs a test-only binding feeding the real native session | Track A |
-| Production `ChunkPlacer` / leases | Allocator reservation PR (with all-or-nothing delete), lease API, publishing every window, window sizing | Track A |
+| Production `ChunkPlacer` / `WindowLease` | Allocator reservation PR (with all-or-nothing delete), publishing every window, sizing `window_bytes` with `request_bytes` | Track A |
 | Pipelined retrieve enabled for real | A working `LayerLoadSink`; Track B's branch has only the stub (`layerwise_sink.py`, 2026-09-22) | Track B |
 | Hooking orchestration into `retrieve` | The fetch-start decision above | Us + Track A + storage-manager maintainers |
 | Removing the chunk-level path (`chunk_fetch_arguments`, `issue_pipelined_fetch_by_keys`, `StorageManager.begin_pipelined_fetch`) | Track A on the slot-level path and rebased onto this branch | Track A |
@@ -84,6 +83,7 @@ later ones build on earlier ones.
    of fetch models, `max_record_bytes()`.
 5. **Conformance suite and native flattening.** `ArrivalDriver`,
    `test_arrival_source_conformance.py`, `native_fetch.py`.
-6. **Request-level orchestration.** Item 1 and 2 above.
+6. **Request-level orchestration.** `pipelined_retrieve.py`, the lease
+   interface in `request_fetch.py`, `request_bytes`.
 
 Design docs travel with the PR whose code they describe.

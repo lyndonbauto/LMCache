@@ -399,15 +399,43 @@ register_kv_cache
 
 retrieve request (IPCCacheServerKey from vLLM)
   resolve_obj_keys(key, range(num_object_groups))    one ObjectKey per chunk per group
-  -> request_cache_keys(keys, attn_desc)             aux groups skipped; window groups
+  run_pipelined_retrieve(model, keys, cap, placer, pump)     on a worker thread
+    -> objects_to_place(model, keys)                 aux groups skipped; window groups
                                                      keep chunks >= first_in_window_chunk
-  -> ChunkPlacer.locate(chunk, group, object_bytes)  node + destination   <- stubbed
-  -> build_request_fetch(...)                        PlanRequest + LayerFetchPlan
-  -> LayerArrivalPump(source, sink).run(plan)         on a worker thread, per retrieve
-  one handler around placer *and* pump:
-       except LayerwiseContractError (incl. PlanTooLargeError):
-         whole-object load into fresh objects in general L1
+    -> ChunkPlacer.lease(objects) -> WindowLease     one window per request  <- Track A
+    -> build_request_fetch(model, keys, cap, lease)  lease.locate() per object; each
+                                                     checked inside the window, no overlap
+    -> pump.run(fetch.plan)                          begin_fetch, then layer by layer
+    -> lease.release(FINISHED | NEVER_FETCHED | ABANDONED)   exactly once
+  except LayerwiseContractError (incl. PlanTooLargeError):
+    whole-object load into fresh objects in general L1
 ```
+
+`run_pipelined_retrieve` (`lmcache/v1/layerwise/pipelined_retrieve.py`) is
+that whole flow. Any refusal before or during the fetch is raised as a
+`LayerwiseContractError`: a request the layout cannot plan, a placement the
+planner rejects, the placer's refusals, and the pump's timeout or unservable
+layer. Only loader errors propagate unchanged. The lease is released exactly
+once, and the outcome follows where the fetch stopped:
+
+| Where it stopped | Released as | Why |
+|---|---|---|
+| Keys don't match the model | not leased | Checked before `lease()` |
+| Placer refused | not leased | No lease was granted |
+| Planning rejected the lease (or `locate` raised) | `NEVER_FETCHED` | Nothing was issued |
+| Pump raised, including at `begin_fetch` | `ABANDONED` | Writes may still land |
+| Every layer loaded | `FINISHED` | Reclaimable at once |
+
+A `begin_fetch` refusal counts as abandoned too, because the transport may
+have issued part of the plan before refusing it. Quarantining a window by
+mistake costs one fetch timeout; reusing a window that is still being
+written corrupts the next request. If `release()` itself fails on an error
+path, the failure is logged and the fetch's error is raised in its place.
+
+The builder validates the lease rather than trusting it. An offset past the
+window, or two objects sharing bytes, would make RDMA writes land on the
+wrong data with no error, so both raise `ValueError` before anything is
+issued.
 
 **Who begins the fetch (decided 2026-09-25, M4).** The pump does: `run(plan)`
 calls `source.begin_fetch(plan)` and owns the generation from then on.
@@ -464,9 +492,12 @@ once at startup. What is decided:
    abandoned fetch overwrite the next request's buffer; the generation check
    stops LMCache *counting* that write but not the NIC performing it. The L1
    write-lock TTL already bounds how late a write can be.
-4. **Track A builds the lease API** (roughly `lease(bytes) -> (window_id,
-   base)` and `release(window_id, abandoned)`) and the production
-   `ChunkPlacer` on top of it. Retrieve calls it.
+4. **Track A builds the lease API** and the production `ChunkPlacer` on top
+   of it. The interface is defined in `request_fetch.py`:
+   `ChunkPlacer.lease(objects) -> WindowLease`, where `WindowLease` has
+   `window_bytes()`, `locate(chunk, group) -> ChunkLocation` (a
+   window-relative offset) and `release(LeaseOutcome)`. The lease is per
+   request because the window is; `locate()` is per object.
 
 **Where the code stands.** None of the above exists yet. `RdmaWindowPlan`
 carves `window_count × window_bytes` from the start of the slab, but the L1
@@ -500,9 +531,11 @@ head_dim × bytes`, so at fp16:
 | Llama-3-8B / Mistral-7B (8 KV heads) | 128 KiB | 32 MiB | 512 MiB |
 
 Not one chunk fits in 8 MiB. The default is instead computed at init from the
-registered KV layout -- the largest pipelined retrieve in chunks × bytes per
-chunk, rounded up to the slab alignment -- and the lease stays `lease() ->
-(window, size)` with window-relative offsets. Other limits stay comfortable: a
+registered KV layout, with window-relative offsets. `FetchModel.request_bytes(
+num_chunks, align_bytes)` gives the bytes one retrieve of `num_chunks` chunks
+places in its window. It counts only the chunks a sliding-window group reads,
+skips aux groups, and rounds each object up to `align_bytes`, so the connector
+sizes `window_bytes` as `request_bytes(max_pipelined_chunks, slab_alignment)`. Other limits stay comfortable: a
 512 MiB window of 960 KiB records is ~550 slots, far under 65536 and
 Soft-RoCE's receive queue (EFA's limit is still A7). A request larger than a
 window is not spread over several windows; the placer refuses it and retrieve
@@ -538,8 +571,8 @@ time. The rules:
    general allocator, so memory-pressure eviction never sees them.
 5. **Only a cleanly finished fetch leaves its window reclaimable at once.** If
    any slot neither landed nor was declined, the fetch counts as abandoned and
-   the window is quarantined. `release(window_id, abandoned)` states this rule
-   rather than leaving it to the caller. The pump finishes a fetch only after
+   the window is quarantined. `WindowLease.release(LeaseOutcome)` states this
+   rule rather than leaving it to the placer to infer. The pump finishes a fetch only after
    every layer is resident, so a pump-finished fetch is clean by
    construction; every other exit abandons.
 
@@ -551,11 +584,15 @@ reclaim turns out to evict too often.
 free (all pinned, quarantined, or a fetch already in flight) raises a plain
 `LayerwiseContractError`: splitting would not help, so the caller falls back.
 
-The `ChunkPlacer` is the only stand-in. `tests/v1/layerwise/test_request_fetch.py`
-drives the builder from a vLLM-shaped request (a hybrid model with a
-full-attention group, a two-chunk window group and an aux group, and a
-prompt that is not chunk-aligned), with keys from the production hasher. The
-real-server test stores those objects and reads every slot back by its key.
+The `ChunkPlacer` is the only stand-in (`tests/v1/layerwise/placers.py`,
+which packs a request's objects into one window and records each release).
+`tests/v1/layerwise/test_request_fetch.py` drives the builder from a
+vLLM-shaped request (a hybrid model with a full-attention group, a two-chunk
+window group and an aux group, and a prompt that is not chunk-aligned), with
+keys from the production hasher. `test_pipelined_retrieve.py` runs
+`run_pipelined_retrieve` with the real pump through every exit in the table
+above. The real-server test stores those objects and reads every slot back
+by its key.
 
 ## 8. Invariants that are not negotiable
 
