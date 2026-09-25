@@ -90,14 +90,17 @@ class LayerArrivalTimeoutError(LayerwiseContractError):
 
 
 class PlanTooLargeError(LayerwiseContractError):
-    """A valid plan is more than this transport can accept in one fetch.
+    """A request is more than this transport can accept in one fetch.
 
-    Raised by :meth:`LayerArrivalSource.begin_fetch` for a limit only the
-    transport knows, such as more slots than the device can post receives
-    for. Distinct from its base class because the caller has a response other
-    than falling back: it can split the request into smaller plans. A caller
-    that does not split can catch :class:`LayerwiseContractError` and treat it
-    like any other refusal.
+    Raised for a limit only the transport knows: by
+    :meth:`LayerArrivalSource.begin_fetch`, e.g. more slots than the device
+    can post receives for, or by the transport's chunk placer, e.g. a request
+    larger than any RDMA window. Distinct from its base class because the
+    caller has a response other than falling back: it can split the request
+    into smaller ones. A refusal that splitting would not fix, such as no
+    window being free right now, is a plain :class:`LayerwiseContractError`.
+    A caller that does not split can catch :class:`LayerwiseContractError`
+    and treat both alike.
     """
 
 

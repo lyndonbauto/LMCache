@@ -37,6 +37,15 @@ Nothing in `contract.py` changes.
   than its window is refused by the placer and falls back to a whole-object
   load, rather than spanning windows.
 
+- **Window reclaim and errors (Track A's follow-up).** `lease()` reclaims
+  the least recently used unpinned window by evicting all of its objects at
+  once, or refuses. The placer raises `PlanTooLargeError` for a request larger
+  than any window and a plain `LayerwiseContractError` when no window is free;
+  retrieve has one handler around placer and pump. The `PlanTooLargeError`
+  docstring now names the placer as a raiser too. A fallback after a failed
+  pipelined fetch loads into fresh general-L1 objects, never into the
+  quarantined window.
+
 **What breaks.** Callers of `StorageManager.begin_pipelined_fetch`, once it
 is retired. Planned code that treats offsets as slab-relative.
 

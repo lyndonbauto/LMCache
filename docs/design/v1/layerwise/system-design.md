@@ -404,8 +404,9 @@ retrieve request (IPCCacheServerKey from vLLM)
   -> ChunkPlacer.locate(chunk, group, object_bytes)  node + destination   <- stubbed
   -> build_request_fetch(...)                        PlanRequest + LayerFetchPlan
   -> LayerArrivalPump(source, sink).run(plan)         on a worker thread, per retrieve
+  one handler around placer *and* pump:
        except LayerwiseContractError (incl. PlanTooLargeError):
-         whole-object load into the same L1 objects
+         whole-object load into fresh objects in general L1
 ```
 
 **Who begins the fetch (decided 2026-09-25, M4).** The pump does: `run(plan)`
@@ -417,8 +418,14 @@ The storage-manager `begin_pipelined_fetch` / `is_pipelined_layer_ready` pair
 is retired (or becomes internal to the source): it returned `0` for
 "unsupported" and a boolean for readiness, the two shapes the contract
 replaced. The pump blocks until every layer is loaded, so it runs on its own
-worker thread, never on the request handler. On fallback the whole-object
-load reuses or releases the same write-locked L1 objects. Until Track B's
+worker thread, never on the request handler. The placer runs before the pump
+and can refuse too (see "Window ownership"), so one handler covers both.
+
+On fallback the whole-object load goes into **fresh objects in general L1**,
+never into the window objects of the failed fetch. An abandoned fetch's
+window is quarantined because RDMA writes may still land in it; a fallback
+written there could be overwritten after it completed. The failed fetch's
+window objects are deleted and the window released as abandoned. Until Track B's
 loader exists, the path sits behind a flag and is tested with
 `RecordingLayerLoadSink`.
 
@@ -469,6 +476,14 @@ no lease API, and the pipelined session runs one fetch at a time with a single
 `window_bytes`. Until the reservation lands, the blast-radius argument above
 does not hold.
 
+`window_count > 1` will let that many retrieves' data stay *resident*; it will
+not let fetches run *concurrently*. The session holds one active request and
+all fetches share one receive queue, so `lease()` refuses while another fetch
+is in flight, and a concurrent retrieve takes the whole-object path.
+Concurrent fetches are a later Track A item: one session per leased window,
+with immediates routed to a session by generation, which then has to be
+unique across sessions.
+
 **The allocator change (Track A).** A small PR reviewed by the `l1_manager`
 maintainers: when RDMA is enabled, the L1 memory manager builds its general
 allocator over the slab *minus* the window range, and the window pool gets
@@ -499,12 +514,42 @@ lease, so it is deferred until the memory budget forces it.
 **The cost is memory.** Windows are carved out of general L1: 4 × 512 MiB is
 2 GiB. That is why data stays in place (point 2) rather than being copied out.
 
-Still open: with data staying in place, a window is only free again once
-every object in it is evicted, so `window_count` windows can fill with
-long-lived cache entries and starve the pipelined path. Proposed: `lease()`
-may evict an idle window's objects to reclaim it. They were just read from
-Aerospike, so they are clean and recoverable from L2; only objects currently
-read-locked pin a window.
+**Reclaiming a full window (decided with Track A).** With data staying in
+place, a window is only free once every object in it is gone, so windows
+would fill with long-lived cache entries and starve the pipelined path.
+`lease()` therefore reclaims a window by evicting its objects. That is safe
+because they are clean copies that can be read again from Aerospike; if
+Aerospike has expired them, it is an ordinary miss and the KV is recomputed.
+A delete is metadata only, so reclaiming inside `lease()` adds no network
+time. The rules:
+
+1. **Whole window or nothing.** Evicting half a window discards entries and
+   frees nothing. "No object in this window is pinned" and the deletes are one
+   step under the L1 lock. `L1Manager.delete` returns `KEY_IS_LOCKED` per key
+   after earlier keys are already gone, so the allocator PR adds a narrow
+   all-or-nothing delete ("delete these keys only if none is locked").
+2. **Least recently used unpinned window.** A pin is a read lock from a load
+   in progress, a read reservation from a lookup awaiting its retrieve, or the
+   write lock of a fetch still running. If every window is pinned or
+   quarantined, `lease()` refuses immediately rather than waiting.
+3. **Through L1's normal delete path**, so the usual cache events fire and
+   the key directory and coordinator stop listing the evicted keys.
+4. **The window pool's only eviction policy.** The windows sit outside the
+   general allocator, so memory-pressure eviction never sees them.
+5. **Only a cleanly finished fetch leaves its window reclaimable at once.** If
+   any slot neither landed nor was declined, the fetch counts as abandoned and
+   the window is quarantined. `release(window_id, abandoned)` states this rule
+   rather than leaving it to the caller. The pump finishes a fetch only after
+   every layer is resident, so a pump-finished fetch is clean by
+   construction; every other exit abandons.
+
+Copy-out into general L1 after the pump finishes stays the fallback if
+reclaim turns out to evict too often.
+
+**What the placer raises.** A request too big for any window raises
+`PlanTooLargeError`: splitting it into smaller requests would work. No window
+free (all pinned, quarantined, or a fetch already in flight) raises a plain
+`LayerwiseContractError`: splitting would not help, so the caller falls back.
 
 The `ChunkPlacer` is the only stand-in. `tests/v1/layerwise/test_request_fetch.py`
 drives the builder from a vLLM-shaped request (a hybrid model with a
