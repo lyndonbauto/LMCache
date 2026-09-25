@@ -100,6 +100,9 @@ per-layer wait). So:
   the per-kernel-group record layouts, fetch-model registration in
   `register_kv_cache`, and `max_record_bytes()`.
 
+**Decided 2026-09-25:** PRs 2 onward stay on the fork until all three
+tracks finish, and then go upstream on top of the foundation.
+
 Each PR is independently reviewable and leaves `dev` working. Order matters:
 later ones build on earlier ones.
 
