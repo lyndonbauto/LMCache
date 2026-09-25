@@ -37,7 +37,8 @@ class FetchOutcome(enum.Enum):
     """How the fetch that held a window ended."""
 
     FINISHED = enum.auto()
-    """Every layer became resident, so no write can still be on the wire."""
+    """No write can still be on the wire: every layer became resident, or no
+    fetch was issued in the window."""
 
     ABANDONED = enum.auto()
     """Any other exit: unservable layer, timeout, error, or cancellation.
@@ -206,7 +207,8 @@ class RdmaWindowLeaser:
         Args:
             lease: The outstanding lease, as returned by :meth:`lease`.
             outcome: :attr:`FetchOutcome.FINISHED` only if every layer became
-                resident; anything else is :attr:`FetchOutcome.ABANDONED`.
+                resident or no fetch was issued; anything else is
+                :attr:`FetchOutcome.ABANDONED`.
 
         Raises:
             ValueError: If ``lease`` is not the outstanding lease, e.g. it

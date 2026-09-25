@@ -14,7 +14,7 @@ how contract changes are made.
 | BLK1 / M1: who expands slots | **Decided: Option 1** (the plan is the only source of truth) | Track A: done |
 | BLK2: node list | Done: `LayerFetchPlan.node_names` | - |
 | BLK3: slot numbering | Done: position in `plan.slots`; `LayerFetchPlan` rejects > 65536 slots | - |
-| Q1 / M2: offsets and window ownership | **Decided 2026-09-25: bounded windows, data stays in place** | Track A: reservation done, pending `l1_manager` review; lease API and placer next |
+| Q1 / M2: offsets and window ownership | **Decided 2026-09-25: bounded windows, data stays in place** | Track A: reservation, lease and destination placer done; publishing every window next |
 | Q2: digest encoding | Done: slots carry `record_key`; native hashes it | - |
 | Q3: planner and `max_sinks` | Done: C5 reworded | - |
 | Q4: oversized-plan error | Done: in `contract.py`, raised by the adapter and the native session | - |
@@ -22,10 +22,12 @@ how contract changes are made.
 | S2: shape test | Done | - |
 | M3: native numbering docstring | Resolved by Option 1 | - |
 | M4: retrieve wiring vs the pump | **Decided 2026-09-25: the pump begins the fetch** | Track C: retrieve wiring; Track A: retire the storage-manager pair |
-| W1: windows run out when data stays in place | **Decided:** `lease()` reclaims a whole idle window | Track A: lease API; `delete_if_none_locked` done |
+| W1: windows run out when data stays in place | **Decided:** `lease()` reclaims a whole idle window | Track A: done (`RdmaWindowLeaser`, `reclaim_rdma_window`) |
 | W2: which error the placer raises | **Decided** as proposed | Track A: placer; Track C: one handler in retrieve |
 | W3: one fetch at a time | Known limit; a concurrent retrieve falls back | Track A, later |
 | W4: fallback after a failed fetch | **Decided:** reload into fresh general-L1 objects | Track A: `abort_write` and pool choice done; Track C: retrieve wiring |
+| N1: an object's records are not on one node | **Open, raised by Track A** | Track C: node per record in the planner; Track A: destination placer |
+| P1: publishing every window | **Decided (Track A): one registration covering all windows** | Track A |
 
 ## Decisions
 
@@ -269,6 +271,70 @@ What this requires of Track A's code:
   ones, because L1 holds one object per key. In between, a lookup sees a
   miss, which is correct.
 
+## Raised while building the placer
+
+### N1. An object's records are not on one node (open, for Track C)
+
+`ChunkPlacer.locate(chunk_id, object_group_id, object_bytes)` returns one
+node per object, and `ChunkPlacement.node_index` documents why: "A chunk's
+object is stored whole on one node, so every slot cut from it is fetched from
+there." The write side doesn't store it that way:
+
+- `RecordKeys.record_key_for` names a sharded object's records
+  `"{cache_key}|s|{index}"`, and Aerospike places every record by the digest
+  of its own key. One object's records are therefore spread over the nodes.
+- The native side already works per record: `issue_pipelined_fetch_by_slots`
+  takes a node per slot, and `record_node(user_key)` looks up the node that
+  masters one record key.
+
+On the single-node Soft-RoCE setup every record is on the same node, so
+nothing fails. On a real cluster, most sinks would go to a node that doesn't
+hold the record and would come back declined, so the layers would report
+`UNSERVABLE`.
+
+**Proposal: split the placer's two jobs.**
+
+| Job | Granularity | Owner | Source |
+|---|---|---|---|
+| Destination offset | per object | Track A | `RdmaWindowPlacer`: lease a window, reserve each object in it |
+| Node | per record | Track C (planner) | a record-to-node lookup, `record_node(record_key)` in production |
+
+For the planner that means:
+
+- `ChunkLocation` and `ChunkPlacement` lose their node field.
+- `FetchPlanner` asks the lookup for each slot's record key and sets
+  `SlotPlacement.node_index` per slot. It builds `node_names` from the
+  answers in order of first appearance.
+
+`locate` also has no `ObjectKey`, but the destination placer needs one to
+reserve the object in L1. So the destination half is per request: it is
+built from the request's keys. See `RdmaWindowPlacer` in
+[aerospike_rdma.md](../distributed/l2_adapters/aerospike_rdma.md#placing-a-retrieves-objects).
+
+### P1. Every window is published as one registration (decided)
+
+The server branch (`feat/kv-sink-fetch-pipelined`) decided it:
+
+- Each `kv-sink-register` creates a server queue pair and holds one
+  `(rkey, addr, size)`.
+- A server allows 16 regions in total, across all clients (`MAX_REGIONS`).
+
+One registration per window would use half a node's regions for one LMCache
+instance with 8 windows, so LMCache instead registers the whole window range
+once per node.
+
+- Plan offsets become slab offsets, which equal
+  `memory_obj.meta.address` for window objects. That changes
+  `system-design.md`'s "offsets are relative to the leased window".
+- The client still refuses a slot outside the leased window before sending.
+- A write can reach another window only through a server bug, never general
+  L1. Late writes from an abandoned fetch still land in their own
+  quarantined window.
+
+A per-window server check (`kv-sink-add-window` plus `window=<i>` on fetch)
+can follow as hardening. Until the client change lands, only window 0 is
+reachable, so run with `rdma.window_count = 1`.
+
 ## Work that follows
 
 **Track A, done:**
@@ -323,6 +389,14 @@ What this requires of Track A's code:
    Two differences from the M2 sketch. `release` takes an outcome enum, not
    a boolean. `lease` returns the window's slab offset, and
    `lease.pool()` gives the pool for `reserve_write`.
+10. The destination half of the placer: `RdmaWindowPlacer.place(objects,
+    layouts) -> WindowPlacement`, with `dest_offset`, `complete` and
+    `abandon`. See
+    [aerospike_rdma.md](../distributed/l2_adapters/aerospike_rdma.md#placing-a-retrieves-objects).
+    - It raises per W2.
+    - `abandon` performs W4's first two steps: abort the writes, then
+      quarantine the window.
+    - The node half waits on N1.
 
 These were verified on the Soft-RoCE VM
 ([rdma_testing_on_windows.md](../distributed/l2_adapters/rdma_testing_on_windows.md)):
@@ -346,9 +420,10 @@ That needs an Aerospike server, and for the slot path, one built from the
 2. ~~Size `window_bytes` at init from the KV layout.~~ Done as item 8, as a
    check rather than sizing.
 3. ~~The lease API with reclaim (W1) and quarantine.~~ Done as item 9.
-   Still open: publish every window to every node. Until then only window 0
-   is usable by a fetch.
-4. The production `ChunkPlacer` on top of the lease, raising per W2.
+   Still open: publish every window to every node, as one registration per
+   node (P1). Until then only window 0 is usable by a fetch.
+4. ~~The production `ChunkPlacer` on top of the lease.~~ The destination
+   half is done as item 10. The node half is Track C's planner change (N1).
 5. Retire or internalize `begin_pipelined_fetch` / `is_pipelined_layer_ready`
    (M4).
 6. Later: concurrent fetches (W3).

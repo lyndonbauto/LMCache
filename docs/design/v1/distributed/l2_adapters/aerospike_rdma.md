@@ -287,10 +287,44 @@ leaser.release(lease, FetchOutcome.FINISHED)   # or ABANDONED on any other exit
   `PlanTooLargeError`, since the caller can split it. No lease available
   raises `LayerwiseContractError`, and the caller falls back.
 
-Not done yet: publishing every window to the nodes rather than window 0. Each
-window already has its own memory registration. A node's `kv-sink-register`
-publishes one of them, though, and fetch commands name that node's single
-registered region. Leasing any window other than 0 needs that changed first.
+### Placing a retrieve's objects
+
+`RdmaWindowPlacer` (`rdma_window_placer.py`) is the destination half of the
+layerwise `ChunkPlacer`. It leases a window and reserves every object of the
+retrieve in it, all or nothing:
+
+```python
+placement = placer.place(
+    [ObjectToPlace(chunk_id, group_id, key), ...],
+    layouts,                                      # {group_id: MemoryLayoutDesc}
+)
+placement.dest_offset(chunk_id, group_id)         # slab offset for the plan
+...                                               # fetch, pump
+placement.complete()   # finish_write + release FINISHED
+# or
+placement.abandon()    # abort_write + release ABANDONED (quarantine), then
+                       # the fallback reserves fresh objects in general L1
+```
+
+- **Size check.** Each object is rounded up to the L1 alignment, as the
+  window allocator does, and a total over `window_bytes` raises
+  `PlanTooLargeError` before anything is leased.
+- **All or nothing.** If L1 refuses any key, for example because it's
+  already cached, every reservation is aborted and the lease is released
+  as `FINISHED`, since no fetch was issued. It then raises
+  `LayerwiseContractError`.
+- **Offsets are slab offsets** (`memory_obj.meta.address`), because every
+  window is published as one registration starting at slab offset 0. See
+  "P1" in the
+  [questions doc](../../layerwise/track-a-questions-for-track-c.md#p1-every-window-is-published-as-one-registration-decided).
+
+The node half isn't here. An object's records are spread over the nodes by
+their own digests, so the node is chosen per record in the planner (N1 in
+the questions doc).
+
+Not done yet: registering the whole window range as one region per node.
+Today a node's `kv-sink-register` publishes window 0 only. Until that changes,
+run with `rdma.window_count = 1`.
 
 ## Transport-agnostic registration handle
 
