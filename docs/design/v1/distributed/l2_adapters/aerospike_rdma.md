@@ -640,9 +640,14 @@ slots from each reply into `LayerReadiness::note_unservable`, and drains
 `RdmaContext::poll_notifications` into the same tracker. It performs no I/O
 itself — the connector issues the info calls and forwards reply strings. `AerospikeNativeConnector` exposes this path only when
 `BUILD_WITH_AEROSPIKE_RDMA` is enabled and `kv-sink-register` has succeeded;
-the TCP get/set path is unchanged otherwise. Python reaches per-layer
-readiness through `StorageManager.is_pipelined_layer_ready`, mirroring
-`set_kv_plane_bytes`. The test mock implements a server-shaped
+the TCP get/set path is unchanged otherwise. Python reaches this path only
+through `StorageManager.layer_arrival_source()`: it returns the native
+adapter's one `AerospikeLayerArrivalSource`, and retrieve runs
+`LayerArrivalPump(source, sink).run(plan)` over it. The pump begins, polls
+and releases the fetch, so the storage manager and the adapters have no
+begin or readiness methods of their own. When no adapter has the pipelined
+path, the accessor raises `LayerwiseContractError`, and retrieve falls back
+to a whole-object load as it does for a failed fetch. The test mock implements a server-shaped
 `handle_pipelined_fetch` so the codec is exercised over a real fabric; the
 format below is still the contract to agree with the Aerospike server team.
 

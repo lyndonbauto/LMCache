@@ -10,7 +10,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Mapping, Sequence
+from typing import TYPE_CHECKING, Mapping
 import threading
 
 if TYPE_CHECKING:
@@ -18,12 +18,12 @@ if TYPE_CHECKING:
     from lmcache.lmcache_native import Bitmap
     from lmcache.v1.distributed.api import KeyListPage, MemoryLayoutDesc, ObjectKey
     from lmcache.v1.distributed.internal_api import L2AdapterListener, L2StoreResult
-    from lmcache.v1.layerwise.contract import LayerFetchPlan
-    from lmcache.v1.layerwise.planner import ChunkPlacement
+    from lmcache.v1.layerwise.contract import LayerArrivalSource
     from lmcache.v1.memory_management import MemoryObj
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.layerwise.contract import LayerwiseContractError
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import get_event_bus
 
@@ -428,51 +428,26 @@ class L2AdapterInterface(ABC):
         """Return the last pipelined-fetch initialization error, if any."""
         return ""
 
-    def begin_pipelined_fetch(
-        self, plan: LayerFetchPlan, placements: Sequence[ChunkPlacement]
-    ) -> int:
-        """Start a pipelined fetch when the backend supports one.
+    def layer_arrival_source(self) -> LayerArrivalSource:
+        """Return the source that fetches and reports layers for this backend.
 
-        Args:
-            plan: Every slot the fetch expects, each naming its record by
-                user key.
-            placements: The placements ``plan`` was built from.
+        A layerwise retrieve runs ``LayerArrivalPump(source, sink).run(plan)``
+        over it; the pump begins, polls and releases the fetch. Every call
+        returns the same source, because a source tracks the backend's one
+        active fetch.
 
-        Returns:
-            Request generation for ``is_pipelined_layer_ready``, or ``0`` when
-            pipelined fetch is unavailable.
-        """
-        del plan, placements
-        return 0
-
-    def finish_pipelined_fetch(self) -> None:
-        """Release the active pipelined fetch."""
-        return None
-
-    def abandon_pipelined_fetch(self) -> None:
-        """Abandon the active pipelined fetch without waiting."""
-        return None
-
-    def is_pipelined_layer_ready(
-        self, layer_id: int, request_generation: int = 0
-    ) -> bool:
-        """Report whether one layer of the active pipelined fetch has landed.
-
-        Layer-pipelined RDMA fetches signal each write separately; vLLM asks
-        this while decoding. Backends without a pipelined path always return
-        ``False``.
-
-        Args:
-            layer_id: Global layer index in the model.
-            request_generation: Pipelined fetch handle from the adapter, or
-                ``0`` to query whichever request the adapter currently tracks.
+        The default raises: most backends have no layer-pipelined path.
 
         Returns:
-            ``True`` when every slot of ``layer_id`` for the identified
-            request has landed and no slot of that layer was declined.
+            The backend's layer arrival source.
+
+        Raises:
+            LayerwiseContractError: If this backend cannot fetch layer by
+                layer. Retrieve falls back to a whole-object load.
         """
-        del layer_id, request_generation
-        return False
+        raise LayerwiseContractError(
+            f"{type(self).__name__} has no layer-pipelined fetch path"
+        )
 
     def _notify_keys_stored(self, keys: list[ObjectKey], sizes: list[int]) -> None:
         """Update byte accounting and notify listeners that ``keys`` were

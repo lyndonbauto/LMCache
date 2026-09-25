@@ -21,7 +21,7 @@ how contract changes are made.
 | S1: conformance driver | Done: the Aerospike source passes the suite over the real native session | - |
 | S2: shape test | Done | - |
 | M3: native numbering docstring | Resolved by Option 1 | - |
-| M4: retrieve wiring vs the pump | **Decided 2026-09-25: the pump begins the fetch** | Track C: retrieve wiring; Track A: retire the storage-manager pair |
+| M4: retrieve wiring vs the pump | **Decided 2026-09-25: the pump begins the fetch.** Track A's part done: `StorageManager.layer_arrival_source()` | Track C: retrieve wiring |
 | W1: windows run out when data stays in place | **Decided:** `lease()` reclaims a whole idle window | Track A: done (`RdmaWindowLeaser`, `reclaim_rdma_window`) |
 | W2: which error the placer raises | **Decided** as proposed | Track A: placer; Track C: one handler in retrieve |
 | W3: one fetch at a time | Known limit; a concurrent retrieve falls back | Track A, later |
@@ -404,6 +404,20 @@ can follow as hardening. **Done** as item 11.
     index. `PipelinedFetchSession` refuses a request whose slots aren't all
     inside the window of its first slot. On the Soft-RoCE VM, a fetch into
     window 2 lands byte-identical, and a write past the range is refused.
+12. The storage-manager pipelined pair is retired (M4).
+    `StorageManager.layer_arrival_source()` returns the native adapter's one
+    `AerospikeLayerArrivalSource`. With no pipelined adapter it raises
+    `LayerwiseContractError`, so retrieve's one handler covers that case too.
+    `begin_pipelined_fetch`, `finish_pipelined_fetch`,
+    `abandon_pipelined_fetch` and `is_pipelined_layer_ready` are gone from
+    the storage manager and the L2 adapters; only the source calls the
+    native ones.
+    - For Track C: nothing in production calls `chunk_fetch_arguments` in
+      `native_fetch.py` any more. The source issues slot for slot through
+      `issue_pipelined_fetch_by_slots`. `chunk_fetch_arguments` and the
+      native `issue_pipelined_fetch_by_keys` can go when you're ready.
+    - Retrieve should wrap the accessor call in the same
+      `LayerwiseContractError` handler as the placer and the pump.
 
 These were verified on the Soft-RoCE VM
 ([rdma_testing_on_windows.md](../distributed/l2_adapters/rdma_testing_on_windows.md)):
@@ -430,8 +444,8 @@ That needs an Aerospike server, and for the slot path, one built from the
    ~~Publish every window to every node.~~ Done as item 11.
 4. ~~The production `ChunkPlacer` on top of the lease.~~ The destination
    half is done as item 10. The node half is Track C's planner change (N1).
-5. Retire or internalize `begin_pipelined_fetch` / `is_pipelined_layer_ready`
-   (M4).
+5. ~~Retire or internalize `begin_pipelined_fetch` /
+   `is_pipelined_layer_ready` (M4).~~ Done as item 12.
 6. Later: concurrent fetches (W3).
 
 **Track C:** retrieve wiring per M4 and W4. One handler covers the placer and

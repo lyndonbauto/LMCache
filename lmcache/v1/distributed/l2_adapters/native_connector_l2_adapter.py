@@ -22,7 +22,6 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
-from collections.abc import Sequence
 from typing import Any
 import select
 import threading
@@ -36,9 +35,14 @@ from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
 )
-from lmcache.v1.layerwise.contract import LayerFetchPlan
-from lmcache.v1.layerwise.native_fetch import chunk_fetch_arguments
-from lmcache.v1.layerwise.planner import ChunkPlacement, record_plane_runs
+from lmcache.v1.distributed.l2_adapters.layerwise_source import (
+    AerospikeLayerArrivalSource,
+    NativePlanIssuer,
+    PipelinedFetchConnector,
+    PlannedFetchConnector,
+)
+from lmcache.v1.layerwise.contract import LayerArrivalSource, LayerwiseContractError
+from lmcache.v1.layerwise.planner import record_plane_runs
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import create_event_notifier
 
@@ -177,6 +181,15 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         # Delete capability detection
         self._has_delete = callable(getattr(native_client, "submit_batch_delete", None))
 
+        # One source per client: it tracks the client's one active fetch.
+        self._layer_source: AerospikeLayerArrivalSource | None = None
+        if isinstance(native_client, PipelinedFetchConnector) and isinstance(
+            native_client, PlannedFetchConnector
+        ):
+            self._layer_source = AerospikeLayerArrivalSource(
+                native_client, NativePlanIssuer(native_client)
+            )
+
         # Pending delete events for synchronous delete() calls
         self._pending_delete_events: dict[L2TaskId, threading.Event] = {}
 
@@ -303,73 +316,28 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             return ""
         return str(getter())
 
-    def begin_pipelined_fetch(
-        self, plan: LayerFetchPlan, placements: Sequence[ChunkPlacement]
-    ) -> int:
-        """Issue a pipelined fetch through the native client when supported.
+    def layer_arrival_source(self) -> LayerArrivalSource:
+        """Return the arrival source over the native pipelined fetch.
 
-        Records are handed over by user key; the native client derives each
-        digest itself.
-
-        Args:
-            plan: Every slot the fetch expects, in slot-number order.
-            placements: The placements ``plan`` was built from.
+        The source issues each plan slot for slot through
+        ``issue_pipelined_fetch_by_slots`` and reports arrivals from the
+        native session. It exists only when the client was built with the
+        pipelined path (``LMCACHE_AEROSPIKE_RDMA``). A client that has the
+        path but failed to initialize it still returns the source; its
+        ``begin_fetch`` then refuses with the reason.
 
         Returns:
-            The native request generation, or ``0`` when the client was built
-            without the pipelined path.
+            The adapter's one :class:`AerospikeLayerArrivalSource`.
 
         Raises:
-            ValueError: If one chunk is placed on more than one node, which
-                the native session cannot express.
+            LayerwiseContractError: If the native client has no pipelined
+                fetch path.
         """
-        issuer = getattr(self._client, "issue_pipelined_fetch_by_keys", None)
-        if issuer is None:
-            return 0
-        arguments = chunk_fetch_arguments(plan, placements)
-        return int(
-            issuer(
-                arguments.placements,
-                arguments.chunk_nodes,
-                arguments.slot_record_keys,
+        if self._layer_source is None:
+            raise LayerwiseContractError(
+                f"{self._type_name}: native client has no pipelined fetch path"
             )
-        )
-
-    def finish_pipelined_fetch(self) -> None:
-        """Finish the active pipelined fetch on the native client."""
-        finisher = getattr(self._client, "finish_pipelined_fetch", None)
-        if finisher is None:
-            return
-        finisher()
-
-    def abandon_pipelined_fetch(self) -> None:
-        """Abandon the active pipelined fetch on the native client."""
-        abandoner = getattr(self._client, "abandon_pipelined_fetch", None)
-        if abandoner is None:
-            return
-        abandoner()
-
-    def is_pipelined_layer_ready(
-        self, layer_id: int, request_generation: int = 0
-    ) -> bool:
-        """Forward pipelined layer readiness to the native client when supported.
-
-        Args:
-            layer_id: Global layer index in the model.
-            request_generation: Fetch handle from ``begin_pipelined_fetch``, or
-                ``0`` to query the adapter's active request.
-
-        Returns:
-            ``True`` when the native client reports the layer ready for that
-            request, otherwise ``False``.
-        """
-        checker = getattr(self._client, "is_pipelined_layer_ready", None)
-        if checker is None:
-            return False
-        try:
-            return bool(checker(layer_id, request_generation))
-        except TypeError:
-            return bool(checker(layer_id))
+        return self._layer_source
 
     def submit_store_task(
         self,
