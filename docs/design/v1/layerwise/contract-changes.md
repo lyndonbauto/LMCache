@@ -30,6 +30,13 @@ Nothing in `contract.py` changes.
   and stay there; a window released by an abandon is quarantined until the
   fetch timeout passes.
 
+- **Follow-ups from Track A.** Track A makes the allocator reservation, as a
+  small PR reviewed by the `l1_manager` maintainers. `window_bytes` is sized
+  at init from the KV layout so one request fits one window; the 8 MiB
+  default cannot hold a single 256-token chunk of a 7B model. A request larger
+  than its window is refused by the placer and falls back to a whole-object
+  load, rather than spanning windows.
+
 **What breaks.** Callers of `StorageManager.begin_pipelined_fetch`, once it
 is retired. Planned code that treats offsets as slab-relative.
 

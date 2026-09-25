@@ -461,10 +461,50 @@ once at startup. What is decided:
    base)` and `release(window_id, abandoned)`) and the production
    `ChunkPlacer` on top of it. Retrieve calls it.
 
-Still open: who changes the L1 allocator (it is `l1_manager`, which neither
-track owns), and whether `window_bytes` (default 8 MiB) is big enough -- one
-request's KV for a 7B model over a few thousand tokens is hundreds of MiB, so
-either the default grows or a request spans several windows.
+**Where the code stands.** None of the above exists yet. `RdmaWindowPlan`
+carves `window_count × window_bytes` from the start of the slab, but the L1
+memory manager does not know about it, so ordinary L1 objects can be
+allocated in those bytes. Only window 0 is published to the nodes, there is
+no lease API, and the pipelined session runs one fetch at a time with a single
+`window_bytes`. Until the reservation lands, the blast-radius argument above
+does not hold.
+
+**The allocator change (Track A).** A small PR reviewed by the `l1_manager`
+maintainers: when RDMA is enabled, the L1 memory manager builds its general
+allocator over the slab *minus* the window range, and the window pool gets
+its own small sub-allocator. Nothing else in `l1_manager` changes. Track A
+owns it because only the transport's safety depends on it.
+
+**Window size: one request, one window, sized from the model.** The 8 MiB
+default is a test-harness constant. KV per token is `2 × layers × kv_heads ×
+head_dim × bytes`, so at fp16:
+
+| Model | KV per token | One 256-token chunk | 4k tokens |
+|---|---|---|---|
+| Llama-2-7B (32 KV heads) | 512 KiB | 128 MiB | 2 GiB |
+| Llama-3-8B / Mistral-7B (8 KV heads) | 128 KiB | 32 MiB | 512 MiB |
+
+Not one chunk fits in 8 MiB. The default is instead computed at init from the
+registered KV layout -- the largest pipelined retrieve in chunks × bytes per
+chunk, rounded up to the slab alignment -- and the lease stays `lease() ->
+(window, size)` with window-relative offsets. Other limits stay comfortable: a
+512 MiB window of 960 KiB records is ~550 slots, far under 65536 and
+Soft-RoCE's receive queue (EFA's limit is still A7). A request larger than a
+window is not spread over several windows; the placer refuses it and retrieve
+falls back to a whole-object load. Spanning windows needs no wire change but
+does need every window registered with every node, per-window regions in the
+node registry, records that never straddle a boundary and a multi-window
+lease, so it is deferred until the memory budget forces it.
+
+**The cost is memory.** Windows are carved out of general L1: 4 × 512 MiB is
+2 GiB. That is why data stays in place (point 2) rather than being copied out.
+
+Still open: with data staying in place, a window is only free again once
+every object in it is evicted, so `window_count` windows can fill with
+long-lived cache entries and starve the pipelined path. Proposed: `lease()`
+may evict an idle window's objects to reclaim it. They were just read from
+Aerospike, so they are clean and recoverable from L2; only objects currently
+read-locked pin a window.
 
 The `ChunkPlacer` is the only stand-in. `tests/v1/layerwise/test_request_fetch.py`
 drives the builder from a vLLM-shaped request (a hybrid model with a
