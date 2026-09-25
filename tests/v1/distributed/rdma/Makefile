@@ -24,6 +24,7 @@ CODEC_BIN := $(BUILD_DIR)/pipelined_fetch_test
 SESSION_BIN := $(BUILD_DIR)/pipelined_fetch_session_test
 ISSUE_BIN := $(BUILD_DIR)/pipelined_fetch_issue_test
 DEPTH_BIN := $(BUILD_DIR)/notification_depth_test
+DUMP_BIN := $(BUILD_DIR)/slot_plan_dump
 
 INCLUDES := -I$(SRC_DIR) -I$(CONNECTOR_DIR)
 ifneq ($(RDMA_CORE_INCLUDE_DIR),)
@@ -93,7 +94,15 @@ DEPTH_SOURCES := \
 	$(CONNECTOR_DIR)/layer_pipeline.cpp \
 	$(CONNECTOR_DIR)/slot_planner.cpp \
 	$(CONNECTOR_DIR)/shard_plan.cpp
-LOGIC_BINS := $(SHARD_BIN) $(PLAN_BIN) $(PLANNER_BIN) $(CODEC_BIN) $(SESSION_BIN) $(ISSUE_BIN) $(DEPTH_BIN)
+# Takes a fixture path and prints plans instead of asserting, so it is built
+# with the logic harnesses but driven by test_slot_plan_parity.py rather than
+# run bare by `logic-test`.
+DUMP_SOURCES := \
+	$(SRC_DIR)/slot_plan_dump.cpp \
+	$(CONNECTOR_DIR)/slot_planner.cpp \
+	$(CONNECTOR_DIR)/layer_pipeline.cpp \
+	$(CONNECTOR_DIR)/shard_plan.cpp
+LOGIC_BINS := $(SHARD_BIN) $(PLAN_BIN) $(PLANNER_BIN) $(CODEC_BIN) $(SESSION_BIN) $(ISSUE_BIN) $(DEPTH_BIN) $(DUMP_BIN)
 
 .PHONY: all test logic logic-test clean
 all: $(BIN) $(PIPELINE_BIN) $(LOGIC_BINS)
@@ -137,6 +146,9 @@ $(ISSUE_BIN): $(ISSUE_SOURCES) | $(BUILD_DIR)
 
 $(DEPTH_BIN): $(DEPTH_SOURCES) | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(DEPTH_SOURCES) -o $@
+
+$(DUMP_BIN): $(DUMP_SOURCES) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(DUMP_SOURCES) -o $@
 
 $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)

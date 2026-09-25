@@ -17,6 +17,7 @@ import time
 import pytest
 
 # First Party
+from lmcache.v1.layerwise.request_fetch import FetchModelRegistry
 from lmcache.v1.multiprocess.config import MPServerConfig
 from lmcache.v1.multiprocess.modules import engine_driven_transfer as non_gpu_mod
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as gpu_mod
@@ -42,6 +43,7 @@ def _bare_gpu_module() -> LMCacheDrivenTransferModule:
     module._ctx.use_layerwise = False
     module._cache_contexts = {}
     module._lock = threading.Lock()
+    module._fetch_models = FetchModelRegistry()
     return module
 
 

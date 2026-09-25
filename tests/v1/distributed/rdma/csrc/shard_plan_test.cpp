@@ -33,8 +33,16 @@
 
 namespace {
 
+using lmcache::connector::choose_shard_plan;
+using lmcache::connector::decode_shard_runs;
+using lmcache::connector::encode_shard_runs;
+using lmcache::connector::layered_payload_bytes;
+using lmcache::connector::make_layered_shard_plan;
 using lmcache::connector::make_shard_plan;
 using lmcache::connector::pieces_per_plane;
+using lmcache::connector::PlaneRun;
+using lmcache::connector::record_layouts_by_payload;
+using lmcache::connector::require_consistent_runs;
 using lmcache::connector::segment_range;
 using lmcache::connector::ShardPlan;
 using lmcache::connector::ShardRange;
@@ -345,6 +353,273 @@ void test_invalid_input_is_rejected() {
   check(threw, "a record index beyond the plan is rejected");
 }
 
+// Payload-order plane boundaries of an object laid out as `runs`.
+std::vector<ShardRange> planes_of(const std::vector<PlaneRun>& runs) {
+  std::vector<ShardRange> planes;
+  size_t offset = 0;
+  for (const PlaneRun& run : runs) {
+    for (uint32_t i = 0; i < run.planes; ++i) {
+      planes.push_back({offset, run.plane_bytes});
+      offset += run.plane_bytes;
+    }
+  }
+  return planes;
+}
+
+// Report whether every record of `plan` lies inside exactly one of `planes`.
+bool every_record_inside_one_plane(const ShardPlan& plan,
+                                   const std::vector<ShardRange>& planes,
+                                   size_t total) {
+  for (uint32_t i = 0; i < plan.nseg; ++i) {
+    const ShardRange r = segment_range(plan, i, total);
+    bool inside = false;
+    for (const ShardRange& p : planes) {
+      if (r.offset >= p.offset && r.offset + r.length <= p.offset + p.length) {
+        inside = true;
+        break;
+      }
+    }
+    if (!inside || r.length == 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Report whether two plans produce the same records at the same indices.
+bool same_records(const ShardPlan& a, const ShardPlan& b, size_t total) {
+  if (a.nseg != b.nseg) {
+    return false;
+  }
+  for (uint32_t i = 0; i < a.nseg; ++i) {
+    const ShardRange ra = segment_range(a, i, total);
+    const ShardRange rb = segment_range(b, i, total);
+    if (ra.offset != rb.offset || ra.length != rb.length) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// The Mamba/GDN shape the single plane hint cannot describe: an attention
+// kernel group and a state kernel group with different plane sizes in the
+// same object.
+const std::vector<PlaneRun> kHybridRuns = {
+    {/*plane_bytes=*/544 * 8 * 128 * 2, /*planes=*/2 * 8},
+    {/*plane_bytes=*/96 * 1024, /*planes=*/24},
+};
+
+void test_hybrid_kernel_groups_get_plane_aligned_records() {
+  std::cout << "\nhybrid kernel groups, one plane size each\n";
+
+  const size_t total = layered_payload_bytes(kHybridRuns);
+  const std::vector<ShardRange> planes = planes_of(kHybridRuns);
+
+  const ShardPlan hint_only =
+      make_shard_plan(total, kMiB, kMiB, kMiB, kHybridRuns[0].plane_bytes);
+  check(hint_only.plane_b == 0 &&
+            !every_record_inside_one_plane(hint_only, planes, total),
+        "a single plane hint cannot align this object, so it straddles "
+        "layers -- the bug being fixed");
+
+  const ShardPlan layered = make_layered_shard_plan(kHybridRuns, kMiB);
+  check(layered.runs.size() == 2, "the plan keeps one run per kernel group");
+  check(every_record_inside_one_plane(layered, planes, total),
+        "every record lies inside one plane of its own kernel group");
+  check(records_tile_payload_exactly(layered, total),
+        "the records cover the payload exactly once, in order");
+
+  // 1.0625 MiB attention planes split in two; 96 KiB state planes fit whole.
+  check(layered.runs[0].seg_b == kHybridRuns[0].plane_bytes / 2,
+        "an attention plane over the cap splits into two equal records");
+  check(layered.runs[1].seg_b == kHybridRuns[1].plane_bytes,
+        "a state plane under the cap is one record");
+  check(layered.nseg == (2 * 16) + 24, "record count is the sum over runs");
+
+  const ShardRange first_state = segment_range(layered, 2 * 16, total);
+  check(first_state.offset == kHybridRuns[0].plane_bytes * 16 &&
+            first_state.length == kHybridRuns[1].plane_bytes,
+        "the second run's first record starts where the first run ends");
+
+  bool threw = false;
+  try {
+    segment_range(layered, layered.nseg, total);
+  } catch (const std::out_of_range&) {
+    threw = true;
+  }
+  check(threw, "a record index beyond a layered plan is rejected");
+}
+
+void test_a_short_last_piece_in_a_later_run() {
+  std::cout << "\na short last piece inside the second run\n";
+
+  // 1001-byte planes against a 300-byte cap cut 251/251/251/248, as in the
+  // uniform case, but here they sit after a run of a different size.
+  const std::vector<PlaneRun> runs = {{64, 3}, {1001, 2}};
+  const size_t total = layered_payload_bytes(runs);
+  const ShardPlan plan = make_layered_shard_plan(runs, 300);
+
+  check(plan.nseg == 3 + (4 * 2), "three whole planes then eight pieces");
+  const ShardRange last_of_first = segment_range(plan, 3 + 3, total);
+  check(last_of_first.offset == 192 + 753 && last_of_first.length == 248,
+        "the fourth piece of the first 1001-byte plane is 248 bytes");
+  const ShardRange first_of_second = segment_range(plan, 3 + 4, total);
+  check(first_of_second.offset == 192 + 1001,
+        "the next plane starts on its boundary");
+  check(every_record_inside_one_plane(plan, planes_of(runs), total),
+        "no record crosses a plane");
+}
+
+void test_uniform_runs_are_identical_to_the_uniform_plan() {
+  std::cout << "\nuniform models are unchanged\n";
+
+  // Two kernel groups that happen to share a plane size, plus a plane that
+  // needs an uneven split: the layered plan must write exactly the records
+  // the existing plane-hint path writes, so objects stay readable by readers
+  // that predate runs and existing objects stay readable by new ones.
+  const size_t plane = 1001;
+  const std::vector<PlaneRun> runs = {{plane, 4}, {plane, 2}};
+  const size_t total = layered_payload_bytes(runs);
+
+  const ShardPlan layered = make_layered_shard_plan(runs, 300);
+  const ShardPlan hinted = make_shard_plan(total, 300, 300, 300, plane);
+  check(layered.runs.empty(), "no runs are recorded for a uniform model");
+  check(layered.plane_b == hinted.plane_b && layered.seg_b == hinted.seg_b,
+        "the uniform form matches the plane-hint plan field for field");
+  check(same_records(layered, hinted, total),
+        "and every record index covers the same bytes");
+
+  // A small single-plane-size object still gets one record per plane rather
+  // than one record holding them all.
+  const ShardPlan small = make_layered_shard_plan({{256, 2}}, kMiB);
+  check(small.nseg == 2 && small.seg_b == 256,
+        "a small multi-plane object is not collapsed into one record");
+}
+
+void test_payload_size_picks_the_layout() {
+  std::cout << "\npicking a layout by payload size\n";
+
+  const std::vector<PlaneRun> hybrid = {{1024, 4}, {512, 2}};
+  const std::vector<PlaneRun> window = {{2048, 2}};
+  const auto layouts = record_layouts_by_payload({hybrid, window, hybrid});
+  check(layouts.size() == 2, "each distinct payload size has a layout");
+  check(layouts.count(5120) == 1 && layouts.at(5120).size() == 2,
+        "the hybrid group's 5120-byte payload maps to its two runs");
+  check(layouts.count(4096) == 1, "the window group's payload maps too");
+
+  // 4096 bytes laid out two ways: the writer cannot tell which a payload of
+  // that size is, so it must not pick either.
+  const std::vector<PlaneRun> clash = {{1024, 2}, {512, 4}};
+  const auto ambiguous = record_layouts_by_payload({window, clash, hybrid});
+  check(ambiguous.count(4096) == 0,
+        "a size two groups share with different runs has no layout");
+  check(ambiguous.count(5120) == 1, "other sizes are unaffected");
+
+  const ShardPlan chosen =
+      choose_shard_plan(5120, layouts, kMiB, kMiB, kMiB, /*plane_bytes=*/0);
+  check(chosen.runs.size() == 2 && chosen.nseg == 6,
+        "a known payload size is written with its layered plan");
+  const ShardPlan unknown =
+      choose_shard_plan(4096, ambiguous, kMiB, kMiB, kMiB, /*plane_bytes=*/0);
+  check(unknown.runs.empty() && unknown.plane_b == 0 && unknown.nseg == 1,
+        "an ambiguous size falls back to the byte-count plan");
+
+  bool threw = false;
+  try {
+    record_layouts_by_payload({{{1024, 0}}});
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  check(threw, "a run with no planes is rejected");
+}
+
+void test_runs_round_trip_through_the_meta_record() {
+  std::cout << "\nencoding runs for the meta record\n";
+
+  const ShardPlan plan = make_layered_shard_plan(kHybridRuns, kMiB);
+  const std::string encoded = encode_shard_runs(plan.runs);
+  check(encoded == "1114112:557056:16,98304:98304:24",
+        "runs encode as plane_b:seg_b:planes, comma separated");
+
+  ShardPlan decoded;
+  decoded.nseg = plan.nseg;
+  decoded.runs = decode_shard_runs(encoded);
+  const size_t total = layered_payload_bytes(kHybridRuns);
+  check(same_records(decoded, plan, total),
+        "a reader recovers every record's range from the meta record alone");
+
+  bool accepted = true;
+  try {
+    require_consistent_runs(decoded, total);
+  } catch (const std::invalid_argument&) {
+    accepted = false;
+  }
+  check(accepted, "runs written by the writer pass the reader's check");
+
+  // What a reader must refuse: runs decoded intact that describe a different
+  // object, from a corrupt or mismatched meta record.
+  struct Corrupt {
+    std::string what;
+    ShardPlan plan;
+    size_t total;
+  };
+  ShardPlan wrong_count = decoded;
+  wrong_count.nseg += 1;
+  ShardPlan wrong_seg = decoded;
+  wrong_seg.runs[1].seg_b = kHybridRuns[1].plane_bytes / 2;
+  const std::vector<Corrupt> corrupt = {
+      {"a size the runs do not cover", decoded, total + 1},
+      {"a record count the runs do not imply", wrong_count, total},
+      {"a record size that changes the count", wrong_seg, total},
+  };
+  for (const Corrupt& c : corrupt) {
+    bool threw = false;
+    try {
+      require_consistent_runs(c.plan, c.total);
+    } catch (const std::invalid_argument&) {
+      threw = true;
+    }
+    check(threw, "the reader refuses runs with " + c.what);
+  }
+
+  for (const std::string bad :
+       {"", "1:1", "1:1:1:1", "0:1:1", "1:0:1", "1:1:0", "2:3:1", "a:1:1",
+        "1:1:1,", ",1:1:1", "1:-1:1", "4:4:99999999999",
+        "99999999999999999999999:1:1"}) {
+    bool threw = false;
+    try {
+      decode_shard_runs(bad);
+    } catch (const std::invalid_argument&) {
+      threw = true;
+    }
+    check(threw, "malformed runs '" + bad + "' are rejected");
+  }
+}
+
+void test_invalid_layered_input_is_rejected() {
+  std::cout << "\ninvalid layered input\n";
+
+  const std::vector<std::vector<PlaneRun>> bad_runs = {
+      {}, {{0, 1}}, {{1024, 0}}};
+  for (const std::vector<PlaneRun>& runs : bad_runs) {
+    bool threw = false;
+    try {
+      make_layered_shard_plan(runs, kMiB);
+    } catch (const std::invalid_argument&) {
+      threw = true;
+    }
+    check(threw, "runs with no planes or a zero plane size are rejected");
+  }
+
+  bool threw = false;
+  try {
+    make_layered_shard_plan({{1024, 1}}, 0);
+  } catch (const std::invalid_argument&) {
+    threw = true;
+  }
+  check(threw, "a zero record cap is rejected");
+}
+
 }  // namespace
 
 int main() {
@@ -356,6 +631,12 @@ int main() {
     test_a_plane_larger_than_the_cap_is_split_evenly();
     test_a_plane_that_does_not_divide_evenly_ends_in_a_short_record();
     test_invalid_input_is_rejected();
+    test_hybrid_kernel_groups_get_plane_aligned_records();
+    test_a_short_last_piece_in_a_later_run();
+    test_uniform_runs_are_identical_to_the_uniform_plan();
+    test_payload_size_picks_the_layout();
+    test_runs_round_trip_through_the_meta_record();
+    test_invalid_layered_input_is_rejected();
   } catch (const std::exception& e) {
     std::cerr << "EXCEPTION: " << e.what() << "\n";
     return 1;

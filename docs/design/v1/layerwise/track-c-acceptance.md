@@ -2,7 +2,9 @@
 
 Read [exercise-goal.md](exercise-goal.md) for why, then
 [system-design.md](system-design.md) for how the tracks fit together. This
-document is what Track C is responsible for and how we will know it is done.
+document is what Track C is responsible for and how we will know it is done;
+[track-c-status.md](track-c-status.md) is where each criterion stands and
+what is blocked by whom.
 
 ## What this track is for
 
@@ -59,11 +61,20 @@ encodes `(generation << 16) | slot`, giving 65536 slots and 16 bits of
 generation. Test a multi-node plan and assert global uniqueness; per-node
 numbering passes a single-node test and corrupts a multi-node fetch.
 
-### C5. Plans respect the per-command sink cap
+### C5. Plans stay inside the request's slot space
 
-The plan is expressible within each node's advertised `max_sinks` (default
-256), and a plan that would exceed the slot space is rejected at construction
-with a clear error rather than truncated.
+A request addresses at most 65536 slots (`MAX_SLOTS_PER_REQUEST`), because
+the immediate has 16 bits of slot index. `LayerFetchPlan` rejects a larger
+plan at construction with a clear error rather than truncating it, whether
+the planner built it or a test did; a truncated or wrapped plan would credit
+one slot's arrival to another.
+
+The per-command sink cap is not the planner's concern. Each node advertises
+`max_sinks` (default 256) in its `kv-sink-register` reply, which only the
+transport sees, and the transport splits a node's sinks into commands that
+fit (Track A's A5). A plan never fails because of it. A plan that fits the
+slot space but exceeds what the device can accept in one fetch is refused by
+the transport with `PlanTooLargeError` instead.
 
 ### C6. The pump is correct under out-of-order arrival
 
@@ -85,6 +96,13 @@ covered; keep it green.
 `tests/v1/layerwise/` grows as A and B find cases the contract did not pin. It
 is written against the public surface only, and it stays that way -- it is the
 example both other tracks copy.
+
+`test_arrival_source_conformance.py` runs once per source registered in
+`SOURCE_HARNESS_FACTORIES` (`tests/v1/layerwise/conftest.py`). Each entry
+pairs a fresh source with an `ArrivalDriver` that lands and declines slots by
+index, which is how the suite pins slot-level rules -- a layer stays
+`PENDING` until its last slot lands, a late slot from an abandoned generation
+is not credited -- for every implementation, not just the scripted one.
 
 ### C9. End-to-end integration
 

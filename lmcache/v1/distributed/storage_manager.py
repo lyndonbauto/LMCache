@@ -6,7 +6,7 @@ Distributed multi-tier storage manager for MP mode
 # Standard
 from contextlib import contextmanager
 from dataclasses import replace
-from typing import Iterator, Literal, Optional
+from typing import Iterator, Literal, Optional, Sequence
 import threading
 import time
 
@@ -60,6 +60,8 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
     create_store_policy,
 )
+from lmcache.v1.layerwise.contract import LayerFetchPlan
+from lmcache.v1.layerwise.planner import ChunkPlacement
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -782,22 +784,23 @@ class StorageManager:
             )
 
     def begin_pipelined_fetch(
-        self,
-        placements: list[object],
-        chunk_nodes: list[object],
-        slot_digests: list[object],
+        self, plan: LayerFetchPlan, placements: Sequence[ChunkPlacement]
     ) -> int:
         """Ask L2 adapters to start a pipelined fetch.
 
-        Returns the first non-zero generation reported by an adapter, or ``0``
-        when no adapter supports pipelined fetch.
+        Args:
+            plan: Every slot the fetch expects, each naming its record by
+                user key.
+            placements: The placements ``plan`` was built from.
+
+        Returns:
+            The first non-zero generation reported by an adapter, or ``0``
+            when no adapter supports pipelined fetch.
         """
         with self._adapters_lock:
             adapters = list(self._l2_adapters.values())
         for adapter in adapters:
-            generation = adapter.begin_pipelined_fetch(
-                placements, chunk_nodes, slot_digests
-            )
+            generation = adapter.begin_pipelined_fetch(plan, placements)
             if generation != 0:
                 return generation
         return 0

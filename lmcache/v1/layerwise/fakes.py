@@ -15,6 +15,8 @@ a bug in the real implementation, not in its own assumptions.
 
 # Standard
 from collections.abc import Sequence
+from enum import Enum
+from typing import Protocol, runtime_checkable
 import threading
 
 # Local
@@ -28,14 +30,110 @@ from .contract import (
 )
 
 
+@runtime_checkable
+class ArrivalDriver(Protocol):
+    """Makes slots of a :class:`LayerArrivalSource`'s fetch land or fail.
+
+    The conformance suite in ``tests/v1/layerwise/`` drives every source
+    implementation through this, so the same tests pin the same behaviour for
+    the scripted source and a real transport. A real transport's driver feeds
+    what the fabric would deliver -- an encoded immediate for a landed slot, a
+    node's decline for a refused one -- into the real session, without a
+    fabric.
+
+    Slots are named by index, the position in :attr:`LayerFetchPlan.slots`,
+    because that is what the wire carries.
+
+    Like the wire, a driver cannot fail on a stale arrival: a slot quoting a
+    generation that is not the active fetch must be dropped, not raised,
+    since a real late write has no caller to raise to.
+    """
+
+    def land_slot(self, slot_index: int, generation: int) -> None:
+        """Deliver one slot's data, as the fabric would.
+
+        Args:
+            slot_index: Position of the slot in the fetch's plan.
+            generation: The generation the arrival is tagged with.
+        """
+        ...
+
+    def decline_slot(self, slot_index: int, generation: int) -> None:
+        """Report that a node refused or lost one slot.
+
+        Args:
+            slot_index: Position of the slot in the fetch's plan.
+            generation: The generation the reply is tagged with.
+        """
+        ...
+
+
+class LayerWaitOutcome(Enum):
+    """What a consumer waiting on one layer of a load would see right now."""
+
+    #: The layer's copy was issued; a waiter proceeds.
+    READY = "ready"
+    #: The copy has not been issued yet; a waiter keeps waiting.
+    PENDING = "pending"
+    #: The load was abandoned before the copy was issued; a waiter fails
+    #: instead of hanging.
+    FAILED = "failed"
+
+
+@runtime_checkable
+class LoadObserver(Protocol):
+    """Reads what a :class:`LayerLoadSink` has done, as its consumers see it.
+
+    The conformance suite in ``tests/v1/layerwise/`` checks every sink
+    through this, so the same tests pin the same behaviour for the recording
+    sink and the real loader. The real loader's observer reads the state the
+    GPU worker polls -- the generation, the watermark and the failure flag --
+    without a GPU worker.
+
+    Neither method blocks.
+    """
+
+    def issued_layers(self, generation: int) -> tuple[int, ...]:
+        """Return the layers whose copies were issued for one load.
+
+        Args:
+            generation: The generation passed to ``begin_load``.
+
+        Returns:
+            Global layer indices in issue order; empty for a generation that
+            was never begun.
+        """
+        ...
+
+    def wait_outcome(self, layer_id: int, generation: int) -> LayerWaitOutcome:
+        """Return what a consumer waiting on one layer would see now.
+
+        Args:
+            layer_id: Global layer index in the model, one the load covers.
+            generation: The generation the consumer is waiting on.
+
+        Returns:
+            ``READY`` once the layer's copy was issued, ``FAILED`` if the load
+            was abandoned before that, ``PENDING`` otherwise -- including for
+            a generation that has not been begun yet. A layer issued before
+            its load was abandoned may report either ``READY`` or ``FAILED``;
+            the real loader fails every wait once the failure flag is set.
+        """
+        ...
+
+
 class ScriptedLayerArrivalSource:
     """A transport whose arrivals are driven by the test, not by hardware.
 
-    Every layer starts ``PENDING``. A test calls :meth:`deliver_layer` or
-    :meth:`decline_layer` to move it on. Because nothing arrives on its own,
-    a test that forgets to deliver a layer hangs its pump rather than passing
-    by accident, which is the behaviour that makes missing-arrival bugs
-    visible.
+    Every layer starts ``PENDING``. A layer is ``RESIDENT`` once every one of
+    its slots has landed, and ``UNSERVABLE`` as soon as any of them is
+    declined. The first reply for a slot is final, as in the native session:
+    a landing after a decline, or a decline after a landing, is a duplicate
+    and is dropped. A test moves slots on with :meth:`land_slot` and
+    :meth:`decline_slot`, or a whole layer at once with :meth:`deliver_layer`
+    and :meth:`decline_layer`. Because nothing arrives on its own, a test
+    that forgets to deliver a layer hangs its pump rather than passing by
+    accident, which is the behaviour that makes missing-arrival bugs visible.
 
     Safe to drive from a thread other than the one polling it, so a test can
     run a real pump on one thread and script arrivals from another.
@@ -46,12 +144,14 @@ class ScriptedLayerArrivalSource:
         self._lock = threading.Lock()
         self._generation = 0
         self._next_generation = 1
-        self._status: dict[int, LayerArrivalStatus] = {}
+        self._slot_layers: tuple[int, ...] = ()
+        self._pending_slots: dict[int, set[int]] = {}
+        self._declined_layers: set[int] = set()
         self._finished_generations: list[int] = []
         self._abandoned_generations: list[int] = []
 
     def begin_fetch(self, plan: LayerFetchPlan) -> int:
-        """Start a scripted fetch with every layer pending.
+        """Start a scripted fetch with every slot outstanding.
 
         Args:
             plan: The slots to pretend to fetch.
@@ -69,9 +169,11 @@ class ScriptedLayerArrivalSource:
                 )
             self._generation = self._next_generation
             self._next_generation += 1
-            self._status = {
-                layer_id: LayerArrivalStatus.PENDING for layer_id in plan.layer_ids()
-            }
+            self._slot_layers = tuple(slot.layer_id for slot in plan.slots)
+            self._pending_slots = {layer_id: set() for layer_id in plan.layer_ids()}
+            for slot_index, layer_id in enumerate(self._slot_layers):
+                self._pending_slots[layer_id].add(slot_index)
+            self._declined_layers = set()
             return self._generation
 
     def poll_layer(self, layer_id: int, generation: int) -> LayerArrivalStatus:
@@ -82,7 +184,8 @@ class ScriptedLayerArrivalSource:
             generation: The generation returned by :meth:`begin_fetch`.
 
         Returns:
-            Whatever the test last scripted for this layer.
+            ``UNSERVABLE`` if any slot of the layer was declined, else
+            ``RESIDENT`` if all of them landed, else ``PENDING``.
 
         Raises:
             StaleGenerationError: If ``generation`` is not the active fetch.
@@ -90,7 +193,12 @@ class ScriptedLayerArrivalSource:
         """
         with self._lock:
             self._require_active(generation)
-            return self._require_layer(layer_id)
+            pending = self._require_layer(layer_id)
+            if layer_id in self._declined_layers:
+                return LayerArrivalStatus.UNSERVABLE
+            if not pending:
+                return LayerArrivalStatus.RESIDENT
+            return LayerArrivalStatus.PENDING
 
     def finish_fetch(self, generation: int) -> None:
         """Record a clean completion and clear the active fetch.
@@ -119,8 +227,52 @@ class ScriptedLayerArrivalSource:
             if generation == self._generation:
                 self._clear()
 
+    def land_slot(self, slot_index: int, generation: int) -> None:
+        """Land one slot of the active fetch.
+
+        An arrival quoting any other generation, or arriving with no fetch
+        active, is dropped, as a late write on the wire would be. So is an
+        arrival for a slot that already landed or was declined.
+
+        Args:
+            slot_index: Position of the slot in the active plan.
+            generation: The generation the arrival is tagged with.
+
+        Raises:
+            ValueError: If ``slot_index`` is outside the active plan.
+        """
+        with self._lock:
+            if generation == 0 or generation != self._generation:
+                return
+            layer_id = self._layer_of_slot(slot_index)
+            self._pending_slots[layer_id].discard(slot_index)
+
+    def decline_slot(self, slot_index: int, generation: int) -> None:
+        """Decline one slot of the active fetch, making its layer unservable.
+
+        A reply quoting any other generation is dropped, and so is a decline
+        for a slot that already landed or was declined: the first reply for a
+        slot is final.
+
+        Args:
+            slot_index: Position of the slot in the active plan.
+            generation: The generation the reply is tagged with.
+
+        Raises:
+            ValueError: If ``slot_index`` is outside the active plan.
+        """
+        with self._lock:
+            if generation == 0 or generation != self._generation:
+                return
+            layer_id = self._layer_of_slot(slot_index)
+            pending = self._pending_slots[layer_id]
+            if slot_index not in pending:
+                return
+            pending.discard(slot_index)
+            self._declined_layers.add(layer_id)
+
     def deliver_layer(self, layer_id: int) -> None:
-        """Mark ``layer_id`` resident, as if its last slot had landed.
+        """Land every remaining slot of ``layer_id`` in the active fetch.
 
         Args:
             layer_id: Global layer index in the model.
@@ -129,7 +281,9 @@ class ScriptedLayerArrivalSource:
             LayerNotInPlanError: If the plan does not cover ``layer_id``.
             LayerwiseContractError: If no fetch is active.
         """
-        self._set_status(layer_id, LayerArrivalStatus.RESIDENT)
+        with self._lock:
+            self._require_any_active()
+            self._require_layer(layer_id).clear()
 
     def decline_layer(self, layer_id: int) -> None:
         """Mark ``layer_id`` unservable, as if a node had refused a slot.
@@ -141,7 +295,10 @@ class ScriptedLayerArrivalSource:
             LayerNotInPlanError: If the plan does not cover ``layer_id``.
             LayerwiseContractError: If no fetch is active.
         """
-        self._set_status(layer_id, LayerArrivalStatus.UNSERVABLE)
+        with self._lock:
+            self._require_any_active()
+            self._require_layer(layer_id)
+            self._declined_layers.add(layer_id)
 
     def finished_generations(self) -> tuple[int, ...]:
         """Return the generations that were cleanly finished, in order.
@@ -161,22 +318,33 @@ class ScriptedLayerArrivalSource:
         with self._lock:
             return tuple(self._abandoned_generations)
 
-    def _set_status(self, layer_id: int, status: LayerArrivalStatus) -> None:
-        """Script one layer's status.
-
-        Args:
-            layer_id: Global layer index in the model.
-            status: The status future polls should report.
+    def _require_any_active(self) -> None:
+        """Reject scripting a layer when there is no fetch to script.
 
         Raises:
-            LayerNotInPlanError: If the plan does not cover ``layer_id``.
             LayerwiseContractError: If no fetch is active.
         """
-        with self._lock:
-            if self._generation == 0:
-                raise LayerwiseContractError("no fetch is active")
-            self._require_layer(layer_id)
-            self._status[layer_id] = status
+        if self._generation == 0:
+            raise LayerwiseContractError("no fetch is active")
+
+    def _layer_of_slot(self, slot_index: int) -> int:
+        """Return the layer a slot of the active plan carries.
+
+        Args:
+            slot_index: Position of the slot in the active plan.
+
+        Returns:
+            The slot's global layer index.
+
+        Raises:
+            ValueError: If ``slot_index`` is outside the active plan.
+        """
+        if not 0 <= slot_index < len(self._slot_layers):
+            raise ValueError(
+                f"slot {slot_index} is outside the active plan's "
+                f"{len(self._slot_layers)} slots"
+            )
+        return self._slot_layers[slot_index]
 
     def _require_active(self, generation: int) -> None:
         """Reject a call that does not name the active fetch.
@@ -192,26 +360,58 @@ class ScriptedLayerArrivalSource:
                 f"generation {generation} is not active (active is {self._generation})"
             )
 
-    def _require_layer(self, layer_id: int) -> LayerArrivalStatus:
-        """Return a layer's status, rejecting layers outside the plan.
+    def _require_layer(self, layer_id: int) -> set[int]:
+        """Return a layer's outstanding slots, rejecting layers outside the plan.
 
         Args:
             layer_id: Global layer index in the model.
 
         Returns:
-            The layer's current status.
+            The live set of the layer's slot indices that have not landed.
 
         Raises:
             LayerNotInPlanError: If the plan does not cover ``layer_id``.
         """
-        if layer_id not in self._status:
+        if layer_id not in self._pending_slots:
             raise LayerNotInPlanError(f"layer {layer_id} is not in this fetch plan")
-        return self._status[layer_id]
+        return self._pending_slots[layer_id]
 
     def _clear(self) -> None:
         """Drop all state for the active fetch."""
         self._generation = 0
-        self._status = {}
+        self._slot_layers = ()
+        self._pending_slots = {}
+        self._declined_layers = set()
+
+
+class ScriptedArrivalDriver:
+    """The :class:`ArrivalDriver` for a :class:`ScriptedLayerArrivalSource`."""
+
+    def __init__(self, source: ScriptedLayerArrivalSource) -> None:
+        """Build a driver for one scripted source.
+
+        Args:
+            source: The source whose slots this driver lands and declines.
+        """
+        self._source = source
+
+    def land_slot(self, slot_index: int, generation: int) -> None:
+        """Land one slot; see :meth:`ScriptedLayerArrivalSource.land_slot`.
+
+        Args:
+            slot_index: Position of the slot in the fetch's plan.
+            generation: The generation the arrival is tagged with.
+        """
+        self._source.land_slot(slot_index, generation)
+
+    def decline_slot(self, slot_index: int, generation: int) -> None:
+        """Decline one slot; see :meth:`ScriptedLayerArrivalSource.decline_slot`.
+
+        Args:
+            slot_index: Position of the slot in the fetch's plan.
+            generation: The generation the reply is tagged with.
+        """
+        self._source.decline_slot(slot_index, generation)
 
 
 class RecordingLayerLoadSink:
@@ -221,6 +421,8 @@ class RecordingLayerLoadSink:
     contract's ordering rule, so a caller that issues layers out of order
     fails here rather than producing a silently wrong result on real hardware,
     where out-of-order issue merely makes a layer look ready early.
+
+    It is also its own :class:`LoadObserver`.
     """
 
     def __init__(self) -> None:
@@ -231,25 +433,35 @@ class RecordingLayerLoadSink:
         self._loaded: list[int] = []
         self._finished_generations: list[int] = []
         self._abandoned_generations: list[int] = []
+        self._issued_by_generation: dict[int, list[int]] = {}
+        self._failed_generations: set[int] = set()
 
     def begin_load(self, generation: int, layer_ids: Sequence[int]) -> None:
         """Record the start of a load.
 
         Args:
             generation: The fetch generation these layers belong to.
-            layer_ids: Global layer indices in the order they will be loaded.
+            layer_ids: Global layer indices in the order they will be loaded;
+                strictly ascending.
 
         Raises:
-            LayerwiseContractError: If a load is already in progress.
+            LayerwiseContractError: If a load is already in progress, or
+                ``layer_ids`` is not strictly ascending.
         """
         if self._generation != 0:
             raise LayerwiseContractError(
                 f"load for generation {self._generation} is still active"
             )
+        if any(a >= b for a, b in zip(layer_ids, layer_ids[1:], strict=False)):
+            raise LayerwiseContractError(
+                f"layers must be strictly ascending, got {list(layer_ids)}"
+            )
         self._generation = generation
         self._expected = tuple(layer_ids)
         self._next_index = 0
         self._loaded = []
+        self._issued_by_generation[generation] = []
+        self._failed_generations.discard(generation)
 
     def load_layer(self, layer_id: int) -> None:
         """Record a copy of ``layer_id``.
@@ -275,6 +487,7 @@ class RecordingLayerLoadSink:
             raise LayerNotInPlanError(f"expected layer {expected} next, got {layer_id}")
         self._next_index += 1
         self._loaded.append(layer_id)
+        self._issued_by_generation[self._generation].append(layer_id)
 
     def finish_load(self, generation: int) -> None:
         """Record a clean completion.
@@ -308,8 +521,37 @@ class RecordingLayerLoadSink:
             generation: The generation passed to :meth:`begin_load`.
         """
         self._abandoned_generations.append(generation)
-        if generation == self._generation:
+        if generation == self._generation and generation != 0:
+            self._failed_generations.add(generation)
             self._reset()
+
+    def issued_layers(self, generation: int) -> tuple[int, ...]:
+        """Return the layers issued for one load; see :class:`LoadObserver`.
+
+        Args:
+            generation: The generation passed to :meth:`begin_load`.
+
+        Returns:
+            Global layer indices in issue order.
+        """
+        return tuple(self._issued_by_generation.get(generation, ()))
+
+    def wait_outcome(self, layer_id: int, generation: int) -> LayerWaitOutcome:
+        """Return what a waiter on one layer would see; see :class:`LoadObserver`.
+
+        Args:
+            layer_id: Global layer index in the model.
+            generation: The generation the waiter is waiting on.
+
+        Returns:
+            ``READY`` if the layer was issued for ``generation``, ``FAILED``
+            if that load was abandoned first, ``PENDING`` otherwise.
+        """
+        if layer_id in self._issued_by_generation.get(generation, ()):
+            return LayerWaitOutcome.READY
+        if generation in self._failed_generations:
+            return LayerWaitOutcome.FAILED
+        return LayerWaitOutcome.PENDING
 
     def loaded_layers(self) -> tuple[int, ...]:
         """Return the layers issued during the active or last-finished load.

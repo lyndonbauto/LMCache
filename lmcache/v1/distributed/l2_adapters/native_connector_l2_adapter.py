@@ -22,6 +22,7 @@ from __future__ import annotations
 
 # Standard
 from collections import defaultdict
+from collections.abc import Sequence
 from typing import Any
 import select
 import threading
@@ -35,6 +36,9 @@ from lmcache.v1.distributed.l2_adapters.base import (
     L2AdapterInterface,
     L2TaskId,
 )
+from lmcache.v1.layerwise.contract import LayerFetchPlan
+from lmcache.v1.layerwise.native_fetch import chunk_fetch_arguments
+from lmcache.v1.layerwise.planner import ChunkPlacement, record_plane_runs
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import create_event_notifier
 
@@ -45,15 +49,22 @@ def _native_object_group_layouts(
     group_layout_descs: dict[int, MemoryLayoutDesc],
     group_kernel_layer_indices: dict[int, list[list[int]]] | None,
 ) -> dict[int, dict[str, object]]:
-    """Build the native layout map consumed by ``set_object_group_layouts``."""
+    """Build the native layout map consumed by ``set_object_group_layouts``.
+
+    ``layer_indices`` is omitted for a group the caller gave none for: the
+    native side then numbers layers itself, whereas an empty list would be
+    rejected as not matching the group's shapes.
+    """
     native: dict[int, dict[str, object]] = {}
     for group_id, layout_desc in group_layout_descs.items():
-        layer_indices = (group_kernel_layer_indices or {}).get(group_id, [])
-        native[group_id] = {
+        group: dict[str, object] = {
             "shapes": [tuple(shape) for shape in layout_desc.shapes],
             "dtypes": [str(dtype) for dtype in layout_desc.dtypes],
-            "layer_indices": layer_indices,
         }
+        layer_indices = (group_kernel_layer_indices or {}).get(group_id)
+        if layer_indices:
+            group["layer_indices"] = layer_indices
+        native[group_id] = group
     return native
 
 
@@ -64,7 +75,7 @@ def _native_object_group_layouts(
 _KEY_SEP = "@"
 
 
-def _object_key_to_string(key: ObjectKey) -> str:
+def object_key_to_string(key: ObjectKey) -> str:
     """Serialize an ObjectKey to the native-connector wire format.
 
     Unsalted::
@@ -74,6 +85,12 @@ def _object_key_to_string(key: ObjectKey) -> str:
     Salted (trailing ``cache_salt``)::
 
         <model_name>@<kv_rank_hex>@<object_group_id_hex>@<chunk_hash_hex>@<cache_salt>
+
+    Args:
+        key: The object key to serialize.
+
+    Returns:
+        The string the native connector stores the object under.
     """
     base = (
         f"{key.model_name}{_KEY_SEP}{key.kv_rank:08x}"
@@ -82,6 +99,9 @@ def _object_key_to_string(key: ObjectKey) -> str:
     if key.cache_salt:
         return f"{base}{_KEY_SEP}{key.cache_salt}"
     return base
+
+
+_object_key_to_string = object_key_to_string
 
 
 def _obj_to_memoryview(
@@ -227,7 +247,36 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         group_layout_descs: dict[int, MemoryLayoutDesc],
         group_kernel_layer_indices: dict[int, list[list[int]]] | None = None,
     ) -> None:
-        """Forward object-group layouts to the native client when supported."""
+        """Forward object-group layouts to the native client when supported.
+
+        Two independent consumers, each called only if the client has it:
+
+        - ``set_record_layouts`` receives each object group's plane runs, so
+          the backend cuts records along its own kernel groups' planes and a
+          layer can be fetched without its neighbours' bytes -- the only way
+          to align a hybrid model, whose planes differ in size.
+        - ``set_object_group_layouts`` receives the full shapes and layer
+          indices, for the pipelined fetch planner.
+
+        Args:
+            group_layout_descs: One layout per object group id.
+            group_kernel_layer_indices: Global layer indices per kernel
+                group, keyed by object group id and parallel to that group's
+                shapes; forwarded to the pipelined fetch planner.
+
+        Raises:
+            ValueError: If a layout has no kernel groups or an unsupported
+                shape.
+        """
+        record_setter = getattr(self._client, "set_record_layouts", None)
+        if record_setter is not None:
+            runs = record_plane_runs(group_layout_descs)
+            record_setter(
+                [
+                    [(run.plane_bytes, run.planes) for run in runs[group_id]]
+                    for group_id in sorted(runs)
+                ]
+            )
         setter = getattr(self._client, "set_object_group_layouts", None)
         if setter is None:
             return
@@ -243,20 +292,34 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         return str(getter())
 
     def begin_pipelined_fetch(
-        self,
-        placements: list[object],
-        chunk_nodes: list[object],
-        slot_digests: list[object],
+        self, plan: LayerFetchPlan, placements: Sequence[ChunkPlacement]
     ) -> int:
-        """Issue a pipelined fetch through the native client when supported."""
-        issuer = getattr(self._client, "issue_pipelined_fetch", None)
+        """Issue a pipelined fetch through the native client when supported.
+
+        Records are handed over by user key; the native client derives each
+        digest itself.
+
+        Args:
+            plan: Every slot the fetch expects, in slot-number order.
+            placements: The placements ``plan`` was built from.
+
+        Returns:
+            The native request generation, or ``0`` when the client was built
+            without the pipelined path.
+
+        Raises:
+            ValueError: If one chunk is placed on more than one node, which
+                the native session cannot express.
+        """
+        issuer = getattr(self._client, "issue_pipelined_fetch_by_keys", None)
         if issuer is None:
             return 0
+        arguments = chunk_fetch_arguments(plan, placements)
         return int(
             issuer(
-                placements,
-                chunk_nodes,
-                slot_digests,
+                arguments.placements,
+                arguments.chunk_nodes,
+                arguments.slot_record_keys,
             )
         )
 

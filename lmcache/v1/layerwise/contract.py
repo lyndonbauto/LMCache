@@ -52,6 +52,13 @@ import types
 #: :meth:`LayerArrivalSource.begin_fetch` for a fetch that actually started.
 NO_GENERATION = 0
 
+#: Slots addressable by one request. The RDMA immediate carries 32 bits, split
+#: as ``(generation << 16) | slot``, so a request has 16 bits of slot index.
+#: Mirrors ``kMaxSlotsPerRequest`` in
+#: ``csrc/storage_backends/aerospike/layer_pipeline.h``; the two must agree,
+#: because the transport decodes what the plan numbers.
+MAX_SLOTS_PER_REQUEST = 0x10000
+
 
 class LayerwiseContractError(Exception):
     """Base class for violations of the layerwise contract."""
@@ -82,6 +89,21 @@ class LayerArrivalTimeoutError(LayerwiseContractError):
     """A layer did not arrive within the caller's deadline."""
 
 
+class PlanTooLargeError(LayerwiseContractError):
+    """A request is more than this transport can accept in one fetch.
+
+    Raised for a limit only the transport knows: by
+    :meth:`LayerArrivalSource.begin_fetch`, e.g. more slots than the device
+    can post receives for, or by the transport's chunk placer, e.g. a request
+    larger than any RDMA window. Distinct from its base class because the
+    caller has a response other than falling back: it can split the request
+    into smaller ones. A refusal that splitting would not fix, such as no
+    window being free right now, is a plain :class:`LayerwiseContractError`.
+    A caller that does not split can catch :class:`LayerwiseContractError`
+    and treat both alike.
+    """
+
+
 class LayerArrivalStatus(Enum):
     """Whether one layer of an in-flight fetch has landed in host memory.
 
@@ -107,23 +129,58 @@ class SlotPlacement:
     every slot carrying part of it has landed, which is why the plan is
     expressed as slots rather than as layers.
 
+    One slot is exactly one stored record, and ``(chunk_id, layer_id, plane,
+    piece)`` is that record's identity -- the same four fields the native
+    fetch path keys records by. There is deliberately no object group in that
+    key: a layer belongs to exactly one object group, so naming the layer
+    already names the group.
+
+    The record is named by its Aerospike *user key*, not its digest. Turning
+    a key into a digest (and a digest into a partition and a node) is the
+    client's job; carrying keys keeps that in one place and keeps the plan
+    independent of how the transport asks the server for a record.
+
     Attributes:
         layer_id: Global layer index in the model.
         chunk_id: Index of the KV chunk this range belongs to.
-        node_index: Index into the fetch's node list identifying which cluster
-            node holds this slot. Slot indices are request-scoped, so two
-            slots on different nodes still have distinct indices.
-        digest: Record digest the transport asks the node for.
+        node_index: Index into :attr:`LayerFetchPlan.node_names` identifying
+            which cluster node holds this slot. Slot indices are
+            request-scoped, so two slots on different nodes still have
+            distinct indices.
+        record_key: User key of the stored record this slot reads, e.g.
+            ``"<model>@<kv_rank:08x>@<object_group_id:x>@<chunk_hash>|s|3"``.
+        plane: Which K/V plane of the layer this range belongs to. Zero for a
+            format that stores a layer as a single plane.
+        piece: Which record of that plane this range is, counting from zero
+            in ascending offset order.
         offset: Byte offset of this range within the destination host buffer.
         length: Length of this range in bytes.
+
+    Raises:
+        ValueError: If the record key is empty, or ``plane`` or ``piece`` is
+            negative, since none of those name a record that exists.
     """
 
     layer_id: int
     chunk_id: int
     node_index: int
-    digest: bytes
+    record_key: str
+    plane: int
+    piece: int
     offset: int
     length: int
+
+    def __post_init__(self) -> None:
+        if not self.record_key:
+            raise ValueError(
+                f"slot for layer {self.layer_id} of chunk {self.chunk_id} has "
+                "an empty record key, which names no record"
+            )
+        if self.plane < 0 or self.piece < 0:
+            raise ValueError(
+                f"slot for layer {self.layer_id} of chunk {self.chunk_id} has "
+                f"a negative plane/piece ({self.plane}, {self.piece})"
+            )
 
 
 @dataclass(frozen=True)
@@ -137,25 +194,82 @@ class LayerFetchPlan:
     order without reaching into transport internals.
 
     Attributes:
-        slots: Every slot the fetch will request. Order is not significant;
-            layer order is given by :meth:`layer_ids`.
+        slots: Every slot the fetch will request. **Order is significant**: a
+            slot's index -- the value the RDMA immediate carries in its low 16
+            bits -- is its position in this tuple. That numbering therefore
+            spans the whole request rather than restarting per node, which is
+            what keeps two nodes' notifications distinguishable when they land
+            on one queue pair. Producers must be deterministic; consumers must
+            not reorder. Layer order is given separately by :meth:`layer_ids`,
+            so nothing needs to infer it from this order.
+        node_names: The cluster nodes this fetch talks to, in the order
+            :attr:`SlotPlacement.node_index` numbers them. Carried on the
+            plan so the transport can resolve a slot to a node without
+            holding the planner's request, which is a Track C type it should
+            not depend on.
 
     Raises:
-        ValueError: If ``slots`` is empty, or any slot has a non-positive
-            length, since neither can describe a fetch that could complete.
+        ValueError: If ``slots`` is empty or holds more than
+            :data:`MAX_SLOTS_PER_REQUEST` slots, if any slot has a
+            non-positive length, if ``node_names`` is empty or repeats a
+            name, or if a slot names a node outside ``node_names`` -- the
+            last of which would otherwise surface as a fetch addressed to the
+            wrong node. A plan past the slot ceiling is refused rather than
+            truncated: the extra slots would reuse the low 16 bits of earlier
+            ones, and their arrivals would be credited to the wrong slot.
     """
 
     slots: tuple[SlotPlacement, ...]
+    node_names: tuple[str, ...]
 
     def __post_init__(self) -> None:
         if not self.slots:
             raise ValueError("a fetch plan must contain at least one slot")
+        if len(self.slots) > MAX_SLOTS_PER_REQUEST:
+            raise ValueError(
+                f"fetch plan has {len(self.slots)} slots, but a request can "
+                f"address at most {MAX_SLOTS_PER_REQUEST}; fetch fewer chunks "
+                "per request"
+            )
+        if not self.node_names:
+            raise ValueError("a fetch plan must name at least one node")
+        if len(set(self.node_names)) != len(self.node_names):
+            raise ValueError(
+                f"fetch plan repeats a node name: {self.node_names}, so a "
+                "slot's node index would be ambiguous"
+            )
         for slot in self.slots:
             if slot.length <= 0:
                 raise ValueError(
                     f"slot for layer {slot.layer_id} has non-positive "
                     f"length {slot.length}"
                 )
+            if not 0 <= slot.node_index < len(self.node_names):
+                raise ValueError(
+                    f"slot for layer {slot.layer_id} names node index "
+                    f"{slot.node_index}, but the plan has "
+                    f"{len(self.node_names)} nodes"
+                )
+
+    def node_name_for(self, slot: SlotPlacement) -> str:
+        """Return the cluster node holding ``slot``.
+
+        Args:
+            slot: A slot of this plan.
+
+        Returns:
+            The node name :attr:`SlotPlacement.node_index` refers to.
+
+        Raises:
+            IndexError: If ``slot`` names a node this plan does not have,
+                which means it came from a different plan.
+        """
+        if not 0 <= slot.node_index < len(self.node_names):
+            raise IndexError(
+                f"slot node index {slot.node_index} is not in this plan's "
+                f"{len(self.node_names)} nodes; the slot is from another plan"
+            )
+        return self.node_names[slot.node_index]
 
     def layer_ids(self) -> tuple[int, ...]:
         """Return the layers this fetch covers, in ascending layer order.
@@ -220,6 +334,8 @@ class LayerArrivalSource(Protocol):
             Every later call about this fetch must quote it.
 
         Raises:
+            PlanTooLargeError: If ``plan`` exceeds a limit of this transport,
+                such as the device's receive-queue depth. Nothing was issued.
             LayerwiseContractError: If a fetch is already active, or the
                 backend cannot serve a pipelined fetch at all. Callers that
                 can fall back should catch this; returning a sentinel instead
@@ -285,12 +401,23 @@ class LayerLoadSink(Protocol):
     def begin_load(self, generation: int, layer_ids: Sequence[int]) -> None:
         """Prepare to load ``layer_ids`` for one fetch.
 
+        ``layer_ids`` is strictly ascending, as
+        :meth:`LayerFetchPlan.layer_ids` returns it. That is also the order a
+        loader's launch schedule follows (global layer index, even for hybrid
+        models), so a loader that tracks readiness by position in its schedule
+        stays correct. It must refuse any other order rather than accept it:
+        issuing layers 0 and 2 of ``(0, 2, 1, 3)`` would advance such a loader
+        two positions and report layer 1 ready before its copy was queued.
+
         Args:
             generation: The fetch generation these layers belong to.
-            layer_ids: Global layer indices in the order they will be loaded.
+            layer_ids: Global layer indices in the order they will be loaded;
+                strictly ascending.
 
         Raises:
-            LayerwiseContractError: If a load is already in progress.
+            LayerwiseContractError: If a load is already in progress, or
+                ``layer_ids`` is not strictly ascending. Nothing is issued and
+                any active load is left as it was.
         """
         ...
 

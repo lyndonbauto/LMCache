@@ -13,9 +13,15 @@ import torch
 
 
 class _FakeKVLayerGroupsManager:
-    """Minimal manager stub: one full-attention object group."""
+    """Minimal manager stub: one full-attention object group of two layers."""
 
     num_object_groups: int = 1
+    kernel_groups: list[types.SimpleNamespace] = [
+        types.SimpleNamespace(layer_indices=[0, 1])
+    ]
+    object_groups: list[types.SimpleNamespace] = [
+        types.SimpleNamespace(kernel_group_indices=[0])
+    ]
 
     def get_attn_desc(self) -> Any:
         """One full-attention object group."""
@@ -51,7 +57,21 @@ class _FakeDeviceHostFuncDispatcher:
 
 @pytest.fixture
 def stub_lmcache_native() -> Any:
-    """Stub native modules so MP server imports work in source-only test runs."""
+    """Stub native modules so MP server imports work in source-only test runs.
+
+    The stub covers only what registration touches, so it is used only when
+    the real extension is missing; otherwise an import it does not cover
+    would fail depending on which tests ran first.
+    """
+    try:
+        # First Party
+        import lmcache.lmcache_native  # noqa: F401
+    except ImportError:
+        pass
+    else:
+        with patch.dict(sys.modules, {"cupy": MagicMock()}):
+            yield
+        return
     module = types.ModuleType("lmcache.lmcache_native")
     module_any = cast(Any, module)
     module_any.PageBufferShapeDesc = type("PageBufferShapeDesc", (), {})
@@ -71,6 +91,168 @@ def stub_lmcache_native() -> Any:
         },
     ):
         yield
+
+
+def _registration_module(
+    monkeypatch: pytest.MonkeyPatch, ctx: Any, layout_desc: Any
+) -> Any:
+    """Build the transfer module with CUDA-touching collaborators stubbed out.
+
+    Args:
+        monkeypatch: Pytest monkeypatch fixture.
+        ctx: Engine context the module is built with.
+        layout_desc: Layout descriptor every object group reports.
+
+    Returns:
+        A ``LMCacheDrivenTransferModule`` ready for ``register_kv_cache``.
+    """
+    # First Party
+    from lmcache.v1.multiprocess.modules import (
+        lmcache_driven_transfer as lmcache_driven_transfer_mod,
+    )
+
+    monkeypatch.setattr(
+        lmcache_driven_transfer_mod,
+        "DeviceHostFuncDispatcher",
+        _FakeDeviceHostFuncDispatcher,
+    )
+    monkeypatch.setattr(
+        lmcache_driven_transfer_mod,
+        "create_cache_context",
+        lambda *args, **kwargs: _FakeGPUContext(),
+    )
+    monkeypatch.setattr(
+        lmcache_driven_transfer_mod,
+        "get_layout_desc",
+        lambda *args, **kwargs: layout_desc,
+    )
+    monkeypatch.setattr(
+        lmcache_driven_transfer_mod.torch_dev,
+        "empty_cache",
+        lambda: None,
+        raising=False,
+    )
+    return lmcache_driven_transfer_mod.LMCacheDrivenTransferModule(ctx)
+
+
+def test_registration_hands_storage_the_layout_and_layer_indices(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_lmcache_native: Any,
+) -> None:
+    """Storage learns each object group's layout when a worker registers.
+
+    Without this nothing ever tells the storage backend how a payload is laid
+    out, so every model -- uniform or hybrid -- is sharded by byte count and
+    no record follows a layer boundary.
+    """
+    # First Party
+    from lmcache.utils import EngineType
+    from lmcache.v1.distributed.api import MemoryLayoutDesc
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    layout_desc = MemoryLayoutDesc(
+        shapes=[torch.Size([2, 2, 16, 32])], dtypes=[torch.float16]
+    )
+    ctx = MagicMock()
+    ctx.chunk_size = 16
+    ctx.use_layerwise = False
+    ctx.layout_desc_registry = LayoutDescRegistry()
+
+    module = _registration_module(monkeypatch, ctx, layout_desc)
+    module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [], [])
+
+    ctx.storage_manager.set_object_group_layouts.assert_called_once_with(
+        {0: layout_desc}, {0: [[0, 1]]}
+    )
+
+
+def test_a_layout_storage_rejects_does_not_fail_registration(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_lmcache_native: Any,
+) -> None:
+    """Storage falls back to byte-count records; the worker still registers."""
+    # First Party
+    from lmcache.utils import EngineType
+    from lmcache.v1.distributed.api import MemoryLayoutDesc
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    layout_desc = MemoryLayoutDesc(
+        shapes=[torch.Size([2, 2, 16, 32])], dtypes=[torch.float16]
+    )
+    ctx = MagicMock()
+    ctx.chunk_size = 16
+    ctx.use_layerwise = False
+    ctx.layout_desc_registry = LayoutDescRegistry()
+    ctx.storage_manager.set_object_group_layouts.side_effect = ValueError("bad")
+
+    module = _registration_module(monkeypatch, ctx, layout_desc)
+    module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [], [])
+
+    assert ctx.layout_desc_registry.find("model", 1) is layout_desc
+
+
+def test_registration_builds_the_fetch_layout_until_the_last_worker_leaves(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_lmcache_native: Any,
+) -> None:
+    """The fetch layout is built from the published layout, once per model.
+
+    It must describe the same bytes storage was told about, and outlive one
+    worker's unregister while another still serves the model.
+    """
+    # First Party
+    from lmcache.utils import EngineType
+    from lmcache.v1.distributed.api import MemoryLayoutDesc
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    layout_desc = MemoryLayoutDesc(
+        shapes=[torch.Size([2, 2, 16, 32])], dtypes=[torch.float16]
+    )
+    ctx = MagicMock()
+    ctx.chunk_size = 16
+    ctx.use_layerwise = False
+    ctx.layout_desc_registry = LayoutDescRegistry()
+
+    module = _registration_module(monkeypatch, ctx, layout_desc)
+    module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [], [])
+    module.register_kv_cache(2, [], "model", 1, EngineType.VLLM, {}, [], [])
+
+    fetch_model = module.fetch_model("model", 1)
+    assert fetch_model.layout.layer_ids() == (0, 1)
+    assert fetch_model.layout.object_group_bytes(0) == 2 * 2 * 16 * 32 * 2
+    assert fetch_model.attn_desc.num_chunks_in_sw == [-1]
+
+    module.unregister_kv_cache(1)
+    assert module.fetch_model("model", 1) is fetch_model
+    module.unregister_kv_cache(2)
+    with pytest.raises(KeyError, match="no layerwise fetch layout"):
+        module.fetch_model("model", 1)
+
+
+def test_a_layout_that_cannot_be_planned_does_not_fail_registration(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_lmcache_native: Any,
+) -> None:
+    """An unplannable layout loses layerwise fetch, not the registration."""
+    # First Party
+    from lmcache.utils import EngineType
+    from lmcache.v1.distributed.api import MemoryLayoutDesc
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    layout_desc = MemoryLayoutDesc(shapes=[torch.Size([64])], dtypes=[torch.float16])
+    ctx = MagicMock()
+    ctx.chunk_size = 16
+    ctx.use_layerwise = False
+    ctx.layout_desc_registry = LayoutDescRegistry()
+    ctx.storage_manager.set_object_group_layouts.side_effect = ValueError("bad")
+
+    module = _registration_module(monkeypatch, ctx, layout_desc)
+    module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [], [])
+
+    assert ctx.layout_desc_registry.find("model", 1) is layout_desc
+    with pytest.raises(KeyError):
+        module.fetch_model("model", 1)
+    module.unregister_kv_cache(1)
 
 
 def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(

@@ -17,6 +17,8 @@ transport needs no GPU and the loader needs no RDMA fabric.
 
 # Local
 from .contract import (
+    MAX_SLOTS_PER_REQUEST,
+    NO_GENERATION,
     LayerArrivalSource,
     LayerArrivalStatus,
     LayerArrivalTimeoutError,
@@ -25,17 +27,49 @@ from .contract import (
     LayerNotInPlanError,
     LayerUnservableError,
     LayerwiseContractError,
+    PlanTooLargeError,
     SlotPlacement,
     StaleGenerationError,
 )
 from .fakes import (
+    ArrivalDriver,
+    LayerWaitOutcome,
+    LoadObserver,
     RecordingLayerLoadSink,
+    ScriptedArrivalDriver,
     ScriptedLayerArrivalSource,
     UnservableLayerArrivalSource,
+)
+from .native_fetch import (
+    ChunkFetchArguments,
+    PipelinedFetchArguments,
+    chunk_fetch_arguments,
+    pipelined_fetch_arguments,
+)
+from .planner import (
+    ByteRange,
+    ChunkPlacement,
+    FetchPlanner,
+    KernelGroupGeometry,
+    ModelLayout,
+    PlaneRun,
+    PlanRequest,
+    RecordKeys,
+    RecordKeySource,
+    plane_segment_bytes,
+    record_plane_runs,
 )
 from .pump import LayerArrivalPump
 
 __all__ = [
+    "MAX_SLOTS_PER_REQUEST",
+    "NO_GENERATION",
+    "ArrivalDriver",
+    "ByteRange",
+    "ChunkFetchArguments",
+    "ChunkPlacement",
+    "FetchPlanner",
+    "KernelGroupGeometry",
     "LayerArrivalPump",
     "LayerArrivalSource",
     "LayerArrivalStatus",
@@ -44,10 +78,24 @@ __all__ = [
     "LayerLoadSink",
     "LayerNotInPlanError",
     "LayerUnservableError",
+    "LayerWaitOutcome",
     "LayerwiseContractError",
+    "LoadObserver",
+    "ModelLayout",
+    "PipelinedFetchArguments",
+    "PlanTooLargeError",
+    "PlaneRun",
+    "PlanRequest",
+    "RecordKeySource",
+    "RecordKeys",
     "RecordingLayerLoadSink",
+    "ScriptedArrivalDriver",
     "ScriptedLayerArrivalSource",
     "SlotPlacement",
     "StaleGenerationError",
     "UnservableLayerArrivalSource",
+    "chunk_fetch_arguments",
+    "pipelined_fetch_arguments",
+    "plane_segment_bytes",
+    "record_plane_runs",
 ]

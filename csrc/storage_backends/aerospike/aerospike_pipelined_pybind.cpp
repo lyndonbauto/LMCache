@@ -10,6 +10,7 @@
   #include <map>
   #include <stdexcept>
   #include <string>
+  #include <tuple>
   #include <vector>
 
 namespace lmcache {
@@ -66,6 +67,35 @@ void set_object_group_layouts(AerospikeNativeConnector& connector,
   connector.set_object_group_layouts(parse_object_group_layouts(groups));
 }
 
+// Tuple shapes mirror lmcache.v1.layerwise.native_fetch.PipelinedFetchArguments
+// so Python needs none of the RDMA-only classes bound below.
+uint16_t issue_pipelined_fetch_by_keys(
+    AerospikeNativeConnector& connector,
+    const std::vector<std::tuple<uint32_t, uint32_t, size_t>>& placements,
+    const std::vector<std::tuple<uint32_t, std::string>>& chunk_nodes,
+    const std::vector<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t,
+                                 std::string>>& slot_record_keys) {
+  std::vector<rdma::ChunkPlacement> native_placements;
+  native_placements.reserve(placements.size());
+  for (const auto& [chunk_id, object_group_id, dest_offset] : placements) {
+    native_placements.push_back({chunk_id, object_group_id, dest_offset});
+  }
+  std::vector<rdma::ChunkNodeBinding> native_chunk_nodes;
+  native_chunk_nodes.reserve(chunk_nodes.size());
+  for (const auto& [chunk_id, node_name] : chunk_nodes) {
+    native_chunk_nodes.push_back({chunk_id, node_name});
+  }
+  std::vector<SlotRecordKey> native_slots;
+  native_slots.reserve(slot_record_keys.size());
+  for (const auto& [chunk_id, layer_id, plane, piece, record_key] :
+       slot_record_keys) {
+    native_slots.push_back({chunk_id, layer_id, plane, piece, record_key});
+  }
+  py::gil_scoped_release release;
+  return connector.issue_pipelined_fetch_by_keys(
+      native_placements, native_chunk_nodes, native_slots);
+}
+
 }  // namespace
 
 void bind_pipelined_fetch(py::module& module,
@@ -98,6 +128,9 @@ void bind_pipelined_fetch(py::module& module,
            &AerospikeNativeConnector::issue_pipelined_fetch,
            py::arg("placements"), py::arg("chunk_nodes"),
            py::arg("slot_digests"))
+      .def("issue_pipelined_fetch_by_keys", &issue_pipelined_fetch_by_keys,
+           py::arg("placements"), py::arg("chunk_nodes"),
+           py::arg("slot_record_keys"))
       .def("finish_pipelined_fetch",
            &AerospikeNativeConnector::finish_pipelined_fetch)
       .def("abandon_pipelined_fetch",

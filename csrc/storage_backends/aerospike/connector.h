@@ -11,6 +11,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -23,6 +24,16 @@
 
 namespace lmcache {
 namespace connector {
+
+// User key of the stored record behind one slot of a pipelined fetch,
+// identified the same way as rdma::SlotDigest.
+struct SlotRecordKey {
+  uint32_t chunk_id = 0;
+  uint32_t layer_id = 0;
+  uint32_t plane = 0;
+  uint32_t piece = 0;
+  std::string record_key;
+};
 
 struct WorkerAerospikeConn {
   aerospike* client = nullptr;
@@ -70,6 +81,46 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
   // unreadable.
   void set_plane_bytes(size_t plane_bytes);
 
+  // Register how each object group's payload is laid out, one list of plane
+  // runs per object group with one run per kernel group in payload order.
+  //
+  // Writes whose size matches a registered layout are cut so that every
+  // record stays inside one plane of its own kernel group; see
+  // make_layered_shard_plan(). This is what lets hybrid models, whose kernel
+  // groups differ in plane size, be fetched a layer at a time -- the single
+  // set_plane_bytes() hint cannot describe them. A later call adds to the
+  // layouts already registered rather than replacing them, so a second model
+  // sharing this connector cannot re-cut the first's records; a size two
+  // layouts share with different runs is not aligned at all.
+  //
+  // Thread safety: safe to call while stores are in flight. Each record
+  // persists the layout it was written with, so this affects only
+  // subsequent writes and never makes an existing record unreadable.
+  //
+  // Throws std::invalid_argument if any run has no planes or a zero plane
+  // size; nothing is registered in that case.
+  void set_record_layouts(
+      const std::vector<std::vector<PlaneRun>>& object_groups);
+
+  // Digest of the record stored under `user_key` in this connector's
+  // namespace and set, as 40 lowercase hex characters.
+  //
+  // This is the client's own RIPEMD-160 over the Aerospike key, so it names
+  // exactly the record a get of that key would read. Callers hand over keys
+  // and let this produce the digest, instead of re-deriving it elsewhere.
+  //
+  // Thread safety: safe to call concurrently; touches no shared state.
+  //
+  // Throws std::invalid_argument if `user_key` is empty.
+  std::string record_digest_hex(const std::string& user_key) const;
+
+  // Largest record this connector writes, in bytes: the server's record cap
+  // less a safety margin. Layer-aligned writes cut planes against this, so a
+  // reader naming records must plan with the same value.
+  //
+  // Thread safety: safe to call concurrently; fixed at construction.
+  size_t max_record_bytes() const;
+
 #ifdef LMCACHE_AEROSPIKE_RDMA
   // Report whether pipelined kv-sink-fetch is initialized and at least one
   // node registered. False when RDMA was not enabled at build time or in
@@ -99,6 +150,19 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
       const std::vector<rdma::ChunkPlacement>& placements,
       const std::vector<rdma::ChunkNodeBinding>& chunk_nodes,
       const std::vector<rdma::SlotDigest>& slot_digests);
+
+  // Same as issue_pipelined_fetch(), but each slot names its record by user
+  // key. Keys are turned into digests with record_digest_hex(), so the
+  // session sees exactly what it would have been given by digest.
+  //
+  // Thread safety: as issue_pipelined_fetch().
+  //
+  // Throws std::invalid_argument if any record key is empty, and whatever
+  // issue_pipelined_fetch() throws.
+  uint16_t issue_pipelined_fetch_by_keys(
+      const std::vector<rdma::ChunkPlacement>& placements,
+      const std::vector<rdma::ChunkNodeBinding>& chunk_nodes,
+      const std::vector<SlotRecordKey>& slot_record_keys);
 
   // Layer readiness for a pipelined fetch. False when pipelined fetch is not
   // ready, the generation does not match, or the layer is not complete.
@@ -167,6 +231,13 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
   // Atomic because set_plane_bytes() may land while worker threads are
   // sharding a payload in plan().
   std::atomic<size_t> plane_bytes_;
+
+  // Every object-group layout registered through set_record_layouts(), and
+  // the per-payload-size lookup derived from them. Guarded by
+  // record_layouts_mu_, which plan() takes on every write.
+  mutable std::mutex record_layouts_mu_;
+  std::vector<std::vector<PlaneRun>> registered_record_layouts_;
+  std::map<size_t, std::vector<PlaneRun>> record_layouts_;
 
   // Description of the L1 slab and window pool to register for RDMA
   // reception. Default-constructed (and therefore inert) unless the L2

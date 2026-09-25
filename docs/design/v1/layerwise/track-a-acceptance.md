@@ -34,6 +34,12 @@ the pump, or anything touching a GPU.
 `lmcache/v1/layerwise/contract.py::LayerArrivalSource`. That file is frozen;
 if it is wrong, say so and we change it together rather than working around it.
 
+When it does change, the change is written up in
+[contract-changes.md](contract-changes.md) -- what moved, what breaks, and
+why the old shape was wrong. Read it before picking the contract back up
+after a gap. Two entries there affect Track A today: `SlotPlacement` gained
+`plane` and `piece`, and `LayerFetchPlan` gained `node_names`.
+
 ## Acceptance criteria
 
 ### A1. The contract is implemented and passes the conformance suite

@@ -61,25 +61,55 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <map>
+#include <string>
+#include <vector>
 
 namespace lmcache {
 namespace connector {
 
+// One kernel group's share of a record layout: a run of equal-sized planes.
+//
+// A kernel group is uniform by construction, so its planes are all one size;
+// kernel groups within an object group need not agree with each other.
+// `planes` is `kv_size * num_layers` for the group.
+struct PlaneRun {
+  size_t plane_bytes = 0;
+  uint32_t planes = 0;
+};
+
+inline bool operator==(const PlaneRun& a, const PlaneRun& b) {
+  return a.plane_bytes == b.plane_bytes && a.planes == b.planes;
+}
+
+// A run as the writer cut it: its plane size, the record size it cut each
+// plane into, and how many planes it holds. Persisted in the meta record, so
+// the reader does not have to know the model to recover the layout.
+struct ShardRun {
+  size_t plane_b = 0;
+  size_t seg_b = 0;
+  uint32_t planes = 0;
+};
+
 // How a payload is divided into records.
 //
-// Segment sizes are uniform within a plane, so the plan stays three numbers
-// and the segment layout is recoverable from the meta record without storing
-// a per-segment table.
+// Segment sizes are uniform within a plane, so a plan whose planes are all
+// one size stays three numbers and is recoverable from the meta record
+// without storing a per-segment table. A plan whose kernel groups disagree
+// adds one `ShardRun` per kernel group instead.
 struct ShardPlan {
   // Number of records the payload occupies.
   uint32_t nseg = 1;
   // Bytes per record. The last record of each plane may be shorter, when
-  // `plane_b` is not an exact multiple of this.
+  // `plane_b` is not an exact multiple of this. Zero when `runs` is set.
   size_t seg_b = 0;
-  // Bytes in one K/V plane, or 0 when the payload has no plane structure and
-  // records tile it uniformly. Non-zero is what makes the plan
-  // plane-aligned; see segment_range().
+  // Bytes in one K/V plane, or 0 when the payload has no single plane size.
+  // Non-zero is what makes a uniform plan plane-aligned; see segment_range().
   size_t plane_b = 0;
+  // Per-kernel-group runs, in payload order. Empty unless the payload's
+  // kernel groups disagree on their plane size; when set, it alone describes
+  // the layout and `seg_b` and `plane_b` are 0.
+  std::vector<ShardRun> runs;
 };
 
 // Byte range one record covers.
@@ -132,6 +162,86 @@ ShardPlan make_shard_plan(size_t payload_bytes, size_t target_segment_bytes,
                           size_t max_record_bytes,
                           size_t single_record_threshold_bytes,
                           size_t plane_bytes);
+
+// Build a plan that keeps every record inside one plane of its own kernel
+// group, for an object whose kernel groups are described by `runs`.
+//
+// This is the rule make_shard_plan() applies, applied per kernel group
+// rather than with one plane size for the whole payload. It exists because
+// that one number cannot describe a hybrid model: a Mamba/GDN object group
+// holds kernel groups with different plane sizes, so a single hint fails to
+// divide the payload and make_shard_plan() falls back to byte-count
+// sharding, whose records straddle layers.
+//
+// Records are numbered in payload order: every piece of the first run's
+// first plane, then its second plane, and so on, then the next run. When all
+// runs share a plane size the result is exactly the uniform plan
+// make_shard_plan() would build from that size -- same records, same
+// indices, `runs` left empty -- so objects written either way are
+// interchangeable and readers that predate runs can still read uniform
+// models.
+//
+// Plane-aligned records are kept even when the whole object would fit in one
+// record, for the same reason make_shard_plan() checks alignment before its
+// single-record fast path: one record holding two planes belongs to two
+// layers.
+//
+// Throws std::invalid_argument if `runs` is empty, a run has no planes or a
+// zero plane size, or `max_record_bytes` is 0; std::runtime_error if the
+// record count overflows uint32_t.
+ShardPlan make_layered_shard_plan(const std::vector<PlaneRun>& runs,
+                                  size_t max_record_bytes);
+
+// Bytes an object described by `runs` occupies.
+size_t layered_payload_bytes(const std::vector<PlaneRun>& runs);
+
+// The record layout the writer should use for each payload size.
+//
+// The writer is handed a key and a byte count, not an object group, so it
+// picks a layout by payload size. `object_groups` holds each object group's
+// runs. A size that two object groups share with *different* runs is left
+// out: the writer cannot tell which layout a payload of that size has, and
+// guessing would put record boundaries inside another group's layers. Such
+// payloads fall back to make_shard_plan(), and a layerwise reader must refuse
+// them rather than assume alignment.
+//
+// Throws std::invalid_argument under the same conditions as
+// make_layered_shard_plan() for any group.
+std::map<size_t, std::vector<PlaneRun>> record_layouts_by_payload(
+    const std::vector<std::vector<PlaneRun>>& object_groups);
+
+// The plan the writer uses for a `payload_bytes` object.
+//
+// Uses the layered plan when `layouts` (from record_layouts_by_payload())
+// has an entry for this size, and make_shard_plan() with `plane_bytes` as the
+// uniform hint otherwise. Kept here rather than in the connector so that
+// anything predicting the writer's records calls the same code the writer
+// does.
+//
+// Throws what make_layered_shard_plan() or make_shard_plan() throws.
+ShardPlan choose_shard_plan(
+    size_t payload_bytes,
+    const std::map<size_t, std::vector<PlaneRun>>& layouts,
+    size_t target_segment_bytes, size_t max_record_bytes,
+    size_t single_record_threshold_bytes, size_t plane_bytes);
+
+// Encode `runs` for the meta record, as `plane_b:seg_b:planes` joined by
+// commas, e.g. "1024:1024:4,4096:4096:2".
+std::string encode_shard_runs(const std::vector<ShardRun>& runs);
+
+// Inverse of encode_shard_runs().
+//
+// Throws std::invalid_argument if `encoded` is empty or malformed, or any run
+// has a zero field -- a corrupt layout must fail the read, not produce ranges.
+std::vector<ShardRun> decode_shard_runs(const std::string& encoded);
+
+// Check that a plan's runs describe exactly `total_bytes` in `plan.nseg`
+// records, as a reader must before trusting runs decoded from a meta record.
+// A plan without runs passes trivially.
+//
+// Throws std::invalid_argument if the runs cover a different size or imply
+// a different record count.
+void require_consistent_runs(const ShardPlan& plan, size_t total_bytes);
 
 // Byte range record `index` of `plan` covers within a `total_bytes` payload.
 //

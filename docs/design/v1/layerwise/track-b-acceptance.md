@@ -30,6 +30,12 @@ decide *which* layers get fetched.
 `lmcache/v1/layerwise/contract.py::LayerLoadSink`. That file is frozen; if it
 is wrong, say so and we change it together rather than working around it.
 
+When it does change, the change is written up in
+[contract-changes.md](contract-changes.md) -- what moved, what breaks, and
+why the old shape was wrong. Read it before picking the contract back up
+after a gap. Nothing there affects `LayerLoadSink` so far; the entries to
+date are on the plan the transport consumes.
+
 ## Acceptance criteria
 
 ### B1. The contract is implemented and passes the conformance suite
