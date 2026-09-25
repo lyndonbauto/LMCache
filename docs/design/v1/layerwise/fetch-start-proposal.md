@@ -106,15 +106,20 @@ vLLM scheduler                  LMCache daemon
 
 After the lookup answers, the forward pass may already be running, and a
 retrieve failure raises `LayerProgressRetrieveFailedError` inside attention.
-The connector swallows only `LayerProgressRetrieveGenerationTimeoutError`, so
-the error escapes the forward pass. The pipelined path therefore recovers
-inside the daemon wherever it can:
+Today the connector swallows only `LayerProgressRetrieveGenerationTimeoutError`,
+so the error escapes the forward pass and kills vLLM's engine. R5
+([vllm-load-failure.md](vllm-load-failure.md)) found the recoverable route.
+The connector reports the step's blocks as load errors instead of raising
+(Track B), and vLLM recomputes them under
+`kv_load_failure_policy: "recompute"`. With that in place, abandoning the
+sink is a safe way to fail a retrieve. The daemon's own recovery below
+avoids the recompute, which on a hybrid model is a full prefill.
 
 | Failure | Handling |
 |---|---|
 | No free window, or the request outgrows it (`LayerwiseContractError`) | Load the deferred objects whole through the adapter's normal load into fresh L1 objects, then copy the remaining layers. Slower, but the request still succeeds. |
-| Transport declines or times out mid-fetch | Same fallback for the objects not yet resident. The window is released `ABANDONED` (quarantined). |
-| A record is gone (evicted after the lookup) | Unrecoverable in the daemon. See open question 1. |
+| Transport declines or times out mid-fetch | Same fallback for the objects not yet resident. The window is released `ABANDONED` (quarantined). If the fallback fails too, abandon the sink. |
+| A record is gone (evicted after the lookup) | Abandon the sink. The worker reports the step's blocks as failed, and vLLM recomputes them. |
 | Loader error | As today in layerwise mode. |
 | Lookup never followed by retrieve (abort, preemption) | `FREE_LOOKUP_LOCKS` / `END_SESSION` drop the deferred record. Nothing was leased, so nothing is released. |
 
@@ -134,9 +139,9 @@ So the retrieve keeps the sink's load open. On a transport failure (a layer
 the layers it has loaded. The retrieve then loads the objects not yet
 resident whole, continues the same sink load from the next layer, and
 finishes it. A loader failure still abandons both sides, since nothing can
-continue it. This changes the pump: today it abandons both sides on any
-failure. It lands with PR 2, where the fallback is first called; until
-then nothing calls the pump from production code.
+continue it. The pump side exists: `LayerArrivalPump.run_resumable` raises
+`LoadLeftOpenError` with the layers still to load. PR 2 calls it from the
+fallback.
 
 **Budget.** The pump gives up on a layer after `layer_timeout_seconds`
 (2.5 s by default), which must stay below the worker's per-layer wait
@@ -150,9 +155,10 @@ layer while the placed objects' later layers are still landing. Those
 objects are write-reserved in L1 until the lease is released `FINISHED`, so
 an L1 read (`reserve_read`) refuses them, which also keeps other requests
 from seeing half-written objects. The sanctioned access is the placement's
-own handle: Track A's `WindowPlacement.memory_obj(chunk, group)` returns
-each placed object's memory. `WindowLease` gains the same method, and
-retrieve passes those objects to the sink when it builds it (Track C).
+own handle: `WindowLease.memory_obj(chunk, group)` returns each placed
+object's memory (Track A's `WindowPlacement.memory_obj` implements it).
+Retrieve passes those objects to the sink when it builds it (Track C), so it
+leases before it builds the sink.
 Reading layer *L* is safe once the source reports *L* `RESIDENT`, which is
 exactly when the pump calls `load_layer(L)`.
 
@@ -178,6 +184,7 @@ show long queueing ahead of pipelined requests.
 | Retrieve: pipelined part via `run_pipelined_retrieve`; whole-object fallback into fresh L1 | `lmcache_driven_transfer.py` | Track C |
 | Pump leaves the sink open on a transport failure; retrieve continues it | `pump.py`, `pipelined_retrieve.py` | Track C |
 | Per-layer copy of L1 plus window objects | `LayerLoadSink` | Track B |
+| A failed retrieve becomes failed blocks in the same step, not an exception (R5) | `lmcache_mp_connector.py`, `vllm_multi_process_adapter.py` | Track B |
 | Placer, lease (including `memory_obj`), source accessor | `ChunkPlacer`, `AerospikeLayerArrivalSource` | Track A |
 
 It can ship in three PRs, each behind the pipelined-fetch flag:
@@ -201,12 +208,13 @@ It can ship in three PRs, each behind the pipelined-fetch flag:
 
 ## Open questions
 
-1. **A record gone at retrieve.** Raising in attention takes the forward pass
-   down. The alternative is to finish the watermark, leave those blocks
-   unwritten, and return `False`. vLLM then recomputes them, provided it
-   discards a same-step load failure's output. That behaviour needs checking
-   against the pinned vLLM version. This is the same question as Track B's
-   R5. Track C investigates it.
+1. ~~**A record gone at retrieve.**~~ Answered by R5
+   ([vllm-load-failure.md](vllm-load-failure.md)). vLLM v0.30.0 discards a
+   same-step load failure's output and recomputes it under
+   `kv_load_failure_policy: "recompute"`. The failure has to be reported in
+   the same step, so the daemon abandons the sink rather than finishing the
+   watermark and returning `False`, whose reply can arrive a step late. The
+   connector turns the resulting failure flag into failed blocks (Track B).
 2. **Fallback budget.** Is the time left after the pump gives up (2.5 s by
    default) enough for a whole-object fallback on the largest eligible
    request, or does eligibility need a byte cap below the window size?

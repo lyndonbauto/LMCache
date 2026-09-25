@@ -11,6 +11,50 @@ defect coming back.
 
 ---
 
+## A resumable pump; the lease hands out each object's memory
+
+**Who is affected:** Track A (the production lease must implement
+`memory_obj`); Track B (how the fallback continues your load, and where
+your sink's objects come from). No change to `run`.
+
+**What changed.**
+
+- **`LayerArrivalPump.run_resumable(plan)`** (in `pump.py`): like `run`,
+  except that when the transport fails (a layer unservable or timed out) it
+  abandons only the source, leaves the sink's load open, and raises
+  `LoadLeftOpenError`. The error carries `generation`, `remaining_layers`
+  (ascending; the first is the layer that failed) and `transport_error`. The
+  caller then owns the load: it loads the remaining layers some other way
+  and finishes it, or abandons it. A loader failure or contract error still
+  abandons both sides. `run` is now `run_resumable` plus abandoning the
+  sink, and raises exactly what it raised before.
+- **`WindowLease.memory_obj(chunk_id, object_group_id) -> MemoryObj`** (in
+  `request_fetch.py`): the L1 object a placed object is fetched into. Its
+  address is the offset `locate` returns. It stays valid until the lease is
+  released.
+
+**What breaks.** A `WindowLease` without `memory_obj`. Track A's
+`WindowPlacement.memory_obj` already has this shape; the adapter in
+`test_rdma_placer_end_to_end.py` forwards to it and checks that address and
+offset agree.
+
+**Why.** For the resumable pump: the fallback cannot abandon the sink,
+because that fails the worker's waits at once, and it cannot start a new
+generation, because the worker raises on a newer one. So it has to continue
+the load the pump was driving (see
+[fetch-start-proposal.md](fetch-start-proposal.md)). For `memory_obj`: a
+loader copies layer *L* while the object's later layers are still landing.
+The object is write-reserved in L1 until the lease is released `FINISHED`,
+so an ordinary L1 read refuses it. The lease's handle is the sanctioned way
+in.
+
+Neither is called from production code yet. When retrieve is wired (C9),
+it leases first, builds the sink from the lease's objects, then drives the
+pump, so `run_pipelined_retrieve` will take a way to build the pump from the
+lease rather than a ready-made pump.
+
+---
+
 ## The pump gives up before the worker; RESIDENT spelled out
 
 **Who is affected:** Track B (raised all three; one stricter suite test).
