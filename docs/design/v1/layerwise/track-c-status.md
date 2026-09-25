@@ -50,7 +50,9 @@ All done (2026-09-25):
   which neither track owns, so it needs agreement with Track A and the
   storage-manager maintainers before the orchestration is hooked into
   `retrieve`. Until then the orchestration is complete and tested but not
-  called from production code.
+  called from production code. **Proposal written:**
+  [fetch-start-proposal.md](fetch-start-proposal.md) (report the remote hit
+  at lookup, fetch at retrieve, fall back inside the daemon).
 - **One flattener or two.** Track A's `NativePlanIssuer` flattens the plan
   itself, duplicating `pipelined_fetch_arguments`. Keep one.
 - **A declined slot that later lands.** Proposed: the layer stays
