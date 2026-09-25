@@ -35,7 +35,12 @@ from .fakes import (
     ScriptedLayerArrivalSource,
     UnservableLayerArrivalSource,
 )
-from .native_fetch import PipelinedFetchArguments, pipelined_fetch_arguments
+from .native_fetch import (
+    ChunkFetchArguments,
+    PipelinedFetchArguments,
+    chunk_fetch_arguments,
+    pipelined_fetch_arguments,
+)
 from .planner import (
     ByteRange,
     ChunkPlacement,
@@ -54,6 +59,7 @@ from .pump import LayerArrivalPump
 __all__ = [
     "MAX_SLOTS_PER_REQUEST",
     "ByteRange",
+    "ChunkFetchArguments",
     "ChunkPlacement",
     "FetchPlanner",
     "KernelGroupGeometry",
@@ -78,6 +84,7 @@ __all__ = [
     "SlotPlacement",
     "StaleGenerationError",
     "UnservableLayerArrivalSource",
+    "chunk_fetch_arguments",
     "pipelined_fetch_arguments",
     "plane_segment_bytes",
     "record_plane_runs",

@@ -221,10 +221,18 @@ def test_the_plan_flattens_into_the_native_fetch_call() -> None:
     """The planned request can be handed to the native session as is."""
     fetch = plan_for(resolve_obj_keys(vllm_request()))
 
-    arguments = pipelined_fetch_arguments(fetch.plan, fetch.request.placements)
+    arguments = pipelined_fetch_arguments(fetch.plan)
 
-    assert len(arguments.slot_record_keys) == len(fetch.plan.slots)
-    assert arguments.chunk_nodes == [(c, f"node-{c % 2}") for c in range(NUM_CHUNKS)]
+    for slot, (node_index, record_key, offset, length, layer_id) in zip(
+        fetch.plan.slots, arguments.slots, strict=True
+    ):
+        assert arguments.node_names[node_index] == f"node-{slot.chunk_id % 2}"
+        assert (record_key, offset, length, layer_id) == (
+            slot.record_key,
+            slot.offset,
+            slot.length,
+            slot.layer_id,
+        )
 
 
 @pytest.mark.parametrize(

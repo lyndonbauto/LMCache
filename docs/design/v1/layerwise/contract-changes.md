@@ -11,6 +11,25 @@ defect coming back.
 
 ---
 
+## `pipelined_fetch_arguments` is one entry per slot
+
+**Who is affected:** Track A (the slot-level native call takes this shape).
+
+**What changed.** `pipelined_fetch_arguments(plan)` no longer takes
+placements. It returns `node_names` and one `(node_index, record_key,
+dest_offset, length, layer_id)` per slot, in plan order; position is the slot
+number. The previous three-list shape for `issue_pipelined_fetch_by_keys` is
+now `chunk_fetch_arguments(plan, placements)` / `ChunkFetchArguments`, used
+by the adapter until the slot-level call exists.
+
+**What breaks.** Callers of `pipelined_fetch_arguments(plan, placements)`;
+switch to `chunk_fetch_arguments` for the old shape.
+
+**Why.** Option 1 from the Track A/C review: the plan is the only source of
+truth, so the native side must not re-plan. The flat shape also carries each
+slot's own node, which the chunk-level call cannot, because one chunk's
+records hash to different partitions.
+
 ## Plans are held to the slot ceiling; transports can refuse a plan as too large
 
 **Who is affected:** Track A (raises the new error); anyone building

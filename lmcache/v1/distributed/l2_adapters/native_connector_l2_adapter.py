@@ -37,7 +37,7 @@ from lmcache.v1.distributed.l2_adapters.base import (
     L2TaskId,
 )
 from lmcache.v1.layerwise.contract import LayerFetchPlan
-from lmcache.v1.layerwise.native_fetch import pipelined_fetch_arguments
+from lmcache.v1.layerwise.native_fetch import chunk_fetch_arguments
 from lmcache.v1.layerwise.planner import ChunkPlacement, record_plane_runs
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.platform import create_event_notifier
@@ -314,7 +314,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         issuer = getattr(self._client, "issue_pipelined_fetch_by_keys", None)
         if issuer is None:
             return 0
-        arguments = pipelined_fetch_arguments(plan, placements)
+        arguments = chunk_fetch_arguments(plan, placements)
         return int(
             issuer(
                 arguments.placements,

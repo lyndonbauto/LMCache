@@ -350,9 +350,9 @@ precise about why, so nobody re-attempts them in Python:
   which only the C client has. It reaches the plan as a name in
   `LayerFetchPlan.node_names`. Note that ownership is per *record*: each
   `|s|<i>` segment hashes to its own partition, so one chunk's records are
-  generally spread across nodes. The native session currently binds a whole
-  chunk to one node (`ChunkNodeBinding`), and `pipelined_fetch_arguments`
-  refuses a plan that would need otherwise.
+  generally spread across nodes. The chunk-level native call binds a whole
+  chunk to one node (`ChunkNodeBinding`), and `chunk_fetch_arguments` refuses
+  a plan that would need otherwise.
 - **Destination offsets.** Chosen by the L1 allocator when it places a
   chunk's object in the registered window, so they are an input to planning
   rather than something planning derives.
@@ -361,6 +361,29 @@ Note the record cap `RecordKeys` is built with must be the cap the object
 was *written* under, not today's. It decides how many records exist, so a
 cap that changed between write and read renames every record. The connector
 reports the cap it writes under as `max_record_bytes()`.
+
+### Slot-level issue: the plan is the only source of truth
+
+The chunk-level call has the native `SlotPlanner` re-expand chunk
+placements into slots, so there are two planners that must agree, and it
+cannot express per-record node ownership. It is being replaced by a
+slot-level call that takes the plan as given.
+`pipelined_fetch_arguments(plan)` produces its input:
+
+```text
+node_names: ["node-a", "node-b"]
+slots:      [(node_index, record_key,                 dest_offset, length, layer_id), ...]
+            [(1,          "m@00000000@0@9f2c|s|0",    0,           4096,   0       ), ...]
+```
+
+A slot's position in `slots` is its slot number on the wire. The native side
+hashes each key with `record_digest_hex`, groups slots by
+`node_names[node_index]`, splits each node's sinks to its `max_sinks`, and
+counts readiness per layer from `layer_id`. It keeps the checks it does
+today: the device receive-queue cap (raised as `PlanTooLargeError`), sinks
+inside the leased window, declines, and stale generations.
+`chunk_fetch_arguments` and `issue_pipelined_fetch_by_keys` stay until the
+slot-level call replaces them.
 
 ### Planning from a real request
 
