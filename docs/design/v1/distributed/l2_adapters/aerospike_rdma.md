@@ -304,8 +304,10 @@ leaser.release(lease, FetchOutcome.FINISHED)   # or ABANDONED on any other exit
   `fetch_timeout_seconds`, because writes already on the wire can still land.
   `FINISHED` means every layer became resident, so the window can be reused
   at once.
-- **One lease at a time.** The native session runs one fetch at a time (W3),
-  so a second `lease` raises instead of queueing.
+- **One lease per window.** The native client runs one fetch per window (W3),
+  so up to `window_count` leases are outstanding at once. A leased window is
+  never a candidate, even for reclaiming. When every window is leased or
+  quarantined, `lease` raises instead of queueing.
 - **Refusals** follow W2. A request larger than a window raises
   `PlanTooLargeError`, since the caller can split it. No lease available
   raises `LayerwiseContractError`, and the caller falls back.
@@ -638,12 +640,16 @@ via `SlotPlanner`, fans out one or more `kv-sink-fetch-pipelined` commands per
 node (each carrying at most that node's advertised `max_sinks`), feeds declined
 slots from each reply into `LayerReadiness::note_unservable`, and drains
 `RdmaContext::poll_notifications` into the same tracker. It performs no I/O
-itself — the connector issues the info calls and forwards reply strings. `AerospikeNativeConnector` exposes this path only when
+itself — the connector issues the info calls and forwards reply strings.
+The connector holds a `PipelinedFetchPool` (`pipelined_fetch_pool.{h,cpp}`)
+of one session per RDMA window, so up to `window_count` fetches run at once;
+see [Concurrent fetches](#concurrent-fetches). `AerospikeNativeConnector` exposes this path only when
 `BUILD_WITH_AEROSPIKE_RDMA` is enabled and `kv-sink-register` has succeeded;
 the TCP get/set path is unchanged otherwise. Python reaches this path only
-through `StorageManager.layer_arrival_source()`: it returns the native
-adapter's one `AerospikeLayerArrivalSource`, and retrieve runs
-`LayerArrivalPump(source, sink).run(plan)` over it. The pump begins, polls
+through `StorageManager.layer_arrival_source()`: each call returns a new
+`AerospikeLayerArrivalSource` over the native adapter's client, one per
+retrieve, and retrieve runs `LayerArrivalPump(source, sink).run(plan)` over
+it. The pump begins, polls
 and releases the fetch, so the storage manager and the adapters have no
 begin or readiness methods of their own. When no adapter has the pipelined
 path, the accessor raises `LayerwiseContractError`, and retrieve falls back
@@ -785,8 +791,10 @@ when the device is opened and records `max_qp_wr` and `max_cq`. At init,
 `enable_layer_notifications()` clamps the depth derived from the leased window
 and record cap to those limits, logs the device-reported numbers next to the
 requested and effective depths, and sizes both the completion queue and the
-receive queue to the effective value. `PipelinedFetchSession::begin_request`
-rejects a plan whose `slot_count()` exceeds that effective depth with an error
+receive queue to the effective value. That depth is shared by every window
+(see [Concurrent fetches](#concurrent-fetches)), so each fetch gets
+`effective / window_count` slots. `PipelinedFetchSession::begin_request`
+rejects a plan whose `slot_count()` exceeds its share with an error
 that names both counts and tells the operator to use fewer chunks per request,
 raise the record cap so each plane needs fewer pieces, or choose hardware with a
 higher `max_recv_wr`.
@@ -820,6 +828,59 @@ logic-test`) cover multi-node slot numbering, declined-slot handling, stale
 generations, abandon, transport-level node failures, and layout conversion —
 without libibverbs or a cluster. That is **implemented** logic, not fabric
 proof.
+
+#### Concurrent fetches
+
+**Status: implemented; verified over Soft-RoCE (`rdma_pipeline_test` stage 6).**
+
+`PipelinedFetchPool` holds one `PipelinedFetchSession` per RDMA window, so
+each window runs at most one fetch and up to `window_count` run at once. All
+of them share the node queue pairs and one completion queue of
+`notification_depth` entries.
+
+- **Which window.** A begin goes to the window holding its first slot's
+  offset (`offset / window_bytes`). Python's `RdmaWindowLeaser` has already
+  leased that window to the retrieve, so the session is idle. A busy window
+  refuses the begin, and the source reports it as `LayerwiseContractError`.
+- **Routing arrivals by generation.** Window `w` allocates only generations
+  `g` with `(g - 1) % window_count == w`: it starts at `w + 1`, steps by
+  `window_count`, and wraps back to `w + 1` past 65535, never reaching 0. An
+  immediate `(generation << 16) | slot` therefore names its window without a
+  lookup. Every later call (poll, finish, abandon, unservable) names the
+  fetch by generation. With 8 windows, each window's generations repeat
+  after about 8,192 fetches rather than 65,535; a late write has to survive
+  that many fetches in the same window to be miscounted.
+- **Static split of the completion queue.** Each window's fetch may use at
+  most `notification_depth / window_count` slots, and
+  `desired_notification_depth` asks the device for
+  `window_count ×` one window's slots. A completion queue overflow is fatal
+  to the queue pair, so the split must hold even when every window is busy
+  and a quarantined window's late writes are still arriving. A shared budget
+  would let one large fetch use more, but then the pool would have to know
+  how many late writes an abandoned fetch still has in flight, which it
+  cannot. The quarantined window keeps its share, so its late writes always
+  fit.
+- **Layout changes.** `set_object_group_layouts` rebuilds the pool, so it is
+  refused while any fetch is active. Each window's generation counter
+  carries over, so a rebuilt pool never reissues a generation a late write
+  might still carry.
+
+A retrieve takes its own `AerospikeLayerArrivalSource` from
+`StorageManager.layer_arrival_source()`. A source holds one fetch, and
+several sources share the native client:
+
+```python
+source = storage_manager.layer_arrival_source()   # one per retrieve
+lease = leaser.lease(request_bytes)               # one window per retrieve
+...                                               # place objects in the lease
+LayerArrivalPump(source, sink).run(plan)          # plan offsets in lease window
+```
+
+**Device-free verification:** `pipelined_fetch_pool_test` covers the window
+limits, routing, generation classes and their wrap, the per-window share, a
+late write after abandon, and carrying counters over a rebuild.
+`tests/v1/layerwise/test_aerospike_concurrent_fetches.py` runs two sources
+over one fabric-free native pool with two windows.
 
 #### Two ways to begin a request
 
@@ -1054,6 +1115,7 @@ Being precise about this, because the gap matters:
 | `kv_sink_client.{h,cpp}` codec | **Verified.** Register and fetch commands round-trip against the mock writer. |
 | Per-node `kv-sink-register` fanout | **Implemented and compiling** via `aerospike_info_foreach`. Never run against a cluster. |
 | `PipelinedFetchSession` driver | **Implemented** and covered by `pipelined_fetch_session_test` (no device). |
+| `PipelinedFetchPool`, one fetch per window | **Verified on RC.** Two fetches in different windows complete from one completion queue over Soft-RoCE, and a late write for an abandoned fetch is not credited to its window's next fetch. |
 | Connector + Python pipelined path | **Implemented (device-free).** `AerospikeNativeConnector::issue_pipelined_fetch` performs begin, per-node `aerospike_info_node`, and reply feeding without holding the driver lock across I/O; `set_object_group_layouts` converts registered `MemoryLayoutDesc` shapes in C++; `finish_pipelined_fetch` / `abandon_pipelined_fetch` and `pipelined_fetch_init_error` are bound through pybind and threaded via `StorageManager` and `NativeConnectorL2Adapter`. Python hands over record user keys through `issue_pipelined_fetch_by_keys`, and the connector derives each sink's digest with `record_digest_hex` (verified against the reference client on a real server). Covered by `pipelined_fetch_issue_test` and Python adapter tests. **Not verified over a fabric** with real digests from a prefetch load. |
 | Adapter plumbing, descriptor, window plan | **Implemented and unit-tested.** |
 | Write-lock TTL invariant | **Implemented and unit-tested** (startup check). |

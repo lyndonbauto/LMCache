@@ -69,13 +69,13 @@ class _KeysOnlyClient(_PlainClient):
     def is_pipelined_layer_ready(self, layer_id: int, request_generation: int) -> bool:
         return False
 
-    def pipelined_unservable_layers(self) -> list[int]:
+    def pipelined_unservable_layers(self, generation: int) -> list[int]:
         return []
 
-    def finish_pipelined_fetch(self) -> None:
+    def finish_pipelined_fetch(self, generation: int) -> None:
         return None
 
-    def abandon_pipelined_fetch(self) -> None:
+    def abandon_pipelined_fetch(self, generation: int) -> None:
         return None
 
     def issue_pipelined_fetch_by_keys(
@@ -160,12 +160,12 @@ def test_native_adapter_without_slot_issue_has_no_source() -> None:
             adapter.layer_arrival_source()
 
 
-def test_native_adapter_returns_one_source() -> None:
-    """Every call returns the same source, which tracks the one fetch."""
+def test_native_adapter_returns_a_new_source_per_call() -> None:
+    """Each retrieve gets its own source, since a source holds one fetch."""
     with _native_adapter(PipelinedNativeClientStub()) as adapter:
         source = adapter.layer_arrival_source()
         assert isinstance(source, AerospikeLayerArrivalSource)
-        assert adapter.layer_arrival_source() is source
+        assert adapter.layer_arrival_source() is not source
 
 
 def test_source_drives_the_native_client() -> None:
@@ -181,20 +181,41 @@ def test_source_drives_the_native_client() -> None:
                 [(1, "obj|s|0", 4096, 64, 0), (0, "obj|s|1", 4160, 64, 1)],
             )
         ]
-        client.ready_layers.add(0)
+        client.ready_layers[generation] = {0}
         assert source.poll_layer(0, generation) is LayerArrivalStatus.RESIDENT
         assert source.poll_layer(1, generation) is LayerArrivalStatus.PENDING
         source.finish_fetch(generation)
-        assert client.finished == 1
+        assert client.finished == [generation]
 
 
-def test_source_refuses_a_second_concurrent_fetch() -> None:
-    """Two retrieves share the adapter's source, so the second is refused."""
+def test_two_sources_run_fetches_side_by_side() -> None:
+    """Concurrent retrieves each hold a fetch and release only their own."""
+    client = PipelinedNativeClientStub(generation=7)
+    with _native_adapter(client) as adapter:
+        first = adapter.layer_arrival_source()
+        second = adapter.layer_arrival_source()
+        first_generation = first.begin_fetch(_two_layer_plan())
+        second_generation = second.begin_fetch(_two_layer_plan())
+        assert first_generation != second_generation
+
+        client.ready_layers[second_generation] = {0, 1}
+        assert first.poll_layer(0, first_generation) is LayerArrivalStatus.PENDING
+        assert second.poll_layer(0, second_generation) is LayerArrivalStatus.RESIDENT
+
+        first.abandon_fetch(first_generation)
+        second.finish_fetch(second_generation)
+        assert client.abandoned == [first_generation]
+        assert client.finished == [second_generation]
+
+
+def test_one_source_refuses_a_second_concurrent_fetch() -> None:
+    """A source holds one fetch; a second retrieve needs its own source."""
     with _native_adapter(PipelinedNativeClientStub()) as adapter:
-        generation = adapter.layer_arrival_source().begin_fetch(_two_layer_plan())
+        source = adapter.layer_arrival_source()
+        generation = source.begin_fetch(_two_layer_plan())
         with pytest.raises(LayerwiseContractError, match="still active"):
-            adapter.layer_arrival_source().begin_fetch(_two_layer_plan())
-        adapter.layer_arrival_source().abandon_fetch(generation)
+            source.begin_fetch(_two_layer_plan())
+        source.abandon_fetch(generation)
 
 
 def test_storage_manager_without_adapters_refuses() -> None:
@@ -214,7 +235,7 @@ def test_storage_manager_refusal_names_each_adapter() -> None:
 def test_storage_manager_returns_the_pipelined_adapters_source(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The adapter with a pipelined path supplies one stable source."""
+    """The adapter with a pipelined path supplies a new source per call."""
     client = PipelinedNativeClientStub()
     monkeypatch.setattr(
         storage_manager_module,
@@ -226,4 +247,4 @@ def test_storage_manager_returns_the_pipelined_adapters_source(
     with _storage_manager([_mock_adapter_config()]) as sm:
         source = sm.layer_arrival_source()
         assert isinstance(source, AerospikeLayerArrivalSource)
-        assert sm.layer_arrival_source() is source
+        assert sm.layer_arrival_source() is not source

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include "pipelined_fetch_pool.h"
 #include "pipelined_fetch_session.h"
 
 #include <cstdint>
@@ -40,6 +41,14 @@ uint16_t issue_pipelined_fetch(PipelinedFetchSession& session,
 // Same as issue_pipelined_fetch(), for a request planned by the caller: see
 // PipelinedFetchSession::begin_request_from_slots.
 uint16_t issue_planned_fetch(PipelinedFetchSession& session,
+                             const PipelinedNodeInfoSender& send_info,
+                             const std::vector<PlannedSlot>& slots);
+
+// Same, through a pool: the request runs in the window of its first slot,
+// and only that request is abandoned on failure.
+//
+// Thread safety: other windows' requests may be used concurrently.
+uint16_t issue_planned_fetch(PipelinedFetchPool& pool,
                              const PipelinedNodeInfoSender& send_info,
                              const std::vector<PlannedSlot>& slots);
 

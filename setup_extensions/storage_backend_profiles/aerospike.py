@@ -160,6 +160,7 @@ class AerospikeStorageBackend(StorageBackendProfile):
             sources.append(
                 "csrc/storage_backends/aerospike/pipelined_fetch_session.cpp"
             )
+            sources.append("csrc/storage_backends/aerospike/pipelined_fetch_pool.cpp")
             sources.append(
                 "csrc/storage_backends/aerospike/connector_pipelined_rdma.cpp"
             )

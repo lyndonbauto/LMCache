@@ -670,26 +670,27 @@ bool AerospikeNativeConnector::is_pipelined_layer_ready(
   return pipelined_rdma_->is_layer_ready(layer_id, request_generation);
 }
 
-std::vector<uint32_t> AerospikeNativeConnector::pipelined_unservable_layers()
-    const {
+std::vector<uint32_t> AerospikeNativeConnector::pipelined_unservable_layers(
+    uint16_t generation) const {
   if (!pipelined_rdma_) {
     return {};
   }
-  return pipelined_rdma_->unservable_layers();
+  return pipelined_rdma_->unservable_layers(generation);
 }
 
-void AerospikeNativeConnector::finish_pipelined_fetch() {
+void AerospikeNativeConnector::finish_pipelined_fetch(uint16_t generation) {
+  if (!pipelined_rdma_) {
+    throw std::runtime_error(
+        "Aerospike pipelined fetch: RDMA path is not enabled");
+  }
+  pipelined_rdma_->finish_request(generation);
+}
+
+void AerospikeNativeConnector::abandon_pipelined_fetch(uint16_t generation) {
   if (!pipelined_rdma_) {
     return;
   }
-  pipelined_rdma_->finish_request();
-}
-
-void AerospikeNativeConnector::abandon_pipelined_fetch() {
-  if (!pipelined_rdma_) {
-    return;
-  }
-  pipelined_rdma_->abandon_request();
+  pipelined_rdma_->abandon_request(generation);
 }
 
 void AerospikeNativeConnector::poll_pipelined_fetch_notifications() {

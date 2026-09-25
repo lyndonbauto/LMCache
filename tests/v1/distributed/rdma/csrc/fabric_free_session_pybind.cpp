@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Test-only Python binding over the real PipelinedFetchSession, with no
-// fabric, device, or cluster.
+// Test-only Python binding over the real PipelinedFetchPool (one
+// PipelinedFetchSession per window), with no fabric, device, or cluster.
 //
 // FabricFreeConnector exposes the same pipelined methods as
 // lmcache_aerospike.LMCacheAerospikeClient, so AerospikeLayerArrivalSource and
@@ -28,7 +28,7 @@
 #include "kv_sink_client.h"
 #include "layer_pipeline.h"
 #include "pipelined_fetch_issue.h"
-#include "pipelined_fetch_session.h"
+#include "pipelined_fetch_pool.h"
 #include "slot_planner.h"
 
 namespace py = pybind11;
@@ -40,7 +40,7 @@ using lmcache::connector::rdma::issue_planned_fetch;
 using lmcache::connector::rdma::NodeRegistration;
 using lmcache::connector::rdma::NodeRegistry;
 using lmcache::connector::rdma::pipelined_command_slot_indices;
-using lmcache::connector::rdma::PipelinedFetchSession;
+using lmcache::connector::rdma::PipelinedFetchPool;
 using lmcache::connector::rdma::PlannedSlot;
 using lmcache::connector::rdma::SlotPlanner;
 
@@ -70,9 +70,11 @@ std::string accept_all(const std::string& command) {
 
 class FabricFreeConnector {
  public:
+  // `max_slots` is one window's share, so the pool's depth is
+  // max_slots * window_count.
   FabricFreeConnector(const std::vector<std::string>& node_names,
                       size_t window_bytes, uint32_t max_slots,
-                      uint32_t max_sinks)
+                      uint32_t max_sinks, uint32_t window_count)
       : planner_(unused_layout()) {
     uint64_t region = 1;
     for (const std::string& name : node_names) {
@@ -83,9 +85,9 @@ class FabricFreeConnector {
       registration.valid = true;
       registry_.set(registration);
     }
-    session_ = std::make_unique<PipelinedFetchSession>(
+    pool_ = std::make_unique<PipelinedFetchPool>(
         planner_, registry_, "kv", kRecordCap, kRecordCap, window_bytes,
-        max_slots);
+        window_count, max_slots * window_count);
   }
 
   bool pipelined_fetch_ready() const { return true; }
@@ -93,7 +95,7 @@ class FabricFreeConnector {
   std::string pipelined_fetch_init_error() const { return {}; }
 
   uint32_t pipelined_max_slots_per_request() const {
-    return session_->max_slots_per_request();
+    return pool_->max_slots_per_request();
   }
 
   // Record keys stand in for digests: the session only needs them non-empty
@@ -114,7 +116,7 @@ class FabricFreeConnector {
           {node_names[node_index], record_key, layer_id, offset, length});
     }
     return issue_planned_fetch(
-        *session_,
+        *pool_,
         [](const std::string&, const std::string& command) {
           return accept_all(command);
         },
@@ -123,32 +125,36 @@ class FabricFreeConnector {
 
   bool is_pipelined_layer_ready(uint32_t layer_id,
                                 uint16_t request_generation) const {
-    return session_->is_layer_ready(layer_id, request_generation);
+    return pool_->is_layer_ready(layer_id, request_generation);
   }
 
-  std::vector<uint32_t> pipelined_unservable_layers() const {
-    return session_->unservable_layers();
+  std::vector<uint32_t> pipelined_unservable_layers(uint16_t generation) const {
+    return pool_->unservable_layers(generation);
   }
 
-  void finish_pipelined_fetch() { session_->finish_request(); }
+  void finish_pipelined_fetch(uint16_t generation) {
+    pool_->finish_request(generation);
+  }
 
-  void abandon_pipelined_fetch() { session_->abandon_request(); }
+  void abandon_pipelined_fetch(uint16_t generation) {
+    pool_->abandon_request(generation);
+  }
 
-  // The session discards immediates whose generation is not the active one,
-  // so a late write from an abandoned fetch is dropped here too.
+  // The pool routes the immediate to its generation's window, whose session
+  // discards it unless that generation is active, so a late write from an
+  // abandoned fetch is dropped here too.
   void land_slot(uint16_t slot_index, uint16_t generation) {
-    session_->on_notifications({encode_immediate(generation, slot_index)});
+    pool_->on_notifications({encode_immediate(generation, slot_index)});
   }
 
-  // Replies quoting a generation that is not active are ignored by the
-  // session; the early return only avoids looking up commands that no longer
-  // exist.
+  // Replies quoting a generation that is not active are ignored by the pool;
+  // the early return only avoids looking up commands that no longer exist.
   void decline_slot(uint16_t slot_index, uint16_t generation) {
-    if (!session_->has_active_request() ||
-        session_->active_generation() != generation) {
+    if (!pool_->is_active(generation)) {
       return;
     }
-    for (const auto& [node, command] : session_->pipelined_fetch_commands()) {
+    for (const auto& [node, command] :
+         pool_->pipelined_fetch_commands(generation)) {
       const std::vector<uint16_t> carried =
           pipelined_command_slot_indices(command);
       for (const uint16_t slot : carried) {
@@ -157,7 +163,7 @@ class FabricFreeConnector {
               "n=" + std::to_string(carried.size()) +
               ";accepted=" + std::to_string(carried.size() - 1) +
               ";failed=" + std::to_string(slot_index) + ";bytes=0";
-          session_->on_node_reply(node, command, reply, generation);
+          pool_->on_node_reply(node, command, reply, generation);
           return;
         }
       }
@@ -169,7 +175,7 @@ class FabricFreeConnector {
  private:
   SlotPlanner planner_;
   NodeRegistry registry_;
-  std::unique_ptr<PipelinedFetchSession> session_;
+  std::unique_ptr<PipelinedFetchPool> pool_;
 };
 
 }  // namespace
@@ -179,10 +185,10 @@ PYBIND11_MODULE(fabric_free_session, m) {
       m, "PipelinedPlanTooLargeError", PyExc_RuntimeError);
 
   py::class_<FabricFreeConnector>(m, "FabricFreeConnector")
-      .def(py::init<const std::vector<std::string>&, size_t, uint32_t,
+      .def(py::init<const std::vector<std::string>&, size_t, uint32_t, uint32_t,
                     uint32_t>(),
            py::arg("node_names"), py::arg("window_bytes"), py::arg("max_slots"),
-           py::arg("max_sinks") = 256)
+           py::arg("max_sinks") = 256, py::arg("window_count") = 1)
       .def("pipelined_fetch_ready", &FabricFreeConnector::pipelined_fetch_ready)
       .def("pipelined_fetch_init_error",
            &FabricFreeConnector::pipelined_fetch_init_error)
@@ -195,11 +201,12 @@ PYBIND11_MODULE(fabric_free_session, m) {
            &FabricFreeConnector::is_pipelined_layer_ready, py::arg("layer_id"),
            py::arg("request_generation"))
       .def("pipelined_unservable_layers",
-           &FabricFreeConnector::pipelined_unservable_layers)
+           &FabricFreeConnector::pipelined_unservable_layers,
+           py::arg("generation"))
       .def("finish_pipelined_fetch",
-           &FabricFreeConnector::finish_pipelined_fetch)
+           &FabricFreeConnector::finish_pipelined_fetch, py::arg("generation"))
       .def("abandon_pipelined_fetch",
-           &FabricFreeConnector::abandon_pipelined_fetch)
+           &FabricFreeConnector::abandon_pipelined_fetch, py::arg("generation"))
       .def("land_slot", &FabricFreeConnector::land_slot, py::arg("slot_index"),
            py::arg("generation"))
       .def("decline_slot", &FabricFreeConnector::decline_slot,

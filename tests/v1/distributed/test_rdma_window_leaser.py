@@ -124,18 +124,37 @@ def test_a_lease_describes_its_window(
     assert lease.base_offset <= offset < lease.base_offset + lease.size_bytes
 
 
-def test_only_one_lease_is_outstanding(
+def test_one_lease_per_window_runs_at_once(
     two_windows: tuple[L1Manager, RdmaWindowLeaser],
 ) -> None:
     _, leaser = two_windows
     first = leaser.lease(OBJECT_BYTES)
+    second = leaser.lease(OBJECT_BYTES)
+    assert {first.window_index, second.window_index} == {0, 1}
 
     with pytest.raises(LayerwiseContractError) as refused:
         leaser.lease(OBJECT_BYTES)
     assert not isinstance(refused.value, PlanTooLargeError)
 
     leaser.release(first, FetchOutcome.FINISHED)
-    leaser.lease(OBJECT_BYTES)
+    assert leaser.lease(OBJECT_BYTES).window_index == first.window_index
+
+
+def test_a_leased_window_is_never_reclaimed_for_another_lease(
+    two_windows: tuple[L1Manager, RdmaWindowLeaser],
+) -> None:
+    mgr, leaser = two_windows
+    held = leaser.lease(OBJECT_BYTES)
+    _store(mgr, held, [_key(0)])
+    other = leaser.lease(OBJECT_BYTES)
+    leaser.release(other, FetchOutcome.FINISHED)
+
+    again = leaser.lease(OBJECT_BYTES)
+
+    assert again.window_index == other.window_index
+    assert _present(mgr, [_key(0)])
+    leaser.release(held, FetchOutcome.FINISHED)
+    leaser.release(again, FetchOutcome.FINISHED)
 
 
 def test_a_request_larger_than_a_window_is_too_large(

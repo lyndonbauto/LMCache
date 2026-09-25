@@ -38,13 +38,13 @@ class _ReadyConnector:
     def is_pipelined_layer_ready(self, layer_id: int, request_generation: int) -> bool:
         return False
 
-    def pipelined_unservable_layers(self) -> list[int]:
+    def pipelined_unservable_layers(self, generation: int) -> list[int]:
         return []
 
-    def finish_pipelined_fetch(self) -> None:
+    def finish_pipelined_fetch(self, generation: int) -> None:
         return None
 
-    def abandon_pipelined_fetch(self) -> None:
+    def abandon_pipelined_fetch(self, generation: int) -> None:
         return None
 
     def issue_pipelined_fetch_by_slots(

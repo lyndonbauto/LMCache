@@ -181,14 +181,9 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         # Delete capability detection
         self._has_delete = callable(getattr(native_client, "submit_batch_delete", None))
 
-        # One source per client: it tracks the client's one active fetch.
-        self._layer_source: AerospikeLayerArrivalSource | None = None
-        if isinstance(native_client, PipelinedFetchConnector) and isinstance(
-            native_client, PlannedFetchConnector
-        ):
-            self._layer_source = AerospikeLayerArrivalSource(
-                native_client, NativePlanIssuer(native_client)
-            )
+        self._has_pipelined_path = isinstance(
+            native_client, PipelinedFetchConnector
+        ) and isinstance(native_client, PlannedFetchConnector)
 
         # Pending delete events for synchronous delete() calls
         self._pending_delete_events: dict[L2TaskId, threading.Event] = {}
@@ -317,27 +312,29 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         return str(getter())
 
     def layer_arrival_source(self) -> LayerArrivalSource:
-        """Return the arrival source over the native pipelined fetch.
+        """Return a new arrival source over the native pipelined fetch.
 
         The source issues each plan slot for slot through
         ``issue_pipelined_fetch_by_slots`` and reports arrivals from the
-        native session. It exists only when the client was built with the
-        pipelined path (``LMCACHE_AEROSPIKE_RDMA``). A client that has the
-        path but failed to initialize it still returns the source; its
-        ``begin_fetch`` then refuses with the reason.
+        native client, which runs one fetch per RDMA window. Each retrieve
+        takes its own source, so retrieves in different windows run at the
+        same time. The client needs the pipelined path
+        (``LMCACHE_AEROSPIKE_RDMA``). A client that has the path but failed
+        to initialize it still returns a source; its ``begin_fetch`` then
+        refuses with the reason.
 
         Returns:
-            The adapter's one :class:`AerospikeLayerArrivalSource`.
+            A new :class:`AerospikeLayerArrivalSource` with no active fetch.
 
         Raises:
             LayerwiseContractError: If the native client has no pipelined
                 fetch path.
         """
-        if self._layer_source is None:
+        if not self._has_pipelined_path:
             raise LayerwiseContractError(
                 f"{self._type_name}: native client has no pipelined fetch path"
             )
-        return self._layer_source
+        return AerospikeLayerArrivalSource(self._client, NativePlanIssuer(self._client))
 
     def submit_store_task(
         self,

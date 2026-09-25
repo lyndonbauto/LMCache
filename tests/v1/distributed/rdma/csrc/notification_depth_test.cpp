@@ -96,6 +96,30 @@ void test_budget_accepts_when_device_is_loose() {
         "max slots equals effective depth");
 }
 
+void test_budget_splits_depth_across_windows() {
+  std::cout << "budget splits the depth evenly across windows\n";
+  RdmaDeviceCaps loose;
+  loose.max_recv_wr_per_qp = 1u << 20;
+  loose.max_cq_entries = 1u << 20;
+  const NotificationDepthBudget one =
+      notification_depth_budget(kWindowBytes, kRecordCap, loose);
+  const NotificationDepthBudget four =
+      notification_depth_budget(kWindowBytes, kRecordCap, loose, 4);
+  check(four.desired_depth == 4 * one.desired_depth,
+        "four windows ask for four windows' worth of receives");
+  check(four.max_slots_per_request == one.max_slots_per_request,
+        "on a loose device each window keeps a full window's slots");
+
+  RdmaDeviceCaps tight;
+  tight.max_recv_wr_per_qp = 100;
+  tight.max_cq_entries = 1u << 20;
+  const NotificationDepthBudget clamped =
+      notification_depth_budget(kWindowBytes, kRecordCap, tight, 4);
+  check(clamped.effective_depth == 100, "the device still clamps the total");
+  check(clamped.max_slots_per_request == 25,
+        "each of four windows gets a quarter of the clamped depth");
+}
+
 void test_begin_request_rejects_plan_above_device_slot_cap() {
   std::cout << "begin_request rejects plan above device slot cap\n";
   const SlotPlanner planner({two_layer_layout()});
@@ -165,6 +189,7 @@ int main() {
   try {
     test_budget_clamps_to_device_caps();
     test_budget_accepts_when_device_is_loose();
+    test_budget_splits_depth_across_windows();
     test_begin_request_rejects_plan_above_device_slot_cap();
     test_begin_request_accepts_plan_within_device_slot_cap();
   } catch (const std::exception& e) {

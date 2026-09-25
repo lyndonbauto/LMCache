@@ -246,10 +246,12 @@ uint16_t PipelinedFetchSession::active_generation() const {
 
 uint16_t PipelinedFetchSession::allocate_generation() {
   if (next_generation_ == kNoGeneration) {
-    next_generation_ = 1;
+    next_generation_ = generation_first_;
   }
   const uint16_t generation = next_generation_;
-  next_generation_ = static_cast<uint16_t>(next_generation_ + 1);
+  const uint32_t next = static_cast<uint32_t>(generation) + generation_stride_;
+  next_generation_ =
+      next > 0xFFFFu ? generation_first_ : static_cast<uint16_t>(next);
   return generation;
 }
 
@@ -511,7 +513,32 @@ void PipelinedFetchSession::restore_generation_counter(
     uint16_t next_generation) {
   std::lock_guard<std::mutex> lock(mu_);
   next_generation_ =
-      next_generation == kNoGeneration ? uint16_t{1} : next_generation;
+      next_generation == kNoGeneration ? generation_first_ : next_generation;
+}
+
+uint16_t PipelinedFetchSession::next_generation() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return next_generation_ == kNoGeneration ? generation_first_
+                                           : next_generation_;
+}
+
+void PipelinedFetchSession::set_generation_class(uint16_t first,
+                                                 uint16_t stride) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (first == kNoGeneration || stride == 0 || first > stride) {
+    throw std::invalid_argument(
+        "PipelinedFetchSession: a generation class needs 1 <= first <= "
+        "stride, got first " +
+        std::to_string(first) + " stride " + std::to_string(stride));
+  }
+  if (has_request_) {
+    throw std::runtime_error(
+        "PipelinedFetchSession: cannot change the generation class during "
+        "an active fetch");
+  }
+  generation_first_ = first;
+  generation_stride_ = stride;
+  next_generation_ = first;
 }
 
 }  // namespace rdma

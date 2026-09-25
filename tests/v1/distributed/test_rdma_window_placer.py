@@ -180,14 +180,16 @@ def test_an_already_cached_key_fails_the_whole_placement(one_window: _Setup) -> 
     one_window.placer.place(_objects(chunks=1), LAYOUTS)
 
 
-def test_one_placement_at_a_time() -> None:
+def test_one_placement_per_window_at_a_time() -> None:
     setup = _Setup(window_count=2)
     try:
         first = setup.placer.place(_objects(chunks=1), LAYOUTS)
+        second = setup.placer.place([ObjectToPlace(0, 0, _key(7))], LAYOUTS)
+        assert first.lease.window_index != second.lease.window_index
         with pytest.raises(LayerwiseContractError):
-            setup.placer.place([ObjectToPlace(0, 0, _key(7))], LAYOUTS)
+            setup.placer.place([ObjectToPlace(0, 0, _key(8))], LAYOUTS)
         first.complete()
-        setup.placer.place([ObjectToPlace(0, 0, _key(7))], LAYOUTS)
+        setup.placer.place([ObjectToPlace(0, 0, _key(8))], LAYOUTS)
     finally:
         setup.l1.close()
 

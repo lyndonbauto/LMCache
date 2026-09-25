@@ -38,6 +38,7 @@ from lmcache.v1.layerwise.contract import (
     PlanTooLargeError,
     StaleGenerationError,
 )
+from lmcache.v1.layerwise.native_fetch import pipelined_fetch_arguments
 
 
 @contextmanager
@@ -77,6 +78,9 @@ class PipelinedFetchConnector(Protocol):
     when built with ``LMCACHE_AEROSPIKE_RDMA``. Declared here so the adapter
     can be tested without the native extension. Issuing is deliberately
     absent: it is reached only through :class:`PlanIssuer`.
+
+    The client runs up to one fetch per RDMA window at a time, so every call
+    about a fetch names it by generation.
     """
 
     def pipelined_fetch_ready(self) -> bool:
@@ -91,16 +95,16 @@ class PipelinedFetchConnector(Protocol):
         """Drain arrivals, then return whether every slot of a layer landed."""
         ...
 
-    def pipelined_unservable_layers(self) -> list[int]:
-        """Return layers of the active fetch that were declined or lost."""
+    def pipelined_unservable_layers(self, generation: int) -> list[int]:
+        """Return layers of fetch ``generation`` that were declined or lost."""
         ...
 
-    def finish_pipelined_fetch(self) -> None:
-        """Drop the active fetch after completion."""
+    def finish_pipelined_fetch(self, generation: int) -> None:
+        """Drop fetch ``generation`` after completion; raise if not active."""
         ...
 
-    def abandon_pipelined_fetch(self) -> None:
-        """Drop the active fetch without waiting for outstanding slots."""
+    def abandon_pipelined_fetch(self, generation: int) -> None:
+        """Drop fetch ``generation`` without waiting; no-op if not active."""
         ...
 
 
@@ -178,20 +182,20 @@ class NativePlanIssuer:
 
         Args:
             plan: The slots to fetch. ``plan.slots[i]`` becomes notification
-                slot ``i``; offsets are relative to the registered window.
+                slot ``i``; offsets are slab offsets, all inside one window.
 
         Returns:
             The native generation.
 
         Raises:
-            PlanTooLargeError: If the plan has more slots than the device can
-                post receives for. Checked before anything is sent, because
-                on RC with ``rnr_retry = 7`` a shortfall is an infinite retry
-                rather than an error. The native session's own refusal is
-                bound as a subclass of the same error.
+            PlanTooLargeError: If the plan has more slots than one window's
+                share of the device's receives. Checked before anything is
+                sent, because on RC with ``rnr_retry = 7`` a shortfall is an
+                infinite retry rather than an error. The native session's own
+                refusal is bound as a subclass of the same error.
             RuntimeError, ValueError, IndexError: Native failures, e.g. a
-                node with no kv-sink registration or a slot outside the
-                window.
+                node with no kv-sink registration, a slot outside the
+                window, or a window that already has a fetch.
         """
         max_slots = self._connector.pipelined_max_slots_per_request()
         if max_slots and len(plan.slots) > max_slots:
@@ -199,11 +203,10 @@ class NativePlanIssuer:
                 f"fetch plan has {len(plan.slots)} slots but the device accepts "
                 f"at most {max_slots} per request; split the fetch"
             )
-        slots = [
-            (s.node_index, s.record_key, s.offset, s.length, s.layer_id)
-            for s in plan.slots
-        ]
-        return self._connector.issue_pipelined_fetch_by_slots(plan.node_names, slots)
+        arguments = pipelined_fetch_arguments(plan)
+        return self._connector.issue_pipelined_fetch_by_slots(
+            arguments.node_names, arguments.slots
+        )
 
 
 class AerospikeLayerArrivalSource:
@@ -220,9 +223,11 @@ class AerospikeLayerArrivalSource:
     :meth:`begin_fetch` is the native one, so it matches what appears on the
     wire.
 
-    Instances hold at most one active fetch. Every method takes one lock, so
-    concurrent :meth:`poll_layer` calls are safe; the native side serializes
-    them anyway.
+    Instances hold at most one active fetch. Several instances may share one
+    native client, one per concurrent retrieve: the client runs one fetch per
+    RDMA window, and each instance names its own fetch by generation. Every
+    method takes the instance's lock, so concurrent :meth:`poll_layer` calls
+    are safe.
     """
 
     def __init__(self, connector: PipelinedFetchConnector, issuer: PlanIssuer) -> None:
@@ -275,8 +280,6 @@ class AerospikeLayerArrivalSource:
             with _as_contract_errors("fetch issue"):
                 generation = self._issuer.issue(plan)
             if generation == NO_GENERATION:
-                with _as_contract_errors("abandon"):
-                    self._connector.abandon_pipelined_fetch()
                 raise LayerwiseContractError(
                     "native fetch returned the reserved generation "
                     f"{NO_GENERATION}; refusing to track it"
@@ -313,7 +316,7 @@ class AerospikeLayerArrivalSource:
             with _as_contract_errors("readiness poll"):
                 if self._connector.is_pipelined_layer_ready(layer_id, generation):
                     return LayerArrivalStatus.RESIDENT
-                unservable = self._connector.pipelined_unservable_layers()
+                unservable = self._connector.pipelined_unservable_layers(generation)
             if layer_id in unservable:
                 return LayerArrivalStatus.UNSERVABLE
             return LayerArrivalStatus.PENDING
@@ -333,7 +336,7 @@ class AerospikeLayerArrivalSource:
             self._require_active(generation)
             try:
                 with _as_contract_errors("finish"):
-                    self._connector.finish_pipelined_fetch()
+                    self._connector.finish_pipelined_fetch(generation)
             finally:
                 self._clear()
 
@@ -357,7 +360,7 @@ class AerospikeLayerArrivalSource:
                 return
             try:
                 with _as_contract_errors("abandon"):
-                    self._connector.abandon_pipelined_fetch()
+                    self._connector.abandon_pipelined_fetch(generation)
             finally:
                 self._clear()
 

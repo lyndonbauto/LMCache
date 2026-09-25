@@ -77,11 +77,12 @@ class WindowLease:
 class RdmaWindowLeaser:
     """Leases RDMA windows, reclaiming idle ones and quarantining abandoned ones.
 
-    At most one lease is outstanding at a time, because the native transport
-    runs one pipelined fetch at a time (W3). A second retrieve is refused and
-    falls back to a whole-object load.
+    Each window has at most one lease outstanding, and the native transport
+    runs one pipelined fetch per window, so up to ``window_count`` retrieves
+    run at once (W3). A retrieve that finds every window leased, quarantined
+    or pinned is refused and falls back to a whole-object load.
 
-    Choosing a window, among those not quarantined:
+    Choosing a window, among those neither leased nor quarantined:
 
     1. an empty window, if any;
     2. otherwise the window released longest ago whose objects are all
@@ -132,7 +133,7 @@ class RdmaWindowLeaser:
         # Windows never released sort first, as least recently used.
         self._released_at = [float("-inf")] * plan.window_count
         self._quarantined_until = [float("-inf")] * plan.window_count
-        self._outstanding: WindowLease | None = None
+        self._outstanding: dict[int, WindowLease] = {}
         self._next_lease_id = 1
 
     def lease(self, request_bytes: int) -> WindowLease:
@@ -152,9 +153,9 @@ class RdmaWindowLeaser:
             ValueError: If ``request_bytes`` is not positive.
             PlanTooLargeError: If ``request_bytes`` exceeds the window size.
                 The caller can split the request.
-            LayerwiseContractError: If a lease is already outstanding, or
-                every window is quarantined or holds a locked object.
-                Splitting does not help; the caller falls back.
+            LayerwiseContractError: If every window is leased, quarantined,
+                or holds a locked object. Splitting does not help; the caller
+                falls back.
         """
         if request_bytes <= 0:
             raise ValueError(f"request_bytes must be positive, got {request_bytes}")
@@ -164,19 +165,17 @@ class RdmaWindowLeaser:
                 f"{self._window_bytes}"
             )
         with self._lock:
-            if self._outstanding is not None:
-                raise LayerwiseContractError(
-                    "another pipelined fetch holds RDMA window "
-                    f"{self._outstanding.window_index}; one fetch runs at a time"
-                )
             now = self._clock()
             candidates = [
                 i
                 for i in range(len(self._offsets))
-                if self._quarantined_until[i] <= now
+                if i not in self._outstanding and self._quarantined_until[i] <= now
             ]
             if not candidates:
-                raise LayerwiseContractError("every RDMA window is quarantined")
+                raise LayerwiseContractError(
+                    f"every RDMA window is leased ({len(self._outstanding)}) "
+                    "or quarantined"
+                )
             counts = {
                 i: self._l1_manager.get_rdma_window_object_count(i) for i in candidates
             }
@@ -193,7 +192,7 @@ class RdmaWindowLeaser:
                     )
                 return self._grant(window_index)
             raise LayerwiseContractError(
-                "every RDMA window is quarantined or holds an object in use"
+                "every RDMA window is leased, quarantined, or holds an object in use"
             )
 
     def release(self, lease: WindowLease, outcome: FetchOutcome) -> None:
@@ -205,19 +204,19 @@ class RdmaWindowLeaser:
         again until ``fetch_timeout_seconds`` has passed.
 
         Args:
-            lease: The outstanding lease, as returned by :meth:`lease`.
+            lease: An outstanding lease, as returned by :meth:`lease`.
             outcome: :attr:`FetchOutcome.FINISHED` only if every layer became
                 resident or no fetch was issued; anything else is
                 :attr:`FetchOutcome.ABANDONED`.
 
         Raises:
-            ValueError: If ``lease`` is not the outstanding lease, e.g. it
-                was already released.
+            ValueError: If ``lease`` is not outstanding, e.g. it was already
+                released.
         """
         with self._lock:
-            if self._outstanding != lease:
-                raise ValueError(f"{lease} is not the outstanding lease")
-            self._outstanding = None
+            if self._outstanding.get(lease.window_index) != lease:
+                raise ValueError(f"{lease} is not an outstanding lease")
+            del self._outstanding[lease.window_index]
             now = self._clock()
             self._released_at[lease.window_index] = now
             if outcome is FetchOutcome.ABANDONED:
@@ -234,5 +233,5 @@ class RdmaWindowLeaser:
             lease_id=self._next_lease_id,
         )
         self._next_lease_id += 1
-        self._outstanding = lease
+        self._outstanding[window_index] = lease
         return lease

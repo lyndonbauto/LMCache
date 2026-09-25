@@ -789,11 +789,11 @@ class StorageManager:
         Retrieve runs ``LayerArrivalPump(source, sink).run(plan)``; the pump
         begins, polls and releases the fetch, so nothing else here does.
         Adapters are asked in registration order and the first one with a
-        layer-pipelined path wins. Asking again returns the same source
-        while that adapter stays registered.
+        layer-pipelined path wins. Call once per retrieve: a source holds
+        one fetch, and concurrent retrieves each need their own.
 
         Returns:
-            The first L2 adapter's layer arrival source.
+            A new layer arrival source from the first adapter that has one.
 
         Raises:
             LayerwiseContractError: If no L2 adapter can fetch layer by

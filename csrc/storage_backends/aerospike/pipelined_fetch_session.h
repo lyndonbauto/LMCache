@@ -206,10 +206,29 @@ class PipelinedFetchSession {
 
   // Restore the generation counter after the session object is recreated.
   //
-  // `kNoGeneration` is coerced to 1, since it is never allocated.
+  // `kNoGeneration` is coerced to the first generation of this session's
+  // class. Pass a value from next_generation() of a session with the same
+  // class; any other value breaks the class.
   //
   // Thread safety: takes `mu_`.
   void restore_generation_counter(uint16_t next_generation);
+
+  // Generation the next request will be allocated.
+  //
+  // Thread safety: takes `mu_`.
+  uint16_t next_generation() const;
+
+  // Allocate only generations `first`, `first + stride`, `first + 2*stride`,
+  // ..., wrapping back to `first` past 65535.
+  //
+  // Sessions given the same `stride` and different `first` never share a
+  // generation, so one completion queue can carry all their immediates and
+  // `(generation - 1) % stride` names the session. The default class is
+  // first 1, stride 1: every generation but kNoGeneration.
+  //
+  // Thread safety: takes `mu_`. Throws std::invalid_argument unless
+  // 1 <= first <= stride, and std::runtime_error if a request is active.
+  void set_generation_class(uint16_t first, uint16_t stride);
 
  private:
   uint16_t allocate_generation();
@@ -224,6 +243,8 @@ class PipelinedFetchSession {
   uint32_t max_notification_slots_;
 
   mutable std::mutex mu_;
+  uint16_t generation_first_ = 1;
+  uint16_t generation_stride_ = 1;
   uint16_t next_generation_ = 1;
   uint16_t last_abandoned_generation_ = 0;
 

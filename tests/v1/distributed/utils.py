@@ -19,17 +19,20 @@ class PipelinedNativeClientStub:
 
     Has the methods ``NativeConnectorL2Adapter`` needs to run, plus the
     pipelined surface ``lmcache_aerospike.LMCacheAerospikeClient`` exposes
-    when built with ``LMCACHE_AEROSPIKE_RDMA``. Records what was issued and
-    reports the layers in ``ready_layers`` as landed.
+    when built with ``LMCACHE_AEROSPIKE_RDMA``. Like the native client it
+    runs several fetches at once, each named by generation. Issues get
+    generations counting up from ``generation``; ``ready_layers`` maps a
+    generation to its landed layers.
     """
 
     def __init__(self, generation: int = 7) -> None:
         self._efd = create_event_notifier()
-        self.generation = generation
-        self.ready_layers: set[int] = set()
+        self.next_generation = generation
+        self.active: set[int] = set()
+        self.ready_layers: dict[int, set[int]] = {}
         self.issued: list[tuple[list[str], list[tuple[int, str, int, int, int]]]] = []
-        self.finished = 0
-        self.abandoned = 0
+        self.finished: list[int] = []
+        self.abandoned: list[int] = []
 
     def event_fd(self) -> int:
         return self._efd.fileno()
@@ -55,16 +58,26 @@ class PipelinedNativeClientStub:
         slots: Sequence[tuple[int, str, int, int, int]],
     ) -> int:
         self.issued.append((list(node_names), list(slots)))
-        return self.generation
+        generation = self.next_generation
+        self.next_generation += 1
+        self.active.add(generation)
+        return generation
 
     def is_pipelined_layer_ready(self, layer_id: int, request_generation: int) -> bool:
-        return request_generation == self.generation and layer_id in self.ready_layers
+        return request_generation in self.active and layer_id in self.ready_layers.get(
+            request_generation, set()
+        )
 
-    def pipelined_unservable_layers(self) -> list[int]:
+    def pipelined_unservable_layers(self, generation: int) -> list[int]:
         return []
 
-    def finish_pipelined_fetch(self) -> None:
-        self.finished += 1
+    def finish_pipelined_fetch(self, generation: int) -> None:
+        if generation not in self.active:
+            raise RuntimeError(f"generation {generation} is not an active fetch")
+        self.active.discard(generation)
+        self.finished.append(generation)
 
-    def abandon_pipelined_fetch(self) -> None:
-        self.abandoned += 1
+    def abandon_pipelined_fetch(self, generation: int) -> None:
+        if generation in self.active:
+            self.active.discard(generation)
+            self.abandoned.append(generation)

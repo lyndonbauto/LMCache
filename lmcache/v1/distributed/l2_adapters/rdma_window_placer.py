@@ -193,7 +193,8 @@ class RdmaWindowPlacer:
     """Reserves every object of a pipelined retrieve inside one leased window.
 
     Thread-safe to the extent its collaborators are: each call to
-    :meth:`place` works on its own lease, and the leaser admits one at a time.
+    :meth:`place` works on its own lease, and the leaser never leases one
+    window twice at once.
     """
 
     def __init__(self, l1_manager: L1Manager, leaser: RdmaWindowLeaser) -> None:

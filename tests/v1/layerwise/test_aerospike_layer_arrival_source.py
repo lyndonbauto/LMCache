@@ -61,8 +61,8 @@ class FakeNativeConnector:
         self.landed: set[int] = set()
         self.unservable: set[int] = set()
         self.arrivals_per_poll: deque[int] = deque()
-        self.finish_calls = 0
-        self.abandon_calls = 0
+        self.finish_calls: list[int] = []
+        self.abandon_calls: list[int] = []
         self.poll_error: Exception = RuntimeError("unset")
         self.raise_on_poll = False
         self.raise_on_finish = False
@@ -101,18 +101,22 @@ class FakeNativeConnector:
             return False
         return layer_id in self.landed and layer_id not in self.unservable
 
-    def pipelined_unservable_layers(self) -> list[int]:
+    def pipelined_unservable_layers(self, generation: int) -> list[int]:
+        if generation != self.active_generation:
+            return []
         return sorted(self.unservable)
 
-    def finish_pipelined_fetch(self) -> None:
-        self.finish_calls += 1
+    def finish_pipelined_fetch(self, generation: int) -> None:
+        self.finish_calls.append(generation)
+        active = self.active_generation
         self.active_generation = NO_GENERATION
-        if self.raise_on_finish:
-            raise RuntimeError("PipelinedFetchSession: no active request")
+        if self.raise_on_finish or generation != active:
+            raise RuntimeError("PipelinedFetchPool: generation is not active")
 
-    def abandon_pipelined_fetch(self) -> None:
-        self.abandon_calls += 1
-        self.active_generation = NO_GENERATION
+    def abandon_pipelined_fetch(self, generation: int) -> None:
+        self.abandon_calls.append(generation)
+        if generation == self.active_generation:
+            self.active_generation = NO_GENERATION
 
     def issue_pipelined_fetch_by_slots(
         self,
@@ -235,13 +239,18 @@ def test_a_failed_begin_fetch_leaves_the_source_idle() -> None:
     assert source.begin_fetch(make_plan({0: 1})) != NO_GENERATION
 
 
-def test_a_reserved_native_generation_is_refused_and_released() -> None:
-    """Generation 0 would alias "no fetch"; it is abandoned, not tracked."""
+def test_a_reserved_native_generation_is_refused() -> None:
+    """Generation 0 would alias "no fetch", so it is not tracked.
+
+    The native side never makes generation 0 active, so there is nothing to
+    release, and the source stays free for the next fetch.
+    """
     source, connector, issuer = _make_source()
     issuer.next_generation = NO_GENERATION
     with pytest.raises(LayerwiseContractError, match="reserved generation"):
         source.begin_fetch(make_plan({0: 1}))
-    assert connector.abandon_calls == 1
+    assert connector.abandon_calls == []
+    assert source.begin_fetch(make_plan({0: 1})) != NO_GENERATION
 
 
 # ---------------------------------------------------------- NativePlanIssuer
@@ -413,7 +422,7 @@ def test_finish_releases_the_native_fetch_and_the_generation() -> None:
     source, connector, _ = _make_source()
     generation = source.begin_fetch(make_plan({0: 1}))
     source.finish_fetch(generation)
-    assert connector.finish_calls == 1
+    assert connector.finish_calls == [generation]
     with pytest.raises(StaleGenerationError):
         source.poll_layer(0, generation)
 
@@ -423,7 +432,7 @@ def test_finish_rejects_a_stale_generation_without_touching_native() -> None:
     generation = source.begin_fetch(make_plan({0: 1}))
     with pytest.raises(StaleGenerationError):
         source.finish_fetch(generation + 1)
-    assert connector.finish_calls == 0
+    assert connector.finish_calls == []
 
 
 def test_a_failed_native_finish_still_frees_the_source() -> None:
@@ -440,8 +449,8 @@ def test_a_failed_native_finish_still_frees_the_source() -> None:
 def test_abandon_tolerates_repeated_and_unknown_generations() -> None:
     """Error paths unwind without first working out how far a fetch got.
 
-    The native abandon throws when nothing is active, so only the first call
-    may reach it.
+    Only the first call names a fetch the source holds, so only it reaches
+    the native side.
     """
     source, connector, _ = _make_source()
     generation = source.begin_fetch(make_plan({0: 1}))
@@ -449,7 +458,7 @@ def test_abandon_tolerates_repeated_and_unknown_generations() -> None:
     source.abandon_fetch(generation)
     source.abandon_fetch(generation + 5)
     source.abandon_fetch(NO_GENERATION)
-    assert connector.abandon_calls == 1
+    assert connector.abandon_calls == [generation]
 
 
 def test_abandon_after_finish_is_a_no_op() -> None:
@@ -457,7 +466,7 @@ def test_abandon_after_finish_is_a_no_op() -> None:
     generation = source.begin_fetch(make_plan({0: 1}))
     source.finish_fetch(generation)
     source.abandon_fetch(generation)
-    assert connector.abandon_calls == 0
+    assert connector.abandon_calls == []
 
 
 def test_abandoning_a_stale_generation_leaves_the_active_fetch_alone() -> None:
@@ -467,7 +476,7 @@ def test_abandoning_a_stale_generation_leaves_the_active_fetch_alone() -> None:
     source.finish_fetch(old_generation)
     new_generation = source.begin_fetch(plan)
     source.abandon_fetch(old_generation)
-    assert connector.abandon_calls == 0
+    assert connector.abandon_calls == []
     assert source.poll_layer(0, new_generation) is LayerArrivalStatus.PENDING
 
 
@@ -489,7 +498,7 @@ def test_the_pump_loads_in_order_when_layers_land_backwards() -> None:
 
     assert sink.loaded_layers() == (0, 1, 2)
     assert sink.finished_generations() == (generation,)
-    assert connector.finish_calls == 1
+    assert connector.finish_calls == [generation]
 
 
 def test_the_pump_falls_back_when_a_layer_is_declined() -> None:
@@ -511,5 +520,5 @@ def test_the_pump_falls_back_when_a_layer_is_declined() -> None:
         LayerArrivalPump(source, sink, sleep=_no_sleep).run(plan)
 
     assert sink.loaded_layers() == (0,)
-    assert len(sink.abandoned_generations()) == 1
-    assert connector.abandon_calls == 1
+    assert sink.abandoned_generations() == (connector.abandon_calls[0],)
+    assert len(connector.abandon_calls) == 1

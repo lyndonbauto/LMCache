@@ -82,6 +82,27 @@ uint16_t issue_planned_fetch(PipelinedFetchSession& session,
                        session.begin_request_from_slots(slots));
 }
 
+uint16_t issue_planned_fetch(PipelinedFetchPool& pool,
+                             const PipelinedNodeInfoSender& send_info,
+                             const std::vector<PlannedSlot>& slots) {
+  const uint16_t generation = pool.begin_request_from_slots(slots);
+  try {
+    for (const auto& entry : pool.pipelined_fetch_commands(generation)) {
+      std::string reply;
+      try {
+        reply = send_info(entry.first, entry.second);
+      } catch (...) {
+        reply = declined_reply_for_command(entry.second);
+      }
+      pool.on_node_reply(entry.first, entry.second, reply, generation);
+    }
+  } catch (...) {
+    pool.abandon_request(generation);
+    throw;
+  }
+  return generation;
+}
+
 }  // namespace rdma
 }  // namespace connector
 }  // namespace lmcache

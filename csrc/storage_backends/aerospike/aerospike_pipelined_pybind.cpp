@@ -161,11 +161,14 @@ void bind_pipelined_fetch(py::module& module,
       .def("pipelined_max_slots_per_request",
            &AerospikeNativeConnector::pipelined_max_slots_per_request)
       .def("pipelined_unservable_layers",
-           &AerospikeNativeConnector::pipelined_unservable_layers)
+           &AerospikeNativeConnector::pipelined_unservable_layers,
+           py::arg("generation"))
       .def("finish_pipelined_fetch",
-           &AerospikeNativeConnector::finish_pipelined_fetch)
+           &AerospikeNativeConnector::finish_pipelined_fetch,
+           py::arg("generation"))
       .def("abandon_pipelined_fetch",
-           &AerospikeNativeConnector::abandon_pipelined_fetch);
+           &AerospikeNativeConnector::abandon_pipelined_fetch,
+           py::arg("generation"));
 }
 
 }  // namespace aerospike_pipelined_pybind

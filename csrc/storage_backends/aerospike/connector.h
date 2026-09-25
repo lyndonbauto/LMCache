@@ -204,26 +204,30 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
   // empty, a node has no kv-sink registration, or a slot leaves the window;
   // rdma::PlanTooLargeError if there are more slots than
   // pipelined_max_slots_per_request(); std::runtime_error if the RDMA path is
-  // not enabled or a fetch is already active.
+  // not enabled or the window of the first slot already has a fetch.
+  //
+  // Up to one fetch per window runs at a time; every later call about this
+  // fetch quotes the returned generation.
   uint16_t issue_pipelined_fetch_by_slots(
       const std::vector<std::string>& node_names,
       const std::vector<PlannedSlotKey>& slots);
 
-  // Most slots one pipelined fetch may carry, or 0 when pipelined fetch is
-  // not ready.
+  // Most slots one pipelined fetch may carry: one window's share of the
+  // device's notification depth, or 0 when pipelined fetch is not ready.
   //
   // Thread safety: safe to call concurrently.
   uint32_t pipelined_max_slots_per_request() const;
 
-  // Layer readiness for a pipelined fetch. False when pipelined fetch is not
-  // ready, the generation does not match, or the layer is not complete.
+  // Whether every slot of `layer_id` in fetch `request_generation` landed.
+  // False when pipelined fetch is not ready, that fetch is not active, the
+  // generation is 0, or the layer is not complete.
   //
   // Thread safety: safe to call concurrently.
   bool is_pipelined_layer_ready(uint32_t layer_id,
-                                uint16_t request_generation = 0) const;
+                                uint16_t request_generation) const;
 
-  // Layers of the active pipelined fetch that a node declined or lost. Empty
-  // when pipelined fetch is not ready or no request is active.
+  // Layers of fetch `generation` that a node declined or lost. Empty when
+  // pipelined fetch is not ready or that fetch is not active.
   //
   // A caller cannot distinguish "still in flight" from "will never arrive"
   // with is_pipelined_layer_ready alone: both report false. Without this the
@@ -231,15 +235,20 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
   // deadline, which turns a recoverable miss into a stall.
   //
   // Thread safety: safe to call concurrently.
-  std::vector<uint32_t> pipelined_unservable_layers() const;
+  std::vector<uint32_t> pipelined_unservable_layers(uint16_t generation) const;
 
-  // Finish or abandon the active pipelined fetch.
+  // Finish fetch `generation` after it completed. Throws std::runtime_error
+  // if it is not active.
   //
   // Thread safety: safe to call concurrently; serialized on the driver lock.
-  void finish_pipelined_fetch();
-  void abandon_pipelined_fetch();
+  void finish_pipelined_fetch(uint16_t generation);
 
-  // Drain RDMA write-with-immediate notifications into the active session.
+  // Abandon fetch `generation` without waiting; no-op if it is not active.
+  //
+  // Thread safety: safe to call concurrently; serialized on the driver lock.
+  void abandon_pipelined_fetch(uint16_t generation);
+
+  // Drain RDMA write-with-immediate notifications into the active fetches.
   //
   // Thread safety: safe to call concurrently; serialized with other pipelined
   // methods on the internal driver lock.

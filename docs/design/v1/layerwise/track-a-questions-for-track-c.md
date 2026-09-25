@@ -24,7 +24,7 @@ how contract changes are made.
 | M4: retrieve wiring vs the pump | **Decided 2026-09-25: the pump begins the fetch.** Track A's part done: `StorageManager.layer_arrival_source()` | Track C: retrieve wiring |
 | W1: windows run out when data stays in place | **Decided:** `lease()` reclaims a whole idle window | Track A: done (`RdmaWindowLeaser`, `reclaim_rdma_window`) |
 | W2: which error the placer raises | **Decided** as proposed | Track A: placer; Track C: one handler in retrieve |
-| W3: one fetch at a time | Known limit; a concurrent retrieve falls back | Track A, later |
+| W3: one fetch at a time | **Done: one fetch per window**, up to `window_count` at once | Track C: one source per retrieve |
 | W4: fallback after a failed fetch | **Decided:** reload into fresh general-L1 objects | Track A: `abort_write` and pool choice done; Track C: retrieve wiring |
 | N1: an object's records are not on one node | **Open, raised by Track A** | Track C: node per record in the planner; Track A: destination placer |
 | P1: publishing every window | **Done: one registration covering all windows** | - |
@@ -83,7 +83,7 @@ runs once per entry in `SOURCE_HARNESS_FACTORIES`.
 
 The `aerospike` entry (`tests/v1/layerwise/aerospike_harness.py`) runs
 `AerospikeLayerArrivalSource` and `NativePlanIssuer` over the real native
-`PipelinedFetchSession`, with no fabric, device, or cluster. The connector is
+`PipelinedFetchPool`, with no fabric, device, or cluster. The connector is
 a test-only pybind module,
 `tests/v1/distributed/rdma/csrc/fabric_free_session_pybind.cpp`, built by
 `make -C tests/v1/distributed/rdma pyharness`. It also acts as the driver:
@@ -223,21 +223,29 @@ things to the caller:
 
 Retrieve then needs one handler around both the placer and the pump.
 
-### W3. One pipelined fetch at a time
+### W3. One pipelined fetch per window (done)
 
-A `window_count` above 1 lets that many retrieves' *data* stay resident, but
-fetches do not run concurrently. The session holds one active request, and
-all fetches share one receive queue. Concurrency needs:
+Fetches used to run one at a time: the session held one active request, and
+`lease()` refused while another fetch was in flight. Now the native client
+holds one session per window, so up to `window_count` retrieves fetch at
+once. Done as item 13.
 
-- one session per leased window;
-- routing each immediate to its session by generation, which then has to be
-  unique across sessions.
+- **One source per retrieve.** `StorageManager.layer_arrival_source()`
+  returns a new source on every call. A source still holds one fetch, as the
+  contract says; several sources share the native client.
+- **Routing by generation.** Window `w` uses only generations `g` with
+  `(g - 1) % window_count == w`, so an immediate names its window. Every
+  native call after the begin takes the generation.
+- **Static split of the notification depth.** All windows share one
+  completion queue, whose overflow is fatal. Each fetch may use at most
+  `depth / window_count` slots. The client asks the device for
+  `window_count` times one window's slots, so the share only shrinks when
+  the device caps the depth; then a plan that fit before can raise
+  `PlanTooLargeError`. A quarantined window keeps its share, so its late
+  writes always fit.
 
-Until that exists, `lease()` also refuses while another fetch is in flight,
-and the second retrieve falls back to a whole-object load. **Under load the
-pipelined path serves only a fraction of retrieves.** Any early benchmark has
-to report the share of retrieves that went pipelined, or its TTFT numbers
-will understate the pipelined path and mix in fallback latency.
+A retrieve still falls back when every window is leased or quarantined. Any
+early benchmark should report the share of retrieves that went pipelined.
 
 ### W4. Fallback after a failed fetch goes into fresh objects
 
@@ -385,7 +393,7 @@ can follow as hardening. **Done** as item 11.
      `reclaim_rdma_window(i)`, which uses L1's own record of each window's
      keys.
    - Quarantine: an abandoned window waits `fetch_timeout_seconds`.
-   - One lease at a time (W3). Refusals follow W2.
+   - One lease per window (W3, item 13). Refusals follow W2.
 
    Two differences from the M2 sketch. `release` takes an outcome enum, not
    a boolean. `lease` returns the window's slab offset, and
@@ -405,8 +413,9 @@ can follow as hardening. **Done** as item 11.
     inside the window of its first slot. On the Soft-RoCE VM, a fetch into
     window 2 lands byte-identical, and a write past the range is refused.
 12. The storage-manager pipelined pair is retired (M4).
-    `StorageManager.layer_arrival_source()` returns the native adapter's one
-    `AerospikeLayerArrivalSource`. With no pipelined adapter it raises
+    `StorageManager.layer_arrival_source()` returns an
+    `AerospikeLayerArrivalSource` from the native adapter (a new one per
+    call since item 13). With no pipelined adapter it raises
     `LayerwiseContractError`, so retrieve's one handler covers that case too.
     `begin_pipelined_fetch`, `finish_pipelined_fetch`,
     `abandon_pipelined_fetch` and `is_pipelined_layer_ready` are gone from
@@ -418,17 +427,42 @@ can follow as hardening. **Done** as item 11.
       native `issue_pipelined_fetch_by_keys` can go when you're ready.
     - Retrieve should wrap the accessor call in the same
       `LayerwiseContractError` handler as the placer and the pump.
+13. Concurrent fetches, one per window (W3). See
+    [aerospike_rdma.md](../distributed/l2_adapters/aerospike_rdma.md#concurrent-fetches).
+    - Native: `PipelinedFetchPool` holds one `PipelinedFetchSession` per
+      window and routes each immediate by its generation. The native
+      `finish_pipelined_fetch`, `abandon_pipelined_fetch` and
+      `pipelined_unservable_layers` now take the generation.
+      `is_pipelined_layer_ready` has no default generation any more.
+    - Python: `layer_arrival_source()` returns a new source per call, and
+      `RdmaWindowLeaser` holds one lease per window.
+    - Over Soft-RoCE, two fetches in windows 0 and 1 complete from one
+      completion queue with the right bytes. After the second is abandoned,
+      a late write carrying its generation is not credited to the window's
+      next fetch.
+    - For Track C, retrieve calls `layer_arrival_source()` once per retrieve
+      and never shares a source between retrieves.
+    - For Track C, on your two questions:
+      - One plan flattener: `NativePlanIssuer` now calls your
+        `pipelined_fetch_arguments` from `native_fetch.py`. Its own copy is
+        gone.
+      - A decline is final: agreed. The native side already works this way.
+        `LayerReadiness::note_unservable` marks the slot as seen without
+        landing it, so a later write for it counts as a duplicate and the
+        layer stays unservable. Please also pin the reverse order in the
+        conformance suite: a slot that lands and is then declined leaves its
+        layer resident.
 
 These were verified on the Soft-RoCE VM
 ([rdma_testing_on_windows.md](../distributed/l2_adapters/rdma_testing_on_windows.md)):
 
 - `lmcache_aerospike` builds with `BUILD_WITH_AEROSPIKE_RDMA=1` against
   C client 7.3.0;
-- device-free logic harness: 298 checks pass;
-- fabric harness over `rxe0`: 341 checks pass;
-- 322 Python tests pass: `tests/v1/layerwise/` (including the conformance
-  suite over both sources), pipelined readiness through the real extension,
-  RDMA registration, and adapter configuration;
+- device-free logic harness: 364 checks pass;
+- fabric harness over `rxe0`: 415 checks pass;
+- `tests/v1/layerwise/` and `tests/v1/distributed/` pass (1202 passed, 92
+  skipped), including the conformance suite over both sources and
+  concurrent fetches over the real native pool;
 - the pytest wrappers in `tests/v1/distributed/rdma/` pass.
 
 `record_node` and `issue_pipelined_fetch_by_slots` have not run end to end.
@@ -446,7 +480,7 @@ That needs an Aerospike server, and for the slot path, one built from the
    half is done as item 10. The node half is Track C's planner change (N1).
 5. ~~Retire or internalize `begin_pipelined_fetch` /
    `is_pipelined_layer_ready` (M4).~~ Done as item 12.
-6. Later: concurrent fetches (W3).
+6. ~~Later: concurrent fetches (W3).~~ Done as item 13.
 
 **Track C:** retrieve wiring per M4 and W4. One handler covers the placer and
 the pump, and the fallback goes into fresh general-L1 objects.

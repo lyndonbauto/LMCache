@@ -429,17 +429,16 @@ class L2AdapterInterface(ABC):
         return ""
 
     def layer_arrival_source(self) -> LayerArrivalSource:
-        """Return the source that fetches and reports layers for this backend.
+        """Return a source that fetches and reports layers for this backend.
 
         A layerwise retrieve runs ``LayerArrivalPump(source, sink).run(plan)``
-        over it; the pump begins, polls and releases the fetch. Every call
-        returns the same source, because a source tracks the backend's one
-        active fetch.
+        over it; the pump begins, polls and releases the fetch. A source
+        holds one fetch at a time, so each retrieve takes its own.
 
         The default raises: most backends have no layer-pipelined path.
 
         Returns:
-            The backend's layer arrival source.
+            A layer arrival source with no active fetch.
 
         Raises:
             LayerwiseContractError: If this backend cannot fetch layer by
