@@ -247,18 +247,50 @@ existing caller changes:
 l1.reserve_write(keys, temps, layout, mode="new", pool=L1Pool.rdma_window(i))
 ```
 
-Two `L1Manager` calls support the window lifecycle
+These `L1Manager` calls support the window lifecycle
 ([W1 and W4](../../layerwise/track-a-questions-for-track-c.md#window-lifecycle-w1-to-w4-agreed-after-the-meeting)):
 
 | Call | Does | Used by |
 |---|---|---|
-| `delete_if_none_locked(keys)` | Deletes every existing key, or none if any is read- or write-locked, in one step under the L1 lock. | `lease()` reclaiming a whole idle window. |
+| `reclaim_rdma_window(i)` | Deletes every object in window `i`, or none if any is read- or write-locked, in one step under the L1 lock. | The leaser, reclaiming a whole idle window. |
+| `get_rdma_window_object_count(i)` | Counts the objects in window `i`. | The leaser, preferring an empty window to a reclaim. |
+| `delete_if_none_locked(keys)` | The same all-or-nothing delete, over a caller's key list. | Callers that hold their own key list. |
 | `abort_write(keys)` | Deletes write-locked keys without making them readable and without a write-finished event. Leaves other keys alone. | The fallback after a failed fetch, before it reserves fresh general-L1 objects. |
 
-Both emit the same eviction events as `delete`.
+The deletes emit the same eviction events as `delete`. L1 keeps its own record
+of which keys live in each window. A caller-side list could go stale: a key
+deleted from a window may be re-created in general L1, and reclaiming by that
+list would delete the wrong object.
 
-Not done yet: the lease API with reclaim and quarantine, and publishing every
-window rather than window 0.
+### Leasing a window
+
+`RdmaWindowLeaser` (`rdma_window_leaser.py`) hands the windows to pipelined
+retrieves:
+
+```python
+lease = leaser.lease(request_bytes)   # WindowLease(window_index, base_offset, ...)
+l1.reserve_write(keys, temps, layout, mode="new", pool=lease.pool())
+...                                   # fetch, pump
+leaser.release(lease, FetchOutcome.FINISHED)   # or ABANDONED on any other exit
+```
+
+- **Choosing a window.** An empty window first. Otherwise the window released
+  longest ago whose objects are all unlocked, reclaimed with
+  `reclaim_rdma_window`. Reads after the fetch don't refresh that order.
+- **Quarantine.** A window released as `ABANDONED` isn't leased again for
+  `fetch_timeout_seconds`, because writes already on the wire can still land.
+  `FINISHED` means every layer became resident, so the window can be reused
+  at once.
+- **One lease at a time.** The native session runs one fetch at a time (W3),
+  so a second `lease` raises instead of queueing.
+- **Refusals** follow W2. A request larger than a window raises
+  `PlanTooLargeError`, since the caller can split it. No lease available
+  raises `LayerwiseContractError`, and the caller falls back.
+
+Not done yet: publishing every window to the nodes rather than window 0. Each
+window already has its own memory registration. A node's `kv-sink-register`
+publishes one of them, though, and fetch commands name that node's single
+registered region. Leasing any window other than 0 needs that changed first.
 
 ## Transport-agnostic registration handle
 

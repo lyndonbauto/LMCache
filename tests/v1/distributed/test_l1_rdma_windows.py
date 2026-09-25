@@ -387,6 +387,113 @@ def test_abort_write_leaves_keys_it_does_not_own(
     assert listener.deleted == []
 
 
+def test_window_object_count_follows_reserve_and_abort(
+    l1: tuple[L1Manager, _RecordingListener],
+) -> None:
+    mgr, _ = l1
+    keys = [_key(i) for i in range(3)]
+    mgr.reserve_write(
+        keys, [False] * len(keys), LAYOUT, mode="new", pool=L1Pool.rdma_window(1)
+    )
+    mgr.reserve_write([_key(9)], [False], LAYOUT, mode="new")
+
+    assert mgr.get_rdma_window_count() == WINDOW_COUNT
+    assert mgr.get_rdma_window_object_count(0) == 0
+    assert mgr.get_rdma_window_object_count(1) == 3
+
+    mgr.abort_write(keys[:2])
+
+    assert mgr.get_rdma_window_object_count(1) == 1
+
+
+def test_reclaim_empties_one_window_and_nothing_else(
+    l1: tuple[L1Manager, _RecordingListener],
+) -> None:
+    mgr, listener = l1
+    in_window = [_key(i) for i in range(PER_WINDOW)]
+    _fill_window(mgr, in_window)
+    other, general = _key(50), _key(60)
+    mgr.reserve_write([other], [False], LAYOUT, mode="new", pool=L1Pool.rdma_window(1))
+    mgr.reserve_write([general], [False], LAYOUT, mode="new")
+    mgr.finish_write([other, general])
+
+    assert mgr.reclaim_rdma_window(0) == L1Error.SUCCESS
+
+    assert all(mgr.get_object_state(key) is None for key in in_window)
+    assert sorted(listener.deleted, key=str) == sorted(in_window, key=str)
+    assert mgr.get_object_state(other) is not None
+    assert mgr.get_object_state(general) is not None
+    assert mgr.get_rdma_window_object_count(0) == 0
+    refill = [_key(i) for i in range(100, 100 + PER_WINDOW)]
+    ret = mgr.reserve_write(
+        refill, [False] * len(refill), LAYOUT, mode="new", pool=L1Pool.rdma_window(0)
+    )
+    assert all(err == L1Error.SUCCESS for err, _ in ret.values())
+
+
+def test_reclaiming_an_empty_window_succeeds_silently(
+    l1: tuple[L1Manager, _RecordingListener],
+) -> None:
+    mgr, listener = l1
+
+    assert mgr.reclaim_rdma_window(1) == L1Error.SUCCESS
+    assert listener.deleted == []
+
+
+@pytest.mark.parametrize("lock", ["read", "write"])
+def test_reclaim_deletes_nothing_when_one_object_is_locked(
+    l1: tuple[L1Manager, _RecordingListener], lock: str
+) -> None:
+    mgr, listener = l1
+    keys = [_key(i) for i in range(PER_WINDOW)]
+    _fill_window(mgr, keys)
+    if lock == "read":
+        mgr.reserve_read([keys[0]])
+    else:
+        mgr.reserve_write([keys[0]], [False], LAYOUT, mode="update")
+
+    assert mgr.reclaim_rdma_window(0) == L1Error.KEY_IS_LOCKED
+
+    assert all(mgr.get_object_state(key) is not None for key in keys)
+    assert listener.deleted == []
+
+
+def test_reclaim_ignores_a_key_that_moved_to_general_l1(
+    l1: tuple[L1Manager, _RecordingListener],
+) -> None:
+    mgr, _ = l1
+    key = _key(0)
+    _fill_window(mgr, [key])
+    mgr.delete([key])
+    mgr.reserve_write([key], [False], LAYOUT, mode="new")
+    mgr.finish_write([key])
+
+    assert mgr.get_rdma_window_object_count(0) == 0
+    assert mgr.reclaim_rdma_window(0) == L1Error.SUCCESS
+    assert mgr.get_object_state(key) is not None
+
+
+def test_clear_empties_the_window_record(
+    l1: tuple[L1Manager, _RecordingListener],
+) -> None:
+    mgr, _ = l1
+    _fill_window(mgr, [_key(0), _key(1)])
+
+    mgr.clear()
+
+    assert mgr.get_rdma_window_object_count(0) == 0
+
+
+def test_a_missing_window_cannot_be_reclaimed(
+    l1: tuple[L1Manager, _RecordingListener],
+) -> None:
+    mgr, _ = l1
+    with pytest.raises(ValueError):
+        mgr.reclaim_rdma_window(WINDOW_COUNT)
+    with pytest.raises(ValueError):
+        mgr.get_rdma_window_object_count(-1)
+
+
 # ---------------------------------------------------------------------------
 # Config normalization
 # ---------------------------------------------------------------------------

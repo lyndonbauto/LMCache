@@ -127,8 +127,9 @@ allocator.
   each window has its own allocator. See
   [aerospike_rdma.md](../distributed/l2_adapters/aerospike_rdma.md#the-windows-are-reserved-outside-the-general-allocator).
   This is pending review by the `l1_manager` maintainers.
+- `RdmaWindowLeaser` hands out windows with reclaim and quarantine (done
+  item 9). Nothing calls it yet; the production `ChunkPlacer` will.
 - Only window 0 is published to the nodes.
-- There is no lease API, so nothing allocates in a window yet.
 
 ### M4: the pump begins the fetch
 
@@ -309,6 +310,19 @@ What this requires of Track A's code:
    the adapter logs it, and retrieves fall back to whole-object loads.
    Sizing examples are in
    [aerospike_rdma.md](../distributed/l2_adapters/aerospike_rdma.md#sizing-window_bytes).
+9. The window lease: `RdmaWindowLeaser.lease(request_bytes) -> WindowLease`
+   and `release(lease, FetchOutcome.FINISHED | ABANDONED)`. See
+   [aerospike_rdma.md](../distributed/l2_adapters/aerospike_rdma.md#leasing-a-window).
+   - Reclaim (W1): an empty window first, then the one released longest ago
+     with no locked object. The reclaim is L1's new
+     `reclaim_rdma_window(i)`, which uses L1's own record of each window's
+     keys.
+   - Quarantine: an abandoned window waits `fetch_timeout_seconds`.
+   - One lease at a time (W3). Refusals follow W2.
+
+   Two differences from the M2 sketch. `release` takes an outcome enum, not
+   a boolean. `lease` returns the window's slab offset, and
+   `lease.pool()` gives the pool for `reserve_write`.
 
 These were verified on the Soft-RoCE VM
 ([rdma_testing_on_windows.md](../distributed/l2_adapters/rdma_testing_on_windows.md)):
@@ -331,8 +345,9 @@ That needs an Aerospike server, and for the slot path, one built from the
 1. Get the allocator reservation (done item 7) through `l1_manager` review.
 2. ~~Size `window_bytes` at init from the KV layout.~~ Done as item 8, as a
    check rather than sizing.
-3. The lease API with reclaim (W1) and quarantine. Publish every window to
-   every node.
+3. ~~The lease API with reclaim (W1) and quarantine.~~ Done as item 9.
+   Still open: publish every window to every node. Until then only window 0
+   is usable by a fetch.
 4. The production `ChunkPlacer` on top of the lease, raising per W2.
 5. Retire or internalize `begin_pipelined_fetch` / `is_pipelined_layer_ready`
    (M4).

@@ -246,6 +246,14 @@ class L1MemoryManager:
             return L1Pool.rdma_window(offset // self._window_bytes)
         return GENERAL_L1_POOL
 
+    def get_rdma_window_count(self) -> int:
+        """Return how many RDMA windows this manager reserves.
+
+        Returns:
+            The number of windows, or 0 when RDMA reception is not enabled.
+        """
+        return len(self._windows)
+
     def get_backend_type(self, memory_obj: MemoryObj) -> L1BackendType:
         """Return the storage medium backing ``memory_obj``.
 

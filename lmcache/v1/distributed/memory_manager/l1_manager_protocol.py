@@ -41,6 +41,10 @@ class L1ManagerProtocol(Protocol):
         """Return the pool ``memory_obj`` was allocated from."""
         ...
 
+    def get_rdma_window_count(self) -> int:
+        """Return how many RDMA windows the tier reserves; 0 for none."""
+        ...
+
     def get_memory_usage(self) -> tuple[int, int]:
         """Return ``(used_bytes, total_bytes)``."""
         ...

@@ -125,6 +125,14 @@ class GDSL1MemoryManager:
         """
         return GENERAL_L1_POOL
 
+    def get_rdma_window_count(self) -> int:
+        """Return how many RDMA windows this manager reserves.
+
+        Returns:
+            0; the GDS tier has no RDMA windows.
+        """
+        return 0
+
     def get_backend_type(self, memory_obj: MemoryObj) -> L1BackendType:
         """Return the storage medium backing ``memory_obj``.
 
