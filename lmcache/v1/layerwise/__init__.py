@@ -17,6 +17,7 @@ transport needs no GPU and the loader needs no RDMA fabric.
 
 # Local
 from .contract import (
+    MAX_SLOTS_PER_REQUEST,
     LayerArrivalSource,
     LayerArrivalStatus,
     LayerArrivalTimeoutError,
@@ -25,6 +26,7 @@ from .contract import (
     LayerNotInPlanError,
     LayerUnservableError,
     LayerwiseContractError,
+    PlanTooLargeError,
     SlotPlacement,
     StaleGenerationError,
 )
@@ -35,7 +37,6 @@ from .fakes import (
 )
 from .native_fetch import PipelinedFetchArguments, pipelined_fetch_arguments
 from .planner import (
-    MAX_SLOTS_PER_REQUEST,
     ByteRange,
     ChunkPlacement,
     FetchPlanner,
@@ -67,6 +68,7 @@ __all__ = [
     "LayerwiseContractError",
     "ModelLayout",
     "PipelinedFetchArguments",
+    "PlanTooLargeError",
     "PlaneRun",
     "PlanRequest",
     "RecordKeySource",

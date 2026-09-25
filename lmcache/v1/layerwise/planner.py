@@ -31,18 +31,11 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 # Local
-from .contract import LayerFetchPlan, SlotPlacement
+from .contract import MAX_SLOTS_PER_REQUEST, LayerFetchPlan, SlotPlacement
 
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.distributed.api import MemoryLayoutDesc
-
-#: Slots addressable by one request. The RDMA immediate carries 32 bits, split
-#: as ``(generation << 16) | slot``, so a request has 16 bits of slot index.
-#: Mirrors ``kMaxSlotsPerRequest`` in
-#: ``csrc/storage_backends/aerospike/layer_pipeline.h``; the two must agree,
-#: because the transport decodes what this module numbers.
-MAX_SLOTS_PER_REQUEST = 0x10000
 
 
 def _ceil_div(numerator: int, denominator: int) -> int:

@@ -12,8 +12,10 @@ import pytest
 from lmcache.v1.layerwise import (
     LayerArrivalPump,
     LayerArrivalTimeoutError,
+    LayerFetchPlan,
     LayerUnservableError,
     LayerwiseContractError,
+    PlanTooLargeError,
     RecordingLayerLoadSink,
     ScriptedLayerArrivalSource,
     UnservableLayerArrivalSource,
@@ -245,6 +247,31 @@ def test_pump_abandons_both_sides_and_reraises_when_sink_fails_mid_load() -> Non
     generation = 1
     assert source.abandoned_generations() == (generation,)
     assert sink.abandoned_generations() == (generation,)
+
+
+def test_pump_passes_a_too_large_refusal_through_before_touching_the_sink() -> None:
+    """The caller must see PlanTooLargeError itself, so it can split the request.
+
+    Nothing was issued, so there is no load to abandon; and a caller that only
+    knows how to fall back still catches it as a contract error.
+    """
+    refusal = PlanTooLargeError("plan exceeds the receive queue")
+
+    class RefusingSource(ScriptedLayerArrivalSource):
+        """Source that refuses every plan as too large."""
+
+        def begin_fetch(self, plan: LayerFetchPlan) -> int:
+            raise refusal
+
+    sink = RecordingLayerLoadSink()
+    pump = LayerArrivalPump(RefusingSource(), sink)
+
+    with pytest.raises(LayerwiseContractError) as caught:
+        pump.run(make_plan({0: 1}))
+
+    assert caught.value is refusal
+    assert sink.abandoned_generations() == ()
+    assert sink.finished_generations() == ()
 
 
 def test_pump_constructor_rejects_negative_poll_interval() -> None:

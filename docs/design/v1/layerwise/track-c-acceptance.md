@@ -59,11 +59,20 @@ encodes `(generation << 16) | slot`, giving 65536 slots and 16 bits of
 generation. Test a multi-node plan and assert global uniqueness; per-node
 numbering passes a single-node test and corrupts a multi-node fetch.
 
-### C5. Plans respect the per-command sink cap
+### C5. Plans stay inside the request's slot space
 
-The plan is expressible within each node's advertised `max_sinks` (default
-256), and a plan that would exceed the slot space is rejected at construction
-with a clear error rather than truncated.
+A request addresses at most 65536 slots (`MAX_SLOTS_PER_REQUEST`), because
+the immediate has 16 bits of slot index. `LayerFetchPlan` rejects a larger
+plan at construction with a clear error rather than truncating it, whether
+the planner built it or a test did; a truncated or wrapped plan would credit
+one slot's arrival to another.
+
+The per-command sink cap is not the planner's concern. Each node advertises
+`max_sinks` (default 256) in its `kv-sink-register` reply, which only the
+transport sees, and the transport splits a node's sinks into commands that
+fit (Track A's A5). A plan never fails because of it. A plan that fits the
+slot space but exceeds what the device can accept in one fetch is refused by
+the transport with `PlanTooLargeError` instead.
 
 ### C6. The pump is correct under out-of-order arrival
 

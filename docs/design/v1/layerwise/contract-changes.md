@@ -11,6 +11,43 @@ defect coming back.
 
 ---
 
+## Plans are held to the slot ceiling; transports can refuse a plan as too large
+
+**Who is affected:** Track A (raises the new error); anyone building
+`LayerFetchPlan` by hand.
+
+**What changed.**
+
+- `MAX_SLOTS_PER_REQUEST` (65536) moved from `planner.py` to `contract.py`,
+  and `LayerFetchPlan` rejects more slots than that with `ValueError`.
+  Previously only `FetchPlanner.plan` checked, so a plan built any other way
+  could carry slot indices that wrap.
+- New `PlanTooLargeError(LayerwiseContractError)`, raised by `begin_fetch`
+  when a plan is valid but beyond a transport limit, e.g. more slots than the
+  device can post receives for (Track A's A6):
+
+  ```python
+  try:
+      pump.run(plan)
+  except PlanTooLargeError:
+      ...  # optional: split the request into smaller plans
+  except LayerwiseContractError:
+      ...  # fall back to a whole-object load
+  ```
+
+- C5 no longer asks the planner to respect `max_sinks`. That cap is per node
+  and per command, known only to the transport, which already splits commands
+  to fit it.
+
+**What breaks.** Nothing that worked: a plan over the ceiling was already
+unfetchable. Imports of `MAX_SLOTS_PER_REQUEST` from `lmcache.v1.layerwise`
+are unchanged.
+
+**Why.** A6 raised the same exception for "this plan is too big" as for
+"this backend can't do pipelined fetch", so a caller could not tell "try a
+smaller plan" from "fall back". Subclassing keeps every existing handler
+correct while letting a caller that can split do so.
+
 ## Slots name records by Aerospike key, not digest
 
 **Who is affected:** Track A.

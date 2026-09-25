@@ -421,11 +421,13 @@ Each of these was a real bug. Losing one reintroduces it.
    `layer_ids()`, so no consumer needs to infer it from slot order. The
    alternative, an explicit `slot_index` field, was rejected because it makes
    the same fact representable twice and therefore representable
-   inconsistently. `FetchPlanner.plan` enforces the ceiling as
-   `MAX_SLOTS_PER_REQUEST`, which must stay equal to `kMaxSlotsPerRequest` in
+   inconsistently. `LayerFetchPlan` enforces the ceiling at construction as
+   `MAX_SLOTS_PER_REQUEST`, so a hand-built plan is held to it as well as
+   planner output. It must stay equal to `kMaxSlotsPerRequest` in
    `csrc/storage_backends/aerospike/layer_pipeline.h`.
 7. A node accepts at most `max_sinks` sinks per command, advertised in the
-   `kv-sink-register` reply and defaulting to 256. Commands are chunked to fit.
+   `kv-sink-register` reply and defaulting to 256. The transport chunks
+   commands to fit; the planner does not know the cap and does not need to.
    The server hard-refuses more, so an unchunked command fails the whole fetch.
 8. A slot's record is looked up per `(chunk_id, layer_id, plane, piece)`, never
    per chunk. Reusing one chunk's record across its slots is not a type error

@@ -52,6 +52,13 @@ import types
 #: :meth:`LayerArrivalSource.begin_fetch` for a fetch that actually started.
 NO_GENERATION = 0
 
+#: Slots addressable by one request. The RDMA immediate carries 32 bits, split
+#: as ``(generation << 16) | slot``, so a request has 16 bits of slot index.
+#: Mirrors ``kMaxSlotsPerRequest`` in
+#: ``csrc/storage_backends/aerospike/layer_pipeline.h``; the two must agree,
+#: because the transport decodes what the plan numbers.
+MAX_SLOTS_PER_REQUEST = 0x10000
+
 
 class LayerwiseContractError(Exception):
     """Base class for violations of the layerwise contract."""
@@ -80,6 +87,18 @@ class LayerUnservableError(LayerwiseContractError):
 
 class LayerArrivalTimeoutError(LayerwiseContractError):
     """A layer did not arrive within the caller's deadline."""
+
+
+class PlanTooLargeError(LayerwiseContractError):
+    """A valid plan is more than this transport can accept in one fetch.
+
+    Raised by :meth:`LayerArrivalSource.begin_fetch` for a limit only the
+    transport knows, such as more slots than the device can post receives
+    for. Distinct from its base class because the caller has a response other
+    than falling back: it can split the request into smaller plans. A caller
+    that does not split can catch :class:`LayerwiseContractError` and treat it
+    like any other refusal.
+    """
 
 
 class LayerArrivalStatus(Enum):
@@ -187,10 +206,14 @@ class LayerFetchPlan:
             not depend on.
 
     Raises:
-        ValueError: If ``slots`` is empty, if any slot has a non-positive
-            length, if ``node_names`` is empty or repeats a name, or if a
-            slot names a node outside ``node_names`` -- the last of which
-            would otherwise surface as a fetch addressed to the wrong node.
+        ValueError: If ``slots`` is empty or holds more than
+            :data:`MAX_SLOTS_PER_REQUEST` slots, if any slot has a
+            non-positive length, if ``node_names`` is empty or repeats a
+            name, or if a slot names a node outside ``node_names`` -- the
+            last of which would otherwise surface as a fetch addressed to the
+            wrong node. A plan past the slot ceiling is refused rather than
+            truncated: the extra slots would reuse the low 16 bits of earlier
+            ones, and their arrivals would be credited to the wrong slot.
     """
 
     slots: tuple[SlotPlacement, ...]
@@ -199,6 +222,12 @@ class LayerFetchPlan:
     def __post_init__(self) -> None:
         if not self.slots:
             raise ValueError("a fetch plan must contain at least one slot")
+        if len(self.slots) > MAX_SLOTS_PER_REQUEST:
+            raise ValueError(
+                f"fetch plan has {len(self.slots)} slots, but a request can "
+                f"address at most {MAX_SLOTS_PER_REQUEST}; fetch fewer chunks "
+                "per request"
+            )
         if not self.node_names:
             raise ValueError("a fetch plan must name at least one node")
         if len(set(self.node_names)) != len(self.node_names):
@@ -302,6 +331,8 @@ class LayerArrivalSource(Protocol):
             Every later call about this fetch must quote it.
 
         Raises:
+            PlanTooLargeError: If ``plan`` exceeds a limit of this transport,
+                such as the device's receive-queue depth. Nothing was issued.
             LayerwiseContractError: If a fetch is already active, or the
                 backend cannot serve a pipelined fetch at all. Callers that
                 can fall back should catch this; returning a sentinel instead
