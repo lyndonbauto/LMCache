@@ -351,6 +351,9 @@ def test_a_request_planned_from_its_cache_lookup_reads_back_its_objects(
                 self.offsets[key] = cursor
                 cursor += size
 
+        def window_start(self) -> int:
+            return 0
+
         def window_bytes(self) -> int:
             return 1 << 30
 

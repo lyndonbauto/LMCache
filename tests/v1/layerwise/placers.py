@@ -22,11 +22,18 @@ class PackingLease:
     """A lease whose objects were packed back to back; records its release."""
 
     def __init__(
-        self, window_bytes: int, locations: dict[tuple[int, int], ChunkLocation]
+        self,
+        window_bytes: int,
+        locations: dict[tuple[int, int], ChunkLocation],
+        window_start: int = 0,
     ) -> None:
+        self._window_start = window_start
         self._window_bytes = window_bytes
         self.locations = locations
         self.outcomes: list[LeaseOutcome] = []
+
+    def window_start(self) -> int:
+        return self._window_start
 
     def window_bytes(self) -> int:
         return self._window_bytes
@@ -39,10 +46,12 @@ class PackingLease:
 
 
 class PackingPlacer:
-    """Packs a request's objects back to back, starting at ``first_offset``.
+    """Packs a request's objects back to back, ``first_offset`` into the window.
 
-    Refuses like the real placer: ``PlanTooLargeError`` when the objects do
-    not fit the window, and a plain contract error while ``busy`` is set.
+    The window starts ``window_start`` bytes into the registration, and the
+    locations it hands out are registration offsets, as the real placer's
+    are. Refuses like the real placer: ``PlanTooLargeError`` when the objects
+    do not fit the window, and a plain contract error while ``busy`` is set.
     """
 
     def __init__(
@@ -50,7 +59,9 @@ class PackingPlacer:
         window_bytes: int = 1 << 30,
         first_offset: int = 4096,
         node_of: Callable[[int, int], str] = alternate_nodes,
+        window_start: int = 0,
     ) -> None:
+        self.window_start = window_start
         self.window_bytes = window_bytes
         self.first_offset = first_offset
         self.node_of = node_of
@@ -68,11 +79,11 @@ class PackingPlacer:
                 f"request needs {needed} bytes; the window has {self.window_bytes}"
             )
         locations: dict[tuple[int, int], ChunkLocation] = {}
-        offset = self.first_offset
+        offset = self.window_start + self.first_offset
         for obj in objects:
             key = (obj.chunk_id, obj.object_group_id)
             locations[key] = ChunkLocation(self.node_of(*key), offset)
             offset += obj.object_bytes
-        lease = PackingLease(self.window_bytes, locations)
+        lease = PackingLease(self.window_bytes, locations, self.window_start)
         self.leases.append(lease)
         return lease

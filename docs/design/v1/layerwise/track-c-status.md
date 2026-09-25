@@ -68,6 +68,50 @@ All done (2026-09-25):
 - ~~**Loader launch order.**~~ Raised by Track B: loads are strictly
   ascending, and a loader refuses any other order. Pinned in the loader
   suite.
+- ~~**Offsets for windows past the first.**~~ Decided by Track A (P1):
+  offsets are registration (slab) offsets, because one registration covers
+  every window. Done: the lease reports `window_start()` and the builder
+  checks `[window_start, window_start + window_bytes)`.
+- ~~**Nodes per record (N1).**~~ Deferred to the client-server owner; the
+  pipelined path is single-node only until then (see "Future work").
+
+## Future work
+
+### Route each record to the node that holds it
+
+**Owner:** the owner of the client-server interaction (not Tracks A, B or
+C). Raised by Track A as N1; deferred 2026-09-25.
+
+**The problem.** The writer splits an object into records
+(`{cache_key}|s|{i}`), and Aerospike places each record by the digest of its
+own key. So one object's records are spread across the cluster, as they
+should be. The pipelined fetch, though, sends raw kv-sink commands straight
+to a node rather than going through a normal client read, which routes each
+key for you. Only the node that holds a record can write it into our window;
+any other node declines. The planner currently sends all of an object's
+records to one node.
+
+**Interim (now).** Pipelined fetch is supported only against a single-node
+cluster, where every record is on that node. On more nodes the pipelined
+path must stay disabled and requests take the whole-object path. Nothing is
+lost there except the pipelining.
+
+**What a proper interface needs.** A way to fetch records into registered
+memory without the planner knowing which node holds each one. The two shapes
+discussed:
+
+- **Batch reads.** The client issues the pipelined fetch as a batch and
+  routes each record by its partition, as a normal batch get does.
+- **Node-direct routing.** The planner asks a record-to-node lookup for each
+  slot, e.g. the native `record_node(record_key)` over the client's partition
+  map, and the session groups slots by node.
+
+**What changes on our side when it lands.** Nodes move from objects to
+slots: `ChunkLocation` and `ChunkPlacement` lose their node field, and the
+placer only decides destinations. Either the planner sets
+`SlotPlacement.node_index` per slot from the lookup, or, with batch reads,
+nodes leave the plan altogether. The contract's `LayerFetchPlan.node_names`
+is the part that would change.
 
 ## Blocked on other tracks
 

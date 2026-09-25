@@ -11,6 +11,36 @@ defect coming back.
 
 ---
 
+## Destination offsets are registration offsets; a lease reports its start
+
+**Who is affected:** Track A (the production lease must implement
+`window_start()`); no contract change for Track B.
+
+**What changed.**
+
+- **`WindowLease.window_start()`** (in `request_fetch.py`): where the leased
+  window begins, measured from the start of the registration.
+- **`ChunkLocation.dest_offset`** is a registration offset (the L1 slab
+  offset, `memory_obj.meta.address` on Track A's placer), no longer
+  window-relative.
+- **`build_request_fetch`** accepts a location only inside
+  `[window_start, window_start + window_bytes)`; before, the range was
+  `[0, window_bytes)`.
+- **Per-object nodes** are documented as correct only on a single-node
+  cluster. Per-record routing is deferred to the client-server owner; see
+  "Future work" in [track-c-status.md](track-c-status.md).
+
+**What breaks.** A lease without `window_start()`. Offsets from window 0
+(which starts at 0) mean the same as before.
+
+**Why.** Track A publishes every window through one registration, because a
+node allows few registered regions (P1). A node writes at an offset into
+that registration, so a window-relative offset would send every window's
+writes into window 0, and the old check refused every placement in any other
+window.
+
+---
+
 ## Loads are strictly ascending; the first reply for a slot is final
 
 **Who is affected:** Track B (the loader must refuse non-ascending loads);
