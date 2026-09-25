@@ -77,8 +77,9 @@ class RdmaWindowPlan:
     Attributes:
         window_count: Number of windows to register. Also the maximum number of
             concurrently outstanding RDMA fetches.
-        window_bytes: Size of each window in bytes. Must be large enough to hold
-            the largest single fetch a request can issue.
+        window_bytes: Size of each window in bytes. Must hold at least one
+            whole chunk of the model; a request larger than its window is not
+            pipelined.
     """
 
     window_count: int
@@ -269,8 +270,12 @@ class L1RdmaConfig:
             "- gid_index (int): port GID index (default 0)\n"
             "- window_count (int): pre-registered windows / max in-flight "
             f"RDMA fetches (default {_DEFAULT_WINDOW_COUNT})\n"
-            "- window_bytes (int): bytes per window; must hold the largest "
-            f"single fetch (default {_DEFAULT_WINDOW_BYTES})\n"
+            "- window_bytes (int): bytes per window; must hold at least one "
+            "whole chunk of the model, e.g. 32 MiB for Llama-3-8B with "
+            f"256-token chunks (default {_DEFAULT_WINDOW_BYTES}, too small "
+            "for most models). Checked when the model registers: if one chunk "
+            "does not fit, retrieves are not pipelined and a warning names "
+            "the size needed\n"
             "- fetch_timeout_seconds (float): deadline for one fetch round "
             f"trip (default {_DEFAULT_FETCH_TIMEOUT_SECONDS}). Must be "
             "strictly less than the L1 write-lock TTL "

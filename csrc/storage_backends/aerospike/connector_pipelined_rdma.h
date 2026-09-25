@@ -41,7 +41,8 @@ class AerospikePipelinedRdmaDriver {
   // exists.
   bool is_ready() const;
 
-  // Last initialization failure, when pipelined fetch is unavailable.
+  // Why pipelined fetch is unavailable: the last initialization failure, or
+  // else a registered layout whose chunk does not fit in one window.
   //
   // Thread safety: takes `mu_`.
   std::string init_error_message() const;
@@ -52,7 +53,9 @@ class AerospikePipelinedRdmaDriver {
   // fatal verbs failure after recording the reason for init_error_message().
   void initialize(aerospike* client);
 
-  // Replace the slot planner used for subsequent requests.
+  // Replace the slot planner used for subsequent requests. If one chunk of
+  // `layouts` does not fit in a window, pipelined fetch stays unavailable
+  // until layouts that fit are set; init_error_message() says why.
   //
   // Thread safety: takes `mu_`. Throws std::runtime_error if a request is
   // active.
@@ -122,6 +125,7 @@ class AerospikePipelinedRdmaDriver {
   bool initialized_ = false;
   bool fabric_ready_ = false;
   std::string init_error_;
+  std::string layout_error_;
 
   uint16_t next_generation_ = 1;
 

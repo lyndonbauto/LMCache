@@ -331,6 +331,33 @@ bound to `lo`; see [the GID index trap](#the-gid-index-trap).
 exists only on AWS EFA. `fetch_timeout_seconds` is checked against the L1
 write-lock TTL at startup.
 
+### Sizing `window_bytes`
+
+A window must hold at least one whole chunk: one object per object group,
+each rounded up to the L1 alignment. The windows are carved out of L1 at
+startup, before any worker has registered its KV cache, so the size comes from
+config rather than from the model. It is checked when the layout arrives: if
+one chunk does not fit, the pipelined path stays off, every retrieve loads
+whole objects, and the adapter logs a warning naming the size needed:
+
+```text
+aerospike: pipelined fetch unavailable, retrieves will load whole objects:
+RDMA window_bytes is 8388608 but one chunk of this model needs 33554432 bytes,
+so no retrieve can be pipelined; set rdma.window_bytes to at least 33554432
+```
+
+One chunk is `2 x layers x chunk_tokens x kv_heads x head_dim x dtype_bytes`
+(for a standard, non-MLA attention layout):
+
+| Model | Per 256-token chunk |
+|---|---|
+| Llama-3-8B (32 layers, 8 KV heads x 128, fp16) | 32 MiB |
+| Llama-2-7B (32 layers, 32 KV heads x 128, fp16) | 128 MiB |
+
+The 8 MiB default is too small for either. The windows come out of L1
+(`window_count x window_bytes`), so eight 32 MiB windows take 256 MiB of the
+slab away from general L1.
+
 ## Per-node registration fanout
 
 `register_all_nodes` in `kv_sink_fanout.{h,cpp}` registers LMCache on every

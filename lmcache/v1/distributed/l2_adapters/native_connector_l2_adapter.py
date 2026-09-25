@@ -256,7 +256,11 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
           layer can be fetched without its neighbours' bytes -- the only way
           to align a hybrid model, whose planes differ in size.
         - ``set_object_group_layouts`` receives the full shapes and layer
-          indices, for the pipelined fetch planner.
+          indices, for the pipelined fetch planner. A client that cannot use
+          the layouts pipelined, for example because one chunk does not fit
+          in an RDMA window, reports why through
+          :meth:`pipelined_fetch_init_error`; that reason is logged here as a
+          warning, and retrieves fall back to whole-object loads.
 
         Args:
             group_layout_descs: One layout per object group id.
@@ -283,6 +287,14 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         setter(
             _native_object_group_layouts(group_layout_descs, group_kernel_layer_indices)
         )
+        reason = self.pipelined_fetch_init_error()
+        if reason:
+            logger.warning(
+                "%s: pipelined fetch unavailable, retrieves will load whole "
+                "objects: %s",
+                self._type_name,
+                reason,
+            )
 
     def pipelined_fetch_init_error(self) -> str:
         """Return the native client's pipelined RDMA initialization error."""

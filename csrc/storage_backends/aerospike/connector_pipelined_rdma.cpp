@@ -38,7 +38,7 @@ bool AerospikePipelinedRdmaDriver::is_ready() const {
 
 std::string AerospikePipelinedRdmaDriver::init_error_message() const {
   std::lock_guard<std::mutex> lock(mu_);
-  return init_error_;
+  return init_error_.empty() ? layout_error_ : init_error_;
 }
 
 uint32_t AerospikePipelinedRdmaDriver::desired_notification_depth() const {
@@ -123,6 +123,8 @@ void AerospikePipelinedRdmaDriver::set_object_group_layouts(
         "fetch");
   }
   session_.reset();
+  layout_error_ = rdma::window_fit_error(layouts, registration_.window_bytes,
+                                         registration_.align_bytes);
   planner_ = std::make_unique<rdma::SlotPlanner>(std::move(layouts));
   ensure_session();
 }
@@ -267,7 +269,7 @@ void AerospikePipelinedRdmaDriver::abandon_request() {
 }
 
 void AerospikePipelinedRdmaDriver::ensure_session() {
-  if (!planner_ || !fabric_ready_) {
+  if (!planner_ || !fabric_ready_ || !layout_error_.empty()) {
     session_.reset();
     return;
   }

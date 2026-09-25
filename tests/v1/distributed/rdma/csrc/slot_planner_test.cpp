@@ -44,6 +44,8 @@ using lmcache::connector::rdma::participating_chunks;
 using lmcache::connector::rdma::plane_bytes;
 using lmcache::connector::rdma::RequestPlan;
 using lmcache::connector::rdma::SlotPlanner;
+using lmcache::connector::rdma::window_bytes_per_chunk;
+using lmcache::connector::rdma::window_fit_error;
 
 constexpr uint16_t kGeneration = 0x51a7;
 // Larger than any plane here, so a plane is one record and one write and the
@@ -491,6 +493,38 @@ void test_invalid_layouts_and_requests_are_rejected() {
   check(threw, "a layer absent from the layout is rejected");
 }
 
+void test_a_window_must_hold_one_whole_chunk() {
+  std::cout << "a window must hold one whole chunk\n";
+  // The default attention geometry over 32 layers is Llama-3-8B: 2 x 32 x
+  // 256 tokens x 1024 x 2 bytes = 32 MiB per 256-token chunk.
+  const std::vector<ObjectGroupLayout> llama3 = {single_group_layout(32)};
+  constexpr size_t kMiB = 1u << 20;
+  check(window_bytes_per_chunk(llama3, 4096) == 32 * kMiB,
+        "one Llama-3-8B chunk is 32 MiB");
+
+  const std::string refused = window_fit_error(llama3, 8 * kMiB, 4096);
+  check(!refused.empty(), "the 8 MiB default window is refused");
+  check(refused.find("33554432") != std::string::npos,
+        "the refusal names the size needed");
+  check(window_fit_error(llama3, 32 * kMiB, 4096).empty(),
+        "a window of exactly one chunk fits");
+
+  // Two object groups whose sizes are not page multiples: each object is
+  // rounded up on its own, as L1 allocates them.
+  ObjectGroupLayout small = single_group_layout(1);
+  small.kernel_groups[0].num_slots = 1;
+  small.kernel_groups[0].hidden_dim = 3;
+  ObjectGroupLayout other = small;
+  other.object_group_id = 1;
+  const std::vector<ObjectGroupLayout> odd = {small, other};
+  check(object_group_bytes(small) == 12, "an odd group is 12 bytes");
+  check(window_bytes_per_chunk(odd, 4096) == 2 * 4096,
+        "each object is rounded up to the L1 alignment separately");
+  check(window_bytes_per_chunk(odd, 0) == 24, "no alignment means no rounding");
+  check(!window_fit_error(odd, 4096, 4096).empty(),
+        "rounding can make a chunk overflow a window");
+}
+
 }  // namespace
 
 int main() {
@@ -504,6 +538,7 @@ int main() {
     test_a_windowed_group_only_covers_its_window();
     test_a_group_with_no_placements_contributes_nothing();
     test_invalid_layouts_and_requests_are_rejected();
+    test_a_window_must_hold_one_whole_chunk();
   } catch (const std::exception& e) {
     std::cerr << "EXCEPTION: " << e.what() << "\n";
     return 1;

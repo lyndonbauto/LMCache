@@ -300,6 +300,15 @@ What this requires of Track A's code:
      the window allocator. Holding the window back until quarantine ends
      is the lease's job, since only the lease hands a window out again;
    - window objects are never picked by memory-pressure eviction (W1.4).
+8. `window_bytes` is checked against the KV layout. It can't be sized from
+   the layout: the windows are reserved when L1 is built, and the layout only
+   arrives later, when a worker registers its KV cache. So the size stays in
+   config. When the layout arrives, the native driver checks that one chunk
+   (one object per group, each rounded to the L1 alignment) fits in a window.
+   If it doesn't, the pipelined path reports not-ready with the size needed,
+   the adapter logs it, and retrieves fall back to whole-object loads.
+   Sizing examples are in
+   [aerospike_rdma.md](../distributed/l2_adapters/aerospike_rdma.md#sizing-window_bytes).
 
 These were verified on the Soft-RoCE VM
 ([rdma_testing_on_windows.md](../distributed/l2_adapters/rdma_testing_on_windows.md)):
@@ -320,7 +329,8 @@ That needs an Aerospike server, and for the slot path, one built from the
 **Track A, next:**
 
 1. Get the allocator reservation (done item 7) through `l1_manager` review.
-2. Size `window_bytes` at init from the KV layout.
+2. ~~Size `window_bytes` at init from the KV layout.~~ Done as item 8, as a
+   check rather than sizing.
 3. The lease API with reclaim (W1) and quarantine. Publish every window to
    every node.
 4. The production `ChunkPlacer` on top of the lease, raising per W2.

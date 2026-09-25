@@ -86,6 +86,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <string>
 #include <vector>
 
 namespace lmcache {
@@ -161,6 +162,18 @@ size_t kernel_group_bytes(const KernelGroupLayout& group);
 
 // Total bytes one chunk's object for `layout` occupies.
 size_t object_group_bytes(const ObjectGroupLayout& layout);
+
+// Bytes one chunk takes inside an RDMA window: one object per object group,
+// each rounded up to `align_bytes` the way L1 allocates it. `align_bytes` of
+// 0 means no rounding.
+size_t window_bytes_per_chunk(const std::vector<ObjectGroupLayout>& layouts,
+                              size_t align_bytes);
+
+// Empty when one chunk fits in a window of `window_bytes`; otherwise a
+// message naming both sizes and the fix. A window that cannot hold one chunk
+// can serve no pipelined retrieve at all.
+std::string window_fit_error(const std::vector<ObjectGroupLayout>& layouts,
+                             size_t window_bytes, size_t align_bytes);
 
 // Resolves global layer indices to byte ranges within an object group's
 // payload, and builds the slot schedule for a request.
