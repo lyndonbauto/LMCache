@@ -218,6 +218,43 @@ def test_one_source_refuses_a_second_concurrent_fetch() -> None:
         source.abandon_fetch(generation)
 
 
+def test_native_adapter_reports_the_pipelined_node() -> None:
+    """The ready client's one node is what the placer is built with."""
+    with _native_adapter(PipelinedNativeClientStub()) as adapter:
+        assert (
+            adapter.pipelined_fetch_node_name() == PipelinedNativeClientStub.NODE_NAME
+        )
+
+
+def test_native_adapter_without_a_ready_path_has_no_node() -> None:
+    """A client whose pipelined init failed refuses, carrying the reason."""
+    client = PipelinedNativeClientStub()
+    client.init_error = "the cluster has 3 nodes"
+    with _native_adapter(client) as adapter:
+        with pytest.raises(LayerwiseContractError, match="the cluster has 3 nodes"):
+            adapter.pipelined_fetch_node_name()
+
+
+@pytest.mark.parametrize("client_type", [_PlainClient, _KeysOnlyClient])
+def test_native_adapter_without_the_path_or_the_name_has_no_node(
+    client_type: type[_PlainClient],
+) -> None:
+    """A client built without RDMA, or without the name, refuses."""
+    with _native_adapter(client_type()) as adapter:
+        with pytest.raises(LayerwiseContractError):
+            adapter.pipelined_fetch_node_name()
+
+
+def test_default_adapter_has_no_node() -> None:
+    """A backend without a pipelined path refuses."""
+    adapter = MockL2Adapter(MockL2AdapterConfig(max_size_gb=1.0, mock_bandwidth_gb=1.0))
+    try:
+        with pytest.raises(LayerwiseContractError, match="MockL2Adapter"):
+            adapter.pipelined_fetch_node_name()
+    finally:
+        adapter.close()
+
+
 def test_storage_manager_without_adapters_refuses() -> None:
     """With no L2 adapter there is nothing to fetch layer by layer."""
     with _storage_manager([]) as sm:
@@ -248,3 +285,26 @@ def test_storage_manager_returns_the_pipelined_adapters_source(
         source = sm.layer_arrival_source()
         assert isinstance(source, AerospikeLayerArrivalSource)
         assert sm.layer_arrival_source() is not source
+
+
+def test_storage_manager_reports_the_pipelined_node(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The adapter with a ready pipelined path supplies the node name."""
+    client = PipelinedNativeClientStub()
+    monkeypatch.setattr(
+        storage_manager_module,
+        "create_l2_adapter",
+        lambda config, l1_memory_desc: NativeConnectorL2Adapter(
+            native_client=client, type_name="stub"
+        ),
+    )
+    with _storage_manager([_mock_adapter_config()]) as sm:
+        assert sm.pipelined_fetch_node_name() == PipelinedNativeClientStub.NODE_NAME
+
+
+def test_storage_manager_without_a_pipelined_node_names_each_adapter() -> None:
+    """The refusal carries each adapter's reason."""
+    with _storage_manager([_mock_adapter_config()]) as sm:
+        with pytest.raises(LayerwiseContractError, match="MockL2Adapter"):
+            sm.pipelined_fetch_node_name()

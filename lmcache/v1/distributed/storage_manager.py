@@ -813,6 +813,33 @@ class StorageManager:
             + ("; ".join(reasons) or "no L2 adapters are registered")
         )
 
+    def pipelined_fetch_node_name(self) -> str:
+        """Return the node the layerwise ``ChunkPlacer`` locates objects on.
+
+        Adapters are asked in registration order, as by
+        :meth:`layer_arrival_source`. Pipelined fetches run on single-node
+        clusters only.
+
+        Returns:
+            The node name from the first adapter with a ready pipelined path.
+
+        Raises:
+            LayerwiseContractError: If no L2 adapter has a ready pipelined
+                path, with each adapter's reason.
+        """
+        with self._adapters_lock:
+            adapters = list(self._l2_adapters.values())
+        reasons: list[str] = []
+        for adapter in adapters:
+            try:
+                return adapter.pipelined_fetch_node_name()
+            except LayerwiseContractError as exc:
+                reasons.append(str(exc))
+        raise LayerwiseContractError(
+            "no L2 adapter has a pipelined fetch node: "
+            + ("; ".join(reasons) or "no L2 adapters are registered")
+        )
+
     def touch_l1_keys(self, keys: list[ObjectKey]):
         """
         Touch the keys in L1 storage, marking the keys

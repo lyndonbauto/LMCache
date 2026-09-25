@@ -53,6 +53,17 @@ std::string AerospikePipelinedRdmaDriver::init_error_message() const {
   return init_error_.empty() ? layout_error_ : init_error_;
 }
 
+std::string AerospikePipelinedRdmaDriver::node_name() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  const std::vector<std::string> names = registry_.node_names();
+  if (!fabric_ready_ || names.size() != 1) {
+    throw std::runtime_error(
+        "Aerospike pipelined RDMA: no single registered node; pipelined "
+        "fetch did not initialize");
+  }
+  return names.front();
+}
+
 uint32_t AerospikePipelinedRdmaDriver::desired_notification_depth() const {
   return rdma::desired_notification_depth(registration_.window_bytes,
                                           max_record_bytes_,

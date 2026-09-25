@@ -311,6 +311,43 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             return ""
         return str(getter())
 
+    def pipelined_fetch_node_name(self) -> str:
+        """Return the cluster's one node, which pipelined fetches read from.
+
+        Pipelined fetches run on single-node clusters only; the native
+        client refuses to initialize them on a larger one. The name is what
+        :class:`~lmcache.v1.distributed.l2_adapters.rdma_window_placer.RdmaWindowPlacer`
+        is built with.
+
+        Returns:
+            The node name.
+
+        Raises:
+            LayerwiseContractError: If the native client has no pipelined
+                fetch path, or pipelined fetch is not ready; the message
+                carries the reason.
+        """
+        if not self._has_pipelined_path:
+            raise LayerwiseContractError(
+                f"{self._type_name}: native client has no pipelined fetch path"
+            )
+        getter = getattr(self._client, "pipelined_fetch_node_name", None)
+        if getter is None:
+            raise LayerwiseContractError(
+                f"{self._type_name}: native client does not report its node"
+            )
+        if not self._client.pipelined_fetch_ready():
+            raise LayerwiseContractError(
+                f"{self._type_name}: pipelined fetch is not ready: "
+                f"{self.pipelined_fetch_init_error() or 'no reason reported'}"
+            )
+        try:
+            return str(getter())
+        except RuntimeError as exc:
+            raise LayerwiseContractError(
+                f"{self._type_name}: no pipelined fetch node: {exc}"
+            ) from exc
+
     def layer_arrival_source(self) -> LayerArrivalSource:
         """Return a new arrival source over the native pipelined fetch.
 

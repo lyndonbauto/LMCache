@@ -147,6 +147,8 @@ void bind_pipelined_fetch(py::module& module,
   connector
       .def("pipelined_fetch_init_error",
            &AerospikeNativeConnector::pipelined_fetch_init_error)
+      .def("pipelined_fetch_node_name",
+           &AerospikeNativeConnector::pipelined_fetch_node_name)
       .def("set_object_group_layouts", &set_object_group_layouts,
            py::arg("group_layouts"))
       .def("issue_pipelined_fetch",

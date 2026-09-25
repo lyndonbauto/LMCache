@@ -605,6 +605,13 @@ Merged into `track/a-transport`. Track A's answers:
     registration check. The native driver refuses pipelined fetches on a
     cluster of more than one node. See
     [Track C's replies on L1 to L4](#track-cs-replies-on-l1-to-l4-trackc-planning-at-2a3c104d).
+16. The placer's node name: `StorageManager.pipelined_fetch_node_name()`,
+    from the native `pipelined_fetch_node_name()` through the adapter.
+    It raises `LayerwiseContractError` with the init error when pipelined
+    fetch isn't ready, the same failure retrieve already falls back on.
+    For Track C, the registration wiring can then build
+    `RdmaWindowPlacer(l1_manager, leaser, layouts,
+    storage_manager.pipelined_fetch_node_name())`.
 
 These were verified on the Soft-RoCE VM
 ([rdma_testing_on_windows.md](../distributed/l2_adapters/rdma_testing_on_windows.md)):
@@ -613,7 +620,7 @@ These were verified on the Soft-RoCE VM
   C client 7.3.0;
 - device-free logic harness: 364 checks pass;
 - fabric harness over `rxe0`: 415 checks pass;
-- `tests/v1/layerwise/` and `tests/v1/distributed/` pass (1277 passed, 92
+- `tests/v1/layerwise/` and `tests/v1/distributed/` pass (1284 passed, 92
   skipped, with Track C's `2a3c104d` merged), including the conformance
   suite over both sources, concurrent fetches over the real native pool, and
   Track C's end-to-end retrieve over the production placer;

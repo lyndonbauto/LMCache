@@ -428,6 +428,22 @@ class L2AdapterInterface(ABC):
         """Return the last pipelined-fetch initialization error, if any."""
         return ""
 
+    def pipelined_fetch_node_name(self) -> str:
+        """Return the one node this backend's pipelined fetches read from.
+
+        The default raises: most backends have no layer-pipelined path.
+
+        Returns:
+            The node name.
+
+        Raises:
+            LayerwiseContractError: If this backend has no ready pipelined
+                fetch path.
+        """
+        raise LayerwiseContractError(
+            f"{type(self).__name__} has no layer-pipelined fetch path"
+        )
+
     def layer_arrival_source(self) -> LayerArrivalSource:
         """Return a source that fetches and reports layers for this backend.
 

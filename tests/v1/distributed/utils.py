@@ -22,11 +22,15 @@ class PipelinedNativeClientStub:
     when built with ``LMCACHE_AEROSPIKE_RDMA``. Like the native client it
     runs several fetches at once, each named by generation. Issues get
     generations counting up from ``generation``; ``ready_layers`` maps a
-    generation to its landed layers.
+    generation to its landed layers. Setting ``init_error`` makes pipelined
+    fetch not ready, with that reason.
     """
+
+    NODE_NAME = "BB9000000000001"
 
     def __init__(self, generation: int = 7) -> None:
         self._efd = create_event_notifier()
+        self.init_error = ""
         self.next_generation = generation
         self.active: set[int] = set()
         self.ready_layers: dict[int, set[int]] = {}
@@ -44,10 +48,15 @@ class PipelinedNativeClientStub:
         self._efd.close()
 
     def pipelined_fetch_ready(self) -> bool:
-        return True
+        return not self.init_error
 
     def pipelined_fetch_init_error(self) -> str:
-        return ""
+        return self.init_error
+
+    def pipelined_fetch_node_name(self) -> str:
+        if self.init_error:
+            raise RuntimeError("pipelined fetch did not initialize")
+        return self.NODE_NAME
 
     def pipelined_max_slots_per_request(self) -> int:
         return 0

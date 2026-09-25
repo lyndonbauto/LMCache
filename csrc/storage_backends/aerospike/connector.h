@@ -161,6 +161,12 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
   // Thread safety: safe to call concurrently.
   std::string pipelined_fetch_init_error() const;
 
+  // The cluster's one node, which every pipelined fetch reads from.
+  //
+  // Thread safety: safe to call concurrently. Throws std::runtime_error if
+  // pipelined fetch was not enabled or did not initialize.
+  std::string pipelined_fetch_node_name() const;
+
   // Replace slot-planner layouts for subsequent pipelined fetches.
   //
   // Thread safety: safe to call concurrently; serialized on the driver lock.

@@ -588,6 +588,13 @@ std::string AerospikeNativeConnector::pipelined_fetch_init_error() const {
   return pipelined_rdma_->init_error_message();
 }
 
+std::string AerospikeNativeConnector::pipelined_fetch_node_name() const {
+  if (!pipelined_rdma_) {
+    throw std::runtime_error("Aerospike pipelined RDMA: not enabled");
+  }
+  return pipelined_rdma_->node_name();
+}
+
 void AerospikeNativeConnector::set_object_group_layouts(
     const std::map<uint32_t, rdma::ObjectGroupLayoutInput>& layouts) {
   if (!pipelined_rdma_) {

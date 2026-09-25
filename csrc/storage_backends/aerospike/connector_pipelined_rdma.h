@@ -48,6 +48,13 @@ class AerospikePipelinedRdmaDriver {
   // Thread safety: takes `mu_`.
   std::string init_error_message() const;
 
+  // The name of the cluster's one node, which every pipelined fetch reads
+  // from. Pipelined fetches run on single-node clusters only.
+  //
+  // Thread safety: takes `mu_`. Throws std::runtime_error if initialization
+  // has not succeeded.
+  std::string node_name() const;
+
   // Register the L1 slab, open verbs resources, and fan out kv-sink-register.
   //
   // Thread safety: call from one thread during connector startup. Throws on

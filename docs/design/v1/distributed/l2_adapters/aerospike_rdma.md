@@ -362,6 +362,9 @@ lease.release(LeaseOutcome.ABANDONED)      # abort_write; window quarantined,
   cluster has more than one node. The refusal becomes
   `pipelined_fetch_init_error`, every fetch falls back, and nothing is
   registered with any node. The node count is checked only at init.
+  `StorageManager.pipelined_fetch_node_name()` returns that one node, to
+  build the placer with. It raises `LayerwiseContractError`, carrying the
+  init error, when no adapter has a ready pipelined path.
 - **A slot lands at its plan offset and nowhere else.** The plan's
   `SlotPlacement.offset` goes to the wire unchanged as `<digest>@<offset>:<length>`
   (`kv_sink_client.cpp`), and the session refuses a plan whose slots leave
