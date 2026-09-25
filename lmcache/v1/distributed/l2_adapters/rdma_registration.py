@@ -7,9 +7,10 @@ that was already abandoned, then silently overwrites an unrelated request's KV.
 Corrupted KV does not crash; it produces confidently wrong tokens, which is the
 hardest possible failure to attribute.
 
-So this module registers a fixed pool of bounded windows at initialization and
-hands out one window per in-flight request. A misdirected write is still
-possible, but its blast radius is one request's own buffer. See
+So this module describes a fixed pool of bounded windows at the start of the
+slab, registered once at initialization, and each pipelined request stays
+inside one window. A misdirected write is still possible, but its blast radius
+is one request's own buffer. See
 ``docs/design/v1/distributed/l2_adapters/aerospike_rdma.md`` for the full
 rationale and the alternatives that were rejected.
 """
@@ -69,16 +70,18 @@ class RdmaTransport(enum.Enum):
 class RdmaWindowPlan:
     """A pool of equally sized registration windows inside the L1 slab.
 
-    Each window is registered once at initialization with
-    ``LOCAL_WRITE | REMOTE_WRITE`` and is leased to at most one in-flight
-    request at a time, so the rkey published to a remote writer never covers
-    more than that one request's destination buffer.
+    The whole range is registered once at initialization with
+    ``LOCAL_WRITE | REMOTE_WRITE`` and published to every node as one region,
+    because a server allows only a few registrations in total. Each window is
+    leased to at most one request at a time, and the native session refuses a
+    request whose writes leave its window.
 
     Attributes:
-        window_count: Number of windows to register. Also the maximum number of
-            concurrently outstanding RDMA fetches.
-        window_bytes: Size of each window in bytes. Must be large enough to hold
-            the largest single fetch a request can issue.
+        window_count: Number of windows. Also how many pipelined retrieves'
+            data can stay resident at once.
+        window_bytes: Size of each window in bytes. Must hold at least one
+            whole chunk of the model; a request larger than its window is not
+            pipelined.
     """
 
     window_count: int
@@ -269,8 +272,12 @@ class L1RdmaConfig:
             "- gid_index (int): port GID index (default 0)\n"
             "- window_count (int): pre-registered windows / max in-flight "
             f"RDMA fetches (default {_DEFAULT_WINDOW_COUNT})\n"
-            "- window_bytes (int): bytes per window; must hold the largest "
-            f"single fetch (default {_DEFAULT_WINDOW_BYTES})\n"
+            "- window_bytes (int): bytes per window; must hold at least one "
+            "whole chunk of the model, e.g. 32 MiB for Llama-3-8B with "
+            f"256-token chunks (default {_DEFAULT_WINDOW_BYTES}, too small "
+            "for most models). Checked when the model registers: if one chunk "
+            "does not fit, retrieves are not pipelined and a warning names "
+            "the size needed\n"
             "- fetch_timeout_seconds (float): deadline for one fetch round "
             f"trip (default {_DEFAULT_FETCH_TIMEOUT_SECONDS}). Must be "
             "strictly less than the L1 write-lock TTL "
@@ -282,6 +289,59 @@ class L1RdmaConfig:
 
 DISABLED_L1_RDMA = L1RdmaConfig()
 """Shared default: RDMA reception turned off."""
+
+
+def rdma_config_of(adapter_config: object) -> L1RdmaConfig:
+    """Return the RDMA settings an L2 adapter config carries.
+
+    Args:
+        adapter_config: Any L2 adapter config. Only adapters that support RDMA
+            reception have an ``rdma`` attribute.
+
+    Returns:
+        The adapter's :class:`L1RdmaConfig`, or :data:`DISABLED_L1_RDMA` when
+        it has none.
+    """
+    rdma = getattr(adapter_config, "rdma", None)
+    return rdma if isinstance(rdma, L1RdmaConfig) else DISABLED_L1_RDMA
+
+
+def validate_windows_reserved(
+    adapter_config: object, reserved_window_count: int, reserved_window_bytes: int
+) -> None:
+    """Check that L1 reserved exactly the windows an RDMA adapter will use.
+
+    The windows are carved out of the general L1 allocator when L1 is built.
+    An RDMA adapter whose plan L1 did not reserve would register windows over
+    memory that ordinary L1 objects also use, so a remote writer could reach
+    them. That happens when an RDMA adapter is added after startup.
+
+    Does nothing when ``adapter_config`` has RDMA disabled.
+
+    Args:
+        adapter_config: An L2 adapter config.
+        reserved_window_count: ``L1MemoryManagerConfig.rdma_window_count``.
+        reserved_window_bytes: ``L1MemoryManagerConfig.rdma_window_bytes``.
+
+    Raises:
+        ValueError: If RDMA is enabled and L1 reserved a different plan, or
+            none.
+    """
+    rdma = rdma_config_of(adapter_config)
+    if not rdma.is_enabled():
+        return
+    plan = rdma.window_plan
+    if (plan.window_count, plan.window_bytes) != (
+        reserved_window_count,
+        reserved_window_bytes,
+    ):
+        raise ValueError(
+            f"the adapter's RDMA windows ({plan.window_count} x "
+            f"{plan.window_bytes} bytes) are not the ones L1 reserved "
+            f"({reserved_window_count} x {reserved_window_bytes} bytes). "
+            "L1 reserves windows only at startup, so an RDMA adapter must be "
+            "configured then, not added at runtime."
+        )
 
 
 def validate_fetch_timeout_against_write_ttl(
@@ -317,8 +377,8 @@ def validate_fetch_timeout_against_write_ttl(
         ValueError: If RDMA is enabled and the fetch timeout is greater than or
             equal to the write-lock TTL, or if the TTL is not positive.
     """
-    rdma = getattr(adapter_config, "rdma", None)
-    if not isinstance(rdma, L1RdmaConfig) or not rdma.is_enabled():
+    rdma = rdma_config_of(adapter_config)
+    if not rdma.is_enabled():
         return
 
     if write_ttl_seconds <= 0:

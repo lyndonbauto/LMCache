@@ -259,32 +259,20 @@ void RdmaContext::register_l1(void* base, size_t size, const WindowPlan& plan) {
   }
 
   const int access = IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE;
-  impl_->mrs.reserve(plan.window_count);
-  local_.windows.reserve(plan.window_count);
-  auto* bytes = static_cast<uint8_t*>(base);
-
-  for (uint32_t i = 0; i < plan.window_count; ++i) {
-    const size_t offset = static_cast<size_t>(i) * plan.window_bytes;
-    ibv_mr* mr =
-        ibv_reg_mr(impl_->pd, bytes + offset, plan.window_bytes, access);
-    if (mr == nullptr) {
-      // Impl's destructor releases the windows registered so far.
-      throw std::runtime_error(
-          "ibv_reg_mr failed for window " + std::to_string(i) +
-          "; check that the L1 slab is pinned and that RLIMIT_MEMLOCK is "
-          "large enough for " +
-          std::to_string(total) + " bytes");
-    }
-    impl_->mrs.push_back(mr);
-    RegisteredWindow window;
-    window.offset = offset;
-    window.size = plan.window_bytes;
-    window.rkey = mr->rkey;
-    local_.windows.push_back(window);
+  ibv_mr* mr = ibv_reg_mr(impl_->pd, base, total, access);
+  if (mr == nullptr) {
+    throw std::runtime_error(
+        "ibv_reg_mr failed for the RDMA window range; check that the L1 slab "
+        "is pinned and that RLIMIT_MEMLOCK is large enough for " +
+        std::to_string(total) + " bytes");
   }
+  impl_->mrs.push_back(mr);
 
   local_.base_addr = reinterpret_cast<uint64_t>(base);
   local_.total_bytes = total;
+  local_.rkey = mr->rkey;
+  local_.window_count = plan.window_count;
+  local_.window_bytes = plan.window_bytes;
   registered_ = true;
 }
 

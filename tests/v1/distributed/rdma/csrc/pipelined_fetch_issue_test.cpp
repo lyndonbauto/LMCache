@@ -18,6 +18,7 @@ namespace {
 using lmcache::connector::rdma::ChunkNodeBinding;
 using lmcache::connector::rdma::ChunkPlacement;
 using lmcache::connector::rdma::issue_pipelined_fetch;
+using lmcache::connector::rdma::issue_planned_fetch;
 using lmcache::connector::rdma::KernelGroupLayout;
 using lmcache::connector::rdma::KernelGroupLayoutInput;
 using lmcache::connector::rdma::NodeRegistration;
@@ -28,6 +29,7 @@ using lmcache::connector::rdma::ObjectGroupLayout;
 using lmcache::connector::rdma::ObjectGroupLayoutInput;
 using lmcache::connector::rdma::PipelinedFetchSession;
 using lmcache::connector::rdma::PipelinedNodeInfoSender;
+using lmcache::connector::rdma::PlannedSlot;
 using lmcache::connector::rdma::RequestPlan;
 using lmcache::connector::rdma::SlotDigest;
 using lmcache::connector::rdma::SlotPlanner;
@@ -211,11 +213,53 @@ void test_memory_layout_conversion_reads_shapes() {
         "layer indices preserved");
 }
 
+void test_planned_transport_failure_marks_only_that_nodes_slots() {
+  std::cout << "planned transport failure marks only that node's slots\n";
+
+  const SlotPlanner planner({single_group_layout(1)});
+  NodeRegistry registry;
+  register_node(registry, "node-a", 1);
+  register_node(registry, "node-b", 2);
+  PipelinedFetchSession session = make_session(planner, registry);
+
+  auto slot = [](const std::string& node, uint32_t layer, size_t offset) {
+    PlannedSlot s;
+    s.node_name = node;
+    s.digest_hex = "d" + std::to_string(offset);
+    s.layer_id = layer;
+    s.offset = offset;
+    s.length = 64;
+    return s;
+  };
+  // Layer 0's records sit on both nodes; layer 1's only on node-a.
+  const std::vector<PlannedSlot> slots = {
+      slot("node-a", 0, 0), slot("node-b", 0, 64), slot("node-a", 1, 128)};
+
+  const PipelinedNodeInfoSender send_info = [](const std::string& node,
+                                               const std::string& command) {
+    if (node == "node-b") {
+      throw std::runtime_error("connection refused");
+    }
+    const size_t n =
+        lmcache::connector::rdma::pipelined_command_slot_indices(command)
+            .size();
+    return "n=" + std::to_string(n) + ";accepted=" + std::to_string(n) +
+           ";bytes=0";
+  };
+
+  issue_planned_fetch(session, send_info, slots);
+  check(session.has_active_request(), "a node failure does not abandon");
+  check(session.unservable_layers() == std::vector<uint32_t>({0}),
+        "only the layer with a slot on the unreachable node is unservable");
+  session.finish_request();
+}
+
 }  // namespace
 
 int main() {
   try {
     test_transport_failure_marks_slots_unservable();
+    test_planned_transport_failure_marks_only_that_nodes_slots();
     test_throw_mid_issue_clears_active_request();
     test_memory_layout_conversion_reads_shapes();
   } catch (const std::exception& e) {

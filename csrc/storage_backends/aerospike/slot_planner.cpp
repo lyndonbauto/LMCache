@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -50,6 +51,32 @@ size_t object_group_bytes(const ObjectGroupLayout& layout) {
     total += kernel_group_bytes(group);
   }
   return total;
+}
+
+size_t window_bytes_per_chunk(const std::vector<ObjectGroupLayout>& layouts,
+                              size_t align_bytes) {
+  size_t total = 0;
+  for (const ObjectGroupLayout& layout : layouts) {
+    size_t bytes = object_group_bytes(layout);
+    if (align_bytes > 0) {
+      bytes = (bytes + align_bytes - 1) / align_bytes * align_bytes;
+    }
+    total += bytes;
+  }
+  return total;
+}
+
+std::string window_fit_error(const std::vector<ObjectGroupLayout>& layouts,
+                             size_t window_bytes, size_t align_bytes) {
+  const size_t needed = window_bytes_per_chunk(layouts, align_bytes);
+  if (needed <= window_bytes) {
+    return {};
+  }
+  std::ostringstream os;
+  os << "RDMA window_bytes is " << window_bytes << " but one chunk of this "
+     << "model needs " << needed << " bytes, so no retrieve can be pipelined; "
+     << "set rdma.window_bytes to at least " << needed;
+  return os.str();
 }
 
 SlotPlanner::SlotPlanner(std::vector<ObjectGroupLayout> layouts)

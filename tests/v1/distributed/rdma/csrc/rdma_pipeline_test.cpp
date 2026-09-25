@@ -51,20 +51,30 @@
 #include "kv_sink_client.h"
 #include "kv_sink_mock_writer.h"
 #include "layer_pipeline.h"
+#include "pipelined_fetch_issue.h"
+#include "pipelined_fetch_pool.h"
 #include "rdma_context.h"
+#include "slot_planner.h"
 
 namespace {
 
 using lmcache::connector::rdma::ArrivalStatus;
 using lmcache::connector::rdma::build_pipelined_fetch_command;
+using lmcache::connector::rdma::issue_planned_fetch;
+using lmcache::connector::rdma::KernelGroupLayout;
 using lmcache::connector::rdma::LayerReadiness;
 using lmcache::connector::rdma::LocalEndpoint;
 using lmcache::connector::rdma::NodeRegistration;
+using lmcache::connector::rdma::NodeRegistry;
+using lmcache::connector::rdma::ObjectGroupLayout;
 using lmcache::connector::rdma::parse_pipelined_fetch_reply;
+using lmcache::connector::rdma::PipelinedFetchPool;
 using lmcache::connector::rdma::PipelinedFetchReply;
+using lmcache::connector::rdma::PlannedSlot;
 using lmcache::connector::rdma::RdmaContext;
 using lmcache::connector::rdma::RequestPlan;
 using lmcache::connector::rdma::SinkRequest;
+using lmcache::connector::rdma::SlotPlanner;
 using lmcache::connector::rdma::Transport;
 using lmcache::test::KvSinkMockWriter;
 using lmcache::test::MockRecord;
@@ -168,6 +178,76 @@ int drain_until_layer_ready(RdmaContext& sink, LayerReadiness& readiness,
   return -1;
 }
 
+// A planner is required by the pool but never consulted on the slot path;
+// one single-layer group satisfies it.
+ObjectGroupLayout unused_layout() {
+  KernelGroupLayout group;
+  group.layer_indices = {0};
+  group.kv_size = 2;
+  group.num_slots = 1;
+  group.hidden_dim = 1;
+  group.element_size = 2;
+  ObjectGroupLayout layout;
+  layout.object_group_id = 0;
+  layout.kernel_groups.push_back(group);
+  return layout;
+}
+
+// One piece per layer in window `window`: piece `window` of each layer, at
+// the window's base plus layer * kPieceBytes.
+std::vector<PlannedSlot> pool_request(const NodeRegistration& node,
+                                      uint32_t window) {
+  std::vector<PlannedSlot> slots;
+  for (uint32_t layer = 0; layer < kLayerCount; ++layer) {
+    PlannedSlot slot;
+    slot.node_name = node.node_name;
+    slot.digest_hex = digest_for(layer, window);
+    slot.layer_id = layer;
+    slot.offset = window * kWindowBytes + layer * kPieceBytes;
+    slot.length = kPieceBytes;
+    slots.push_back(slot);
+  }
+  return slots;
+}
+
+bool all_layers_ready(const PipelinedFetchPool& pool, uint16_t generation) {
+  for (uint32_t layer = 0; layer < kLayerCount; ++layer) {
+    if (!pool.is_layer_ready(layer, generation)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// Poll into `pool` until `done` holds, or give up.
+template <typename Done>
+bool drain_pool_until(RdmaContext& sink, PipelinedFetchPool& pool,
+                      Done&& done) {
+  for (int attempt = 0; attempt < kPollAttempts; ++attempt) {
+    pool.on_notifications(sink.poll_notifications(8));
+    if (done()) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Whether window `window` holds piece `window` of every layer, as
+// pool_request placed it.
+bool pool_bytes_intact(const uint8_t* slab,
+                       const std::vector<std::vector<uint8_t>>& payloads,
+                       uint32_t window) {
+  for (uint32_t layer = 0; layer < kLayerCount; ++layer) {
+    const size_t offset = window * kWindowBytes + layer * kPieceBytes;
+    if (std::memcmp(slab + offset,
+                    payloads[slot_index_of(layer, window)].data(),
+                    kPieceBytes) != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -235,7 +315,7 @@ int main(int argc, char** argv) {
     // ---- Handshake. ----
     const LocalEndpoint& local = sink.local_endpoint();
     const std::string register_reply = writer.handle_register(
-        lmcache::connector::rdma::build_register_command(local, 0));
+        lmcache::connector::rdma::build_register_command(local));
     const NodeRegistration registration =
         lmcache::connector::rdma::parse_register_reply("mock-node",
                                                        register_reply);
@@ -434,6 +514,67 @@ int main(int argc, char** argv) {
               ArrivalStatus::kLayerComplete,
           "the final piece of a layer reports completion");
     check(fresh.slots_landed() == 2, "duplicates do not inflate the count");
+
+    // ---- Stage 6: two fetches at once, one per window. ----
+    //
+    // Both windows' writes land on the one completion queue; the pool must
+    // credit each immediate to its own fetch. Each fetch carries one piece
+    // per layer, so it fits one window's share of the receive depth.
+    std::memset(slab, 0, kSlabBytes);
+    NodeRegistry registry;
+    registry.set(registration);
+    const SlotPlanner planner({unused_layout()});
+    PipelinedFetchPool pool(planner, registry, "kv", kPieceBytes, kPieceBytes,
+                            kWindowBytes, kWindowCount,
+                            sink.notification_depth());
+    auto send = [&](const std::string&, const std::string& command) {
+      return writer.handle_pipelined_fetch(command);
+    };
+    const uint16_t first =
+        issue_planned_fetch(pool, send, pool_request(registration, 0));
+    const uint16_t second =
+        issue_planned_fetch(pool, send, pool_request(registration, 1));
+    check(pool.window_of_generation(first) == 0 &&
+              pool.window_of_generation(second) == 1,
+          "each concurrent fetch holds its own window's generation");
+    check(drain_pool_until(sink, pool,
+                           [&] {
+                             return all_layers_ready(pool, first) &&
+                                    all_layers_ready(pool, second);
+                           }),
+          "both concurrent fetches complete from one completion queue");
+    check(pool_bytes_intact(slab_bytes, payloads, 0) &&
+              pool_bytes_intact(slab_bytes, payloads, 1),
+          "each window holds its own fetch's bytes, byte-identical");
+    pool.finish_request(first);
+    pool.abandon_request(second);
+
+    // A late write of the abandoned fetch lands while the window's next
+    // fetch is active, and must not be credited to it.
+    const uint16_t next =
+        pool.begin_request_from_slots(pool_request(registration, 1));
+    writer.push_slot(digest_for(0, 1), kWindowBytes, kPieceBytes,
+                     lmcache::connector::rdma::encode_immediate(second, 0));
+    bool consumed_late = false;
+    for (int attempt = 0; attempt < kPollAttempts && !consumed_late;
+         ++attempt) {
+      const std::vector<uint32_t> late = sink.poll_notifications(8);
+      pool.on_notifications(late);
+      consumed_late = !late.empty();
+    }
+    check(consumed_late, "the late write raised a notification");
+    check(!pool.is_layer_ready(0, next),
+          "the late write is not credited to the window's next fetch");
+    for (uint32_t layer = 0; layer < kLayerCount; ++layer) {
+      writer.push_slot(digest_for(layer, 1), kWindowBytes + layer * kPieceBytes,
+                       kPieceBytes,
+                       lmcache::connector::rdma::encode_immediate(
+                           next, static_cast<uint16_t>(layer)));
+    }
+    check(drain_pool_until(sink, pool,
+                           [&] { return all_layers_ready(pool, next); }),
+          "the next fetch completes from its own writes");
+    pool.finish_request(next);
 
     munlock(slab, kSlabBytes);
     std::free(slab);

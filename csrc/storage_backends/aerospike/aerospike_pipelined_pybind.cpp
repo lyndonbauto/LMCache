@@ -96,10 +96,35 @@ uint16_t issue_pipelined_fetch_by_keys(
       native_placements, native_chunk_nodes, native_slots);
 }
 
+// Each slot is (node_index, record_key, dest_offset, length, layer_id); its
+// position in `slots` is its notification slot.
+uint16_t issue_pipelined_fetch_by_slots(
+    AerospikeNativeConnector& connector,
+    const std::vector<std::string>& node_names,
+    const std::vector<
+        std::tuple<uint32_t, std::string, size_t, size_t, uint32_t>>& slots) {
+  std::vector<PlannedSlotKey> native_slots;
+  native_slots.reserve(slots.size());
+  for (const auto& [node_index, record_key, dest_offset, length, layer_id] :
+       slots) {
+    native_slots.push_back(
+        {node_index, record_key, dest_offset, length, layer_id});
+  }
+  py::gil_scoped_release release;
+  return connector.issue_pipelined_fetch_by_slots(node_names, native_slots);
+}
+
 }  // namespace
 
 void bind_pipelined_fetch(py::module& module,
                           py::class_<AerospikeNativeConnector>& connector) {
+  // Subclassing the contract's error lets callers catch one type whether the
+  // adapter's pre-check or the native session refused the plan.
+  py::register_exception<rdma::PlanTooLargeError>(
+      module, "PipelinedPlanTooLargeError",
+      py::module_::import("lmcache.v1.layerwise.contract")
+          .attr("PlanTooLargeError"));
+
   py::class_<rdma::ChunkPlacement>(module, "PipelinedChunkPlacement")
       .def(py::init<>())
       .def_readwrite("chunk_id", &rdma::ChunkPlacement::chunk_id)
@@ -131,10 +156,19 @@ void bind_pipelined_fetch(py::module& module,
       .def("issue_pipelined_fetch_by_keys", &issue_pipelined_fetch_by_keys,
            py::arg("placements"), py::arg("chunk_nodes"),
            py::arg("slot_record_keys"))
+      .def("issue_pipelined_fetch_by_slots", &issue_pipelined_fetch_by_slots,
+           py::arg("node_names"), py::arg("slots"))
+      .def("pipelined_max_slots_per_request",
+           &AerospikeNativeConnector::pipelined_max_slots_per_request)
+      .def("pipelined_unservable_layers",
+           &AerospikeNativeConnector::pipelined_unservable_layers,
+           py::arg("generation"))
       .def("finish_pipelined_fetch",
-           &AerospikeNativeConnector::finish_pipelined_fetch)
+           &AerospikeNativeConnector::finish_pipelined_fetch,
+           py::arg("generation"))
       .def("abandon_pipelined_fetch",
-           &AerospikeNativeConnector::abandon_pipelined_fetch);
+           &AerospikeNativeConnector::abandon_pipelined_fetch,
+           py::arg("generation"));
 }
 
 }  // namespace aerospike_pipelined_pybind

@@ -34,17 +34,21 @@ struct NotificationDepthBudget {
   uint32_t max_slots_per_request = 0;
 };
 
-// Upper bound on unconsumed notifications for one request, from the leased
-// window and the connector's record cap. Also bounded by kMaxSlotsPerRequest
+// Upper bound on unconsumed notifications for `window_count` concurrent
+// requests, one per window. One request's bound comes from the window and
+// the connector's record cap, and is also limited by kMaxSlotsPerRequest
 // because the immediate carries only 16 slot-index bits.
 uint32_t desired_notification_depth(size_t window_bytes,
-                                    size_t max_record_bytes);
+                                    size_t max_record_bytes,
+                                    uint32_t window_count = 1);
 
 // Clamp desired depth to what the device can allocate on the queue pair and
-// completion queue. max_slots_per_request equals effective_depth.
+// completion queue. Each window gets an equal share, so
+// max_slots_per_request is effective_depth / window_count; see
+// PipelinedFetchPool for why the split is static.
 NotificationDepthBudget notification_depth_budget(
     size_t window_bytes, size_t max_record_bytes,
-    const RdmaDeviceCaps& device_caps);
+    const RdmaDeviceCaps& device_caps, uint32_t window_count = 1);
 
 }  // namespace rdma
 }  // namespace connector

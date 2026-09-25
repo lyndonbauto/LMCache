@@ -17,6 +17,7 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc
+from lmcache.v1.distributed.l2_adapters import native_connector_l2_adapter
 from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
     NativeConnectorL2Adapter,
 )
@@ -153,6 +154,44 @@ def test_an_unsupported_shape_is_reported_not_forwarded(
         adapter.close()
 
     assert client.record_layouts == []
+
+
+class _UnpipelinableClient(_RecordLayoutClient):
+    """A client whose pipelined path is off for a stated reason."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__()
+        self._reason = reason
+
+    def pipelined_fetch_init_error(self) -> str:
+        """Return the stated reason."""
+        return self._reason
+
+
+@pytest.mark.parametrize("reason", ["window_bytes is 8388608 but ...", ""])
+def test_an_unusable_pipelined_path_is_logged_when_layouts_arrive(
+    monkeypatch: pytest.MonkeyPatch, reason: str
+) -> None:
+    """The operator learns the window is too small when the model registers."""
+    warnings: list[str] = []
+    monkeypatch.setattr(
+        native_connector_l2_adapter.logger,
+        "warning",
+        lambda fmt, *args: warnings.append(fmt % args),
+    )
+    adapter = NativeConnectorL2Adapter(
+        native_client=_UnpipelinableClient(reason), type_name="test"
+    )
+    try:
+        adapter.set_object_group_layouts(_hybrid_descs())
+    finally:
+        adapter.close()
+
+    if reason:
+        assert len(warnings) == 1
+        assert reason in warnings[0]
+    else:
+        assert warnings == []
 
 
 def test_the_writers_runs_are_the_readers_runs() -> None:

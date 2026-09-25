@@ -32,6 +32,9 @@ struct L1RdmaRegistration {
   // maximum number of concurrently outstanding RDMA fetches.
   uint32_t window_count = 0;
   size_t window_bytes = 0;
+  // L1 allocation alignment; every object in a window is rounded up to it.
+  // 0 means unknown, and sizes are then taken unrounded.
+  size_t align_bytes = 0;
   // Deadline for one kv-sink-fetch round trip, DMA included. Validated at
   // startup to be strictly below the L1 write-lock TTL, because a fetch that
   // outlives the lock lets the destination buffer become readable and

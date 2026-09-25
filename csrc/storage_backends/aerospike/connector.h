@@ -35,6 +35,16 @@ struct SlotRecordKey {
   std::string record_key;
 };
 
+// One slot of a caller-planned pipelined fetch; see
+// AerospikeNativeConnector::issue_pipelined_fetch_by_slots.
+struct PlannedSlotKey {
+  uint32_t node_index = 0;
+  std::string record_key;
+  size_t dest_offset = 0;
+  size_t length = 0;
+  uint32_t layer_id = 0;
+};
+
 struct WorkerAerospikeConn {
   aerospike* client = nullptr;
   std::string ns;
@@ -114,6 +124,22 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
   // Throws std::invalid_argument if `user_key` is empty.
   std::string record_digest_hex(const std::string& user_key) const;
 
+  // Name of the node that currently masters the record stored under
+  // `user_key`, read from the client's partition map.
+  //
+  // Records of one chunk hash to independent partitions, so a planner must
+  // ask per record rather than per chunk. The answer is a snapshot: a
+  // migration may move the record before it is fetched, in which case the
+  // named node declines the slot and the layer reports unservable.
+  //
+  // Thread safety: safe to call concurrently; the client guards its
+  // partition map.
+  //
+  // Throws std::invalid_argument if `user_key` is empty, and
+  // std::runtime_error if the client is not connected or no node masters
+  // the record's partition.
+  std::string record_node(const std::string& user_key) const;
+
   // Largest record this connector writes, in bytes: the server's record cap
   // less a safety margin. Layer-aligned writes cut planes against this, so a
   // reader naming records must plan with the same value.
@@ -164,20 +190,65 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
       const std::vector<rdma::ChunkNodeBinding>& chunk_nodes,
       const std::vector<SlotRecordKey>& slot_record_keys);
 
-  // Layer readiness for a pipelined fetch. False when pipelined fetch is not
-  // ready, the generation does not match, or the layer is not complete.
+  // Begin a pipelined fetch whose slots the caller has already planned, and
+  // return its generation.
+  //
+  // `slots[i]` is notification slot i: its record (by user key, hashed with
+  // record_digest_hex()) is written by node `node_names[slots[i].node_index]`
+  // to `dest_offset` in the registered window, and it counts toward
+  // `layer_id`'s readiness. Nothing is re-planned or re-ordered here.
+  //
+  // Thread safety: as issue_pipelined_fetch().
+  //
+  // Throws std::invalid_argument if a node index is out of range, a key is
+  // empty, a node has no kv-sink registration, or a slot leaves the window;
+  // rdma::PlanTooLargeError if there are more slots than
+  // pipelined_max_slots_per_request(); std::runtime_error if the RDMA path is
+  // not enabled or the window of the first slot already has a fetch.
+  //
+  // Up to one fetch per window runs at a time; every later call about this
+  // fetch quotes the returned generation.
+  uint16_t issue_pipelined_fetch_by_slots(
+      const std::vector<std::string>& node_names,
+      const std::vector<PlannedSlotKey>& slots);
+
+  // Most slots one pipelined fetch may carry: one window's share of the
+  // device's notification depth, or 0 when pipelined fetch is not ready.
+  //
+  // Thread safety: safe to call concurrently.
+  uint32_t pipelined_max_slots_per_request() const;
+
+  // Whether every slot of `layer_id` in fetch `request_generation` landed.
+  // False when pipelined fetch is not ready, that fetch is not active, the
+  // generation is 0, or the layer is not complete.
   //
   // Thread safety: safe to call concurrently.
   bool is_pipelined_layer_ready(uint32_t layer_id,
-                                uint16_t request_generation = 0) const;
+                                uint16_t request_generation) const;
 
-  // Finish or abandon the active pipelined fetch.
+  // Layers of fetch `generation` that a node declined or lost. Empty when
+  // pipelined fetch is not ready or that fetch is not active.
+  //
+  // A caller cannot distinguish "still in flight" from "will never arrive"
+  // with is_pipelined_layer_ready alone: both report false. Without this the
+  // only available response to a declined slot is to keep polling until the
+  // deadline, which turns a recoverable miss into a stall.
+  //
+  // Thread safety: safe to call concurrently.
+  std::vector<uint32_t> pipelined_unservable_layers(uint16_t generation) const;
+
+  // Finish fetch `generation` after it completed. Throws std::runtime_error
+  // if it is not active.
   //
   // Thread safety: safe to call concurrently; serialized on the driver lock.
-  void finish_pipelined_fetch();
-  void abandon_pipelined_fetch();
+  void finish_pipelined_fetch(uint16_t generation);
 
-  // Drain RDMA write-with-immediate notifications into the active session.
+  // Abandon fetch `generation` without waiting; no-op if it is not active.
+  //
+  // Thread safety: safe to call concurrently; serialized on the driver lock.
+  void abandon_pipelined_fetch(uint16_t generation);
+
+  // Drain RDMA write-with-immediate notifications into the active fetches.
   //
   // Thread safety: safe to call concurrently; serialized with other pipelined
   // methods on the internal driver lock.

@@ -78,7 +78,15 @@ def _scripted_harness() -> SourceHarness:
 #: Every source implementation the conformance suite runs against, by test id.
 #: Add one factory per implementation. A factory may call ``pytest.skip`` when
 #: its implementation cannot be built here, e.g. without the native extension.
+def _aerospike_harness() -> SourceHarness:
+    # Local
+    from .aerospike_harness import aerospike_harness
+
+    return aerospike_harness()
+
+
 SOURCE_HARNESS_FACTORIES: dict[str, Callable[[], SourceHarness]] = {
+    "aerospike": _aerospike_harness,
     "scripted": _scripted_harness,
 }
 

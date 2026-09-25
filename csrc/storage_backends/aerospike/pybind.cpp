@@ -39,6 +39,8 @@ PYBIND11_MODULE(lmcache_aerospike, m) {
                      &lmcache::connector::L1RdmaRegistration::window_count)
       .def_readwrite("window_bytes",
                      &lmcache::connector::L1RdmaRegistration::window_bytes)
+      .def_readwrite("align_bytes",
+                     &lmcache::connector::L1RdmaRegistration::align_bytes)
       .def_readwrite("fetch_timeout_ms",
                      &lmcache::connector::L1RdmaRegistration::fetch_timeout_ms)
       .def("is_enabled", &lmcache::connector::L1RdmaRegistration::is_enabled);
@@ -85,6 +87,9 @@ PYBIND11_MODULE(lmcache_aerospike, m) {
           .def("record_digest_hex",
                &lmcache::connector::AerospikeNativeConnector::record_digest_hex,
                py::arg("user_key"))
+          .def("record_node",
+               &lmcache::connector::AerospikeNativeConnector::record_node,
+               py::arg("user_key"))
           .def("max_record_bytes",
                &lmcache::connector::AerospikeNativeConnector::max_record_bytes);
 #ifdef LMCACHE_AEROSPIKE_RDMA
@@ -94,7 +99,7 @@ PYBIND11_MODULE(lmcache_aerospike, m) {
       .def("is_pipelined_layer_ready",
            &lmcache::connector::AerospikeNativeConnector::
                is_pipelined_layer_ready,
-           py::arg("layer_id"), py::arg("request_generation") = 0)
+           py::arg("layer_id"), py::arg("request_generation"))
       .def("poll_pipelined_fetch_notifications",
            &lmcache::connector::AerospikeNativeConnector::
                poll_pipelined_fetch_notifications);

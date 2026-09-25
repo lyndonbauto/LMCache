@@ -23,6 +23,7 @@ PLANNER_BIN := $(BUILD_DIR)/slot_planner_test
 CODEC_BIN := $(BUILD_DIR)/pipelined_fetch_test
 SESSION_BIN := $(BUILD_DIR)/pipelined_fetch_session_test
 ISSUE_BIN := $(BUILD_DIR)/pipelined_fetch_issue_test
+POOL_BIN := $(BUILD_DIR)/pipelined_fetch_pool_test
 DEPTH_BIN := $(BUILD_DIR)/notification_depth_test
 DUMP_BIN := $(BUILD_DIR)/slot_plan_dump
 
@@ -46,7 +47,12 @@ COMMON_SOURCES := \
 	$(CONNECTOR_DIR)/layer_pipeline.cpp
 
 SOURCES := $(SRC_DIR)/rdma_equivalence_test.cpp $(COMMON_SOURCES)
-PIPELINE_SOURCES := $(SRC_DIR)/rdma_pipeline_test.cpp $(COMMON_SOURCES)
+PIPELINE_SOURCES := $(SRC_DIR)/rdma_pipeline_test.cpp $(COMMON_SOURCES) \
+	$(CONNECTOR_DIR)/pipelined_fetch_pool.cpp \
+	$(CONNECTOR_DIR)/pipelined_fetch_issue.cpp \
+	$(CONNECTOR_DIR)/pipelined_fetch_session.cpp \
+	$(CONNECTOR_DIR)/slot_planner.cpp \
+	$(CONNECTOR_DIR)/shard_plan.cpp
 
 # These cover arithmetic, bookkeeping and string codecs rather than the data
 # path, so they link neither libibverbs nor the Aerospike client and run
@@ -73,6 +79,7 @@ SESSION_SOURCES := \
 	$(SRC_DIR)/pipelined_fetch_session_test.cpp \
 	$(CONNECTOR_DIR)/pipelined_fetch_session.cpp \
 	$(CONNECTOR_DIR)/pipelined_fetch_issue.cpp \
+	$(CONNECTOR_DIR)/pipelined_fetch_pool.cpp \
 	$(CONNECTOR_DIR)/kv_sink_client.cpp \
 	$(CONNECTOR_DIR)/layer_pipeline.cpp \
 	$(CONNECTOR_DIR)/slot_planner.cpp \
@@ -80,8 +87,18 @@ SESSION_SOURCES := \
 ISSUE_SOURCES := \
 	$(SRC_DIR)/pipelined_fetch_issue_test.cpp \
 	$(CONNECTOR_DIR)/pipelined_fetch_issue.cpp \
+	$(CONNECTOR_DIR)/pipelined_fetch_pool.cpp \
 	$(CONNECTOR_DIR)/pipelined_fetch_session.cpp \
 	$(CONNECTOR_DIR)/memory_layout_conversion.cpp \
+	$(CONNECTOR_DIR)/kv_sink_client.cpp \
+	$(CONNECTOR_DIR)/layer_pipeline.cpp \
+	$(CONNECTOR_DIR)/slot_planner.cpp \
+	$(CONNECTOR_DIR)/shard_plan.cpp
+POOL_SOURCES := \
+	$(SRC_DIR)/pipelined_fetch_pool_test.cpp \
+	$(CONNECTOR_DIR)/pipelined_fetch_pool.cpp \
+	$(CONNECTOR_DIR)/pipelined_fetch_issue.cpp \
+	$(CONNECTOR_DIR)/pipelined_fetch_session.cpp \
 	$(CONNECTOR_DIR)/kv_sink_client.cpp \
 	$(CONNECTOR_DIR)/layer_pipeline.cpp \
 	$(CONNECTOR_DIR)/slot_planner.cpp \
@@ -102,10 +119,57 @@ DUMP_SOURCES := \
 	$(CONNECTOR_DIR)/slot_planner.cpp \
 	$(CONNECTOR_DIR)/layer_pipeline.cpp \
 	$(CONNECTOR_DIR)/shard_plan.cpp
-LOGIC_BINS := $(SHARD_BIN) $(PLAN_BIN) $(PLANNER_BIN) $(CODEC_BIN) $(SESSION_BIN) $(ISSUE_BIN) $(DEPTH_BIN) $(DUMP_BIN)
+LOGIC_BINS := $(SHARD_BIN) $(PLAN_BIN) $(PLANNER_BIN) $(CODEC_BIN) $(SESSION_BIN) $(ISSUE_BIN) $(POOL_BIN) $(DEPTH_BIN) $(DUMP_BIN)
 
-.PHONY: all test logic logic-test clean
-all: $(BIN) $(PIPELINE_BIN) $(LOGIC_BINS)
+# Acceptance A7: does a write-with-immediate consume a posted receive?
+# Standalone, libibverbs only. EFA=1 adds the SRD path (needs efadv.h and
+# libefa) and builds a separately named binary. The unsolicited write-receive
+# mode is compiled only when efadv.h declares it (newer rdma-core).
+PROBE_SOURCES := $(SRC_DIR)/efa_imm_probe.cpp
+PROBE_FLAGS :=
+PROBE_LIBS := -libverbs
+ifeq ($(EFA),1)
+PROBE_BIN := $(BUILD_DIR)/efa_imm_probe_efa
+PROBE_FLAGS += -DLMCACHE_AEROSPIKE_EFA
+PROBE_LIBS += -lefa
+HASH := \#
+EFA_UNSOLICITED := $(shell printf '$(HASH)include <infiniband/efadv.h>\nint f(efadv_cq* c) { return EFADV_QP_FLAGS_UNSOLICITED_WRITE_RECV + EFADV_WC_EX_WITH_IS_UNSOLICITED + efadv_wc_is_unsolicited(c); }\n' | $(CXX) $(INCLUDES) -fsyntax-only -x c++ - 2>/dev/null && echo 1)
+ifeq ($(EFA_UNSOLICITED),1)
+PROBE_FLAGS += -DLMCACHE_EFA_UNSOLICITED
+endif
+else
+PROBE_BIN := $(BUILD_DIR)/efa_imm_probe
+endif
+
+# Test-only Python module over the real session, driven by the layerwise
+# conformance suite (tests/v1/layerwise/aerospike_harness.py). Needs pybind11
+# in the interpreter named by PYTHON; built only by `make pyharness`.
+PYTHON ?= python3
+PYHARNESS_SOURCES := \
+	$(SRC_DIR)/fabric_free_session_pybind.cpp \
+	$(CONNECTOR_DIR)/pipelined_fetch_session.cpp \
+	$(CONNECTOR_DIR)/pipelined_fetch_issue.cpp \
+	$(CONNECTOR_DIR)/pipelined_fetch_pool.cpp \
+	$(CONNECTOR_DIR)/kv_sink_client.cpp \
+	$(CONNECTOR_DIR)/layer_pipeline.cpp \
+	$(CONNECTOR_DIR)/slot_planner.cpp \
+	$(CONNECTOR_DIR)/shard_plan.cpp
+
+.PHONY: all test logic logic-test pyharness efa-probe clean
+
+pyharness: $(PYHARNESS_SOURCES) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -shared -fPIC $(INCLUDES) \
+		$$($(PYTHON) -m pybind11 --includes) $(PYHARNESS_SOURCES) \
+		-o $(BUILD_DIR)/fabric_free_session$$($(PYTHON) -c \
+		"import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))")
+all: $(BIN) $(PIPELINE_BIN) $(PROBE_BIN) $(LOGIC_BINS)
+
+# Build the A7 probe. On EFA: make efa-probe EFA=1, then
+#   build/efa_imm_probe_efa <device> 0 --transport srd
+efa-probe: $(PROBE_BIN)
+
+$(PROBE_BIN): $(PROBE_SOURCES) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(PROBE_FLAGS) $(INCLUDES) $(PROBE_SOURCES) $(LDFLAGS) $(PROBE_LIBS) -o $@
 
 # Build the device-independent harnesses without running them.
 logic: $(LOGIC_BINS)
@@ -118,6 +182,7 @@ logic-test: $(LOGIC_BINS)
 	$(CODEC_BIN)
 	$(SESSION_BIN)
 	$(ISSUE_BIN)
+	$(POOL_BIN)
 	$(DEPTH_BIN)
 
 $(BIN): $(SOURCES) | $(BUILD_DIR)
@@ -144,6 +209,9 @@ $(SESSION_BIN): $(SESSION_SOURCES) | $(BUILD_DIR)
 $(ISSUE_BIN): $(ISSUE_SOURCES) | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(ISSUE_SOURCES) -o $@
 
+$(POOL_BIN): $(POOL_SOURCES) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(POOL_SOURCES) -o $@
+
 $(DEPTH_BIN): $(DEPTH_SOURCES) | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(DEPTH_SOURCES) -o $@
 
@@ -158,16 +226,18 @@ $(BUILD_DIR):
 # RDMA_DEVICE to be set too since the two are positional. Soft-RoCE on `lo`
 # needs the IPv4-mapped entry, usually index 1:
 #   make test RDMA_DEVICE=rxe0 RDMA_GID_INDEX=1
-test: $(BIN) $(PIPELINE_BIN) $(LOGIC_BINS)
+test: $(BIN) $(PIPELINE_BIN) $(PROBE_BIN) $(LOGIC_BINS)
 	$(SHARD_BIN)
 	$(PLAN_BIN)
 	$(PLANNER_BIN)
 	$(CODEC_BIN)
 	$(SESSION_BIN)
 	$(ISSUE_BIN)
+	$(POOL_BIN)
 	$(DEPTH_BIN)
 	$(BIN) $(RDMA_DEVICE) $(RDMA_GID_INDEX)
 	$(PIPELINE_BIN) $(RDMA_DEVICE) $(RDMA_GID_INDEX)
+	$(PROBE_BIN) $(RDMA_DEVICE) $(RDMA_GID_INDEX) --expect-consumes
 
 clean:
 	rm -rf $(BUILD_DIR)

@@ -33,12 +33,19 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace lmcache {
 namespace connector {
 namespace rdma {
+
+// Reserved generation meaning "no fetch". Never allocated to a live request,
+// so a zero-initialised or defaulted generation cannot alias a real one and
+// be credited with its arrivals. Matches NO_GENERATION in
+// lmcache/v1/layerwise/contract.py.
+constexpr uint16_t kNoGeneration = 0;
 
 // Which cluster node holds each participating chunk.
 struct ChunkNodeBinding {
@@ -55,6 +62,30 @@ struct SlotDigest {
   std::string digest_hex;
 };
 
+// One slot of a plan built by the caller, issued exactly as given.
+//
+// Each slot names its own node because Aerospike places every record by its
+// own digest: one chunk's records usually sit on several nodes, so a node
+// cannot be inferred from the chunk.
+struct PlannedSlot {
+  std::string node_name;
+  std::string digest_hex;
+  uint32_t layer_id = 0;
+  // Relative to the base of the registered window.
+  size_t offset = 0;
+  size_t length = 0;
+};
+
+// A plan with more slots than this device can post receives for.
+//
+// Distinct from other begin_request failures because the caller's response
+// differs: a smaller plan can still succeed, whereas an unready backend
+// cannot. Derives from std::runtime_error so existing handlers still see it.
+class PlanTooLargeError : public std::runtime_error {
+ public:
+  using std::runtime_error::runtime_error;
+};
+
 // Owns one in-flight pipelined fetch at a time: plan, readiness, commands.
 //
 // Thread safety: every public method takes `mu_` and may be called from any
@@ -64,11 +95,16 @@ class PipelinedFetchSession {
  public:
   // `planner` and `registry` must outlive this session and must not change
   // while the session exists. `namespace_name` is embedded in fetch commands.
+  //
+  // Slot offsets are relative to the registered range, which holds
+  // `window_count` windows of `window_bytes` each. Every slot of one request
+  // must fall inside a single window: the one its first slot is in.
   PipelinedFetchSession(const SlotPlanner& planner,
                         const NodeRegistry& registry,
                         std::string namespace_name, size_t max_record_bytes,
                         size_t max_write_bytes, size_t window_bytes,
-                        uint32_t max_notification_slots);
+                        uint32_t max_notification_slots,
+                        uint32_t window_count = 1);
 
   // Report whether a request is currently active.
   //
@@ -84,12 +120,31 @@ class PipelinedFetchSession {
   //
   // Thread safety: takes `mu_`. Throws std::runtime_error if a request is
   // already active, if `slot_count()` exceeds the device-derived
-  // `max_notification_slots_`, if a planned slot falls outside `window_bytes_`,
+  // `max_notification_slots_`, if the planned slots do not share one window,
   // if a digest is missing, or if any exception SlotPlanner::plan_request may
   // throw. Throws std::invalid_argument if a chunk lacks a node binding.
   uint16_t begin_request(const std::vector<ChunkPlacement>& placements,
                          const std::vector<ChunkNodeBinding>& chunk_nodes,
                          const std::vector<SlotDigest>& slot_digests);
+
+  // Begin a request whose slots were planned by the caller.
+  //
+  // Nothing is re-planned: slot i of `slots` is sent with slot number i, to
+  // `slots[i].node_name`, and counts toward `slots[i].layer_id`. This is the
+  // entry point for LayerFetchPlan, whose slot order is the contract's slot
+  // numbering.
+  //
+  // Thread safety: takes `mu_`. Throws std::runtime_error if a request is
+  // already active, PlanTooLargeError if `slots.size()` exceeds the
+  // device-derived `max_notification_slots_`, and std::invalid_argument if
+  // `slots` is empty, a slot has an empty node or digest, a node is not
+  // registered, or the slots do not share one window.
+  uint16_t begin_request_from_slots(const std::vector<PlannedSlot>& slots);
+
+  // Most slots one request may carry on this device.
+  //
+  // Thread safety: immutable after construction.
+  uint32_t max_slots_per_request() const { return max_notification_slots_; }
 
   // kv-sink-fetch-pipelined commands for the active plan. A node may appear
   // more than once when its sink count exceeds that node's
@@ -123,7 +178,9 @@ class PipelinedFetchSession {
   // Layer readiness for the active request.
   //
   // Thread safety: takes `mu_`. When ``request_generation`` is non-zero and
-  // does not match the active request, returns false.
+  // does not match the active request, returns false. `kNoGeneration` skips
+  // the check; it is unambiguous because no live request is ever allocated
+  // that value.
   bool is_layer_ready(uint32_t layer_id, uint16_t request_generation = 0) const;
 
   // Layers marked unservable on the active request.
@@ -149,8 +206,29 @@ class PipelinedFetchSession {
 
   // Restore the generation counter after the session object is recreated.
   //
+  // `kNoGeneration` is coerced to the first generation of this session's
+  // class. Pass a value from next_generation() of a session with the same
+  // class; any other value breaks the class.
+  //
   // Thread safety: takes `mu_`.
   void restore_generation_counter(uint16_t next_generation);
+
+  // Generation the next request will be allocated.
+  //
+  // Thread safety: takes `mu_`.
+  uint16_t next_generation() const;
+
+  // Allocate only generations `first`, `first + stride`, `first + 2*stride`,
+  // ..., wrapping back to `first` past 65535.
+  //
+  // Sessions given the same `stride` and different `first` never share a
+  // generation, so one completion queue can carry all their immediates and
+  // `(generation - 1) % stride` names the session. The default class is
+  // first 1, stride 1: every generation but kNoGeneration.
+  //
+  // Thread safety: takes `mu_`. Throws std::invalid_argument unless
+  // 1 <= first <= stride, and std::runtime_error if a request is active.
+  void set_generation_class(uint16_t first, uint16_t stride);
 
  private:
   uint16_t allocate_generation();
@@ -161,17 +239,20 @@ class PipelinedFetchSession {
   size_t max_record_bytes_;
   size_t max_write_bytes_;
   size_t window_bytes_;
+  uint32_t window_count_;
   uint32_t max_notification_slots_;
 
   mutable std::mutex mu_;
-  uint16_t next_generation_ = 0;
+  uint16_t generation_first_ = 1;
+  uint16_t generation_stride_ = 1;
+  uint16_t next_generation_ = 1;
   uint16_t last_abandoned_generation_ = 0;
 
   bool has_request_ = false;
   uint16_t active_generation_ = 0;
   RequestPlan plan_;
   LayerReadiness readiness_;
-  std::map<uint32_t, std::string> chunk_to_node_;
+  std::vector<std::string> node_per_slot_;
   std::map<std::string, std::set<uint16_t>> slots_by_node_;
   std::vector<std::string> digest_per_slot_;
 };

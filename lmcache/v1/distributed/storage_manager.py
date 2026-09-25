@@ -6,7 +6,7 @@ Distributed multi-tier storage manager for MP mode
 # Standard
 from contextlib import contextmanager
 from dataclasses import replace
-from typing import Iterator, Literal, Optional, Sequence
+from typing import Iterator, Literal, Optional
 import threading
 import time
 
@@ -38,6 +38,7 @@ from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInter
 from lmcache.v1.distributed.l2_adapters.config import L2AdapterConfigBase
 from lmcache.v1.distributed.l2_adapters.rdma_registration import (
     validate_fetch_timeout_against_write_ttl,
+    validate_windows_reserved,
 )
 from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2ReconfigurableAdapter,
@@ -60,8 +61,7 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     AdapterDescriptor,
     create_store_policy,
 )
-from lmcache.v1.layerwise.contract import LayerFetchPlan
-from lmcache.v1.layerwise.planner import ChunkPlacement
+from lmcache.v1.layerwise.contract import LayerArrivalSource, LayerwiseContractError
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -783,67 +783,35 @@ class StorageManager:
                 group_layout_descs, group_kernel_layer_indices
             )
 
-    def begin_pipelined_fetch(
-        self, plan: LayerFetchPlan, placements: Sequence[ChunkPlacement]
-    ) -> int:
-        """Ask L2 adapters to start a pipelined fetch.
+    def layer_arrival_source(self) -> LayerArrivalSource:
+        """Return the source a layerwise retrieve runs its pump over.
 
-        Args:
-            plan: Every slot the fetch expects, each naming its record by
-                user key.
-            placements: The placements ``plan`` was built from.
+        Retrieve runs ``LayerArrivalPump(source, sink).run(plan)``; the pump
+        begins, polls and releases the fetch, so nothing else here does.
+        Adapters are asked in registration order and the first one with a
+        layer-pipelined path wins. Call once per retrieve: a source holds
+        one fetch, and concurrent retrieves each need their own.
 
         Returns:
-            The first non-zero generation reported by an adapter, or ``0``
-            when no adapter supports pipelined fetch.
+            A new layer arrival source from the first adapter that has one.
+
+        Raises:
+            LayerwiseContractError: If no L2 adapter can fetch layer by
+                layer, with each adapter's reason. Retrieve falls back to a
+                whole-object load, the same as for a failed fetch.
         """
         with self._adapters_lock:
             adapters = list(self._l2_adapters.values())
+        reasons: list[str] = []
         for adapter in adapters:
-            generation = adapter.begin_pipelined_fetch(plan, placements)
-            if generation != 0:
-                return generation
-        return 0
-
-    def finish_pipelined_fetch(self) -> None:
-        """Finish the active pipelined fetch on every adapter."""
-        with self._adapters_lock:
-            adapters = list(self._l2_adapters.values())
-        for adapter in adapters:
-            adapter.finish_pipelined_fetch()
-
-    def abandon_pipelined_fetch(self) -> None:
-        """Abandon the active pipelined fetch on every adapter."""
-        with self._adapters_lock:
-            adapters = list(self._l2_adapters.values())
-        for adapter in adapters:
-            adapter.abandon_pipelined_fetch()
-
-    def is_pipelined_layer_ready(
-        self, layer_id: int, request_generation: int = 0
-    ) -> bool:
-        """Ask L2 adapters whether a pipelined fetch layer has landed.
-
-        Each adapter tracks its own active pipelined request. ``False`` when
-        no adapter owns ``request_generation`` or the layer is not complete on
-        that adapter.
-
-        Args:
-            layer_id: Global layer index in the model.
-            request_generation: Handle returned by ``begin_pipelined_fetch`` on
-                the adapter that issued the fetch. ``0`` means "whichever
-                request the adapter currently considers active".
-
-        Returns:
-            ``True`` when an adapter reports the layer ready for the given
-            request generation.
-        """
-        with self._adapters_lock:
-            adapters = list(self._l2_adapters.values())
-        for adapter in adapters:
-            if adapter.is_pipelined_layer_ready(layer_id, request_generation):
-                return True
-        return False
+            try:
+                return adapter.layer_arrival_source()
+            except LayerwiseContractError as exc:
+                reasons.append(str(exc))
+        raise LayerwiseContractError(
+            "no L2 adapter can fetch layer by layer: "
+            + ("; ".join(reasons) or "no L2 adapters are registered")
+        )
 
     def touch_l1_keys(self, keys: list[ObjectKey]):
         """
@@ -1317,6 +1285,10 @@ class StorageManager:
         # here so a mismatch fails on boot rather than silently corrupting KV.
         validate_fetch_timeout_against_write_ttl(
             config, self._l1_config.write_ttl_seconds
+        )
+        memory_config = self._l1_config.memory_config
+        validate_windows_reserved(
+            config, memory_config.rdma_window_count, memory_config.rdma_window_bytes
         )
 
         adapter_id = self._next_adapter_id
