@@ -56,6 +56,64 @@ def lmcache_memcpy_async_h2d(
         )
 
 
+def lmcache_memcpy_async_h2d_range(
+    memory_obj: MemoryObj,
+    gpu_buffer: torch.Tensor,
+    byte_offset: int,
+    nbytes: int,
+) -> None:
+    """Copy one byte range of a memory object into the same range of a GPU buffer.
+
+    The partial counterpart of :func:`lmcache_memcpy_async_h2d`: bytes
+    ``[byte_offset, byte_offset + nbytes)`` of the memory object land at the
+    same offsets of ``gpu_buffer``. Used to stage a single layer of an object
+    whose other layers may still be arriving. Non-blocking; runs on the
+    current stream and does not synchronize.
+
+    Args:
+        memory_obj: Host memory object to read from.
+        gpu_buffer: Contiguous device buffer laid out byte-for-byte like the
+            memory object (for example an object-group staging buffer).
+        byte_offset: Start of the range, in bytes, in both buffers.
+        nbytes: Length of the range in bytes.
+
+    Raises:
+        ValueError: If ``memory_obj`` is a GDS object (those transfer whole
+            objects only), has no backing tensor, or if the range is empty,
+            negative, or runs past the end of either buffer.
+    """
+    if isinstance(memory_obj, GDSMemoryObject):
+        raise ValueError("GDS memory objects cannot be staged by byte range")
+    src_tensor = memory_obj.raw_tensor
+    if src_tensor is None:
+        raise ValueError(
+            "memory_obj.raw_tensor is None; ensure the MemoryObj has been allocated."
+        )
+    if byte_offset < 0 or nbytes <= 0:
+        raise ValueError(f"invalid byte range: offset={byte_offset}, nbytes={nbytes}")
+    end = byte_offset + nbytes
+    if end > memory_obj.get_size() or end > gpu_buffer.nbytes:
+        raise ValueError(
+            f"byte range [{byte_offset}, {end}) exceeds memory_obj nbytes="
+            f"{memory_obj.get_size()} or gpu_buffer nbytes={gpu_buffer.nbytes}"
+        )
+    if isinstance(memory_obj.parent(), LazyMemoryAllocator):
+        # The host offset is the allocator's virtual offset of the range start;
+        # the native copy splits at pin-chunk boundaries relative to it.
+        device_ops.lmcache_memcpy_async(
+            gpu_buffer.data_ptr() + byte_offset,
+            memory_obj.data_ptr + byte_offset,
+            nbytes,
+            lmcache_native.TransferDirection.H2D,
+            memory_obj.meta.address + byte_offset,
+            LazyMemoryAllocator.PIN_CHUNK_SIZE,
+        )
+    else:
+        gpu_buffer.view(torch.uint8)[byte_offset:end].copy_(
+            src_tensor.view(torch.uint8)[byte_offset:end], non_blocking=True
+        )
+
+
 def lmcache_memcpy_async_d2h(
     gpu_buffer: torch.Tensor,
     memory_obj: MemoryObj,

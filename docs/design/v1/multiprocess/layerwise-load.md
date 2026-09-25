@@ -53,6 +53,17 @@ concern as the RDMA layer pipeline’s generation field.
 share one transfer stream and follow `LayerwiseSchedule`, so the watermark is a
 tight bound for “layer *L* has landed.”
 
+**Segment ownership.** The worker creates the segment (name
+`lmcache_mp_layer_progress_<instance_id>`) and is the only process that
+unlinks it; every other process attaches through
+`layer_progress.attach_layer_progress_shm`. A plain
+`SharedMemory(name=...)` attach is not safe here: CPython registers attached
+segments with the attaching process's resource tracker and unlinks them when
+that process exits, so a daemon exit or restart would delete every live
+worker's segment. Worker teardown drops the waiter before closing the segment,
+treats an already-removed name as success, and a registration that fails
+after creating the segment removes it.
+
 Failure paths:
 
 - Retrieve fails partway: daemon sets a failure flag; the worker raises
@@ -60,17 +71,62 @@ Failure paths:
 - Stale generation in shared memory: worker raises `LayerProgressStaleGenerationError`.
 - Layer not in the schedule: connector `wait_for_layer_load` is a no-op.
 
+## Arrival-driven launch
+
+`transfer_kv_layerwise_h2d` launches every scheduled layer back to back. When
+bytes arrive from a remote store layer by layer, launches must instead wait
+for each layer to land. `object_group_transfer.LayerwiseH2DRetrieve` exposes
+the same work in three phases so a caller can pace it:
+
+```text
+retrieve.begin()               # per-batch setup once; publish generation G
+retrieve.launch_layer(L)       # copy layer L; record event[o]; watermark=o+1
+retrieve.mark_failed()         # publish failure under G; waiters raise
+```
+
+`launch_layer` accepts only the next layer in `LayerwiseSchedule` order, so the
+watermark stays a tight bound. `transfer_kv_layerwise_h2d` is now a thin loop
+over `launch_layer` and behaves exactly as before.
+
+`mark_failed` never touches a record that already holds a newer generation,
+and the worker's waiter honours a failure flag only under its own generation,
+so one retrieve's failure cannot fail or rewind the next.
+
+`layerwise_sink.MultiprocessLayerLoadSink` wraps one retrieve as the
+`LayerLoadSink` contract so `LayerArrivalPump` can drive it from a transport's
+arrivals. The pump's fetch generation and the worker's retrieve generation are
+distinct; the sink is bound to one retrieve generation at construction. See
+[`../layerwise/track-b-acceptance.md`](../layerwise/track-b-acceptance.md)
+(implementation log) for the decisions behind this split.
+
 ## Staging vs overlap
 
-Per-layer kernels still read from GPU staging buffers filled by **whole-object**
-H2D copies (same as the default path). Staging is not split per layer. Overlap is
-therefore:
+Per-layer kernels read from GPU staging buffers. How those buffers are filled is
+chosen per retrieve with `LayerStaging`, and the choice decides correctness:
+
+| Mode | Copies | Correct when | Used by |
+| --- | --- | --- | --- |
+| `WHOLE_OBJECT` | each object in full, on its first layer's launch | every object is complete before the retrieve starts | `transfer_kv_layerwise_h2d` |
+| `PER_LAYER` (default) | only the launched layer's bytes, at its launch | always, including while later layers are still arriving | `MultiprocessLayerLoadSink` |
+
+`WHOLE_OBJECT` on arriving data is silently wrong: layer 0's launch copies the
+bytes of layers not yet written, and later launches reuse that stale copy.
+
+Per-layer staging works because each kernel group's staging view sits at a
+fixed offset inside its object group's staging buffer, and a memory object is
+laid out byte-for-byte like that buffer. A layer is `kv_size` disjoint planes
+in the `(kv_size, num_layers, slots, hidden)` layout, or one block in the
+`(num_layers, slots, hidden)` layout, so it costs `kv_size` range copies per
+chunk instead of one copy per object. GDS objects transfer whole only and are
+refused in `PER_LAYER` mode.
+
+Overlap is therefore:
 
 - **Yes** between attention on layer *L* and the daemon stream processing layer
-  *L+1* (kernel launch, and staging for batches not yet copied).
-- **No** between staging an object and the first layer drawn from that object’s
-  staging buffer within the same batch—the full object must land before any of its
-  layer slices can launch.
+  *L+1*, in both modes.
+- In `WHOLE_OBJECT` mode, **no** overlap between staging an object and the first
+  layer drawn from it -- the full object must be in host memory first.
+- In `PER_LAYER` mode a layer can launch as soon as its own bytes have landed.
 
 ## Scheduling bargain (vLLM)
 

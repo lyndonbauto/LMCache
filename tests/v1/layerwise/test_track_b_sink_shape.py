@@ -1,11 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Track B's skeleton matches the frozen load contract.
+"""Track B's sink matches the frozen load contract.
 
-These tests pin the *shape* of Track B's implementation before it has any
-behaviour, so that Track A and Track C can build against it. They are
-deliberately cheap and need no GPU; the real coverage is the conformance
-suite, which this implementation is expected to pass once the methods are
-filled in.
+These pin the *shape* of Track B's implementation so Track A and Track C can
+build against it. Behaviour is covered in ``test_multiprocess_sink.py``.
 """
 
 # Standard
@@ -15,13 +12,22 @@ import inspect
 import pytest
 
 # First Party
-from lmcache.v1.layerwise import LayerLoadSink
+from lmcache.v1.layerwise import LayerLoadSink, LayerwiseContractError
+from lmcache.v1.multiprocess.layerwise_schedule import LayerwiseSchedule
 from lmcache.v1.multiprocess.layerwise_sink import MultiprocessLayerLoadSink
+
+# Local
+from .conftest import RecordingLauncher
+
+
+def _make_sink() -> MultiprocessLayerLoadSink:
+    """Build a sink over a two-layer schedule and a recording launcher."""
+    return MultiprocessLayerLoadSink(LayerwiseSchedule([[0, 1]]), RecordingLauncher())
 
 
 def test_the_multiprocess_sink_satisfies_the_load_protocol() -> None:
     """Track B's class is a LayerLoadSink as far as the protocol can tell."""
-    assert isinstance(MultiprocessLayerLoadSink(), LayerLoadSink)
+    assert isinstance(_make_sink(), LayerLoadSink)
 
 
 @pytest.mark.parametrize(
@@ -40,12 +46,12 @@ def test_the_sink_signature_matches_the_contract(method_name: str) -> None:
     assert actual == expected
 
 
-def test_the_unimplemented_sink_refuses_to_pretend_it_worked() -> None:
-    """An unfilled method raises rather than silently doing nothing.
+def test_the_sink_refuses_to_load_before_a_load_begins() -> None:
+    """A layer issued with no active load is refused rather than ignored.
 
-    A skeleton whose ``load_layer`` returned ``None`` would let a pump run to
+    A sink whose ``load_layer`` quietly returned would let a pump run to
     completion having copied nothing, which reads as success.
     """
-    sink = MultiprocessLayerLoadSink()
-    with pytest.raises(NotImplementedError):
+    sink = _make_sink()
+    with pytest.raises(LayerwiseContractError):
         sink.load_layer(0)

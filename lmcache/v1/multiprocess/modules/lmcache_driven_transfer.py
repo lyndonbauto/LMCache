@@ -35,7 +35,7 @@ from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.layer_progress import (
     DaemonLayerLaunchEventPool,
     LayerProgressRecord,
-    layer_progress_shm_name,
+    attach_layer_progress_shm,
 )
 from lmcache.v1.multiprocess.layerwise_schedule import (
     LayerwiseSchedule,
@@ -184,10 +184,8 @@ def _publish_layerwise_retrieve_terminal(
     shm_to_close: shared_memory.SharedMemory | None = None
     if progress is None:
         try:
-            shm_to_close = shared_memory.SharedMemory(
-                name=layer_progress_shm_name(instance_id),
-            )
-            progress = LayerProgressRecord(shm_to_close.buf)
+            shm_to_close = attach_layer_progress_shm(instance_id)
+            progress = LayerProgressRecord.from_shared_memory(shm_to_close)
         except FileNotFoundError:
             return
     progress.begin_retrieve(retrieve_generation)
@@ -613,10 +611,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             response_handles = daemon_layer_event_pool.export_handles(
                 cache_context.device
             )
-            layer_progress_shm = shared_memory.SharedMemory(
-                name=layer_progress_shm_name(instance_id),
-            )
-            layer_progress = LayerProgressRecord(layer_progress_shm.buf)
+            layer_progress_shm = attach_layer_progress_shm(instance_id)
+            layer_progress = LayerProgressRecord.from_shared_memory(layer_progress_shm)
 
         with self._lock:
             self._cache_contexts[instance_id] = ContextEntry(
