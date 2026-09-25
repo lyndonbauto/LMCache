@@ -11,6 +11,34 @@ defect coming back.
 
 ---
 
+## Decided 2026-09-25: the pump begins the fetch; windows are leased and reserved
+
+**Who is affected:** Track A (lease API, production `ChunkPlacer`,
+retirement of the storage-manager pipelined pair); Track C (retrieve wiring).
+Nothing in `contract.py` changes.
+
+**What changed.**
+
+- **M4.** Retrieve runs `LayerArrivalPump(source, sink).run(plan)` over an
+  `AerospikeLayerArrivalSource` obtained from the storage manager, and falls
+  back to a whole-object load on `LayerwiseContractError`. The storage-manager
+  `begin_pipelined_fetch` / `is_pipelined_layer_ready` pair is retired or made
+  internal to the source.
+- **M2.** Plan offsets are relative to the request's leased RDMA window,
+  which Track A owns. Window ranges become a reserved region of the L1
+  allocator; a pipelined retrieve's objects are allocated inside its window
+  and stay there; a window released by an abandon is quarantined until the
+  fetch timeout passes.
+
+**What breaks.** Callers of `StorageManager.begin_pipelined_fetch`, once it
+is retired. Planned code that treats offsets as slab-relative.
+
+**Why.** The pump already calls `begin_fetch`, so a caller that began the
+fetch itself would begin it twice. A slab-wide window lets a late write from
+an abandoned fetch corrupt an unrelated request silently. Details and the
+two questions still open are in
+[system-design.md](system-design.md) section 11, "Window ownership".
+
 ## The conformance suite drives sources through an `ArrivalDriver`
 
 **Who is affected:** Track A (registers its source); anyone using

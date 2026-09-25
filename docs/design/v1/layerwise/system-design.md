@@ -353,9 +353,9 @@ precise about why, so nobody re-attempts them in Python:
   generally spread across nodes. The chunk-level native call binds a whole
   chunk to one node (`ChunkNodeBinding`), and `chunk_fetch_arguments` refuses
   a plan that would need otherwise.
-- **Destination offsets.** Chosen by the L1 allocator when it places a
-  chunk's object in the registered window, so they are an input to planning
-  rather than something planning derives.
+- **Destination offsets.** Chosen when a chunk's object is placed in the
+  request's leased RDMA window (see "Window ownership" below), so they are an
+  input to planning rather than something planning derives.
 
 Note the record cap `RecordKeys` is built with must be the cap the object
 was *written* under, not today's. It decides how many records exist, so a
@@ -403,8 +403,24 @@ retrieve request (IPCCacheServerKey from vLLM)
                                                      keep chunks >= first_in_window_chunk
   -> ChunkPlacer.locate(chunk, group, object_bytes)  node + destination   <- stubbed
   -> build_request_fetch(...)                        PlanRequest + LayerFetchPlan
-  -> storage.begin_pipelined_fetch(plan, placements)
+  -> LayerArrivalPump(source, sink).run(plan)         on a worker thread, per retrieve
+       except LayerwiseContractError (incl. PlanTooLargeError):
+         whole-object load into the same L1 objects
 ```
+
+**Who begins the fetch (decided 2026-09-25, M4).** The pump does: `run(plan)`
+calls `source.begin_fetch(plan)` and owns the generation from then on.
+Retrieve only builds the plan and runs the pump over an
+`AerospikeLayerArrivalSource`, which it gets from the storage manager through
+a `layer_arrival_source()` accessor rather than from the L2 adapter directly.
+The storage-manager `begin_pipelined_fetch` / `is_pipelined_layer_ready` pair
+is retired (or becomes internal to the source): it returned `0` for
+"unsupported" and a boolean for readiness, the two shapes the contract
+replaced. The pump blocks until every layer is loaded, so it runs on its own
+worker thread, never on the request handler. On fallback the whole-object
+load reuses or releases the same write-locked L1 objects. Until Track B's
+loader exists, the path sits behind a flag and is tested with
+`RecordingLayerLoadSink`.
 
 `LMCacheDrivenTransferModule.fetch_model(model, world_size)` returns the
 registered `FetchModel`. It is released with the model's last registration,
@@ -412,6 +428,43 @@ and it is absent (`KeyError`) for a layout that cannot be planned; such a
 request loads whole objects. `retrieve` and `request_cache_keys` share
 `first_in_window_chunk`, so the two cannot disagree about which chunks a
 sliding-window group reads.
+
+### Window ownership (decided 2026-09-25, M2)
+
+Offsets in a plan are relative to the start of the request's **leased RDMA
+window**, and Track A owns the lease. The whole L1 region is *not* one window:
+that reverses the bounded-window decision in
+[aerospike_rdma.md](../distributed/l2_adapters/aerospike_rdma.md#registration-scope-bounded-windows),
+because a late write from an abandoned fetch would land in whatever
+unrelated object had since been allocated at that address.
+
+The windows (`RdmaWindowPlan`) are already ranges of the L1 slab, registered
+once at startup. What is decided:
+
+1. **The window ranges are reserved.** Today the L1 allocator does not know
+   about them and can place ordinary objects inside a window, so the
+   blast-radius guarantee does not yet hold. The window ranges become a
+   reserved region of the allocator, used only by pipelined retrieves.
+2. **Data stays where it lands.** A window is already L1 memory, so a
+   pipelined retrieve allocates its L1 objects inside its leased window and
+   nothing is copied. The window returns to the pool when those objects are
+   freed. The cost: `window_count` bounds how many pipelined retrieves' objects
+   are held at once, not only how many fetches are in flight. If that proves
+   too tight, copy out after the pump finishes -- off the TTFT path, since
+   every layer has reached the GPU by then.
+3. **A window released by an abandon is quarantined** until the fetch
+   timeout has passed. Re-leasing it at once would let a late write from the
+   abandoned fetch overwrite the next request's buffer; the generation check
+   stops LMCache *counting* that write but not the NIC performing it. The L1
+   write-lock TTL already bounds how late a write can be.
+4. **Track A builds the lease API** (roughly `lease(bytes) -> (window_id,
+   base)` and `release(window_id, abandoned)`) and the production
+   `ChunkPlacer` on top of it. Retrieve calls it.
+
+Still open: who changes the L1 allocator (it is `l1_manager`, which neither
+track owns), and whether `window_bytes` (default 8 MiB) is big enough -- one
+request's KV for a 7B model over a few thousand tokens is hundreds of MiB, so
+either the default grows or a request spans several windows.
 
 The `ChunkPlacer` is the only stand-in. `tests/v1/layerwise/test_request_fetch.py`
 drives the builder from a vLLM-shaped request (a hybrid model with a
