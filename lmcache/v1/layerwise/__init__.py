@@ -18,6 +18,7 @@ transport needs no GPU and the loader needs no RDMA fabric.
 # Local
 from .contract import (
     MAX_SLOTS_PER_REQUEST,
+    NO_GENERATION,
     LayerArrivalSource,
     LayerArrivalStatus,
     LayerArrivalTimeoutError,
@@ -31,7 +32,9 @@ from .contract import (
     StaleGenerationError,
 )
 from .fakes import (
+    ArrivalDriver,
     RecordingLayerLoadSink,
+    ScriptedArrivalDriver,
     ScriptedLayerArrivalSource,
     UnservableLayerArrivalSource,
 )
@@ -58,6 +61,8 @@ from .pump import LayerArrivalPump
 
 __all__ = [
     "MAX_SLOTS_PER_REQUEST",
+    "NO_GENERATION",
+    "ArrivalDriver",
     "ByteRange",
     "ChunkFetchArguments",
     "ChunkPlacement",
@@ -80,6 +85,7 @@ __all__ = [
     "RecordKeySource",
     "RecordKeys",
     "RecordingLayerLoadSink",
+    "ScriptedArrivalDriver",
     "ScriptedLayerArrivalSource",
     "SlotPlacement",
     "StaleGenerationError",

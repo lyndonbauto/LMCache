@@ -95,6 +95,13 @@ covered; keep it green.
 is written against the public surface only, and it stays that way -- it is the
 example both other tracks copy.
 
+`test_arrival_source_conformance.py` runs once per source registered in
+`SOURCE_HARNESS_FACTORIES` (`tests/v1/layerwise/conftest.py`). Each entry
+pairs a fresh source with an `ArrivalDriver` that lands and declines slots by
+index, which is how the suite pins slot-level rules -- a layer stays
+`PENDING` until its last slot lands, a late slot from an abandoned generation
+is not credited -- for every implementation, not just the scripted one.
+
 ### C9. End-to-end integration
 
 Track A's real source and Track B's real loader, driven by the pump, serve a

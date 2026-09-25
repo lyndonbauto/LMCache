@@ -11,6 +11,44 @@ defect coming back.
 
 ---
 
+## The conformance suite drives sources through an `ArrivalDriver`
+
+**Who is affected:** Track A (registers its source); anyone using
+`ScriptedLayerArrivalSource`.
+
+**What changed.**
+
+- New `ArrivalDriver` protocol in `fakes.py`: `land_slot(slot_index,
+  generation)` and `decline_slot(slot_index, generation)`. Slots are named by
+  their position in `plan.slots`, the number the wire carries. An arrival
+  quoting a generation that is not active is dropped, not raised, as on the
+  wire.
+- `ScriptedLayerArrivalSource` counts slots: a layer is resident once all of
+  its slots land and unservable once any is declined. It gains `land_slot` /
+  `decline_slot`; `deliver_layer` / `decline_layer` still work, and
+  `deliver_layer` no longer turns a declined layer resident.
+  `ScriptedArrivalDriver(source)` is its driver.
+- `tests/v1/layerwise/test_arrival_source_conformance.py` runs every test
+  once per entry in `SOURCE_HARNESS_FACTORIES`. To add a source:
+
+  ```python
+  # tests/v1/layerwise/conftest.py
+  def _aerospike_harness() -> SourceHarness:
+      session = ...  # fabric-free native session; pytest.skip() if unbuilt
+      return SourceHarness(AerospikeLayerArrivalSource(...), FabricFreeDriver(session))
+
+  SOURCE_HARNESS_FACTORIES["aerospike"] = _aerospike_harness
+  ```
+
+**What breaks.** Nothing in the contract. A test that delivered a layer after
+declining it and expected `RESIDENT` now sees `UNSERVABLE`.
+
+**Why.** The pump tests could only drive the scripted source, by layer, with
+methods a real source does not have, so they could not show that a real
+source keeps a layer pending until its last slot, or ignores a late slot from
+an abandoned fetch. Driving by slot index puts those rules in one suite that
+every implementation must pass.
+
 ## `pipelined_fetch_arguments` is one entry per slot
 
 **Who is affected:** Track A (the slot-level native call takes this shape).

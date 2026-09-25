@@ -6,11 +6,14 @@ import pytest
 
 # First Party
 from lmcache.v1.layerwise import (
+    ArrivalDriver,
     LayerArrivalSource,
+    LayerArrivalStatus,
     LayerLoadSink,
     LayerNotInPlanError,
     LayerwiseContractError,
     RecordingLayerLoadSink,
+    ScriptedArrivalDriver,
     ScriptedLayerArrivalSource,
     StaleGenerationError,
 )
@@ -91,7 +94,26 @@ def test_recording_sink_rejects_finish_load_with_unissued_layer() -> None:
         sink.finish_load(1)
 
 
+def test_scripted_source_rejects_a_slot_outside_the_plan() -> None:
+    """A driver naming a slot the plan lacks has a bug, not a late write."""
+    source = ScriptedLayerArrivalSource()
+    generation = source.begin_fetch(make_plan({0: 1}))
+    with pytest.raises(ValueError, match="outside the active plan"):
+        source.land_slot(1, generation)
+
+
+def test_scripted_deliver_layer_does_not_undo_a_decline() -> None:
+    """Delivering a declined layer's other slots leaves it unservable."""
+    source = ScriptedLayerArrivalSource()
+    generation = source.begin_fetch(make_plan({0: 2}))
+    source.decline_slot(0, generation)
+    source.deliver_layer(0)
+    assert source.poll_layer(0, generation) == LayerArrivalStatus.UNSERVABLE
+
+
 def test_fakes_satisfy_runtime_checkable_protocols() -> None:
     """Fakes are valid stand-ins for the transport and loader protocols."""
-    assert isinstance(ScriptedLayerArrivalSource(), LayerArrivalSource)
+    source = ScriptedLayerArrivalSource()
+    assert isinstance(source, LayerArrivalSource)
+    assert isinstance(ScriptedArrivalDriver(source), ArrivalDriver)
     assert isinstance(RecordingLayerLoadSink(), LayerLoadSink)
