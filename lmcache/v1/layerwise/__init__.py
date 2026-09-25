@@ -33,6 +33,8 @@ from .contract import (
 )
 from .fakes import (
     ArrivalDriver,
+    LayerWaitOutcome,
+    LoadObserver,
     RecordingLayerLoadSink,
     ScriptedArrivalDriver,
     ScriptedLayerArrivalSource,
@@ -76,7 +78,9 @@ __all__ = [
     "LayerLoadSink",
     "LayerNotInPlanError",
     "LayerUnservableError",
+    "LayerWaitOutcome",
     "LayerwiseContractError",
+    "LoadObserver",
     "ModelLayout",
     "PipelinedFetchArguments",
     "PlanTooLargeError",

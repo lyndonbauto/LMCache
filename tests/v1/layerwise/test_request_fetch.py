@@ -14,108 +14,44 @@ import re
 
 # Third Party
 import pytest
-import torch
 
 # First Party
-from lmcache.v1.distributed.api import (
-    AttnWindowDesc,
-    MemoryLayoutDesc,
-    ObjectKey,
-    ipc_key_to_object_keys,
-)
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
     object_key_to_string,
 )
-from lmcache.v1.layerwise import ModelLayout, pipelined_fetch_arguments
+from lmcache.v1.layerwise import pipelined_fetch_arguments
 from lmcache.v1.layerwise.request_fetch import (
     ChunkLocation,
-    FetchModel,
     FetchModelRegistry,
+    ObjectToPlace,
     RequestFetch,
     build_request_fetch,
     first_in_window_chunk,
+    objects_to_place,
     request_cache_keys,
 )
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
-from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
-CHUNK_TOKENS = 16
-NUM_CHUNKS = 5
-MODEL_NAME = "google/gemma-3-hybrid"
-#: Small enough that the attention planes are cut into several records.
-MAX_RECORD_BYTES = 3000
-
-#: Group 0: full attention, 2 layers. Group 1: sliding window of 2 chunks,
-#: 2 layers. Group 2: a connector-private aux group, never retrieved.
-GROUP_LAYOUTS = {
-    0: MemoryLayoutDesc(shapes=[torch.Size([2, 2, 16, 64])], dtypes=[torch.float16]),
-    1: MemoryLayoutDesc(shapes=[torch.Size([2, 2, 16, 32])], dtypes=[torch.float16]),
-    2: MemoryLayoutDesc(shapes=[torch.Size([1, 1, 16, 8])], dtypes=[torch.float16]),
-}
-KERNEL_LAYERS = {0: [[0, 2]], 1: [[1, 3]], 2: [[4]]}
-ATTN = AttnWindowDesc(
-    num_chunks_in_sw=[-1, 2, -1],
-    world_size=2,
-    group_kinds=("attention", "attention", "aux"),
+# Local
+from .placers import PackingLease, PackingPlacer
+from .vllm_requests import (
+    ATTN,
+    MAX_RECORD_BYTES,
+    MODEL_NAME,
+    NUM_CHUNKS,
+    fetch_model,
+    resolve_obj_keys,
+    vllm_request,
 )
-
-
-class PackingPlacer:
-    """Packs objects back to back in the window; chunks alternate nodes."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[int, int, int]] = []
-        self.offsets: dict[tuple[int, int], int] = {}
-        self._next_offset = 4096
-
-    def locate(
-        self, chunk_id: int, object_group_id: int, object_bytes: int
-    ) -> ChunkLocation:
-        """Record the call and place the object after the previous one."""
-        self.calls.append((chunk_id, object_group_id, object_bytes))
-        offset = self._next_offset
-        self.offsets[(chunk_id, object_group_id)] = offset
-        self._next_offset += object_bytes
-        return ChunkLocation(node_name=f"node-{chunk_id % 2}", dest_offset=offset)
-
-
-def vllm_request(cache_salt: str = "") -> IPCCacheServerKey:
-    """A prompt of five full chunks plus a partial one, from worker 1 of 2."""
-    tokens = tuple(range(1000, 1000 + NUM_CHUNKS * CHUNK_TOKENS + 7))
-    return IPCCacheServerKey(
-        model_name=MODEL_NAME,
-        world_size=2,
-        worker_id=1,
-        token_ids=tokens,
-        start=0,
-        end=NUM_CHUNKS * CHUNK_TOKENS,
-        request_id="cmpl-7f3a",
-        cache_salt=cache_salt,
-    )
-
-
-def resolve_obj_keys(key: IPCCacheServerKey) -> list[list[ObjectKey]]:
-    """What ``MPCacheServerContext.resolve_obj_keys`` returns for ``key``."""
-    hasher = TokenHasher(chunk_size=CHUNK_TOKENS)
-    chunk_hashes = [
-        TokenHasher.hash_to_bytes(h)
-        for h in hasher.compute_chunk_hashes(list(key.token_ids), end=key.end)
-    ]
-    return ipc_key_to_object_keys(
-        key, chunk_hashes, list(range(ATTN.num_object_groups))
-    )
-
-
-def fetch_model() -> FetchModel:
-    return FetchModel(ModelLayout.from_registration(GROUP_LAYOUTS, KERNEL_LAYERS), ATTN)
 
 
 def plan_for(
     keys: Sequence[Sequence[ObjectKey]], placer: PackingPlacer | None = None
 ) -> RequestFetch:
-    return build_request_fetch(
-        fetch_model(), keys, MAX_RECORD_BYTES, placer or PackingPlacer()
-    )
+    """Lease a window the way retrieve does, then plan into it."""
+    placer = placer or PackingPlacer()
+    lease = placer.lease(objects_to_place(fetch_model(), keys))
+    return build_request_fetch(fetch_model(), keys, MAX_RECORD_BYTES, lease)
 
 
 _RECORD_SUFFIX = re.compile(r"\|(?:m|s\|(\d+))$")
@@ -173,10 +109,11 @@ def test_slots_tile_each_object_at_its_placed_destination() -> None:
     fetch = plan_for(resolve_obj_keys(vllm_request()), placer)
     layout = fetch_model().layout
 
+    (lease,) = placer.leases
     for placement in fetch.request.placements:
         assert (
             placement.dest_offset
-            == placer.offsets[(placement.chunk_id, placement.object_group_id)]
+            == lease.locate(placement.chunk_id, placement.object_group_id).dest_offset
         )
         size = layout.object_group_bytes(placement.object_group_id)
         group_layers = {
@@ -196,16 +133,187 @@ def test_slots_tile_each_object_at_its_placed_destination() -> None:
         assert cursor == placement.dest_offset + size
 
 
-def test_the_placer_is_asked_once_per_object_with_its_size() -> None:
-    """The destination must fit the object, so the placer is told its size."""
+def test_the_placer_is_asked_once_per_request_with_every_objects_size() -> None:
+    """One lease covers the request, and each destination must fit its object."""
     placer = PackingPlacer()
-    fetch = plan_for(resolve_obj_keys(vllm_request()), placer)
+    keys = resolve_obj_keys(vllm_request())
+    fetch = plan_for(keys, placer)
     layout = fetch_model().layout
 
-    assert sorted(placer.calls) == sorted(
-        (p.chunk_id, p.object_group_id, layout.object_group_bytes(p.object_group_id))
+    (request,) = placer.requests
+    assert request == tuple(
+        ObjectToPlace(
+            p.chunk_id,
+            p.object_group_id,
+            keys[p.object_group_id][p.chunk_id],
+            layout.object_group_bytes(p.object_group_id),
+        )
         for p in fetch.request.placements
     )
+
+
+def _lease_with(
+    window_bytes: int,
+    others_from: int = 1 << 20,
+    window_start: int = 0,
+    **offsets: int,
+) -> tuple[PackingLease, list[list[ObjectKey]]]:
+    """A lease placing the request's objects at chosen offsets.
+
+    ``offsets`` maps ``c<chunk>g<group>`` to a destination offset; every other
+    object is packed back to back from ``others_from``. All offsets are
+    registration offsets, as is ``window_start``.
+    """
+    keys = resolve_obj_keys(vllm_request())
+    objects = objects_to_place(fetch_model(), keys)
+    locations: dict[tuple[int, int], ChunkLocation] = {}
+    cursor = others_from
+    for obj in objects:
+        name = f"c{obj.chunk_id}g{obj.object_group_id}"
+        if name in offsets:
+            offset = offsets[name]
+        else:
+            offset = cursor
+            cursor += obj.object_bytes
+        locations[(obj.chunk_id, obj.object_group_id)] = ChunkLocation("n", offset)
+    return PackingLease(window_bytes, locations, window_start), keys
+
+
+def test_an_object_reaching_past_the_window_is_refused() -> None:
+    """A write past the window lands in memory no lease covers."""
+    size = fetch_model().layout.object_group_bytes(0)
+    lease, keys = _lease_with(1 << 30, others_from=0, c0g0=(1 << 30) - size + 1)
+
+    with pytest.raises(ValueError, match="outside the"):
+        build_request_fetch(fetch_model(), keys, MAX_RECORD_BYTES, lease)
+
+
+def test_an_object_that_exactly_fills_the_window_end_is_accepted() -> None:
+    """The last byte of the window is usable."""
+    size = fetch_model().layout.object_group_bytes(0)
+    lease, keys = _lease_with(1 << 30, others_from=0, c0g0=(1 << 30) - size)
+
+    fetch = build_request_fetch(fetch_model(), keys, MAX_RECORD_BYTES, lease)
+
+    assert max(s.offset + s.length for s in fetch.plan.slots) == 1 << 30
+
+
+def test_a_negative_offset_is_refused() -> None:
+    """A negative offset writes before the window."""
+    lease, keys = _lease_with(1 << 30, c0g0=-1)
+
+    with pytest.raises(ValueError, match="outside the"):
+        build_request_fetch(fetch_model(), keys, MAX_RECORD_BYTES, lease)
+
+
+WINDOW_START = 3 << 30
+WINDOW_BYTES = 1 << 30
+
+
+def test_a_later_window_plans_registration_offsets() -> None:
+    """Offsets inside a window past the first are planned as given."""
+    placer = PackingPlacer(window_bytes=WINDOW_BYTES, window_start=WINDOW_START)
+    keys = resolve_obj_keys(vllm_request())
+    lease = placer.lease(objects_to_place(fetch_model(), keys))
+
+    fetch = build_request_fetch(fetch_model(), keys, MAX_RECORD_BYTES, lease)
+
+    assert min(p.dest_offset for p in fetch.request.placements) == WINDOW_START + 4096
+    assert min(s.offset for s in fetch.plan.slots) == WINDOW_START + 4096
+    assert max(s.offset + s.length for s in fetch.plan.slots) <= (
+        WINDOW_START + WINDOW_BYTES
+    )
+
+
+def test_an_object_before_the_window_start_is_refused() -> None:
+    """Bytes below the window belong to another window's lease."""
+    lease, keys = _lease_with(
+        WINDOW_BYTES,
+        others_from=WINDOW_START,
+        window_start=WINDOW_START,
+        c1g0=WINDOW_START - 1,
+    )
+
+    with pytest.raises(ValueError, match="outside the leased window"):
+        build_request_fetch(fetch_model(), keys, MAX_RECORD_BYTES, lease)
+
+
+def test_an_object_past_a_later_window_end_is_refused() -> None:
+    """The end bound moves with the window, not with its size alone."""
+    size = fetch_model().layout.object_group_bytes(0)
+    end = WINDOW_START + WINDOW_BYTES
+    lease, keys = _lease_with(
+        WINDOW_BYTES,
+        others_from=WINDOW_START,
+        window_start=WINDOW_START,
+        c1g0=end - size + 1,
+    )
+
+    with pytest.raises(ValueError, match="outside the leased window"):
+        build_request_fetch(fetch_model(), keys, MAX_RECORD_BYTES, lease)
+
+
+def test_an_object_ending_at_a_later_window_end_is_accepted() -> None:
+    """The last byte of a later window is usable."""
+    size = fetch_model().layout.object_group_bytes(0)
+    end = WINDOW_START + WINDOW_BYTES
+    lease, keys = _lease_with(
+        WINDOW_BYTES,
+        others_from=WINDOW_START,
+        window_start=WINDOW_START,
+        c1g0=end - size,
+    )
+
+    fetch = build_request_fetch(fetch_model(), keys, MAX_RECORD_BYTES, lease)
+
+    assert max(s.offset + s.length for s in fetch.plan.slots) == end
+
+
+def test_two_objects_sharing_bytes_are_refused() -> None:
+    """Overlapping destinations make one fetch overwrite another's data."""
+    size = fetch_model().layout.object_group_bytes(0)
+    lease, keys = _lease_with(1 << 30, c0g0=0, c1g0=size - 1)
+
+    with pytest.raises(ValueError, match="overlap"):
+        build_request_fetch(fetch_model(), keys, MAX_RECORD_BYTES, lease)
+
+
+def test_adjacent_objects_are_not_an_overlap() -> None:
+    """Objects that touch but do not share a byte are fine."""
+    size = fetch_model().layout.object_group_bytes(0)
+    lease, keys = _lease_with(1 << 30, c0g0=0, c1g0=size)
+
+    build_request_fetch(fetch_model(), keys, MAX_RECORD_BYTES, lease)
+
+
+def test_request_bytes_counts_exactly_the_objects_a_request_reads() -> None:
+    """Window sizing must agree with what the placer is asked to place."""
+    model = fetch_model()
+    objects = objects_to_place(model, resolve_obj_keys(vllm_request()))
+
+    assert model.request_bytes(NUM_CHUNKS) == sum(o.object_bytes for o in objects)
+
+
+def test_request_bytes_honours_windows_aux_groups_and_alignment() -> None:
+    """Full attention scales with chunks, the window caps at 2, aux is free."""
+    model = fetch_model()
+    full = model.layout.object_group_bytes(0)
+    windowed = model.layout.object_group_bytes(1)
+
+    assert model.request_bytes(0) == 0
+    assert model.request_bytes(1) == full + windowed
+    assert model.request_bytes(10) == 10 * full + 2 * windowed
+    align = 1 << 20
+    assert model.request_bytes(3, align_bytes=align) == 3 * align + 2 * align
+
+
+@pytest.mark.parametrize("num_chunks, align", [(-1, 1), (1, 0), (1, -4)])
+def test_request_bytes_rejects_meaningless_arguments(
+    num_chunks: int, align: int
+) -> None:
+    """Negative chunk counts and non-positive alignments size nothing."""
+    with pytest.raises(ValueError):
+        fetch_model().request_bytes(num_chunks, align_bytes=align)
 
 
 def test_node_names_come_from_the_placer_in_first_seen_order() -> None:

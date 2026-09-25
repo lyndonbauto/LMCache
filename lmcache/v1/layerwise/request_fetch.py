@@ -9,8 +9,9 @@ plan always names the objects the whole-object retrieve would have read.
 
 Two inputs are not the request's to decide and are injected through
 :class:`ChunkPlacer`: which node serves a chunk's object, and where in the
-registered window it lands. See ``docs/design/v1/layerwise/system-design.md``
-section 11 for why neither can be produced here.
+request's leased RDMA window it lands. See
+``docs/design/v1/layerwise/system-design.md`` section 11 for why neither can
+be produced here, and for the lease rules the placer follows.
 
 Kept out of the package ``__init__`` because it imports the native adapter's
 key serialization, and the adapter imports this package.
@@ -19,6 +20,7 @@ key serialization, and the adapter imports this package.
 # Standard
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import Enum
 from typing import Protocol, runtime_checkable
 import threading
 
@@ -58,35 +60,128 @@ def first_in_window_chunk(num_chunks: int, window_chunks: int) -> int:
     return max(0, num_chunks - window_chunks)
 
 
+def _round_up(value: int, multiple: int) -> int:
+    return -(-value // multiple) * multiple
+
+
 @dataclass(frozen=True)
 class ChunkLocation:
     """Where one chunk's object is fetched from and delivered to.
 
     Attributes:
-        node_name: Cluster node that serves the object.
-        dest_offset: Byte offset of the object in the registered window.
+        node_name: Cluster node every record of the object is fetched from;
+            only correct on a single-node cluster (see
+            :attr:`~lmcache.v1.layerwise.planner.ChunkPlacement.node_index`).
+        dest_offset: Byte offset of the object from the start of the
+            registered memory the nodes write into -- the L1 slab, since one
+            registration covers every window. It lies inside the leased
+            window, ``[window_start, window_start + window_bytes)``.
     """
 
     node_name: str
     dest_offset: int
 
 
-@runtime_checkable
-class ChunkPlacer(Protocol):
-    """Decides the node and destination of each object a fetch reads."""
+@dataclass(frozen=True)
+class ObjectToPlace:
+    """One object a fetch reads, as the placer is asked to place it.
 
-    def locate(
-        self, chunk_id: int, object_group_id: int, object_bytes: int
-    ) -> ChunkLocation:
-        """Return where one object comes from and where it lands.
+    Attributes:
+        chunk_id: Index of the chunk within the request.
+        object_group_id: Object group the object belongs to.
+        key: The object's key, which the placer reserves the object under
+            in L1 so the fetched data stays where it lands.
+        object_bytes: Size of the object, which its destination must fit.
+    """
+
+    chunk_id: int
+    object_group_id: int
+    key: ObjectKey
+    object_bytes: int
+
+
+class LeaseOutcome(Enum):
+    """How the fetch that used a window lease ended.
+
+    The outcome decides whether the window may be reused at once, so it is
+    stated by the one caller that knows it rather than inferred by the placer.
+    """
+
+    #: Nothing was issued, so no write can be on the wire. The window is
+    #: reusable at once.
+    NEVER_FETCHED = "never_fetched"
+    #: Every slot landed. The window holds the fetched objects and is
+    #: reclaimable at once.
+    FINISHED = "finished"
+    #: Issued but not finished. Writes may still arrive, so the window is
+    #: quarantined until the fetch timeout has passed.
+    ABANDONED = "abandoned"
+
+
+@runtime_checkable
+class WindowLease(Protocol):
+    """One request's hold on an RDMA window, with its objects placed in it.
+
+    Released exactly once, with the outcome of the fetch that used it.
+
+    Offsets are measured from the start of the registration, not of the
+    window: a node allows few registered regions, so one registration covers
+    every window and a window is a range inside it.
+    """
+
+    def window_start(self) -> int:
+        """Return where the leased window begins, as a registration offset."""
+        ...
+
+    def window_bytes(self) -> int:
+        """Return the size of the leased window."""
+        ...
+
+    def locate(self, chunk_id: int, object_group_id: int) -> ChunkLocation:
+        """Return where one placed object comes from and where it lands.
 
         Args:
             chunk_id: Index of the chunk within the request.
             object_group_id: Object group the object belongs to.
-            object_bytes: Size of the object, which the destination must fit.
 
         Returns:
             The object's node and destination offset.
+
+        Raises:
+            KeyError: If the object was not among those the lease placed.
+        """
+        ...
+
+    def release(self, outcome: LeaseOutcome) -> None:
+        """Give the window back, stating how its fetch ended.
+
+        Args:
+            outcome: Whether the fetch never started, finished, or was
+                abandoned; see :class:`LeaseOutcome`.
+        """
+        ...
+
+
+@runtime_checkable
+class ChunkPlacer(Protocol):
+    """Leases a window per request and decides where each object lands."""
+
+    def lease(self, objects: Sequence[ObjectToPlace]) -> WindowLease:
+        """Lease one window and place every object of a request in it.
+
+        Args:
+            objects: Every object the request reads, as returned by
+                :func:`objects_to_place`.
+
+        Returns:
+            A lease that locates each of ``objects`` inside one window.
+
+        Raises:
+            PlanTooLargeError: If the objects cannot fit in any window, so
+                the request would have to be split.
+            LayerwiseContractError: If no window can be leased right now,
+                e.g. every window is pinned or quarantined, or a fetch is
+                already in flight. Splitting would not help.
         """
         ...
 
@@ -102,6 +197,48 @@ class FetchModel:
 
     layout: ModelLayout
     attn_desc: AttnWindowDesc
+
+    def request_bytes(self, num_chunks: int, align_bytes: int = 1) -> int:
+        """Return the window space a pipelined retrieve of a request needs.
+
+        This is what a window must hold for one request of ``num_chunks``
+        chunks: every object the retrieve reads, each rounded up to
+        ``align_bytes``. Sliding-window groups contribute only their window,
+        and aux groups nothing, exactly as :func:`request_cache_keys` selects
+        objects. The transport checks its configured ``window_bytes``
+        against this when a model registers, since the windows are carved
+        out before any layout is known.
+
+        Args:
+            num_chunks: Chunks in the request.
+            align_bytes: Alignment each object's destination is rounded up to.
+
+        Returns:
+            Bytes of window space the request's objects occupy.
+
+        Raises:
+            ValueError: If ``num_chunks`` is negative or ``align_bytes`` is
+                not positive.
+            KeyError: If the layout does not cover an object group the
+                request reads.
+        """
+        if num_chunks < 0:
+            raise ValueError(f"num_chunks must be non-negative, got {num_chunks}")
+        if align_bytes <= 0:
+            raise ValueError(f"align_bytes must be positive, got {align_bytes}")
+        total = 0
+        for group_id in range(self.attn_desc.num_object_groups):
+            if self.attn_desc.group_kinds and (
+                self.attn_desc.group_kinds[group_id] == "aux"
+            ):
+                continue
+            window = self.attn_desc.num_chunks_in_sw[group_id]
+            chunks_read = num_chunks - first_in_window_chunk(num_chunks, window)
+            object_bytes = _round_up(
+                self.layout.object_group_bytes(group_id), align_bytes
+            )
+            total += chunks_read * object_bytes
+        return total
 
 
 @dataclass(frozen=True)
@@ -232,13 +369,48 @@ def request_cache_keys(
     return cache_keys
 
 
+def objects_to_place(
+    model: FetchModel, obj_keys_per_obj_group: Sequence[Sequence[ObjectKey]]
+) -> tuple[ObjectToPlace, ...]:
+    """List the objects a retrieve reads, for :meth:`ChunkPlacer.lease`.
+
+    Args:
+        model: The registered model's layout and windows.
+        obj_keys_per_obj_group: The request's object keys, as described for
+            :func:`request_cache_keys`.
+
+    Returns:
+        One entry per object read, ordered by chunk, then object group.
+
+    Raises:
+        ValueError: If the keys do not match the model (see
+            :func:`request_cache_keys`).
+        KeyError: If the layout does not cover an object group the request
+            reads.
+    """
+    cache_keys = request_cache_keys(obj_keys_per_obj_group, model.attn_desc)
+    return tuple(
+        ObjectToPlace(
+            chunk_id,
+            group_id,
+            obj_keys_per_obj_group[group_id][chunk_id],
+            model.layout.object_group_bytes(group_id),
+        )
+        for chunk_id, group_id in sorted(cache_keys)
+    )
+
+
 def build_request_fetch(
     model: FetchModel,
     obj_keys_per_obj_group: Sequence[Sequence[ObjectKey]],
     max_record_bytes: int,
-    placer: ChunkPlacer,
+    lease: WindowLease,
 ) -> RequestFetch:
     """Plan the pipelined fetch of every object a retrieve would read.
+
+    Every location the lease returns is checked against the window before it
+    is planned: an object reaching past the window, or two objects sharing
+    bytes, would have RDMA writes land on the wrong data without any error.
 
     Args:
         model: The registered model's layout and windows.
@@ -246,7 +418,7 @@ def build_request_fetch(
             :func:`request_cache_keys`.
         max_record_bytes: The record cap the objects were written under;
             the connector reports it as ``max_record_bytes()``.
-        placer: Supplies each object's node and destination offset.
+        lease: The request's window lease, which places each object.
 
     Returns:
         The placements and the plan built from them. Placements are ordered
@@ -255,18 +427,28 @@ def build_request_fetch(
     Raises:
         ValueError: If the keys do not match the model (see
             :func:`request_cache_keys`), the request reads no objects, the
-            placer returns an unusable location, or the model's records
-            cannot be named layer by layer.
+            lease places an object outside its window or over another one,
+            or the model's records cannot be named layer by layer.
         KeyError: If the layout does not cover an object group the request
-            reads.
+            reads, or the lease cannot locate an object.
     """
     cache_keys = request_cache_keys(obj_keys_per_obj_group, model.attn_desc)
+    window_start = lease.window_start()
+    window_end = window_start + lease.window_bytes()
     node_indices: dict[str, int] = {}
     placements: list[ChunkPlacement] = []
+    extents: list[tuple[int, int, tuple[int, int]]] = []
     for chunk_id, group_id in sorted(cache_keys):
-        location = placer.locate(
-            chunk_id, group_id, model.layout.object_group_bytes(group_id)
-        )
+        location = lease.locate(chunk_id, group_id)
+        object_bytes = model.layout.object_group_bytes(group_id)
+        end = location.dest_offset + object_bytes
+        if location.dest_offset < window_start or end > window_end:
+            raise ValueError(
+                f"object (chunk {chunk_id}, group {group_id}) placed at "
+                f"[{location.dest_offset}, {end}), outside the leased "
+                f"window [{window_start}, {window_end})"
+            )
+        extents.append((location.dest_offset, end, (chunk_id, group_id)))
         node_index = node_indices.setdefault(location.node_name, len(node_indices))
         placements.append(
             ChunkPlacement(
@@ -276,6 +458,15 @@ def build_request_fetch(
                 dest_offset=location.dest_offset,
             )
         )
+    extents.sort()
+    for (_, previous_end, previous), (start, _, current) in zip(
+        extents, extents[1:], strict=False
+    ):
+        if start < previous_end:
+            raise ValueError(
+                f"objects {previous} and {current} overlap in the window "
+                f"at byte {start}"
+            )
     request = PlanRequest(
         placements=tuple(placements),
         node_names=tuple(node_indices),

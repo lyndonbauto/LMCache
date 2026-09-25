@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Shared builders and source fixtures for layerwise contract tests."""
+"""Shared builders, and source and sink fixtures, for layerwise contract tests."""
 
 # Standard
 from collections.abc import Callable
@@ -13,6 +13,9 @@ from lmcache.v1.layerwise import (
     ArrivalDriver,
     LayerArrivalSource,
     LayerFetchPlan,
+    LayerLoadSink,
+    LoadObserver,
+    RecordingLayerLoadSink,
     ScriptedArrivalDriver,
     ScriptedLayerArrivalSource,
     SlotPlacement,
@@ -92,3 +95,36 @@ SOURCE_HARNESS_FACTORIES: dict[str, Callable[[], SourceHarness]] = {
 def source_harness(request: pytest.FixtureRequest) -> SourceHarness:
     """Yield a fresh harness for each registered source implementation."""
     return SOURCE_HARNESS_FACTORIES[request.param]()
+
+
+@dataclass(frozen=True)
+class SinkHarness:
+    """One :class:`LayerLoadSink` implementation under test.
+
+    Attributes:
+        sink: A fresh sink with no active load.
+        observer: Reports what that sink's consumers would see.
+    """
+
+    sink: LayerLoadSink
+    observer: LoadObserver
+
+
+def _recording_harness() -> SinkHarness:
+    sink = RecordingLayerLoadSink()
+    return SinkHarness(sink, sink)
+
+
+#: Every sink implementation the conformance suite runs against, by test id.
+#: Add one factory per implementation, as for sources. A factory may call
+#: ``pytest.skip`` when its implementation cannot be built here, e.g. without
+#: a GPU.
+SINK_HARNESS_FACTORIES: dict[str, Callable[[], SinkHarness]] = {
+    "recording": _recording_harness,
+}
+
+
+@pytest.fixture(params=sorted(SINK_HARNESS_FACTORIES))
+def sink_harness(request: pytest.FixtureRequest) -> SinkHarness:
+    """Yield a fresh harness for each registered sink implementation."""
+    return SINK_HARNESS_FACTORIES[request.param]()

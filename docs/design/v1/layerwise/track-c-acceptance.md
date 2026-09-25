@@ -2,7 +2,9 @@
 
 Read [exercise-goal.md](exercise-goal.md) for why, then
 [system-design.md](system-design.md) for how the tracks fit together. This
-document is what Track C is responsible for and how we will know it is done.
+document is what Track C is responsible for and how we will know it is done;
+[track-c-status.md](track-c-status.md) is where each criterion stands and
+what is blocked by whom.
 
 ## What this track is for
 

@@ -214,6 +214,57 @@ def test_a_declined_slot_makes_only_its_layer_unservable(
     }
 
 
+def test_a_slot_that_lands_after_its_decline_leaves_the_layer_unservable(
+    source_harness: SourceHarness,
+) -> None:
+    """The first reply for a slot is final; the late write is a duplicate.
+
+    The loader may already be falling back for this layer, so a late landing
+    must not make it look servable again.
+    """
+    plan = _plan()
+    source, driver = source_harness.source, source_harness.driver
+    generation = source.begin_fetch(plan)
+    (only,) = _slots_of(plan, 1)
+
+    driver.decline_slot(only, generation)
+    driver.land_slot(only, generation)
+
+    assert _statuses(source, plan, generation)[1] is UNSERVABLE
+
+
+def test_a_decline_after_a_slot_landed_leaves_the_layer_resident(
+    source_harness: SourceHarness,
+) -> None:
+    """A duplicate decline for a landed slot does not withdraw its data."""
+    plan = _plan()
+    source, driver = source_harness.source, source_harness.driver
+    generation = source.begin_fetch(plan)
+    (only,) = _slots_of(plan, 1)
+
+    driver.land_slot(only, generation)
+    driver.decline_slot(only, generation)
+
+    assert _statuses(source, plan, generation)[1] is RESIDENT
+
+
+def test_a_decline_after_one_slot_landed_still_counts_the_landed_slot(
+    source_harness: SourceHarness,
+) -> None:
+    """Within a two-slot layer, only the slot's own first reply is final."""
+    plan = _plan()
+    source, driver = source_harness.source, source_harness.driver
+    generation = source.begin_fetch(plan)
+    first, last = _slots_of(plan, 0)
+
+    driver.land_slot(first, generation)
+    driver.decline_slot(first, generation)
+    assert _statuses(source, plan, generation)[0] is PENDING
+
+    driver.land_slot(last, generation)
+    assert _statuses(source, plan, generation)[0] is RESIDENT
+
+
 def test_polls_quoting_another_generation_are_refused(
     source_harness: SourceHarness,
 ) -> None:

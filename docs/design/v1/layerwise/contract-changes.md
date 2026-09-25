@@ -11,6 +11,188 @@ defect coming back.
 
 ---
 
+## The pump gives up before the worker; RESIDENT spelled out
+
+**Who is affected:** Track B (raised all three; one stricter suite test).
+
+**What changed.**
+
+- **`DEFAULT_LAYER_TIMEOUT_SECONDS`** (in `pump.py`) is 2.5 s, down from
+  30 s. It must stay below the worker's per-layer wait,
+  `lmcache.mp.layerwise_wait_timeout_seconds` (5 s).
+- **`LayerArrivalStatus.RESIDENT`** now says what "every slot landed"
+  covers: every K/V plane of the layer in every chunk the retrieve reads for
+  the layer's group, each at the offset those bytes have in a normally
+  loaded object. So a layer is complete but not contiguous.
+- **The loader suite's gap test** loads past the gap and finishes, instead
+  of stopping after layer 0.
+
+**What breaks.** A loader that marks layers ready by counting copies now
+fails the gap test. No caller passes the pump's default timeout yet.
+
+**Why.** With 30 s against the worker's 5 s, the worker could time out and
+leave attention while the pump went on copying layers into GPU blocks vLLM
+no longer expected to be written. The pump starts waiting for a layer
+before the worker does, so a shorter timeout makes it give up first, and
+its abandon reaches the worker as a failure flag. Nothing checks the two
+timeouts against each other at startup yet: the daemon never learns the
+worker's value, because the registration does not carry it. When retrieve
+builds the pump (C9), the registration should carry the worker's timeout so
+retrieve can derive the pump's from it and refuse a bad pair.
+
+The old gap test stopped after layer 0, where copy counting and layer
+tracking agree, so the copy-counting loader it was meant to catch passed.
+
+---
+
+## Destination offsets are registration offsets; a lease reports its start
+
+**Who is affected:** Track A (the production lease must implement
+`window_start()`); no contract change for Track B.
+
+**What changed.**
+
+- **`WindowLease.window_start()`** (in `request_fetch.py`): where the leased
+  window begins, measured from the start of the registration.
+- **`ChunkLocation.dest_offset`** is a registration offset (the L1 slab
+  offset, `memory_obj.meta.address` on Track A's placer), no longer
+  window-relative.
+- **`build_request_fetch`** accepts a location only inside
+  `[window_start, window_start + window_bytes)`; before, the range was
+  `[0, window_bytes)`.
+- **Per-object nodes** are documented as correct only on a single-node
+  cluster. Per-record routing is deferred to the client-server owner; see
+  "Future work" in [track-c-status.md](track-c-status.md).
+
+**What breaks.** A lease without `window_start()`. Offsets from window 0
+(which starts at 0) mean the same as before.
+
+**Why.** Track A publishes every window through one registration, because a
+node allows few registered regions (P1). A node writes at an offset into
+that registration, so a window-relative offset would send every window's
+writes into window 0, and the old check refused every placement in any other
+window.
+
+---
+
+## Loads are strictly ascending; the first reply for a slot is final
+
+**Who is affected:** Track B (the loader must refuse non-ascending loads);
+Track A (the rule the native session already follows is now pinned).
+
+**What changed.**
+
+- **`LayerLoadSink.begin_load`** (in `contract.py`): `layer_ids` is strictly
+  ascending, as `LayerFetchPlan.layer_ids()` returns it. A loader raises
+  `LayerwiseContractError` for any other order, issuing nothing and leaving
+  any active load alone. `RecordingLayerLoadSink` enforces this.
+- **The loader suite** no longer asks a sink to honour `(0, 2, 1, 3)`. It
+  checks the refusal instead (interleaved, descending, repeated), and checks
+  that a load with gaps, `(0, 2, 3)`, tracks readiness by layer, not by
+  position.
+- **Arrival sources:** the first reply for a slot is final. A landing after a
+  decline leaves the layer `UNSERVABLE`; a decline after a landing leaves the
+  landed slot counted, so a fully landed layer stays `RESIDENT`.
+  `ScriptedLayerArrivalSource` now follows this; before, a decline after a
+  landing made the layer unservable. Three source-suite tests pin it.
+
+**What breaks.** A loader that accepted any order, and a caller that passed
+a non-ascending order. The pump always passes the plan's ascending order, so
+no current caller breaks.
+
+**Why.** Track B pointed out that the suite demanded a hazard. Their loader
+publishes readiness as a watermark over positions in its launch schedule,
+which is ascending by global layer, hybrid models included. Given
+`(0, 2, 1, 3)`, issuing layers 0 and 2 moves the watermark two positions,
+and the worker then reads layer 1 as ready before its copy was queued. The
+old test's claim that a hybrid schedule is non-ascending was wrong: the
+schedule interleaves kernel groups *by* global layer index. For slots, Track
+A confirmed that the native session marks a slot seen on its first reply, so
+the fake and the suite now agree with it.
+
+## A conformance suite for loaders, driven through a `LoadObserver`
+
+**Who is affected:** Track B (registers its loader). Nothing in `contract.py`
+changes.
+
+**What changed.**
+
+- New `LoadObserver` protocol and `LayerWaitOutcome` enum in `fakes.py`:
+  - `issued_layers(generation)` gives the copies issued for a load, in
+    order;
+  - `wait_outcome(layer_id, generation)` gives `READY`, `PENDING` or
+    `FAILED`: what a GPU worker waiting on that layer would see. It never
+    blocks.
+- `RecordingLayerLoadSink` is its own observer.
+- `tests/v1/layerwise/test_load_sink_conformance.py` runs every sink in
+  `SINK_HARNESS_FACTORIES` (in `conftest.py`) through the rules the worker
+  relies on:
+  - a layer is never ready before its copy is issued;
+  - copies are issued in the order given to `begin_load`, which is
+    strictly ascending (see the entry above), and every ordering violation
+    is refused without making a layer ready;
+  - `finish_load` refuses missing layers and stale generations, and leaves
+    the active load intact;
+  - `abandon_load` fails every layer not yet issued, is safe with no load
+    active, and does not disturb a newer load or revoke a finished one;
+  - driven by the real pump, the sink sees plan order, and a transport
+    decline leaves no waiter hanging.
+
+**How Track B registers.** Add a factory to `SINK_HARNESS_FACTORIES`
+returning `SinkHarness(sink, observer)`. The observer reads the layer
+progress record the worker polls, and maps it to an outcome: `FAILED` if the
+failure flag is set for the generation, `READY` if the watermark covers the
+layer's ordinal, `PENDING` otherwise. The factory calls `pytest.skip` where
+the loader cannot be built, e.g. without a GPU.
+
+**Deliberately unpinned.** For a layer issued *before* an abandon, either
+`READY` or `FAILED` is allowed. The real loader fails every wait once the
+failure flag is set, and the recording sink keeps it `READY`.
+
+**Why.** The source suite let Track A find contract gaps against a fake
+before wiring. Track B has only a skeleton, so the same suite on the loader
+side keeps them from discovering the rules through the pump.
+
+## The placer leases one window per request; `run_pipelined_retrieve`
+
+**Who is affected:** Track A (implements `ChunkPlacer` and `WindowLease`,
+and sizes windows); Track C (retrieve wiring). Nothing in `contract.py`
+changes.
+
+**What changed** (all in `request_fetch.py` unless noted):
+
+- `ChunkPlacer.locate(chunk, group, object_bytes)` is replaced by
+  `ChunkPlacer.lease(objects: Sequence[ObjectToPlace]) -> WindowLease`. It
+  raises `PlanTooLargeError` if the objects fit no window, and a plain
+  `LayerwiseContractError` if no window is free.
+- New `WindowLease` protocol: `window_bytes()`, `locate(chunk_id,
+  object_group_id) -> ChunkLocation` (raises `KeyError` for an object it did
+  not place), and `release(outcome: LeaseOutcome)`, called exactly once.
+- New `LeaseOutcome`: `NEVER_FETCHED` (reuse at once), `FINISHED`
+  (reclaimable at once), `ABANDONED` (quarantine).
+- `ChunkLocation.dest_offset` is window-relative.
+- New `objects_to_place(model, keys)` lists what to lease, ordered by chunk,
+  then group, with each object's true (unrounded) size. Alignment is the
+  placer's choice.
+- `build_request_fetch(model, keys, max_record_bytes, lease)` takes the
+  lease and raises `ValueError` for an object outside the window or
+  overlapping another.
+- New `FetchModel.request_bytes(num_chunks, align_bytes=1)` for checking
+  the configured `window_bytes` against the model at registration (the
+  windows exist before the layout, so it cannot size them).
+- New `pipelined_retrieve.run_pipelined_retrieve(model, keys,
+  max_record_bytes, placer, pump)`: lease, plan, pump, release, with every
+  refusal surfacing as `LayerwiseContractError`.
+
+**What breaks.** Anything implementing the old per-object `locate()`; only
+test stand-ins did.
+
+**Why.** The window is leased per request, so a per-object `locate()` had no
+place to take or give back the window, and no way to say how the fetch
+ended. Stating the outcome at release is what lets the placer follow reclaim
+rule 5 without guessing. The window check exists because a bad offset
+fails silently on RDMA.
+
 ## Decided 2026-09-25: the pump begins the fetch; windows are leased and reserved
 
 **Who is affected:** Track A (lease API, production `ChunkPlacer`,
