@@ -48,19 +48,29 @@ class LayerProgressError(Exception):
     """Base error for layer-progress synchronization failures."""
 
 
-class LayerProgressRetrieveFailedError(LayerProgressError):
+class LayerProgressLoadError(LayerProgressError):
+    """The waited layer's KV is not known to have landed for this retrieve.
+
+    The paged blocks the retrieve targeted may hold stale or partial data, so
+    callers must treat them as failed loads (recompute them) rather than run
+    attention on them. Configuration errors such as
+    :class:`LayerProgressIncompatibleWithCudaGraphError` are not load errors.
+    """
+
+
+class LayerProgressRetrieveFailedError(LayerProgressLoadError):
     """The daemon reported that the retrieve failed before this layer landed."""
 
 
-class LayerProgressRetrieveGenerationTimeoutError(LayerProgressError):
+class LayerProgressRetrieveGenerationTimeoutError(LayerProgressLoadError):
     """Timed out waiting for the daemon to publish this retrieve's generation."""
 
 
-class LayerProgressRetrieveProgressTimeoutError(LayerProgressError):
+class LayerProgressRetrieveProgressTimeoutError(LayerProgressLoadError):
     """Timed out waiting for the watermark to reach the required launch ordinal."""
 
 
-class LayerProgressStaleGenerationError(LayerProgressError):
+class LayerProgressStaleGenerationError(LayerProgressLoadError):
     """Shared memory carries a generation newer than this wait (superseded)."""
 
 

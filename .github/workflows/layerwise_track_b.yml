@@ -4,7 +4,9 @@ name: Track B layerwise (CPU)
 #
 # What this covers: the CPU-testable logic of Track B -- the frozen contract,
 # the arrival pump, the fakes, the multiprocess sink shape, and the per-layer
-# schedule / progress bookkeeping. These run on standard GitHub-hosted Ubuntu
+# schedule / progress bookkeeping, and how the vLLM worker adapter reports a
+# failed layer wait (the connector's side skips here without vLLM; test.yml
+# installs vLLM and runs it). These run on standard GitHub-hosted Ubuntu
 # runners, which have no GPU, so anything marked `cuda` is excluded here.
 #
 # What this does NOT cover: the real GPU per-layer overlap
@@ -30,6 +32,10 @@ on:
       - "lmcache/v1/multiprocess/object_group_transfer.py"
       - "lmcache/v1/multiprocess/transfer_context/worker_transfer.py"
       - "lmcache/v1/gpu_connector/gpu_ops.py"
+      - "lmcache/integration/vllm/lmcache_mp_connector.py"
+      - "lmcache/integration/vllm/vllm_multi_process_adapter.py"
+      - "tests/v1/test_vllm_mp_adapter.py"
+      - "tests/v1/test_mp_connector_layerwise_scheduler.py"
       - "benchmarks/layerwise/**"
       - "tests/benchmarks/test_layerwise_simulate_ttft.py"
       - ".github/workflows/layerwise_track_b.yml"
@@ -97,6 +103,8 @@ jobs:
             tests/v1/multiprocess/test_layerwise_schedule.py \
             tests/v1/multiprocess/test_object_group_layerwise_transfer.py \
             tests/v1/multiprocess/test_layerwise_gpu_overlap.py \
+            tests/v1/test_vllm_mp_adapter.py \
+            tests/v1/test_mp_connector_layerwise_scheduler.py \
             tests/benchmarks/test_layerwise_simulate_ttft.py
 
   # The real GPU overlap proof. Skipped everywhere until a self-hosted GPU

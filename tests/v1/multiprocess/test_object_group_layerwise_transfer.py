@@ -63,6 +63,26 @@ def _make_cache_context() -> MagicMock:
     return cache_context
 
 
+def _plan_for(schedule: LayerwiseSchedule) -> LayerFetchPlan:
+    """Build a one-node plan with one slot per scheduled layer."""
+    return LayerFetchPlan(
+        tuple(
+            SlotPlacement(
+                layer_id=launch.layer_id,
+                chunk_id=0,
+                node_index=0,
+                record_key="record",
+                plane=0,
+                piece=0,
+                offset=0,
+                length=64,
+            )
+            for launch in schedule.launches
+        ),
+        ("node-a",),
+    )
+
+
 def _make_retrieve(
     schedule: LayerwiseSchedule,
     progress: LayerProgressRecord,
@@ -549,14 +569,11 @@ def test_the_real_sink_and_retrieve_let_a_worker_consume_every_layer(
     """Pump -> sink -> real retrieve -> real waiter: every layer is consumable."""
     schedule = LayerwiseSchedule([[0, 2], [1, 3]])
     progress = LayerProgressRecord(bytearray(LayerProgressRecord.RECORD_SIZE))
-    sink = MultiprocessLayerLoadSink(schedule, _make_retrieve(schedule, progress))
-    source = ScriptedLayerArrivalSource()
-    plan = LayerFetchPlan(
-        tuple(
-            SlotPlacement(launch.layer_id, 0, 0, b"digest", 0, 64)
-            for launch in schedule.launches
-        )
+    sink = MultiprocessLayerLoadSink.for_retrieve(
+        schedule, _make_retrieve(schedule, progress)
     )
+    source = ScriptedLayerArrivalSource()
+    plan = _plan_for(schedule)
     errors: list[BaseException] = []
 
     def run_pump() -> None:
@@ -595,13 +612,10 @@ def test_an_unservable_fetch_wakes_a_waiting_worker_with_a_failure(
     """A declined fetch reaches the worker as a failure, not a timeout (B4)."""
     schedule = LayerwiseSchedule([[0, 2], [1, 3]])
     progress = LayerProgressRecord(bytearray(LayerProgressRecord.RECORD_SIZE))
-    sink = MultiprocessLayerLoadSink(schedule, _make_retrieve(schedule, progress))
-    plan = LayerFetchPlan(
-        tuple(
-            SlotPlacement(launch.layer_id, 0, 0, b"digest", 0, 64)
-            for launch in schedule.launches
-        )
+    sink = MultiprocessLayerLoadSink.for_retrieve(
+        schedule, _make_retrieve(schedule, progress)
     )
+    plan = _plan_for(schedule)
 
     with pytest.raises(LayerUnservableError):
         LayerArrivalPump(UnservableLayerArrivalSource(), sink).run(plan)

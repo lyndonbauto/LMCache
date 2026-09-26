@@ -71,6 +71,46 @@ Failure paths:
 - Stale generation in shared memory: worker raises `LayerProgressStaleGenerationError`.
 - Layer not in the schedule: connector `wait_for_layer_load` is a no-op.
 
+**What vLLM sees.** The four "this layer's KV did not land" errors share the
+base class `LayerProgressLoadError`: retrieve failed, generation never
+published, watermark stalled, stale generation. The connector's
+`wait_for_layer_load` catches that class and calls the worker adapter's
+`report_failed_layer_load()`, which adds the blocks of every retrieve submitted
+this step to `get_block_ids_with_load_errors()`. The forward pass then
+continues; later layer waits return at once because the failed retrieve is no
+longer active. vLLM's scheduler truncates each affected request's computed
+tokens to the first bad block and discards this step's output for it, then
+either recomputes (`kv_load_failure_policy="recompute"`, the default) or fails
+the request (`"fail"`).
+
+```
+layer 7 wait raises LayerProgressLoadError
+  -> connector: report_failed_layer_load()        # this step's retrieves only
+  -> layers 8..N: no active retrieve, return
+  -> get_block_ids_with_load_errors() -> {blocks}  # same step, as sync loads need
+  -> vLLM: drop this step's tokens, recompute from first bad block
+```
+
+Why every retrieve of the step, not only the one whose wait failed: each
+request submits its own retrieve, and the transfer context waits on the latest
+one alone, so the earlier ones are unproven too. Retrieves from earlier steps
+are not flagged: their forward pass already passed its waits, and flagging them
+would recompute a running request's prefix. A retrieve reported this way is not
+reported again when its future later resolves as failed; a second report in a
+later step would discard the recompute step as well, or hit blocks that now
+belong to another request.
+
+Limits:
+
+- Models with more than one vLLM KV cache group (hybrid models) raise
+  `RuntimeError` instead. vLLM rejects block-level load-error reports for them,
+  and its alternative (`finished_recving` failures) covers only requests parked
+  in `WAITING_FOR_REMOTE_KVS`, which layerwise loads never are.
+- Configuration errors (`LayerProgressIncompatibleWithCudaGraphError`,
+  `LayerProgressLayerNotScheduledError`) are not load errors and still raise.
+- A missing generation costs one full `layerwise_wait_timeout_seconds` before
+  the step gives up.
+
 ## Arrival-driven launch
 
 `transfer_kv_layerwise_h2d` launches every scheduled layer back to back. When
@@ -92,10 +132,26 @@ over `launch_layer` and behaves exactly as before.
 and the worker's waiter honours a failure flag only under its own generation,
 so one retrieve's failure cannot fail or rewind the next.
 
-`layerwise_sink.MultiprocessLayerLoadSink` wraps one retrieve as the
+`layerwise_sink.MultiprocessLayerLoadSink` presents this as the
 `LayerLoadSink` contract so `LayerArrivalPump` can drive it from a transport's
-arrivals. The pump's fetch generation and the worker's retrieve generation are
-distinct; the sink is bound to one retrieve generation at construction. See
+arrivals. Production builds one sink per retrieve:
+
+```python
+sink = MultiprocessLayerLoadSink.for_retrieve(schedule, LayerwiseH2DRetrieve(...))
+```
+
+- The pump's fetch generation and the worker's retrieve generation are
+  distinct; each load's launcher is already bound to its retrieve generation.
+- A load is any strictly ascending subset of the schedule (the plan's
+  `layer_ids()`). Scheduled layers the load skips are launched on the way
+  past, and trailing ones at `finish_load`, so the watermark always tracks
+  schedule position -- never a count of copies, which would report a layer
+  ready early.
+- `abandon_load` fails only the active load's waiters; a stale or late
+  abandon changes nothing.
+
+It passes the shared loader suite, `tests/v1/layerwise/test_load_sink_conformance.py`,
+through `tests/v1/layerwise/multiprocess_sink_harness.py`. See
 [`../layerwise/track-b-acceptance.md`](../layerwise/track-b-acceptance.md)
 (implementation log) for the decisions behind this split.
 

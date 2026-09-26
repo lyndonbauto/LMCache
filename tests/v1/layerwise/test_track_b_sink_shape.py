@@ -21,8 +21,10 @@ from .conftest import RecordingLauncher
 
 
 def _make_sink() -> MultiprocessLayerLoadSink:
-    """Build a sink over a two-layer schedule and a recording launcher."""
-    return MultiprocessLayerLoadSink(LayerwiseSchedule([[0, 1]]), RecordingLauncher())
+    """Build a one-retrieve sink over a two-layer schedule."""
+    return MultiprocessLayerLoadSink.for_retrieve(
+        LayerwiseSchedule([[0, 1]]), RecordingLauncher()
+    )
 
 
 def test_the_multiprocess_sink_satisfies_the_load_protocol() -> None:

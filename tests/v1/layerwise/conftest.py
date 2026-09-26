@@ -148,12 +148,28 @@ def _recording_harness() -> SinkHarness:
     return SinkHarness(sink, sink)
 
 
+def _multiprocess_harness() -> SinkHarness:
+    """Track B's loader over real progress records (no GPU needed).
+
+    Imported here, not at module level, so these tests do not depend on the
+    multiprocess package unless this entry runs.
+    """
+    try:
+        # Local
+        from .multiprocess_sink_harness import multiprocess_sink_harness
+    except ImportError as exc:  # e.g. torch or the native extension missing
+        pytest.skip(f"multiprocess loader unavailable: {exc}")
+    sink, observer = multiprocess_sink_harness()
+    return SinkHarness(sink, observer)
+
+
 #: Every sink implementation the conformance suite runs against, by test id.
 #: Add one factory per implementation, as for sources. A factory may call
 #: ``pytest.skip`` when its implementation cannot be built here, e.g. without
 #: a GPU.
 SINK_HARNESS_FACTORIES: dict[str, Callable[[], SinkHarness]] = {
     "recording": _recording_harness,
+    "multiprocess": _multiprocess_harness,
 }
 
 

@@ -648,6 +648,126 @@ def test_failed_retrieve_marks_blocks_for_recompute(
     assert "req-1" not in adapter.retrieve_futures
 
 
+def _pending_retrieve_ctx(adapter: LMCacheMPWorkerAdapter) -> dict[str, MagicMock]:
+    """Give *adapter* a transfer context whose retrieves stay pending.
+
+    Returns the futures by request id so a test can resolve them later.
+    """
+    futures: dict[str, MagicMock] = {}
+
+    def submit_retrieve(request_id: str, *_args: object, **_kwargs: object):
+        future = MagicMock(name=f"retrieve_future_{request_id}")
+        future.query.return_value = False
+        futures[request_id] = future
+        return future
+
+    transfer_ctx = MagicMock(name="transfer_ctx")
+    transfer_ctx.submit_retrieve.side_effect = submit_retrieve
+    adapter.transfer_ctx = transfer_ctx
+    return futures
+
+
+def _resolve(future: MagicMock, result: bool) -> None:
+    future.query.return_value = True
+    future.result.return_value = result
+
+
+def test_failed_layer_load_reports_every_retrieve_of_the_step(fake_adapter) -> None:
+    """All retrieves submitted this step are unproven, not only the waited one."""
+    adapter, _send_mock, _future = fake_adapter
+    _pending_retrieve_ctx(adapter)
+    adapter.batched_submit_retrieve_requests(
+        ["req-a", "req-b"], [_op([[1, 2]]), _op([[5]])], None
+    )
+
+    assert adapter.report_failed_layer_load() == {1, 2, 5}
+    assert adapter.get_block_ids_with_load_errors() == {1, 2, 5}
+
+
+def test_failed_layer_load_leaves_earlier_step_retrieves_alone(fake_adapter) -> None:
+    """A retrieve whose step already finished its forward pass is not flagged."""
+    adapter, _send_mock, _future = fake_adapter
+    _pending_retrieve_ctx(adapter)
+    adapter.submit_retrieve_request("req-old", _op([[1]]), None)
+    adapter.get_finished(set())  # end of the old step; its retrieve is pending
+    adapter.submit_retrieve_request("req-new", _op([[9]]), None)
+
+    assert adapter.report_failed_layer_load() == {9}
+    assert adapter.get_block_ids_with_load_errors() == {9}
+
+
+def test_failed_layer_load_with_no_retrieves_reports_nothing(fake_adapter) -> None:
+    adapter, _send_mock, _future = fake_adapter
+    _pending_retrieve_ctx(adapter)
+
+    assert adapter.report_failed_layer_load() == set()
+    assert adapter.get_block_ids_with_load_errors() == set()
+
+
+@pytest.mark.parametrize("lazy_offload", [False, True])
+def test_retrieve_reported_by_layer_wait_is_not_reported_again(
+    fake_adapter,
+    lazy_offload: bool,
+) -> None:
+    """The retrieve's later failed result must not re-flag its blocks.
+
+    vLLM would otherwise discard the recompute step as well, or recompute a
+    block that has since been given to another request.
+    """
+    adapter, _send_mock, _future = fake_adapter
+    adapter.lazy_offload = lazy_offload
+    futures = _pending_retrieve_ctx(adapter)
+    adapter.submit_retrieve_request("req-1", _op([[7, 8]]), None)
+    adapter.report_failed_layer_load()
+    get_finished = (
+        adapter.get_finished_with_lazy_offload
+        if lazy_offload
+        else lambda: adapter.get_finished(set())
+    )
+    get_finished()
+    assert adapter.get_block_ids_with_load_errors() == {7, 8}
+
+    _resolve(futures["req-1"], False)
+    _stores, finished_retrieves = get_finished()
+
+    assert finished_retrieves == {"req-1"}
+    assert adapter.get_block_ids_with_load_errors() == set()
+
+
+def test_resubmitted_retrieve_failure_is_reported(fake_adapter) -> None:
+    """A new retrieve for a request is reportable even after an earlier report."""
+    adapter, _send_mock, _future = fake_adapter
+    futures = _pending_retrieve_ctx(adapter)
+    adapter.submit_retrieve_request("req-1", _op([[7]]), None)
+    adapter.report_failed_layer_load()
+    adapter.get_finished(set())
+    adapter.get_block_ids_with_load_errors()
+
+    adapter.submit_retrieve_request("req-1", _op([[3]]), None)
+    _resolve(futures["req-1"], False)
+    adapter.get_finished(set())
+
+    assert adapter.get_block_ids_with_load_errors() == {3}
+
+
+def test_wait_for_layer_load_propagates_load_errors(fake_adapter) -> None:
+    """The adapter leaves recovery to the caller."""
+    # First Party
+    from lmcache.v1.multiprocess.layer_progress import (
+        LayerProgressLoadError,
+        LayerProgressRetrieveFailedError,
+    )
+
+    adapter, _send_mock, _future = fake_adapter
+    _pending_retrieve_ctx(adapter)
+    adapter.transfer_ctx.wait_for_layer_load.side_effect = (
+        LayerProgressRetrieveFailedError("boom")
+    )
+
+    with pytest.raises(LayerProgressLoadError):
+        adapter.wait_for_layer_load(0)
+
+
 def test_failed_full_retrieve_is_recomputed_instead_of_retried_remotely() -> None:
     """A failed full async load must not re-enter remote wait forever."""
     pytest.importorskip("vllm")

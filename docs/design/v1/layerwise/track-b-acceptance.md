@@ -320,14 +320,14 @@ request to the pump is the integration step (C9).
 
 | Item | State |
 | --- | --- |
-| B1 contract implemented, conformance suite passes | Done on CPU (`tests/v1/layerwise`, 48 passed) |
+| B1 contract implemented, conformance suite passes | Done (Step 9): registered in Track C's shared loader suite, all 27 tests pass against the real sink and launcher |
 | B2 layer N ready while later layers outstanding | Ordering proven at logic level with the real pump, and on GPU in one process. Per-layer staging of arriving data proven with real tensors on CPU and GPU (Step 6). Needs the C9 hand-off to read partly written objects; cross-process not proven |
 | B3 launch order, event before watermark | Pre-existing tests still pass; enforced per layer by `LayerwiseH2DRetrieve` |
-| B4 failure wakes every waiter | *Wake with an error* proven on the real record and waiter (< 1 s, not at timeout). The *fall back to a whole-request load* half is not built: the error propagates into attention (Review 1, R5) |
+| B4 failure wakes every waiter | *Wake with an error* proven on the real record and waiter (< 1 s, not at timeout). Step 10: a failed layer wait now reaches vLLM as load errors for the step's blocks, which vLLM recomputes; verified against vLLM `main` and tested with vLLM 0.30.0. Not a whole-request *fallback*: the step is redone, not rescued. Hybrid models (more than one KV cache group) still raise, because vLLM gives them no recovery path |
 | B5 default vLLM config (piecewise CUDA graphs) | Not started; needs a real vLLM run on native Linux |
 | B6 shared-memory lifetime | Done (Step 7): teardown after a failed load, already-removed segment, double close, re-register, stale segment, failed register; daemon no longer deletes live workers' segments on exit |
 | B7 per-batch setup hoisted | Pre-existing call-count test still passes |
-| B8 first TTFT number | First *simulated* number done (Step 8): 40 ms saved at line rate, 119 ms transfer-bound, of a 32-layer, 2048-token prefill. Not a vLLM TTFT |
+| B8 first TTFT number | First *simulated* number done (Step 8): 40 ms saved at line rate, 119 ms transfer-bound, of a 32-layer, 2048-token prefill. Step 11: holds with production-shaped copies (16 per layer) and arrival jitter up to p99 = 2x median. Not a vLLM TTFT |
 | B9 no RDMA in Track B tests | Holds; every new test uses the fakes |
 
 **Next:** B6's teardown-after-failed-load test, then B8. Both can run on
@@ -710,4 +710,281 @@ the script itself (dormant GPU job).
 ```bash
 cd /mnt/c/Repos/LMCache
 .venv/bin/python benchmarks/layerwise/simulate_ttft.py --repeats 9 --json out.json
+```
+
+### Step 9 -- Build against Track C's updated contract (2026-09-25)
+
+Track B's work was committed locally (`7f75a0ba`), then `track/c-planning`
+was merged in, up to `1280926c` (merge `212b1ab7`). The only conflict was
+`tests/v1/layerwise/conftest.py`, resolved by keeping both sides. Read
+[contract-changes.md](contract-changes.md) for what Track C changed; what
+follows is how Track B adapted.
+
+**Contract shape.** `SlotPlacement` now carries `record_key`, `plane` and
+`piece` (no `digest`), and `LayerFetchPlan` takes `node_names`. Track B's
+integration tests and `benchmarks/layerwise/simulate_ttft.py` build plans in
+the new shape.
+
+**Order rule.** Track B raised that the loader suite demanded a sink honour
+any layer order, such as `(0, 2, 1, 3)`, which lets a watermark over schedule
+positions report layer 1 ready before its copy. Track C agreed and changed
+the contract: `begin_load` receives a strictly ascending order (the plan's
+`layer_ids()`), and a loader refuses anything else.
+
+Decisions (three earlier ones are superseded):
+
+- **D14 (supersedes D2). The sink is reusable; production still uses one
+  per retrieve.** The shared suite requires a sink to accept a new load after
+  a finish or abandon, so the sink now takes a *launcher factory* and gets a
+  fresh launcher per load. `MultiprocessLayerLoadSink.for_retrieve(schedule,
+  launcher)` wraps a single launcher and refuses a second load, which keeps
+  D2's reason intact: rerunning a retrieve's launcher would republish its
+  generation under waiters still parked on it.
+- **D15 (supersedes D4). A load is any strictly ascending subset of the
+  schedule.** Non-ascending, repeated, empty and unscheduled loads are refused
+  before anything is issued. Scheduled layers a load skips are launched on the
+  way past, and trailing ones at `finish_load`, through the same launcher, so
+  the watermark tracks schedule position rather than counting copies. Launching
+  a skipped layer copies whatever its memory objects hold -- nothing for a
+  group the retrieve does not serve, complete data for an L1-resident one --
+  which is exactly what the whole-retrieve path already does for those layers.
+  This also resolves R7.
+- **D16 (supersedes D8). `abandon_load` affects only the active load.** An
+  abandon for a finished, stale or never-begun generation does nothing; the
+  suite requires this, and it is right: a finished load's data has landed, and
+  a stale abandon must not fail a newer load. The case D8 guarded -- the
+  worker left waiting after `begin_load` itself was refused -- now belongs to
+  the retrieve path, which per M4 falls back to a whole-object load or
+  reports the retrieve failed. This also settles R4 from the loader's side.
+- **D1 stands.** Fetch and retrieve generations remain separate. The suite
+  observes by fetch generation; Track B's harness maps it to the retrieve
+  generation each launcher publishes.
+
+**Conformance.** Track B's loader is registered in
+`SINK_HARNESS_FACTORIES` as `multiprocess`
+(`tests/v1/layerwise/multiprocess_sink_harness.py`, imported lazily so the
+layerwise package's own tests stay independent of multiprocess code). It runs
+the real sink, the real `LayerwiseH2DRetrieve` launcher and the real
+`LayerProgressRecord`; the observer answers through the real worker-side
+`LayerProgressWaiter` with a near-zero timeout. Only the cache context and
+event backend are stand-ins, and the retrieve has no memory objects, so no
+bytes move -- byte correctness stays with the staging tests. Each load gets
+its own record, so each load's waiters can be asked about independently;
+safety of the shared per-worker record across retrieves is covered by the
+R2/R3 tests. **All 27 suite tests pass** against it.
+
+**Mutation checks** (all restored afterwards):
+
+- Accepting any order: 4 tests fail (the suite's 3 non-ascending cases and
+  one Track B test).
+- Counting copies instead of tracking schedule position: **the shared suite
+  alone passes**, because its gap test stops after layer 0. Track B's new
+  gapped-load tests fail (5), so the gap is covered here. Suggested to Track
+  C: extend the shared gap test to load past the gap and finish, so every
+  loader is held to it.
+
+**Tested:**
+
+- `tests/v1/layerwise/test_multiprocess_sink.py`, rewritten for the new
+  semantics: gap and trailing layers launched, unscheduled/empty/reserved
+  loads refused, setup failure leaves the sink idle, abandon only touches the
+  active load, `for_retrieve` serves one load (after finish or abandon), a
+  gapped load and a trailing-gap load seen through the real waiter, and three
+  runs through the real pump.
+- Loader conformance suite: 54 passed (27 per harness).
+- Track B and layerwise suites plus the GPU tests on the RTX 3060: 376 passed.
+- Broad `-m 'not cuda'` regression over `tests/v1/layerwise`,
+  `tests/v1/multiprocess`, Track C's distributed tests and the benchmark
+  tests: 1148 passed; the 17 failures are the known pre-existing `test_mq.py`
+  and `test_common_api.py` ones.
+- Ruff, isort and mypy clean on every changed file, including the merged
+  `lmcache_driven_transfer.py`.
+
+**Review 1 status after this step:** R1-R3 fixed (Steps 5-6); R4 and R7
+resolved by D15/D16 and M4; **R5 still open** -- and it is also the fetch-start
+proposal's open question 1 (what vLLM does with a same-step `retrieve`
+failure); **R6 still open** (pump timeout must stay below the worker's
+per-layer wait). The fetch-start proposal's in-daemon fallback also needs one
+decision from Track B: after a declined layer, a fallback that continues the
+same retrieve must not mark it failed first, so either the retrieve path
+calls the fallback *instead of* abandoning the sink, or the fallback runs
+under a new retrieve generation.
+
+### Step 10 -- R5: a failed layer wait becomes a vLLM recompute (2026-09-25)
+
+**Before:** a failed layer wait raised out of `wait_for_layer_load` into
+vLLM's forward pass and crashed the step, except for
+`LayerProgressRetrieveGenerationTimeoutError`, which the connector swallowed
+-- so a retrieve the daemon never published let attention run on KV that was
+never loaded (Review 1, R4/R5).
+
+**First, what vLLM does with a same-step load error** (read in vLLM `main`,
+`vllm/v1/core/sched/scheduler.py`; this is also the fetch-start proposal's
+open question 1). Blocks a connector returns from
+`get_block_ids_with_load_errors()` reach `_handle_invalid_blocks`. For a
+synchronous load -- which every layerwise load is, since
+`get_num_new_matched_tokens` reports `load_async=False` in layerwise mode --
+`_update_requests_with_invalid_blocks` truncates the request's
+`num_computed_tokens` to the first bad block, and `update_from_output` skips
+that request's sampled token for the step. The next step recomputes from the
+bad block. The policy is `kv_transfer_config.kv_load_failure_policy`:
+`"recompute"` (the default) or `"fail"`, which ends the request with an error.
+Two limits found:
+
+- **Hybrid models have no recovery path.** `_handle_invalid_blocks` raises
+  `RuntimeError` when the model has more than one KV cache group and tells
+  connectors to use `failed_recving` instead; that only covers requests
+  parked in `WAITING_FOR_REMOTE_KVS`, which layerwise loads never are.
+- **The report must arrive in the same step.** A synchronous load's failure
+  reported a step later lands after the request has moved on.
+
+**Fix:**
+
+- `layer_progress.py`: new base class `LayerProgressLoadError` for the four
+  "KV did not land" errors (retrieve failed, generation never published,
+  progress stalled, stale generation). The CUDA-graph and not-scheduled errors
+  stay outside it: they are configuration bugs, not load failures.
+- `vllm_multi_process_adapter.py`: new `report_failed_layer_load()` flags the
+  blocks of every retrieve submitted since the last `get_finished` call, and
+  `get_finished` / `get_finished_with_lazy_offload` stop reporting those
+  retrieves a second time when their futures resolve as failed.
+- `lmcache_mp_connector.py`: `wait_for_layer_load` catches
+  `LayerProgressLoadError`, reports and continues for single-group models, and
+  raises a `RuntimeError` naming the vLLM limit for multi-group models. The
+  silent swallow is gone. The vLLM group count comes from the connector's
+  `KVCacheConfig`, the same object vLLM's scheduler checks; LMCache's engine
+  groups are not a proxy, since LMCache can split one vLLM group by physical
+  layout and adds a CacheBlend group.
+
+Decisions:
+
+- **D17. A failed layer wait reports load errors; it does not raise.**
+  vLLM's same-step handling makes this safe for single-group models, and
+  raising crashes the engine. Attention still runs on the remaining layers in
+  that step, but vLLM discards the step's output for the affected requests.
+- **D18. Report every retrieve of the step.** Each request submits its own
+  retrieve and the transfer context waits on the latest one only, so a wait
+  failure cannot be pinned to one request. Earlier steps' retrieves are left
+  alone: their forward pass passed its waits, and flagging them would make
+  vLLM recompute a running request's prefix.
+- **D19. Report each retrieve once.** A retrieve flagged by a layer wait is
+  not re-flagged when its future resolves as failed. A second report in a
+  later step would discard the recompute step too, or hit blocks since given
+  to another request. A fresh retrieve for the same request id is reportable
+  again.
+- **D20. A never-published generation is a load failure.** It was swallowed
+  on the theory that the load happened some other way; nothing guarantees
+  that, so it is now reported like the rest.
+
+**New open item, R8 (pre-existing, not fixed here).** Because only the
+step's latest retrieve is waited on, a step with several loading requests
+relies on the daemon finishing earlier retrieves before the latest one's
+layers. The MP server serialises retrieves per worker today, which should
+cover it, but nothing asserts it; and an earlier retrieve's failure surfaces
+only through its future, possibly a step late. Worth confirming with a
+multi-request test once cross-process runs are possible.
+
+**Also fixed:** `test_scheduler_reports_synchronous_load_when_layerwise_enabled`
+failed under vLLM 0.30.0, which made `KVConnectorBase_V1.role` a read-only
+property; CI's `test.yml` installs the latest vLLM, so it would fail there
+too. It now sets the backing `_role`.
+
+**Tested:**
+
+- `tests/v1/test_vllm_mp_adapter.py`, 7 new tests: every retrieve of the step
+  is reported; an earlier step's pending retrieve is not; no retrieves reports
+  nothing; a retrieve reported by a layer wait is not reported again when its
+  future fails (plain and lazy-offload `get_finished`); a resubmitted retrieve
+  is reportable; the adapter's wait propagates load errors.
+- `tests/v1/test_mp_connector_layerwise_scheduler.py`, 6 new tests (skipped
+  without vLLM): each of the four load errors is reported and the wait
+  returns; multi-group models raise; the CUDA-graph error propagates.
+- **With real vLLM:** vLLM is not installed in the main venv, because it would
+  swap `numba` and three other packages. A separate WSL venv
+  (`/home/simon/vllm-venv`, Python 3.10, vLLM 0.30.0, which brings the same
+  `torch 2.13.0+cu130`) loads LMCache's in-tree compiled extensions via a
+  source-only editable install. There, the connector and adapter files: 61
+  passed.
+- Mutation checks (restored afterwards): flagging every tracked retrieve
+  instead of this step's fails the earlier-step test; dropping the
+  report-once guard fails both report-once tests; putting back the swallow
+  fails all 5 targeted connector tests.
+- Track B suites plus the GPU tests (main venv): 429 passed, 9 skipped (the
+  vLLM-gated tests above).
+- Ruff, isort clean; mypy clean on the three changed source files apart from
+  two errors in `lmcache_mp_connector.py` that are identical on `HEAD`
+  (`zmq_context` annotation, `kv_caches` dict type).
+
+### Step 11 -- B8 refined: jittered arrivals and production-shaped copies (2026-09-25)
+
+Step 8 listed two assumptions that flattered the numbers: perfectly regular
+arrivals, and one contiguous copy per layer. `simulate_ttft.py` now models
+both.
+
+- **Arrival jitter.** Per-layer intervals are drawn from a seeded lognormal
+  with median `remote_ms`, sized so the 99th-percentile interval is
+  `--arrival-p99-ratio` times the median. Arrivals are the running sum, so a
+  slow layer delays every later one, as on a busy link.
+- **Per-chunk, per-plane copies.** KV is held per LMCache chunk (256 tokens,
+  one memory object each) in the `(kv, L, S*H)` layout, so staging one layer
+  is `chunks x planes` range copies -- 8 x 2 = 16 copies of 512 KiB for a
+  2048-token prompt -- as `LayerStaging.PER_LAYER` does in production. The
+  barrier copies each object whole, one copy per chunk, as the whole-object
+  path does. `--chunk-tokens 2048 --planes 1 --arrival-p99-ratio 1.0`
+  reproduces Step 8's setup.
+
+The pipeline model now takes the actual arrival times and a measured
+whole-object copy time for the barrier.
+
+**Results** -- RTX 3060 Laptop GPU, 32 layers, 2048 tokens, median of 9
+interleaved runs per mode. Saved ms, barrier minus layerwise (barrier ->
+layerwise in brackets):
+
+| Setup | Compute-bound | Balanced | Transfer-bound | Near-complete hit |
+| --- | --- | --- | --- | --- |
+| Step 8 shape: 1 copy/layer, fixed arrivals | **40.8** (109.4 -> 68.6) | **42.0** (67.4 -> 25.4) | **120.9** (268.0 -> 147.1) | **23.5** (47.3 -> 23.8) |
+| 16 copies/layer, fixed arrivals | **41.0** (109.7 -> 68.7) | **40.9** (67.6 -> 26.7) | **123.5** (270.7 -> 147.2) | **22.1** (47.5 -> 25.4) |
+| 16 copies/layer, p99 = 1.5x median | **40.4** (109.4 -> 69.0) | **40.9** (67.6 -> 26.7) | **124.8** (272.2 -> 147.4) | **21.2** (47.5 -> 26.3) |
+| 16 copies/layer, p99 = 2x median | **41.6** (109.4 -> 67.8) | **41.4** (68.3 -> 26.9) | **120.7** (270.5 -> 149.8) | **19.8** (46.8 -> 27.0) |
+
+**What changed and why:**
+
+1. **Production-shaped copies cost little.** Staging a layer as 16 copies
+   takes 0.69-0.72 ms against 0.66-0.67 ms for one copy (~5-8%), and the
+   savings do not move.
+2. **Independent per-layer jitter barely matters over 32 layers.** At
+   p99 = 2x median the last layer arrives only ~0.5 ms later (22.0 -> 22.5 ms
+   at line rate): 32 independent intervals average out. Both modes wait for
+   the same last arrival, so the saving holds. Only the near-complete hit
+   loses a few ms (23.5 -> 19.8), because with almost no compute to hide
+   behind, layerwise TTFT is the last arrival plus the last copy.
+3. **What this does not cover is correlated stalls** -- one node pausing for
+   several ms, say. A stall of X at layer k delays the barrier by X and
+   layerwise by at most X, less whatever compute backlog is queued (the new
+   model test `test_a_late_layer_stalls_layerwise_but_not_past_the_barrier`
+   shows the shape). So layerwise should be at least as robust, but that is
+   modelled rather than measured.
+
+**Noise:** about one run in three on this laptop is noisy -- in one rerun
+even the single-threaded copy measurement read 1.29 ms instead of 0.69, and
+layerwise with tiny compute read +10-15 ms over the model. That points at
+the shared laptop GPU/PCIe (the Windows host uses the same GPU), not at the
+harness. The table uses clean runs, each confirmed by a rerun or by the
+neighbouring configurations agreeing within ~1-2 ms.
+
+**Tested:** `tests/benchmarks/test_layerwise_simulate_ttft.py`, now 20 tests:
+the model with arbitrary arrival times (including a late-layer stall and
+rejecting decreasing arrivals); the jitter's median and p99 over 20,000
+samples, per-seed reproducibility and input checks; the default scenarios'
+16-copy split and partial-chunk refusal; and the GPU end-to-end smoke test
+in two shapes (1 copy fixed, 8 copies jittered). All pass on the RTX 3060;
+ruff and isort clean.
+
+**Reproduce:**
+
+```bash
+cd /mnt/c/Repos/LMCache
+.venv/bin/python benchmarks/layerwise/simulate_ttft.py --repeats 9
+.venv/bin/python benchmarks/layerwise/simulate_ttft.py --repeats 9 --arrival-p99-ratio 2.0
+.venv/bin/python benchmarks/layerwise/simulate_ttft.py --repeats 9 --chunk-tokens 2048 --planes 1
 ```

@@ -5,13 +5,18 @@
 A first, deliberately modest answer to Track B's B8: how much of a remote KV
 fetch does layer-at-a-time loading hide behind prefill compute, on this GPU?
 
-One simulated prefill is ``layers`` layers, each with ``layer_bytes`` of KV.
-Every layer passes through three real stages:
+One simulated prefill is ``layers`` layers, each with ``layer_bytes`` of KV
+spread over ``chunks`` memory objects (one per LMCache chunk) of ``planes``
+K/V planes each. Every layer passes through three real stages:
 
-1. **Remote arrival**, on a fixed schedule: layer ``i`` lands in host memory at
-   ``(i + 1) * remote_ms`` after the request starts. This stands in for the
-   RDMA transport; no network is involved.
-2. **Host-to-device copy**, a real pinned H2D copy on a transfer stream.
+1. **Remote arrival**, on a precomputed schedule standing in for the RDMA
+   transport (no network is involved). Arrival intervals have median
+   ``remote_ms``; with ``arrival_p99_ratio`` above 1 they are drawn from a
+   seeded lognormal whose 99th percentile is that multiple of the median, so a
+   slow layer delays every later one, as on a busy link.
+2. **Host-to-device copy**, real pinned H2D copies on a transfer stream. A
+   layer is ``chunks * planes`` separate range copies, as the production
+   per-layer staging does for the ``(kv, L, S, H)`` object layout.
 3. **Compute**, real GPU matmuls calibrated to ``compute_ms`` per layer, on a
    compute stream, plus a read of the layer's KV so compute depends on it.
 
@@ -19,8 +24,8 @@ Three modes are timed from the same start instant until the last layer's
 compute finishes:
 
 - ``barrier`` -- layerwise off, as MP mode works today: wait for every layer
-  to arrive, copy all of them in one H2D copy, then compute every layer. One
-  contiguous copy is the most favourable case for this mode.
+  to arrive, copy each object whole (one copy per chunk), then compute every
+  layer.
 - ``streamed copy`` -- copy each layer as soon as it arrives, but still wait
   for every copy before computing anything. This needs no per-layer waits in
   vLLM, so it isolates how much of the saving comes merely from overlapping
@@ -33,8 +38,8 @@ compute finishes:
   ``streamed copy`` is the part only per-layer attention waits can deliver.
 
 Both roles run as threads in one process, so no CUDA IPC is needed (it is not
-available under WSL2). The production paged-KV kernel is not used; the copy
-is a plain per-layer H2D copy.
+available under WSL2). The production paged-KV kernel is not used; copies
+land in a device mirror of the host objects.
 
 Measured times are printed next to a three-stage pipeline model
 (:func:`modeled_ttft_ms`) so disagreements are visible.
@@ -42,14 +47,21 @@ Measured times are printed next to a three-stage pipeline model
 Usage::
 
     python benchmarks/layerwise/simulate_ttft.py
+    python benchmarks/layerwise/simulate_ttft.py --arrival-p99-ratio 2.0
     python benchmarks/layerwise/simulate_ttft.py --repeats 9 --json out.json
+
+``--chunk-tokens <prompt tokens> --planes 1 --arrival-p99-ratio 1.0``
+reproduces the first version: one copy per layer, fixed arrivals.
 """
 
 # Standard
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 import argparse
+import itertools
 import json
+import math
+import random
 import statistics
 import threading
 import time
@@ -85,6 +97,12 @@ LLAMA3_8B_KV_BYTES_PER_TOKEN_PER_LAYER = 4 * 1024
 NIC_CEILING_BYTES_PER_S = 12.2e9
 SINGLE_OBJECT_BYTES_PER_S = 1.88e9
 
+#: LMCache's default chunk size, in tokens; one memory object per chunk.
+DEFAULT_CHUNK_TOKENS = 256
+
+#: z-score of the 99th percentile of a standard normal distribution.
+_Z_P99 = 2.3263478740408408
+
 
 @dataclass(frozen=True)
 class Scenario:
@@ -94,8 +112,14 @@ class Scenario:
         name: Short label for reports.
         layers: Number of transformer layers.
         layer_bytes: KV bytes per layer for the whole prompt.
-        remote_ms: Time for one layer to arrive from the remote store.
+        remote_ms: Median time for one layer to arrive from the remote store.
         compute_ms: Target GPU compute time per layer.
+        chunks: Memory objects the prompt's KV is split into.
+        planes: K/V planes per layer in each object (2 for the
+            ``(kv, L, S, H)`` layout, 1 for ``(L, S, H)``).
+        arrival_p99_ratio: 99th-percentile arrival interval over the median;
+            1.0 means every interval is exactly ``remote_ms``.
+        seed: Seed for the arrival jitter, so runs are reproducible.
     """
 
     name: str
@@ -103,6 +127,20 @@ class Scenario:
     layer_bytes: int
     remote_ms: float
     compute_ms: float
+    chunks: int = 1
+    planes: int = 1
+    arrival_p99_ratio: float = 1.0
+    seed: int = 0
+
+    @property
+    def copies_per_layer(self) -> int:
+        """Range copies needed to stage one layer."""
+        return self.chunks * self.planes
+
+    @property
+    def piece_bytes(self) -> int:
+        """Bytes in one plane of one layer of one object."""
+        return self.layer_bytes // self.copies_per_layer
 
 
 @dataclass(frozen=True)
@@ -134,7 +172,9 @@ class ScenarioResult:
 
     Attributes:
         scenario: The operating point.
-        h2d_ms: Measured host-to-device copy time for one layer.
+        last_arrival_ms: When the last layer arrives, after jitter.
+        h2d_ms: Measured time to stage one layer (all its range copies).
+        barrier_copy_ms: Measured time to copy every object whole.
         compute_ms: Per-layer compute measured *inside* the barrier and
             streamed-copy runs (median). This, not a warm calibration, drives
             the model, so clock or thermal drift during the runs shows up in
@@ -152,7 +192,9 @@ class ScenarioResult:
     """
 
     scenario: Scenario
+    last_arrival_ms: float
     h2d_ms: float
+    barrier_copy_ms: float
     compute_ms: float
     warm_compute_ms: float
     barrier_ms: float
@@ -163,7 +205,7 @@ class ScenarioResult:
 
     @property
     def ratio(self) -> float:
-        """Measured transfer-to-compute ratio per layer."""
+        """Measured transfer-to-compute ratio per layer (median arrival)."""
         return self.scenario.remote_ms / self.compute_ms
 
     @property
@@ -183,7 +225,11 @@ class ScenarioResult:
 
 
 def default_scenarios(
-    layers: int = 32, prompt_tokens: int = 2048
+    layers: int = 32,
+    prompt_tokens: int = 2048,
+    chunk_tokens: int = DEFAULT_CHUNK_TOKENS,
+    planes: int = 2,
+    arrival_p99_ratio: float = 1.0,
 ) -> tuple[Scenario, ...]:
     """Return the operating points the design documents reason about.
 
@@ -194,65 +240,126 @@ def default_scenarios(
     Args:
         layers: Number of transformer layers.
         prompt_tokens: Tokens whose KV is fetched.
+        chunk_tokens: Tokens per memory object; must divide ``prompt_tokens``.
+        planes: K/V planes per layer in each object.
+        arrival_p99_ratio: Arrival jitter, as in :class:`Scenario`.
 
     Returns:
         The scenarios, in report order.
+
+    Raises:
+        ValueError: If ``chunk_tokens`` does not divide ``prompt_tokens``.
     """
+    if chunk_tokens <= 0 or prompt_tokens % chunk_tokens:
+        raise ValueError(
+            f"chunk_tokens {chunk_tokens} must divide prompt_tokens {prompt_tokens}"
+        )
     layer_bytes = prompt_tokens * LLAMA3_8B_KV_BYTES_PER_TOKEN_PER_LAYER
     line_rate_ms = layer_bytes / NIC_CEILING_BYTES_PER_S * 1e3
     single_object_ms = layer_bytes / SINGLE_OBJECT_BYTES_PER_S * 1e3
+    shape = {
+        "chunks": prompt_tokens // chunk_tokens,
+        "planes": planes,
+        "arrival_p99_ratio": arrival_p99_ratio,
+    }
     return (
         Scenario("line rate, compute-bound (ratio 0.31)", layers, layer_bytes,
-                 line_rate_ms, line_rate_ms / 0.31),
+                 line_rate_ms, line_rate_ms / 0.31, **shape),
         Scenario("line rate, balanced (ratio 1.0)", layers, layer_bytes,
-                 line_rate_ms, line_rate_ms),
+                 line_rate_ms, line_rate_ms, **shape),
         Scenario("single-object rate, transfer-bound (ratio 1.98)", layers,
-                 layer_bytes, single_object_ms, single_object_ms / 1.98),
+                 layer_bytes, single_object_ms, single_object_ms / 1.98, **shape),
         Scenario("near-complete hit, little prefill (ratio 10)", layers,
-                 layer_bytes, line_rate_ms, line_rate_ms / 10.0),
+                 layer_bytes, line_rate_ms, line_rate_ms / 10.0, **shape),
     )  # fmt: skip
 
 
+def arrival_offsets_ms(
+    layers: int, remote_ms: float, p99_ratio: float = 1.0, seed: int = 0
+) -> tuple[float, ...]:
+    """Return when each layer arrives, in milliseconds after the request.
+
+    Arrivals are the running sum of per-layer intervals, so a slow layer
+    delays every later layer. Intervals have median ``remote_ms``. With
+    ``p99_ratio == 1`` every interval is exactly ``remote_ms``; above 1 they
+    are lognormal with the given 99th-percentile-to-median ratio, which also
+    raises their mean by ``exp(sigma**2 / 2)``.
+
+    Args:
+        layers: Number of layers.
+        remote_ms: Median arrival interval.
+        p99_ratio: 99th-percentile interval over the median; at least 1.
+        seed: Seed for the jitter.
+
+    Returns:
+        Non-decreasing arrival offsets, one per layer in ascending layer order.
+
+    Raises:
+        ValueError: If ``layers`` is not positive, ``remote_ms`` is negative
+            or ``p99_ratio`` is below 1.
+    """
+    if layers <= 0:
+        raise ValueError(f"layers must be positive, got {layers}")
+    if remote_ms < 0:
+        raise ValueError(f"remote_ms must not be negative, got {remote_ms}")
+    if p99_ratio < 1.0:
+        raise ValueError(f"p99_ratio must be at least 1, got {p99_ratio}")
+    if p99_ratio == 1.0 or remote_ms == 0:
+        intervals = [remote_ms] * layers
+    else:
+        rng = random.Random(seed)
+        sigma = math.log(p99_ratio) / _Z_P99
+        mu = math.log(remote_ms)
+        intervals = [rng.lognormvariate(mu, sigma) for _ in range(layers)]
+    return tuple(itertools.accumulate(intervals))
+
+
 def modeled_ttft_ms(
-    layers: int, remote_ms: float, h2d_ms: float, compute_ms: float
+    arrivals_ms: Sequence[float],
+    h2d_ms: float,
+    compute_ms: float,
+    barrier_copy_ms: float,
 ) -> ModeledTtft:
     """Model all three modes as deterministic stages.
 
-    Layer ``i`` arrives at ``(i + 1) * remote_ms``. Copies are serial on one
+    Layer ``i`` arrives at ``arrivals_ms[i]``. Copies are serial on one
     stream; compute is serial on another. Polling and launch overheads are
     ignored.
 
-    - Barrier: everything arrives, then one copy of all layers, then all
-      compute: ``layers * (remote_ms + h2d_ms + compute_ms)``.
-    - Streamed copy: each copy starts once its layer has arrived and the
+    - Barrier: the last layer arrives, then every object is copied whole
+      (``barrier_copy_ms``), then all compute.
+    - Streamed copy: each layer's copy starts once it has arrived and the
       previous copy finished; compute starts after the last copy.
     - Layerwise: as streamed copy, but each layer's compute starts as soon as
       its own copy and the previous layer's compute have finished.
 
     Args:
-        layers: Number of layers.
-        remote_ms: Arrival interval per layer.
-        h2d_ms: Copy time per layer.
+        arrivals_ms: Non-decreasing arrival time of each layer.
+        h2d_ms: Time to stage one layer.
         compute_ms: Compute time per layer.
+        barrier_copy_ms: Time to copy every object whole.
 
     Returns:
         The modelled TTFT of each mode.
 
     Raises:
-        ValueError: If ``layers`` is not positive or any time is negative.
+        ValueError: If there are no layers, arrivals decrease, or any time is
+            negative.
     """
-    if layers <= 0:
-        raise ValueError(f"layers must be positive, got {layers}")
-    if min(remote_ms, h2d_ms, compute_ms) < 0:
+    if not arrivals_ms:
+        raise ValueError("at least one layer must arrive")
+    if min(arrivals_ms[0], h2d_ms, compute_ms, barrier_copy_ms) < 0:
         raise ValueError("stage times must not be negative")
+    if any(later < earlier for earlier, later in itertools.pairwise(arrivals_ms)):
+        raise ValueError("arrivals must not decrease")
+    layers = len(arrivals_ms)
     copy_done = 0.0
     compute_done = 0.0
-    for layer in range(layers):
-        arrived = (layer + 1) * remote_ms
+    for arrived in arrivals_ms:
         copy_done = max(arrived, copy_done) + h2d_ms
         compute_done = max(copy_done, compute_done) + compute_ms
     return ModeledTtft(
-        barrier_ms=layers * (remote_ms + h2d_ms + compute_ms),
+        barrier_ms=arrivals_ms[-1] + barrier_copy_ms + layers * compute_ms,
         streamed_copy_ms=copy_done + layers * compute_ms,
         layerwise_ms=compute_done,
     )
@@ -263,18 +370,19 @@ class _TimedArrivalSource:
 
     Implements :class:`~lmcache.v1.layerwise.contract.LayerArrivalSource`.
     Layer ``i`` of the plan (in ascending order) is resident from
-    ``start + (i + 1) * interval``.
+    ``start + arrivals_s[i]``.
     """
 
-    def __init__(self, start: float, interval_s: float) -> None:
+    def __init__(self, start: float, arrivals_s: Sequence[float]) -> None:
         """Fix the arrival schedule.
 
         Args:
             start: ``time.perf_counter()`` at which the request started.
-            interval_s: Seconds between successive layer arrivals.
+            arrivals_s: Seconds after ``start`` at which each layer arrives,
+                one per plan layer in ascending order.
         """
         self._start = start
-        self._interval_s = interval_s
+        self._arrivals_s = tuple(arrivals_s)
         self._generation = NO_GENERATION
         self._arrival: dict[int, float] = {}
 
@@ -282,9 +390,15 @@ class _TimedArrivalSource:
         """Start the scheduled fetch; returns generation 1."""
         if self._generation != NO_GENERATION:
             raise LayerwiseContractError("a fetch is already active")
+        layer_ids = plan.layer_ids()
+        if len(layer_ids) != len(self._arrivals_s):
+            raise LayerwiseContractError(
+                f"plan has {len(layer_ids)} layers, schedule has "
+                f"{len(self._arrivals_s)}"
+            )
         self._arrival = {
-            layer_id: self._start + (index + 1) * self._interval_s
-            for index, layer_id in enumerate(plan.layer_ids())
+            layer_id: self._start + offset
+            for layer_id, offset in zip(layer_ids, self._arrivals_s, strict=True)
         }
         self._generation = 1
         return self._generation
@@ -312,7 +426,7 @@ class _TimedArrivalSource:
 
 
 class _SimulationLauncher:
-    """A :class:`LayerLauncher` doing one plain H2D copy per layer.
+    """A :class:`LayerLauncher` staging one layer's range copies per launch.
 
     Publishes each layer exactly as production does: copy on the transfer
     stream, record that ordinal's event on the same stream, then advance the
@@ -321,8 +435,7 @@ class _SimulationLauncher:
 
     def __init__(
         self,
-        host: torch.Tensor,
-        device: torch.Tensor,
+        copy_layer: Callable[[int], None],
         transfer_stream: torch.cuda.Stream,
         progress: LayerProgressRecord,
         event_pool: DaemonLayerLaunchEventPool,
@@ -331,15 +444,13 @@ class _SimulationLauncher:
         """Bind one simulated retrieve.
 
         Args:
-            host: Pinned ``[layers, elements]`` host KV.
-            device: ``[layers, elements]`` device KV, same shape.
+            copy_layer: Enqueues one layer's copies on the current stream.
             transfer_stream: Stream the copies and event records run on.
             progress: Progress record the worker waits on.
             event_pool: Per-ordinal events recorded after each copy.
             retrieve_generation: Generation the worker waits on.
         """
-        self._host = host
-        self._device = device
+        self._copy_layer = copy_layer
         self._transfer_stream = transfer_stream
         self._progress = progress
         self._event_pool = event_pool
@@ -353,7 +464,7 @@ class _SimulationLauncher:
     def launch_layer(self, layer_id: int) -> None:
         """Copy one layer, record its event, then advance the watermark."""
         with torch.cuda.stream(self._transfer_stream):
-            self._device[layer_id].copy_(self._host[layer_id], non_blocking=True)
+            self._copy_layer(layer_id)
         self._event_pool.record_ordinal(self._next_ordinal, self._transfer_stream)
         self._next_ordinal += 1
         self._progress.report_launch_recorded(self._next_ordinal)
@@ -364,7 +475,12 @@ class _SimulationLauncher:
 
 
 class _Workload:
-    """GPU buffers, streams and calibrated compute for one scenario."""
+    """GPU buffers, streams and calibrated compute for one scenario.
+
+    KV is held as ``[chunks, planes, layers, elements]``: object ``c`` is
+    ``host[c]``, laid out ``(kv, L, S*H)`` like a production memory object, so
+    one plane of one layer is a contiguous range.
+    """
 
     def __init__(self, scenario: Scenario) -> None:
         """Allocate KV buffers and calibrate compute to the scenario's target.
@@ -373,80 +489,84 @@ class _Workload:
             scenario: The operating point.
 
         Raises:
-            ValueError: If ``layer_bytes`` is not a multiple of 2 (fp16).
+            ValueError: If ``layer_bytes`` does not split into whole fp16
+                values per piece.
         """
-        if scenario.layer_bytes % 2:
-            raise ValueError("layer_bytes must be a whole number of fp16 values")
+        if scenario.layer_bytes % (2 * scenario.copies_per_layer):
+            raise ValueError(
+                "layer_bytes must split into whole fp16 values per plane per chunk"
+            )
         self.scenario = scenario
         self.device_id = torch.device("cuda:0")
-        elements = scenario.layer_bytes // 2
-        self.host = torch.ones(
-            (scenario.layers, elements), dtype=torch.float16, pin_memory=True
+        shape = (
+            scenario.chunks,
+            scenario.planes,
+            scenario.layers,
+            scenario.piece_bytes // 2,
         )
-        self.device = torch.zeros(
-            (scenario.layers, elements), dtype=torch.float16, device=self.device_id
+        self.host = torch.ones(shape, dtype=torch.float16, pin_memory=True)
+        self.device = torch.zeros(shape, dtype=torch.float16, device=self.device_id)
+        self.arrivals_ms = arrival_offsets_ms(
+            scenario.layers,
+            scenario.remote_ms,
+            scenario.arrival_p99_ratio,
+            scenario.seed,
         )
         self.transfer_stream = torch.cuda.Stream(device=self.device_id)
         self.compute_stream = torch.cuda.Stream(device=self.device_id)
         self._compute_layer = _calibrated_compute(
-            scenario.compute_ms, self.device, self.compute_stream
+            scenario.compute_ms, self.device[-1, -1, :, :1], self.compute_stream
         )
+
+    def copy_layer(self, layer_id: int) -> None:
+        """Enqueue one layer's range copies (every chunk, every plane)."""
+        for chunk in range(self.scenario.chunks):
+            for plane in range(self.scenario.planes):
+                self.device[chunk, plane, layer_id].copy_(
+                    self.host[chunk, plane, layer_id], non_blocking=True
+                )
+
+    def copy_whole_objects(self) -> None:
+        """Enqueue one whole-object copy per chunk, as the barrier path does."""
+        for chunk in range(self.scenario.chunks):
+            self.device[chunk].copy_(self.host[chunk], non_blocking=True)
 
     def compute(self, layer_id: int) -> None:
         """Enqueue one layer's compute on the current stream."""
         self._compute_layer(layer_id)
 
     def measure_h2d_ms(self, repeats: int = 20) -> float:
-        """Return the median time of one single-layer H2D copy."""
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        samples: list[float] = []
-        with torch.cuda.stream(self.transfer_stream):
-            for _ in range(repeats):
-                start.record()
-                self.device[0].copy_(self.host[0], non_blocking=True)
-                end.record()
-                end.synchronize()
-                samples.append(start.elapsed_time(end))
-        return statistics.median(samples)
+        """Return the median time to stage one layer."""
+        return _median_gpu_ms(lambda: self.copy_layer(0), self.transfer_stream, repeats)
+
+    def measure_barrier_copy_ms(self, repeats: int = 5) -> float:
+        """Return the median time to copy every object whole."""
+        return _median_gpu_ms(self.copy_whole_objects, self.transfer_stream, repeats)
 
     def measure_compute_ms(self, repeats: int = 20) -> float:
         """Return the median time of one layer's compute."""
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        samples: list[float] = []
-        with torch.cuda.stream(self.compute_stream):
-            for _ in range(repeats):
-                start.record()
-                self.compute(0)
-                end.record()
-                end.synchronize()
-                samples.append(start.elapsed_time(end))
-        return statistics.median(samples)
+        return _median_gpu_ms(lambda: self.compute(0), self.compute_stream, repeats)
 
     def run_barrier(self) -> _RunTiming:
         """Time one request with layerwise off."""
-        scenario = self.scenario
         torch.cuda.synchronize()
         start = time.perf_counter()
-        _sleep_until(start + scenario.layers * scenario.remote_ms / 1e3)
+        _sleep_until(start + self.arrivals_ms[-1] / 1e3)
         copied = torch.cuda.Event()
         with torch.cuda.stream(self.transfer_stream):
-            self.device.copy_(self.host, non_blocking=True)
+            self.copy_whole_objects()
             copied.record()
         return self._compute_all_after(copied, start)
 
     def run_streamed_copy(self) -> _RunTiming:
         """Time one request copying each layer on arrival; compute waits all."""
-        scenario = self.scenario
-        interval_s = scenario.remote_ms / 1e3
         torch.cuda.synchronize()
         start = time.perf_counter()
         copied = torch.cuda.Event()
         with torch.cuda.stream(self.transfer_stream):
-            for layer_id in range(scenario.layers):
-                _sleep_until(start + (layer_id + 1) * interval_s)
-                self.device[layer_id].copy_(self.host[layer_id], non_blocking=True)
+            for layer_id, arrival_ms in enumerate(self.arrivals_ms):
+                _sleep_until(start + arrival_ms / 1e3)
+                self.copy_layer(layer_id)
             copied.record()
         return self._compute_all_after(copied, start)
 
@@ -470,21 +590,15 @@ class _Workload:
             WorkerComputeLayerLaunchEventPool(events, backend, scenario.layers),
             wait_timeout_seconds=30.0,
         )
-        plan = LayerFetchPlan(
-            tuple(
-                SlotPlacement(layer_id, 0, 0, b"sim", 0, scenario.layer_bytes)
-                for layer_id in range(scenario.layers)
-            )
-        )
+        plan = _fetch_plan(scenario)
         errors: list[BaseException] = []
 
         torch.cuda.synchronize()
         start = time.perf_counter()
-        sink = MultiprocessLayerLoadSink(
+        sink = MultiprocessLayerLoadSink.for_retrieve(
             schedule,
             _SimulationLauncher(
-                self.host,
-                self.device,
+                self.copy_layer,
                 self.transfer_stream,
                 progress,
                 daemon_pool,
@@ -492,7 +606,7 @@ class _Workload:
             ),
         )
         pump = LayerArrivalPump(
-            _TimedArrivalSource(start, scenario.remote_ms / 1e3), sink
+            _TimedArrivalSource(start, [ms / 1e3 for ms in self.arrivals_ms]), sink
         )
 
         def run_pump() -> None:
@@ -537,6 +651,30 @@ class _Workload:
         return _RunTiming(total_ms, phase_start.elapsed_time(phase_end))
 
 
+def _fetch_plan(scenario: Scenario) -> LayerFetchPlan:
+    """Return one slot per (layer, chunk, plane), offsets as in ``_Workload``."""
+    piece = scenario.piece_bytes
+    return LayerFetchPlan(
+        tuple(
+            SlotPlacement(
+                layer_id=layer_id,
+                chunk_id=chunk,
+                node_index=0,
+                record_key=f"sim|{chunk}|{layer_id}|{plane}",
+                plane=plane,
+                piece=0,
+                offset=((chunk * scenario.planes + plane) * scenario.layers + layer_id)
+                * piece,
+                length=piece,
+            )
+            for layer_id in range(scenario.layers)
+            for chunk in range(scenario.chunks)
+            for plane in range(scenario.planes)
+        ),
+        ("simulated-node",),
+    )
+
+
 def _sleep_until(deadline: float) -> None:
     """Block until ``time.perf_counter()`` reaches ``deadline``."""
     remaining = deadline - time.perf_counter()
@@ -544,25 +682,43 @@ def _sleep_until(deadline: float) -> None:
         time.sleep(remaining)
 
 
+def _median_gpu_ms(
+    enqueue: Callable[[], None], stream: torch.cuda.Stream, repeats: int
+) -> float:
+    """Return the median GPU time of ``enqueue``'s work on ``stream``."""
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
+    samples: list[float] = []
+    with torch.cuda.stream(stream):
+        for _ in range(repeats):
+            start.record()
+            enqueue()
+            end.record()
+            end.synchronize()
+            samples.append(start.elapsed_time(end))
+    return statistics.median(samples)
+
+
 def _calibrated_compute(
-    target_ms: float, kv: torch.Tensor, stream: torch.cuda.Stream
+    target_ms: float, kv_probe: torch.Tensor, stream: torch.cuda.Stream
 ) -> Callable[[int], None]:
     """Build a per-layer compute step that takes about ``target_ms``.
 
-    Each step touches the layer's KV (so it is ordered after the layer's copy
-    on the device) and then runs a chain of square fp16 matmuls. The matmul
-    size is the largest that still needs at least two matmuls per step, which
-    keeps launch overhead small while allowing fine-grained targets.
+    Each step reads one element of the layer's KV (so it is ordered after the
+    layer's copy on the device) and then runs a chain of square fp16 matmuls.
+    The matmul size is the largest that still needs at least two matmuls per
+    step, which keeps launch overhead small while allowing fine-grained
+    targets.
 
     Args:
         target_ms: Desired GPU time per layer.
-        kv: ``[layers, elements]`` device KV.
+        kv_probe: ``[layers, 1]`` device view with one KV element per layer.
         stream: Stream to calibrate on.
 
     Returns:
         A function enqueuing one layer's compute on the current stream.
     """
-    device = kv.device
+    device = kv_probe.device
     chosen_size, per_matmul_ms = 128, 0.0
     for size in (2048, 1024, 512, 256, 128):
         chosen_size, per_matmul_ms = size, _matmul_ms(size, device, stream)
@@ -574,7 +730,7 @@ def _calibrated_compute(
     scratch = torch.empty(1, dtype=torch.float32, device=device)
 
     def compute_layer(layer_id: int) -> None:
-        scratch.copy_(kv[layer_id][:1].float())
+        scratch.copy_(kv_probe[layer_id].float())
         product = left
         for _ in range(repeats):
             product = torch.mm(product, right)
@@ -586,33 +742,25 @@ def _matmul_ms(size: int, device: torch.device, stream: torch.cuda.Stream) -> fl
     """Return the median time of one ``size x size`` fp16 matmul."""
     left = torch.randn((size, size), dtype=torch.float16, device=device)
     right = torch.randn((size, size), dtype=torch.float16, device=device)
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    samples: list[float] = []
     with torch.cuda.stream(stream):
         for _ in range(5):
             torch.mm(left, right)
-        for _ in range(20):
-            start.record()
-            torch.mm(left, right)
-            end.record()
-            end.synchronize()
-            samples.append(start.elapsed_time(end))
-    return statistics.median(samples)
+    return _median_gpu_ms(lambda: torch.mm(left, right), stream, 20)
 
 
 def run_scenario(scenario: Scenario, repeats: int) -> ScenarioResult:
-    """Measure one scenario in both modes.
+    """Measure one scenario in all three modes.
 
     Args:
         scenario: The operating point.
         repeats: Timed runs per mode, after one warm-up run each.
 
     Returns:
-        Medians for both modes plus the pipeline model.
+        Medians for every mode plus the pipeline model.
     """
     workload = _Workload(scenario)
     h2d_ms = workload.measure_h2d_ms()
+    barrier_copy_ms = workload.measure_barrier_copy_ms()
     warm_compute_ms = workload.measure_compute_ms()
     workload.run_barrier()
     workload.run_streamed_copy()
@@ -630,14 +778,18 @@ def run_scenario(scenario: Scenario, repeats: int) -> ScenarioResult:
     )
     return ScenarioResult(
         scenario=scenario,
+        last_arrival_ms=workload.arrivals_ms[-1],
         h2d_ms=h2d_ms,
+        barrier_copy_ms=barrier_copy_ms,
         compute_ms=compute_ms,
         warm_compute_ms=warm_compute_ms,
         barrier_ms=statistics.median(timing.total_ms for timing in barrier),
         streamed_copy_ms=statistics.median(timing.total_ms for timing in streamed),
         layerwise_ms=statistics.median(layerwise),
         layerwise_range_ms=(min(layerwise), max(layerwise)),
-        model=modeled_ttft_ms(scenario.layers, scenario.remote_ms, h2d_ms, compute_ms),
+        model=modeled_ttft_ms(
+            workload.arrivals_ms, h2d_ms, compute_ms, barrier_copy_ms
+        ),
     )
 
 
@@ -651,10 +803,13 @@ def format_report(results: list[ScenarioResult]) -> str:
         The report text.
     """
     lines = [
-        "Per layer (ms): remote arrival, H2D copy, compute; measured ratio.",
+        "Per layer (ms): median remote arrival, H2D staging, compute; measured "
+        "ratio. last = last layer's arrival (ms); bcopy = whole-object copy of "
+        "everything (ms).",
         "TTFT (ms): measured median (pipeline model).",
         "",
         f"{'scenario':<48} {'remote':>6} {'h2d':>5} {'comp':>5} {'ratio':>5} "
+        f"{'last':>6} {'bcopy':>5} "
         f"{'barrier':>13} {'streamed':>13} {'layerwise':>13} "
         f"{'saved':>6} {'copy':>6} {'comp':>6}",
     ]
@@ -663,6 +818,7 @@ def format_report(results: list[ScenarioResult]) -> str:
         lines.append(
             f"{r.scenario.name:<48} {r.scenario.remote_ms:>6.3f} {r.h2d_ms:>5.2f} "
             f"{r.compute_ms:>5.2f} {r.ratio:>5.2f} "
+            f"{r.last_arrival_ms:>6.1f} {r.barrier_copy_ms:>5.1f} "
             f"{r.barrier_ms:>6.1f}({m.barrier_ms:>5.1f}) "
             f"{r.streamed_copy_ms:>6.1f}({m.streamed_copy_ms:>5.1f}) "
             f"{r.layerwise_ms:>6.1f}({m.layerwise_ms:>5.1f}) "
@@ -695,18 +851,29 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--layers", type=int, default=32)
     parser.add_argument("--prompt-tokens", type=int, default=2048)
+    parser.add_argument("--chunk-tokens", type=int, default=DEFAULT_CHUNK_TOKENS)
+    parser.add_argument("--planes", type=int, default=2)
+    parser.add_argument("--arrival-p99-ratio", type=float, default=1.0)
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--json", type=str, default="", help="write results here")
     args = parser.parse_args()
     if not torch.cuda.is_available():
         raise SystemExit("a CUDA GPU is required")
 
-    results = [
-        run_scenario(scenario, args.repeats)
-        for scenario in default_scenarios(args.layers, args.prompt_tokens)
-    ]
+    scenarios = default_scenarios(
+        args.layers,
+        args.prompt_tokens,
+        args.chunk_tokens,
+        args.planes,
+        args.arrival_p99_ratio,
+    )
+    results = [run_scenario(scenario, args.repeats) for scenario in scenarios]
+    first = scenarios[0]
     print(f"GPU: {torch.cuda.get_device_name(0)}")
     print(f"{args.layers} layers, {args.prompt_tokens} prompt tokens, "
+          f"{first.chunks} chunks x {first.planes} planes = "
+          f"{first.copies_per_layer} copies/layer of {first.piece_bytes} B, "
+          f"arrival p99/median {args.arrival_p99_ratio:g}, "
           f"median of {args.repeats} runs per mode")  # fmt: skip
     print(format_report(results))
     if args.json:

@@ -1307,6 +1307,15 @@ class LMCacheMPWorkerAdapter:
         # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS.
         self._dropped_retrieves: set[str] = set()
 
+        # Retrieves submitted since the last get_finished call, i.e. in the
+        # step currently running. A failed layerwise wait flags these.
+        self._current_step_retrieves: set[str] = set()
+        # Retrieves whose blocks a failed layerwise wait already reported.
+        # get_finished must not report them again when their future resolves
+        # with a failure: a late second report would make vLLM discard the
+        # recompute step, or hit blocks that now belong to another request.
+        self._retrieves_reported_failed: set[str] = set()
+
         # The store requests that have finished execution in LMCache
         self.finished_stores: set[str] = set()
         # The finished request ids that are passed via vLLM and also
@@ -1513,11 +1522,50 @@ class LMCacheMPWorkerAdapter:
             ) from None
 
     def wait_for_layer_load(self, layer_id: int) -> None:
-        """Block until layer ``layer_id`` has landed when layerwise is enabled."""
+        """Block until layer ``layer_id`` has landed when layerwise is enabled.
+
+        Args:
+            layer_id: Global layer index vLLM is about to compute.
+
+        Raises:
+            LayerProgressLoadError: The layer's KV did not land for the active
+                retrieve. Callers that can recover should call
+                :meth:`report_failed_layer_load`.
+            LayerProgressError: Any other progress failure, such as a wait
+                during CUDA graph capture.
+        """
         if self.transfer_ctx is None:
             return
         if hasattr(self.transfer_ctx, "wait_for_layer_load"):
             self.transfer_ctx.wait_for_layer_load(layer_id)
+
+    def report_failed_layer_load(self) -> set[int]:
+        """Report this step's retrieves as failed loads so vLLM recomputes them.
+
+        Adds the blocks of every retrieve submitted since the last
+        ``get_finished`` call to the set returned by
+        :meth:`get_block_ids_with_load_errors`. All of the step's retrieves are
+        flagged, not only the one whose wait failed: the transfer context waits
+        on the step's latest retrieve alone, so the earlier ones are unproven
+        too. Retrieves from earlier steps are not flagged; their forward pass
+        already completed.
+
+        A retrieve reported here is not reported again when its future later
+        resolves with a failure.
+
+        Returns:
+            The block IDs newly reported, empty when the step has no
+            submitted retrieves.
+        """
+        flagged: set[int] = set()
+        for request_id in self._current_step_retrieves:
+            tracked = self.retrieve_futures.get(request_id)
+            if tracked is None or request_id in self._retrieves_reported_failed:
+                continue
+            flagged.update(tracked[1])
+            self._retrieves_reported_failed.add(request_id)
+        self.error_block_ids.update(flagged)
+        return flagged
 
     def _ensure_heartbeat_started(self) -> None:
         """Lazily start the heartbeat thread on first store/retrieve.
@@ -1750,6 +1798,8 @@ class LMCacheMPWorkerAdapter:
             skip_first_n_tokens=op.skip_first_n_tokens,
         )
         self.retrieve_futures[request_id] = (future, op.flat_block_ids)
+        self._current_step_retrieves.add(request_id)
+        self._retrieves_reported_failed.discard(request_id)
         if event is not None:
             self.retrieve_events[request_id] = event
 
@@ -1899,6 +1949,9 @@ class LMCacheMPWorkerAdapter:
         if self.dispatcher is not None:
             dispatch(self.dispatcher, "reclaim")
 
+        # get_finished closes the step: later layer waits belong to the next.
+        self._current_step_retrieves.clear()
+
         # If unhealthy, drain all pending futures immediately
         if not self.is_healthy:
             finished_stores = set(self.store_futures.keys())
@@ -1908,7 +1961,8 @@ class LMCacheMPWorkerAdapter:
                 r_block_ids,
             ) in self.retrieve_futures.items():
                 finished_retrieves.add(request_id)
-                self.error_block_ids.update(r_block_ids)
+                self._report_failed_retrieve(request_id, r_block_ids)
+            self._retrieves_reported_failed.clear()
             self.store_futures.clear()
             self.retrieve_futures.clear()
             self.store_events.clear()
@@ -1958,7 +2012,7 @@ class LMCacheMPWorkerAdapter:
             finished_retrieves.add(request_id)
 
             if not r_result:
-                self.error_block_ids.update(r_block_ids)
+                self._report_failed_retrieve(request_id, r_block_ids)
                 logger.error(
                     "Something went wrong when processing the "
                     "retrieve request for request_id=%s, result=%s",
@@ -1973,6 +2027,7 @@ class LMCacheMPWorkerAdapter:
         for request_id in finished_retrieves:
             self.retrieve_futures.pop(request_id, None)
             self.retrieve_events.pop(request_id, None)
+            self._retrieves_reported_failed.discard(request_id)
 
         # Retrieves dropped while unhealthy still must be reported,
         # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS. No
@@ -2027,6 +2082,9 @@ class LMCacheMPWorkerAdapter:
         if self.dispatcher is not None:
             dispatch(self.dispatcher, "reclaim")
 
+        # get_finished closes the step: later layer waits belong to the next.
+        self._current_step_retrieves.clear()
+
         # If unhealthy, drain all pending futures immediately
         if not self.is_healthy:
             finished_stores = set(self.store_futures.keys())
@@ -2036,7 +2094,8 @@ class LMCacheMPWorkerAdapter:
                 r_block_ids,
             ) in self.retrieve_futures.items():
                 finished_retrieves.add(request_id)
-                self.error_block_ids.update(r_block_ids)
+                self._report_failed_retrieve(request_id, r_block_ids)
+            self._retrieves_reported_failed.clear()
             self.store_futures.clear()
             self.retrieve_futures.clear()
             self.store_events.clear()
@@ -2083,7 +2142,7 @@ class LMCacheMPWorkerAdapter:
             finished_retrieves.add(request_id)
 
             if not r_result:
-                self.error_block_ids.update(r_block_ids)
+                self._report_failed_retrieve(request_id, r_block_ids)
                 logger.error(
                     "Something went wrong when processing the "
                     "retrieve request for request_id=%s, result=%s",
@@ -2098,6 +2157,7 @@ class LMCacheMPWorkerAdapter:
         for request_id in finished_retrieves:
             self.retrieve_futures.pop(request_id, None)
             self.retrieve_events.pop(request_id, None)
+            self._retrieves_reported_failed.discard(request_id)
 
         # Retrieves dropped while unhealthy still must be reported,
         # exactly once, or async loads hang in WAITING_FOR_REMOTE_KVS. No
@@ -2232,6 +2292,11 @@ class LMCacheMPWorkerAdapter:
         self.previously_finished.difference_update(safe_finished_s)
 
         return safe_finished_s
+
+    def _report_failed_retrieve(self, request_id: str, block_ids: list[int]) -> None:
+        """Flag a failed retrieve's blocks unless a layer wait already did."""
+        if request_id not in self._retrieves_reported_failed:
+            self.error_block_ids.update(block_ids)
 
     def _create_key(
         self,
