@@ -320,18 +320,29 @@ are in `lmcache/v1/layerwise/request_fetch.py`). It leases a window and
 reserves every object of the retrieve in it, all or nothing:
 
 ```python
-placer = RdmaWindowPlacer(l1_manager, leaser, layouts, node_name)
+placer = RdmaWindowPlacer(l1_manager, leaser, layouts, node_name,
+                          policy.select_l1_retentions)
 #   layouts: {group_id: MemoryLayoutDesc} of the registered model
 #   node_name: the cluster's one node
+#   last argument: which objects stay in L1 afterwards (default: none)
 lease = placer.lease(objects_to_place(model, obj_keys))
 lease.locate(chunk_id, group_id)   # ChunkLocation(node_name, slab offset)
-...                                # build_request_fetch, pump
-lease.release(LeaseOutcome.FINISHED)       # finish_write; window reusable
+...                                # build_request_fetch, pump, sink copies
+lease.release(LeaseOutcome.FINISHED)       # retained objects readable, the
+                                           # rest freed; window reusable
 lease.release(LeaseOutcome.NEVER_FETCHED)  # abort_write; window reusable
 lease.release(LeaseOutcome.ABANDONED)      # abort_write; window quarantined,
                                            # fallback uses general L1 (W4)
 ```
 
+- **Retention, and no write-back.** Fetched objects follow the prefetch
+  policy, as today's whole-object loads do: the ones it doesn't retain are
+  reserved temporary and freed when the lease finishes. `FINISHED` ends the
+  writes with `finish_write_and_reserve_read` and then `finish_read`, never
+  plain `finish_write`. For a permanent object, `finish_write` would tell the
+  store controller to store it to L2, which is where it just came from.
+  Since the window is reusable at once, release only after the reader's
+  copies out of it have completed.
 - **Size check.** Each object is rounded up to the L1 alignment, as the
   window allocator does, and a total over `window_bytes` raises
   `PlanTooLargeError` before anything is leased. An object larger than its

@@ -8,7 +8,7 @@ device is needed. Time comes from a fake clock.
 """
 
 # Standard
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 # Third Party
 import pytest
@@ -25,9 +25,11 @@ from lmcache.v1.distributed.l2_adapters.rdma_registration import (
     RdmaWindowPlan,
 )
 from lmcache.v1.distributed.l2_adapters.rdma_window_leaser import RdmaWindowLeaser
+from lmcache.v1.distributed.internal_api import L1ManagerListener
 from lmcache.v1.distributed.l2_adapters.rdma_window_placer import (
     RdmaWindowPlacer,
     check_window_holds_request,
+    retain_none,
 )
 from lmcache.v1.layerwise.contract import LayerwiseContractError, PlanTooLargeError
 from lmcache.v1.layerwise.planner import ModelLayout
@@ -59,8 +61,44 @@ class _FakeClock:
         return self.now
 
 
+class _WriteFinishedRecorder(L1ManagerListener):
+    """Records the keys the store controller would store to L2."""
+
+    def __init__(self) -> None:
+        self.stored: list[ObjectKey] = []
+
+    def on_l1_keys_reserved_read(self, keys: list[ObjectKey]) -> None:
+        pass
+
+    def on_l1_keys_read_finished(self, keys: list[ObjectKey]) -> None:
+        pass
+
+    def on_l1_keys_reserved_write(self, keys: list[ObjectKey]) -> None:
+        pass
+
+    def on_l1_keys_write_finished(self, keys: list[ObjectKey]) -> None:
+        self.stored.extend(keys)
+
+    def on_l1_keys_finish_write_and_reserve_read(self, keys: list[ObjectKey]) -> None:
+        pass
+
+    def on_l1_keys_deleted_by_manager(self, keys: list[ObjectKey]) -> None:
+        pass
+
+    def on_l1_keys_accessed(self, keys: list[ObjectKey]) -> None:
+        pass
+
+
+def _retain_all(keys: list[ObjectKey]) -> list[bool]:
+    return [True] * len(keys)
+
+
 class _Setup:
-    def __init__(self, window_count: int) -> None:
+    def __init__(
+        self,
+        window_count: int,
+        select_retentions: Callable[[list[ObjectKey]], list[bool]] = retain_none,
+    ) -> None:
         self.clock = _FakeClock()
         self.l1 = L1Manager(
             L1ManagerConfig(
@@ -81,8 +119,14 @@ class _Setup:
             ),
             fetch_timeout_seconds=FETCH_TIMEOUT,
         )
+        self.recorder = _WriteFinishedRecorder()
+        self.l1.register_listener(self.recorder)
         self.placer = RdmaWindowPlacer(
-            self.l1, RdmaWindowLeaser(self.l1, rdma, self.clock), LAYOUTS, NODE
+            self.l1,
+            RdmaWindowLeaser(self.l1, rdma, self.clock),
+            LAYOUTS,
+            NODE,
+            select_retentions,
         )
 
 
@@ -140,15 +184,67 @@ def test_every_object_lands_in_the_leased_window(one_window: _Setup) -> None:
     assert placement.keys() == [o.key for o in objects]
 
 
-def test_placed_objects_stay_unreadable_until_finished(one_window: _Setup) -> None:
+def test_retained_objects_stay_unreadable_until_finished() -> None:
+    setup = _Setup(window_count=1, select_retentions=_retain_all)
+    try:
+        objects = _objects(chunks=2)
+        placement = setup.placer.lease(objects)
+
+        assert not any(_readable(setup.l1, o.key) for o in objects)
+
+        placement.release(LeaseOutcome.FINISHED)
+
+        assert all(_readable(setup.l1, o.key) for o in objects)
+    finally:
+        setup.l1.close()
+
+
+def test_by_default_a_finished_lease_frees_its_objects(one_window: _Setup) -> None:
     objects = _objects(chunks=2)
-    placement = one_window.placer.lease(objects)
 
-    assert not any(_readable(one_window.l1, o.key) for o in objects)
+    one_window.placer.lease(objects).release(LeaseOutcome.FINISHED)
 
-    placement.release(LeaseOutcome.FINISHED)
+    assert all(one_window.l1.get_object_state(o.key) is None for o in objects)
+    assert one_window.l1.get_rdma_window_object_count(0) == 0
 
-    assert all(_readable(one_window.l1, o.key) for o in objects)
+
+def test_only_the_selected_objects_are_retained() -> None:
+    objects = _objects(chunks=2)
+    kept = objects[1].key
+    setup = _Setup(
+        window_count=1, select_retentions=lambda keys: [k == kept for k in keys]
+    )
+    try:
+        setup.placer.lease(objects).release(LeaseOutcome.FINISHED)
+
+        assert _readable(setup.l1, kept)
+        assert setup.l1.get_object_state(objects[0].key) is None
+    finally:
+        setup.l1.close()
+
+
+@pytest.mark.parametrize("select_retentions", [retain_none, _retain_all])
+def test_a_finished_lease_stores_nothing_back_to_l2(
+    select_retentions: Callable[[list[ObjectKey]], list[bool]],
+) -> None:
+    setup = _Setup(window_count=1, select_retentions=select_retentions)
+    try:
+        setup.placer.lease(_objects(chunks=2)).release(LeaseOutcome.FINISHED)
+
+        assert setup.recorder.stored == []
+    finally:
+        setup.l1.close()
+
+
+def test_a_wrong_number_of_retentions_is_refused_without_leasing() -> None:
+    setup = _Setup(window_count=1, select_retentions=lambda keys: [True])
+    try:
+        with pytest.raises(ValueError, match="retentions"):
+            setup.placer.lease(_objects(chunks=2))
+
+        assert setup.l1.get_rdma_window_object_count(0) == 0
+    finally:
+        setup.l1.close()
 
 
 def test_a_finished_window_is_leased_again_at_once(one_window: _Setup) -> None:

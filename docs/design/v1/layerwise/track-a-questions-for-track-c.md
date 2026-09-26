@@ -32,6 +32,7 @@ how contract changes are made.
 | L2: `ObjectToPlace` has no object key | **Done:** Track C added `key`; Track A's copy is gone | - |
 | L3: releasing a lease as `NEVER_FETCHED` | **Done:** aborts the writes without quarantine | - |
 | L4: sizing `window_bytes` from `request_bytes` | **Done:** `check_window_holds_request` | Track C: call it at registration |
+| F1-F5: review of `fetch-start-proposal.md` | **Option A agreed**; F1 (a finished lease stored its objects back to L2) fixed | Track A: F4's limit if wanted; Track C: F2, F3, F4 |
 
 ## Decisions
 
@@ -435,7 +436,8 @@ These are listed as blocked on Track A but are done:
 
 `fetch-start-proposal.md` open question 3 calls concurrent fetches "a later
 Track A item". W3 is done, so one lease per (request, rank) is possible now.
-Track A's review of the proposal follows separately.
+Track A's review of the proposal is
+[below](#track-as-review-of-fetch-start-proposalmd).
 
 ## Track C's replies on L1 to L4 (`track/c-planning` at `2a3c104d`)
 
@@ -477,6 +479,99 @@ Merged into `track/a-transport`. Track A's answers:
     bytes land outside the requested offsets.
   - Caveat: the real server's side, that it writes exactly `length` bytes at
     `offset`, is unverified until A8.
+
+## Track A's review of `fetch-start-proposal.md`
+
+Track A agrees with option A: report the hit at lookup, lease and fetch at
+retrieve. Windows are the scarce resource, and nothing is leased for a
+request that never reaches retrieve. Points from the transport side, most
+important first.
+
+### F1. A finished lease writes its objects back to L2 (Track A bug, fixed)
+
+`WindowPlacement.release(FINISHED)` calls `L1Manager.finish_write` on
+objects reserved with `is_temporary=False`. For a permanent object,
+`finish_write` notifies the listeners, and `StoreController` queues the key
+for an L2 store. So every pipelined fetch would write its objects straight
+back to Aerospike. Today's prefetch avoids both halves of this:
+
+- it reserves with `is_temporary` from `select_l1_retentions`, so under the
+  `default` policy the objects are temporary;
+- it finishes with `finish_write_and_reserve_read`, which `StoreController`
+  ignores on purpose.
+
+Point 4 of the proposal assumes the placer already follows the retention
+policy. **Fixed as done item 17:** the placer takes the retention choice at
+construction as `select_retentions`, with the signature of the policy's
+`select_l1_retentions`. It defaults to keeping nothing, like the `default`
+policy. `FINISHED` ends with `finish_write_and_reserve_read` then
+`finish_read`. Temporary objects are then freed at once, as the proposal
+expects, and retained ones become readable without a store.
+
+For Track C: `test_rdma_placer_end_to_end.py` now builds its placer with a
+retain-everything choice, since it reads the landed data back afterwards.
+
+### F2. Release `FINISHED` only after the sink's copies complete
+
+Under `default` retention, `FINISHED` frees the window objects, and the
+window can be leased again at once. The sink's per-layer copies run on a GPU
+stream, so retrieve must release the lease only after the sink's last copy
+has completed, not when it was enqueued. The same holds on the fallback
+path: its release is `ABANDONED`, which quarantines the window, so it is
+safe for `fetch_timeout_seconds` but shouldn't rely on that.
+
+### F3. Two requests deferring the same keys
+
+Shared prefixes make this common. When two requests defer the same chunk,
+the second request's placer fails: its `reserve_write(mode="new")` is
+refused because the first request holds the key write-reserved. The
+proposed fallback, a whole-object load "into fresh L1 objects" under the
+same keys, is refused for the same reason. Retrieve needs a rule for keys
+another request is fetching or has just fetched. Options:
+
+- re-check L1 at retrieve, and read-lock keys that are now resident instead
+  of placing them;
+- for keys still write-reserved by another fetch, wait for that fetch
+  within the layer budget, or recompute (open question 1).
+
+### F4. Eligibility should also check the slot count
+
+A plan larger than the per-fetch notification share is refused at
+`begin_fetch` with `PlanTooLargeError`. With W3's static split, the share is
+`depth / window_count`, which `pipelined_max_slots_per_request()` reports.
+At retrieve that refusal means the fallback. Checking only `request_bytes`
+at lookup misses it. The slot count follows from the fetch model and
+`max_record_bytes`, so it can be checked at lookup. Track A can expose the
+limit through the storage manager if Track C wants it.
+
+### F5. Eligibility can use readiness for the single-node rule
+
+Pipelined fetch is refused on clusters of more than one node (N1
+deferred), and the refusal shows up as not ready. So "the adapter has a
+ready pipelined path" covers it. `StorageManager.pipelined_fetch_node_name()`
+raises exactly when it doesn't.
+
+### Open questions, from the transport side
+
+- **Q2, fallback budget.** A whole-object fallback for a window-sized request
+  (512 MiB in the proposal's example) must land in the 2.5 s left after the
+  pump gives up, so about 200 MB/s end to end. That is plausible for one
+  request but not under load. A byte cap below `window_bytes` at lookup is
+  the safer default until it's measured.
+- **Q3, more than one reader.** W3 is done, so one lease per (request, rank)
+  is possible now. Each lease holds its own window, though. With
+  `window_count` windows, a request with `world_size` ranks takes
+  `world_size` of them, and `world_size > window_count` can never run.
+  Keeping `world_size == 1` for the first version is right. After that,
+  either the eligibility check counts windows, or one lease covers every
+  rank of a request, as one fetch with one sink per rank.
+- **Quarantine after failures.** Each abandoned fetch holds its window for
+  `fetch_timeout_seconds` (30 s by default). With four windows, four
+  failures inside 30 s send every pipelined request to the fallback until
+  the quarantines end. That is correct but worth a metric.
+- **A record gone at retrieve (Q1).** On the transport side, the server
+  declines the slot, the layer becomes `UNSERVABLE`, and the pump gives up
+  on it at once rather than after the timeout.
 
 ## Work that follows
 
@@ -612,6 +707,13 @@ Merged into `track/a-transport`. Track A's answers:
     For Track C, the registration wiring can then build
     `RdmaWindowPlacer(l1_manager, leaser, layouts,
     storage_manager.pipelined_fetch_node_name())`.
+17. The placer follows the prefetch retention policy and never stores its
+    objects back to L2 (F1). `RdmaWindowPlacer` takes `select_retentions`,
+    which defaults to keeping nothing. `FINISHED` ends with
+    `finish_write_and_reserve_read` then `finish_read`, so objects that
+    aren't retained are freed at once. A test listener checks that no
+    write-finished notification, the store controller's trigger, is sent
+    under either retention.
 
 These were verified on the Soft-RoCE VM
 ([rdma_testing_on_windows.md](../distributed/l2_adapters/rdma_testing_on_windows.md)):
@@ -620,7 +722,7 @@ These were verified on the Soft-RoCE VM
   C client 7.3.0;
 - device-free logic harness: 364 checks pass;
 - fabric harness over `rxe0`: 415 checks pass;
-- `tests/v1/layerwise/` and `tests/v1/distributed/` pass (1284 passed, 92
+- `tests/v1/layerwise/` and `tests/v1/distributed/` pass (1289 passed, 92
   skipped, with Track C's `2a3c104d` merged), including the conformance
   suite over both sources, concurrent fetches over the real native pool, and
   Track C's end-to-end retrieve over the production placer;

@@ -137,11 +137,13 @@ class _Setup:
             ),
             fetch_timeout_seconds=FETCH_TIMEOUT,
         )
+        # Retain every fetched object, so a test can read back what landed.
         self.rdma_placer = RdmaWindowPlacer(
             self.l1,
             RdmaWindowLeaser(self.l1, rdma, self.clock),
             GROUP_LAYOUTS,
             TEST_NODE_NAMES[0],
+            lambda keys: [True] * len(keys),
         )
         self.placer = _RecordingPlacer(self.rdma_placer)
         self.connector: FabricFreeClient = fabric_free_connector(window_count)

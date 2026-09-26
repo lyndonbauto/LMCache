@@ -17,7 +17,7 @@ offset is its slab offset, ``memory_obj.meta.address``.
 """
 
 # Standard
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 import enum
 
 # First Party
@@ -78,6 +78,21 @@ def check_window_holds_request(
             f"retrieve of {max_pipelined_chunks} chunks; set rdma_window_bytes "
             f"to at least {needed}"
         )
+
+
+def retain_none(keys: list[ObjectKey]) -> list[bool]:
+    """Keep none of the fetched objects in L1 once their fetch finishes.
+
+    The placer's default retention, matching the ``default`` prefetch
+    policy's ``select_l1_retentions``.
+
+    Args:
+        keys: Keys of the objects being placed.
+
+    Returns:
+        ``False`` for every key.
+    """
+    return [False] * len(keys)
 
 
 def _align_up(size: int, align_bytes: int) -> int:
@@ -178,9 +193,11 @@ class WindowPlacement:
     def release(self, outcome: LeaseOutcome) -> None:
         """End the placement, stating how its fetch ended.
 
-        - ``FINISHED``: every layer became resident. The writes are
-          finished, so the objects become readable L1 cache entries, and the
-          window is reusable at once.
+        - ``FINISHED``: every layer became resident and the reader has
+          consumed it. Objects the placer's retention keeps become readable
+          L1 cache entries; the rest are freed. Neither is stored back to
+          L2, since that is where they came from. The window is reusable at
+          once, so the reader's copies out of it must have completed.
         - ``NEVER_FETCHED``: nothing was issued, so no write can be on the
           wire. The reservations are aborted and the window is reusable at
           once.
@@ -209,12 +226,20 @@ class WindowPlacement:
             self._abort(FetchOutcome.ABANDONED)
 
     def _finish(self) -> None:
-        """Finish every write and release the window as reusable."""
+        """End every write as a consumed load and release the window.
+
+        ``finish_write_and_reserve_read`` rather than ``finish_write``: the
+        store controller ignores it, so nothing is stored back to L2. The
+        read lock is dropped at once, which frees temporary objects.
+        """
+        keys = self.keys()
         try:
-            results = self._l1_manager.finish_write(self.keys())
+            results = self._l1_manager.finish_write_and_reserve_read(keys)
+            finished = [k for k, (e, _) in results.items() if e == L1Error.SUCCESS]
+            self._l1_manager.finish_read(finished)
         finally:
             self._leaser.release(self._window, FetchOutcome.FINISHED)
-        failed = {k: e for k, e in results.items() if e != L1Error.SUCCESS}
+        failed = {k: e for k, (e, _) in results.items() if e != L1Error.SUCCESS}
         if failed:
             raise RuntimeError(f"L1 refused to finish writes: {failed}")
 
@@ -249,6 +274,7 @@ class RdmaWindowPlacer:
         leaser: RdmaWindowLeaser,
         layouts: Mapping[int, MemoryLayoutDesc],
         node_name: str,
+        select_retentions: Callable[[list[ObjectKey]], list[bool]] = retain_none,
     ) -> None:
         """Create a placer for one registered model on a single-node cluster.
 
@@ -260,6 +286,10 @@ class RdmaWindowPlacer:
                 L1.
             node_name: The cluster's one node, which every object is fetched
                 from.
+            select_retentions: Given the keys of one lease's objects, in
+                order, returns whether to keep each in L1 after its fetch
+                finishes, as the prefetch policy's ``select_l1_retentions``
+                does. Called once per lease. Defaults to keeping none.
 
         Raises:
             ValueError: If ``layouts`` is empty or ``node_name`` is empty.
@@ -272,6 +302,7 @@ class RdmaWindowPlacer:
         self._leaser = leaser
         self._layouts = dict(layouts)
         self._node_name = node_name
+        self._select_retentions = select_retentions
         self._align_bytes = l1_manager.get_l1_memory_desc().align_bytes
 
     def lease(self, objects: Sequence[ObjectToPlace]) -> WindowPlacement:
@@ -287,7 +318,9 @@ class RdmaWindowPlacer:
         Raises:
             ValueError: If ``objects`` is empty, repeats a pair, names an
                 object group with no layout, or is larger than its group's
-                L1 layout, so the fetched bytes would overrun the object.
+                L1 layout, so the fetched bytes would overrun the object;
+                or if ``select_retentions`` returns the wrong number of
+                choices.
             PlanTooLargeError: If the objects, each rounded up to the L1
                 alignment, do not fit in one window. The caller can split
                 the request.
@@ -296,9 +329,17 @@ class RdmaWindowPlacer:
                 is left reserved or leased. The caller falls back.
         """
         request_bytes = self._request_bytes(objects)
+        keys = [o.key for o in objects]
+        retentions = self._select_retentions(keys)
+        if len(retentions) != len(keys):
+            raise ValueError(
+                f"select_retentions returned {len(retentions)} choices for "
+                f"{len(keys)} objects"
+            )
+        retained = {key for key, keep in zip(keys, retentions, strict=True) if keep}
         window = self._leaser.lease(request_bytes)
         try:
-            reserved = self._reserve_all(objects, window)
+            reserved = self._reserve_all(objects, window, retained)
         except BaseException:
             self._leaser.release(window, FetchOutcome.FINISHED)
             raise
@@ -332,8 +373,12 @@ class RdmaWindowPlacer:
         self,
         objects: Sequence[ObjectToPlace],
         window: LeasedWindow,
+        retained: set[ObjectKey],
     ) -> dict[tuple[int, int], tuple[ObjectKey, MemoryObj]]:
         """Reserve ``objects`` in the leased window, undoing all on failure.
+
+        Objects whose key is in ``retained`` are reserved permanent, the
+        rest temporary.
 
         Raises:
             PlanTooLargeError: If the window ran out of room despite the size
@@ -349,7 +394,7 @@ class RdmaWindowPlacer:
             keys = [o.key for o in group_objects]
             results = self._l1_manager.reserve_write(
                 keys,
-                [False] * len(keys),
+                [key not in retained for key in keys],
                 self._layouts[group_id],
                 mode="new",
                 pool=window.pool(),
