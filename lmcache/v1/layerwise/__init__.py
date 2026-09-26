@@ -59,7 +59,7 @@ from .planner import (
     plane_segment_bytes,
     record_plane_runs,
 )
-from .pump import LayerArrivalPump
+from .pump import LayerArrivalPump, LoadLeftOpenError
 
 __all__ = [
     "MAX_SLOTS_PER_REQUEST",
@@ -80,6 +80,7 @@ __all__ = [
     "LayerUnservableError",
     "LayerWaitOutcome",
     "LayerwiseContractError",
+    "LoadLeftOpenError",
     "LoadObserver",
     "ModelLayout",
     "PipelinedFetchArguments",

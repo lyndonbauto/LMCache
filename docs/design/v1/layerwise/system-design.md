@@ -353,6 +353,15 @@ precise about why, so nobody re-attempts them in Python:
   generally spread across nodes. The chunk-level native call binds a whole
   chunk to one node (`ChunkNodeBinding`), and `chunk_fetch_arguments` refuses
   a plan that would need otherwise.
+
+  **Interim: single-node clusters only.** The planner still takes one node
+  per object from the placer and sends every record of that object there.
+  That is correct when the cluster has one node, as on the Soft-RoCE setup.
+  On more nodes most slots would reach a node that does not hold their
+  record and be declined, so the pipelined path must not be enabled there;
+  such a request takes the whole-object path. Routing each record to the
+  node that holds it belongs to the client-server interface and is future
+  work (see [track-c-status.md](track-c-status.md), "Future work").
 - **Destination offsets.** Chosen when a chunk's object is placed in the
   request's leased RDMA window (see "Window ownership" below), so they are an
   input to planning rather than something planning derives.
@@ -466,8 +475,12 @@ sliding-window group reads.
 
 ### Window ownership (decided 2026-09-25, M2)
 
-Offsets in a plan are relative to the start of the request's **leased RDMA
-window**, and Track A owns the lease. The whole L1 region is *not* one window:
+Every destination in a plan lies inside the request's **leased RDMA
+window**, and Track A owns the lease. Offsets are measured from the start of
+the registration (the L1 slab), not of the window: a node allows few
+registered regions, so one registration covers every window and a window is
+a range `[window_start, window_start + window_bytes)` inside it (Track A's
+P1). The whole L1 region is *not* one window:
 that reverses the bounded-window decision in
 [aerospike_rdma.md](../distributed/l2_adapters/aerospike_rdma.md#registration-scope-bounded-windows),
 because a late write from an abandoned fetch would land in whatever
@@ -495,9 +508,11 @@ once at startup. What is decided:
 4. **Track A builds the lease API** and the production `ChunkPlacer` on top
    of it. The interface is defined in `request_fetch.py`:
    `ChunkPlacer.lease(objects) -> WindowLease`, where `WindowLease` has
-   `window_bytes()`, `locate(chunk, group) -> ChunkLocation` (a
-   window-relative offset) and `release(LeaseOutcome)`. The lease is per
-   request because the window is; `locate()` is per object.
+   `window_start()`, `window_bytes()`, `locate(chunk, group) ->
+   ChunkLocation` (a registration offset inside the window) and
+   `release(LeaseOutcome)`. The lease is per request because the window is;
+   `locate()` is per object. `build_request_fetch` refuses any location
+   outside `[window_start, window_start + window_bytes)`.
 
 **Where the code stands.** None of the above exists yet. `RdmaWindowPlan`
 carves `window_count × window_bytes` from the start of the slab, but the L1
@@ -521,7 +536,7 @@ allocator over the slab *minus* the window range, and the window pool gets
 its own small sub-allocator. Nothing else in `l1_manager` changes. Track A
 owns it because only the transport's safety depends on it.
 
-**Window size: one request, one window, sized from the model.** The 8 MiB
+**Window size: one request, one window, checked against the model.** The 8 MiB
 default is a test-harness constant. KV per token is `2 × layers × kv_heads ×
 head_dim × bytes`, so at fp16:
 
@@ -530,12 +545,16 @@ head_dim × bytes`, so at fp16:
 | Llama-2-7B (32 KV heads) | 512 KiB | 128 MiB | 2 GiB |
 | Llama-3-8B / Mistral-7B (8 KV heads) | 128 KiB | 32 MiB | 512 MiB |
 
-Not one chunk fits in 8 MiB. The default is instead computed at init from the
-registered KV layout, with window-relative offsets. `FetchModel.request_bytes(
-num_chunks, align_bytes)` gives the bytes one retrieve of `num_chunks` chunks
-places in its window. It counts only the chunks a sliding-window group reads,
-skips aux groups, and rounds each object up to `align_bytes`, so the connector
-sizes `window_bytes` as `request_bytes(max_pipelined_chunks, slab_alignment)`. Other limits stay comfortable: a
+Not one chunk fits in 8 MiB. But `window_bytes` cannot be derived from the
+model: the windows are carved out when L1 is built, and the KV layout only
+arrives later, when a worker registers its KV cache. So `window_bytes` stays
+in config, and the connector checks it at registration instead.
+`FetchModel.request_bytes(num_chunks, align_bytes)` gives the bytes one
+retrieve of `num_chunks` chunks places in its window. It counts only the
+chunks a sliding-window group reads, skips aux groups, and rounds each
+object up to `align_bytes`. At registration the connector compares
+`request_bytes(max_pipelined_chunks, slab_alignment)` with `window_bytes`
+and, if the window is too small, reports the size needed. Other limits stay comfortable: a
 512 MiB window of 960 KiB records is ~550 slots, far under 65536 and
 Soft-RoCE's receive queue (EFA's limit is still A7). A request larger than a
 window is not spread over several windows; the placer refuses it and retrieve

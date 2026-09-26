@@ -35,8 +35,10 @@ All done (2026-09-25):
    WindowLease`, released with a `LeaseOutcome`. The builder rejects
    placements outside the window or overlapping. Track A implements the
    production placer against it.
-3. **Window sizing input for Track A.** Done:
-   `FetchModel.request_bytes(num_chunks, align_bytes)`.
+3. **Window size check for Track A.** Done:
+   `FetchModel.request_bytes(num_chunks, align_bytes)`. `window_bytes`
+   stays in config, since the windows exist before any layout does; Track A
+   checks it against this at registration (L4).
 4. **PR split plan** for upstreaming this branch (below).
 5. **Loader conformance suite.** Done: `test_load_sink_conformance.py`,
    `LoadObserver` and `SINK_HARNESS_FACTORIES`, running against the
@@ -68,13 +70,83 @@ All done (2026-09-25):
 - ~~**Loader launch order.**~~ Raised by Track B: loads are strictly
   ascending, and a loader refuses any other order. Pinned in the loader
   suite.
+- ~~**Offsets for windows past the first.**~~ Decided by Track A (P1):
+  offsets are registration (slab) offsets, because one registration covers
+  every window. Done: the lease reports `window_start()` and the builder
+  checks `[window_start, window_start + window_bytes)`.
+- ~~**Nodes per record (N1).**~~ Deferred to the client-server owner; the
+  pipelined path is single-node only until then (see "Future work").
+- ~~**What vLLM does when a retrieve fails mid-step (Track B's R5, the
+  proposal's open question 1).**~~ Done:
+  [vllm-load-failure.md](vllm-load-failure.md). Raising in attention kills
+  vLLM's engine; failed blocks reported in the same step are recomputed
+  under `kv_load_failure_policy: "recompute"`. Track B's connector must
+  report instead of raising; the daemon fails a retrieve only by abandoning
+  the sink.
+- **Track B's questions, answered 2026-09-25** (details in
+  [fetch-start-proposal.md](fetch-start-proposal.md) and
+  [contract-changes.md](contract-changes.md)):
+  - *Fallback vs. abandon:* neither abandon nor a new generation works; the
+    fallback continues the same sink load. Done on the pump side:
+    `run_resumable` abandons only the source and raises `LoadLeftOpenError`
+    with the layers still to load. The fallback that uses it is PR 2.
+  - *When live traffic reaches Track B's sink:* after the fetch-start
+    proposal is accepted. PR 2 wires retrieve with the recording sink, PR 3
+    swaps in Track B's.
+  - *Reading objects still landing:* through `WindowLease.memory_obj`
+    (added), which retrieve passes to the sink; not through L1 reads, which
+    refuse write-reserved objects.
+  - *Layout:* confirmed on the planner side and written into
+    `LayerArrivalStatus.RESIDENT`. Track A should confirm the transport
+    side (a slot lands exactly at its plan offset).
+  - *Timeout order (R6):* the pump's default is now 2.5 s, below the
+    worker's 5 s. A startup check needs the worker's value in the
+    registration, which lands with C9.
+
+## Future work
+
+### Route each record to the node that holds it
+
+**Owner:** the owner of the client-server interaction (not Tracks A, B or
+C). Raised by Track A as N1; deferred 2026-09-25.
+
+**The problem.** The writer splits an object into records
+(`{cache_key}|s|{i}`), and Aerospike places each record by the digest of its
+own key. So one object's records are spread across the cluster, as they
+should be. The pipelined fetch, though, sends raw kv-sink commands straight
+to a node rather than going through a normal client read, which routes each
+key for you. Only the node that holds a record can write it into our window;
+any other node declines. The planner currently sends all of an object's
+records to one node.
+
+**Interim (now).** Pipelined fetch is supported only against a single-node
+cluster, where every record is on that node. On more nodes the pipelined
+path must stay disabled and requests take the whole-object path. Nothing is
+lost there except the pipelining.
+
+**What a proper interface needs.** A way to fetch records into registered
+memory without the planner knowing which node holds each one. The two shapes
+discussed:
+
+- **Batch reads.** The client issues the pipelined fetch as a batch and
+  routes each record by its partition, as a normal batch get does.
+- **Node-direct routing.** The planner asks a record-to-node lookup for each
+  slot, e.g. the native `record_node(record_key)` over the client's partition
+  map, and the session groups slots by node.
+
+**What changes on our side when it lands.** Nodes move from objects to
+slots: `ChunkLocation` and `ChunkPlacement` lose their node field, and the
+placer only decides destinations. Either the planner sets
+`SlotPlacement.node_index` per slot from the lookup, or, with batch reads,
+nodes leave the plan altogether. The contract's `LayerFetchPlan.node_names`
+is the part that would change.
 
 ## Blocked on other tracks
 
 | Item | Waiting on | Owner |
 |---|---|---|
 | Aerospike source in the conformance suite | Fabric-free `ArrivalDriver`, which needs a test-only binding feeding the real native session | Track A |
-| Production `ChunkPlacer` / `WindowLease` | Allocator reservation PR (with all-or-nothing delete), publishing every window, sizing `window_bytes` with `request_bytes` | Track A |
+| Production `ChunkPlacer` / `WindowLease` | Allocator reservation PR (with all-or-nothing delete), publishing every window, checking `window_bytes` with `request_bytes` at registration | Track A |
 | Pipelined retrieve enabled for real | A working `LayerLoadSink`; Track B's branch has only the stub (`layerwise_sink.py`, 2026-09-22) | Track B |
 | Hooking orchestration into `retrieve` | The fetch-start decision above | Us + Track A + storage-manager maintainers |
 | Removing the chunk-level path (`chunk_fetch_arguments`, `issue_pipelined_fetch_by_keys`, `StorageManager.begin_pipelined_fetch`) | Track A on the slot-level path and rebased onto this branch | Track A |

@@ -163,8 +163,11 @@ class ChunkPlacement:
         object_group_id: Object group this placement is for. A chunk has one
             placement per object group it participates in.
         node_index: Index into :attr:`PlanRequest.node_names` identifying the
-            cluster node holding this chunk. A chunk's object is stored whole
-            on one node, so every slot cut from it is fetched from there.
+            cluster node every slot cut from this object is fetched from.
+            This is only correct on a single-node cluster: each of an
+            object's records is placed by the digest of its own key, so on
+            more nodes they are spread out. Per-record routing is future
+            work (see ``docs/design/v1/layerwise/track-c-status.md``).
         dest_offset: Base offset of this object within the registered window.
 
     Raises:

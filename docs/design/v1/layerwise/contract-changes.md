@@ -11,6 +11,114 @@ defect coming back.
 
 ---
 
+## A resumable pump; the lease hands out each object's memory
+
+**Who is affected:** Track A (the production lease must implement
+`memory_obj`); Track B (how the fallback continues your load, and where
+your sink's objects come from). No change to `run`.
+
+**What changed.**
+
+- **`LayerArrivalPump.run_resumable(plan)`** (in `pump.py`): like `run`,
+  except that when the transport fails (a layer unservable or timed out) it
+  abandons only the source, leaves the sink's load open, and raises
+  `LoadLeftOpenError`. The error carries `generation`, `remaining_layers`
+  (ascending; the first is the layer that failed) and `transport_error`. The
+  caller then owns the load: it loads the remaining layers some other way
+  and finishes it, or abandons it. A loader failure or contract error still
+  abandons both sides. `run` is now `run_resumable` plus abandoning the
+  sink, and raises exactly what it raised before.
+- **`WindowLease.memory_obj(chunk_id, object_group_id) -> MemoryObj`** (in
+  `request_fetch.py`): the L1 object a placed object is fetched into. Its
+  address is the offset `locate` returns. It stays valid until the lease is
+  released.
+
+**What breaks.** A `WindowLease` without `memory_obj`. Track A's
+`WindowPlacement.memory_obj` already has this shape; the adapter in
+`test_rdma_placer_end_to_end.py` forwards to it and checks that address and
+offset agree.
+
+**Why.** For the resumable pump: the fallback cannot abandon the sink,
+because that fails the worker's waits at once, and it cannot start a new
+generation, because the worker raises on a newer one. So it has to continue
+the load the pump was driving (see
+[fetch-start-proposal.md](fetch-start-proposal.md)). For `memory_obj`: a
+loader copies layer *L* while the object's later layers are still landing.
+The object is write-reserved in L1 until the lease is released `FINISHED`,
+so an ordinary L1 read refuses it. The lease's handle is the sanctioned way
+in.
+
+Neither is called from production code yet. When retrieve is wired (C9),
+it leases first, builds the sink from the lease's objects, then drives the
+pump, so `run_pipelined_retrieve` will take a way to build the pump from the
+lease rather than a ready-made pump.
+
+---
+
+## The pump gives up before the worker; RESIDENT spelled out
+
+**Who is affected:** Track B (raised all three; one stricter suite test).
+
+**What changed.**
+
+- **`DEFAULT_LAYER_TIMEOUT_SECONDS`** (in `pump.py`) is 2.5 s, down from
+  30 s. It must stay below the worker's per-layer wait,
+  `lmcache.mp.layerwise_wait_timeout_seconds` (5 s).
+- **`LayerArrivalStatus.RESIDENT`** now says what "every slot landed"
+  covers: every K/V plane of the layer in every chunk the retrieve reads for
+  the layer's group, each at the offset those bytes have in a normally
+  loaded object. So a layer is complete but not contiguous.
+- **The loader suite's gap test** loads past the gap and finishes, instead
+  of stopping after layer 0.
+
+**What breaks.** A loader that marks layers ready by counting copies now
+fails the gap test. No caller passes the pump's default timeout yet.
+
+**Why.** With 30 s against the worker's 5 s, the worker could time out and
+leave attention while the pump went on copying layers into GPU blocks vLLM
+no longer expected to be written. The pump starts waiting for a layer
+before the worker does, so a shorter timeout makes it give up first, and
+its abandon reaches the worker as a failure flag. Nothing checks the two
+timeouts against each other at startup yet: the daemon never learns the
+worker's value, because the registration does not carry it. When retrieve
+builds the pump (C9), the registration should carry the worker's timeout so
+retrieve can derive the pump's from it and refuse a bad pair.
+
+The old gap test stopped after layer 0, where copy counting and layer
+tracking agree, so the copy-counting loader it was meant to catch passed.
+
+---
+
+## Destination offsets are registration offsets; a lease reports its start
+
+**Who is affected:** Track A (the production lease must implement
+`window_start()`); no contract change for Track B.
+
+**What changed.**
+
+- **`WindowLease.window_start()`** (in `request_fetch.py`): where the leased
+  window begins, measured from the start of the registration.
+- **`ChunkLocation.dest_offset`** is a registration offset (the L1 slab
+  offset, `memory_obj.meta.address` on Track A's placer), no longer
+  window-relative.
+- **`build_request_fetch`** accepts a location only inside
+  `[window_start, window_start + window_bytes)`; before, the range was
+  `[0, window_bytes)`.
+- **Per-object nodes** are documented as correct only on a single-node
+  cluster. Per-record routing is deferred to the client-server owner; see
+  "Future work" in [track-c-status.md](track-c-status.md).
+
+**What breaks.** A lease without `window_start()`. Offsets from window 0
+(which starts at 0) mean the same as before.
+
+**Why.** Track A publishes every window through one registration, because a
+node allows few registered regions (P1). A node writes at an offset into
+that registration, so a window-relative offset would send every window's
+writes into window 0, and the old check refused every placement in any other
+window.
+
+---
+
 ## Loads are strictly ascending; the first reply for a slot is final
 
 **Who is affected:** Track B (the loader must refuse non-ascending loads);
@@ -113,8 +221,9 @@ changes.
 - `build_request_fetch(model, keys, max_record_bytes, lease)` takes the
   lease and raises `ValueError` for an object outside the window or
   overlapping another.
-- New `FetchModel.request_bytes(num_chunks, align_bytes=1)` for sizing
-  `window_bytes` from the model.
+- New `FetchModel.request_bytes(num_chunks, align_bytes=1)` for checking
+  the configured `window_bytes` against the model at registration (the
+  windows exist before the layout, so it cannot size them).
 - New `pipelined_retrieve.run_pipelined_retrieve(model, keys,
   max_record_bytes, placer, pump)`: lease, plan, pump, release, with every
   refusal surfacing as `LayerwiseContractError`.

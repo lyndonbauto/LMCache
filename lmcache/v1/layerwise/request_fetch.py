@@ -37,6 +37,7 @@ from lmcache.v1.layerwise.planner import (
     PlanRequest,
     RecordKeys,
 )
+from lmcache.v1.memory_management import MemoryObj
 
 
 def first_in_window_chunk(num_chunks: int, window_chunks: int) -> int:
@@ -69,9 +70,13 @@ class ChunkLocation:
     """Where one chunk's object is fetched from and delivered to.
 
     Attributes:
-        node_name: Cluster node that serves the object.
-        dest_offset: Byte offset of the object from the start of the leased
-            window.
+        node_name: Cluster node every record of the object is fetched from;
+            only correct on a single-node cluster (see
+            :attr:`~lmcache.v1.layerwise.planner.ChunkPlacement.node_index`).
+        dest_offset: Byte offset of the object from the start of the
+            registered memory the nodes write into -- the L1 slab, since one
+            registration covers every window. It lies inside the leased
+            window, ``[window_start, window_start + window_bytes)``.
     """
 
     node_name: str
@@ -85,11 +90,14 @@ class ObjectToPlace:
     Attributes:
         chunk_id: Index of the chunk within the request.
         object_group_id: Object group the object belongs to.
+        key: The object's key, which the placer reserves the object under
+            in L1 so the fetched data stays where it lands.
         object_bytes: Size of the object, which its destination must fit.
     """
 
     chunk_id: int
     object_group_id: int
+    key: ObjectKey
     object_bytes: int
 
 
@@ -116,10 +124,18 @@ class WindowLease(Protocol):
     """One request's hold on an RDMA window, with its objects placed in it.
 
     Released exactly once, with the outcome of the fetch that used it.
+
+    Offsets are measured from the start of the registration, not of the
+    window: a node allows few registered regions, so one registration covers
+    every window and a window is a range inside it.
     """
 
+    def window_start(self) -> int:
+        """Return where the leased window begins, as a registration offset."""
+        ...
+
     def window_bytes(self) -> int:
-        """Return the size of the leased window; offsets stay below it."""
+        """Return the size of the leased window."""
         ...
 
     def locate(self, chunk_id: int, object_group_id: int) -> ChunkLocation:
@@ -130,7 +146,29 @@ class WindowLease(Protocol):
             object_group_id: Object group the object belongs to.
 
         Returns:
-            The object's node and window-relative destination offset.
+            The object's node and destination offset.
+
+        Raises:
+            KeyError: If the object was not among those the lease placed.
+        """
+        ...
+
+    def memory_obj(self, chunk_id: int, object_group_id: int) -> MemoryObj:
+        """Return the L1 object one placed object is fetched into.
+
+        The loader reads fetched layers through this handle while the
+        object's later layers are still landing. The object stays
+        write-reserved in L1 until the lease is released ``FINISHED``, so an
+        ordinary L1 read refuses it, which also keeps other requests from
+        seeing it half written. Its address is the offset :meth:`locate`
+        returns.
+
+        Args:
+            chunk_id: Index of the chunk within the request.
+            object_group_id: Object group the object belongs to.
+
+        Returns:
+            The object's memory, valid until the lease is released.
 
         Raises:
             KeyError: If the object was not among those the lease placed.
@@ -190,7 +228,9 @@ class FetchModel:
         chunks: every object the retrieve reads, each rounded up to
         ``align_bytes``. Sliding-window groups contribute only their window,
         and aux groups nothing, exactly as :func:`request_cache_keys` selects
-        objects. The transport sizes ``window_bytes`` from this at init.
+        objects. The transport checks its configured ``window_bytes``
+        against this when a model registers, since the windows are carved
+        out before any layout is known.
 
         Args:
             num_chunks: Chunks in the request.
@@ -373,7 +413,12 @@ def objects_to_place(
     """
     cache_keys = request_cache_keys(obj_keys_per_obj_group, model.attn_desc)
     return tuple(
-        ObjectToPlace(chunk_id, group_id, model.layout.object_group_bytes(group_id))
+        ObjectToPlace(
+            chunk_id,
+            group_id,
+            obj_keys_per_obj_group[group_id][chunk_id],
+            model.layout.object_group_bytes(group_id),
+        )
         for chunk_id, group_id in sorted(cache_keys)
     )
 
@@ -411,7 +456,8 @@ def build_request_fetch(
             reads, or the lease cannot locate an object.
     """
     cache_keys = request_cache_keys(obj_keys_per_obj_group, model.attn_desc)
-    window_bytes = lease.window_bytes()
+    window_start = lease.window_start()
+    window_end = window_start + lease.window_bytes()
     node_indices: dict[str, int] = {}
     placements: list[ChunkPlacement] = []
     extents: list[tuple[int, int, tuple[int, int]]] = []
@@ -419,11 +465,11 @@ def build_request_fetch(
         location = lease.locate(chunk_id, group_id)
         object_bytes = model.layout.object_group_bytes(group_id)
         end = location.dest_offset + object_bytes
-        if location.dest_offset < 0 or end > window_bytes:
+        if location.dest_offset < window_start or end > window_end:
             raise ValueError(
                 f"object (chunk {chunk_id}, group {group_id}) placed at "
-                f"[{location.dest_offset}, {end}), outside the "
-                f"{window_bytes}-byte window"
+                f"[{location.dest_offset}, {end}), outside the leased "
+                f"window [{window_start}, {window_end})"
             )
         extents.append((location.dest_offset, end, (chunk_id, group_id)))
         node_index = node_indices.setdefault(location.node_name, len(node_indices))

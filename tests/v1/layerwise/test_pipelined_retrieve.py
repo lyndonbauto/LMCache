@@ -95,7 +95,9 @@ class CrashingLocatePlacer(PackingPlacer):
 
     def lease(self, objects: Sequence[ObjectToPlace]) -> PackingLease:
         lease = super().lease(objects)
-        crashing = CrashingLocateLease(lease.window_bytes(), lease.locations)
+        crashing = CrashingLocateLease(
+            lease.window_bytes(), lease.locations, lease.window_start()
+        )
         self.leases[-1] = crashing
         return crashing
 
@@ -113,7 +115,9 @@ class FailingReleasePlacer(PackingPlacer):
 
     def lease(self, objects: Sequence[ObjectToPlace]) -> PackingLease:
         lease = super().lease(objects)
-        failing = FailingReleaseLease(lease.window_bytes(), lease.locations)
+        failing = FailingReleaseLease(
+            lease.window_bytes(), lease.locations, lease.window_start()
+        )
         self.leases[-1] = failing
         return failing
 
@@ -349,9 +353,5 @@ def test_object_sizes_reach_the_placer_unrounded() -> None:
 
     (request,) = placer.requests
     assert all(
-        o
-        == ObjectToPlace(
-            o.chunk_id, o.object_group_id, layout.object_group_bytes(o.object_group_id)
-        )
-        for o in request
+        o.object_bytes == layout.object_group_bytes(o.object_group_id) for o in request
     )

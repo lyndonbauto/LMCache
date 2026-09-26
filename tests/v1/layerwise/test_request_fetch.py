@@ -136,7 +136,8 @@ def test_slots_tile_each_object_at_its_placed_destination() -> None:
 def test_the_placer_is_asked_once_per_request_with_every_objects_size() -> None:
     """One lease covers the request, and each destination must fit its object."""
     placer = PackingPlacer()
-    fetch = plan_for(resolve_obj_keys(vllm_request()), placer)
+    keys = resolve_obj_keys(vllm_request())
+    fetch = plan_for(keys, placer)
     layout = fetch_model().layout
 
     (request,) = placer.requests
@@ -144,6 +145,7 @@ def test_the_placer_is_asked_once_per_request_with_every_objects_size() -> None:
         ObjectToPlace(
             p.chunk_id,
             p.object_group_id,
+            keys[p.object_group_id][p.chunk_id],
             layout.object_group_bytes(p.object_group_id),
         )
         for p in fetch.request.placements
@@ -151,12 +153,16 @@ def test_the_placer_is_asked_once_per_request_with_every_objects_size() -> None:
 
 
 def _lease_with(
-    window_bytes: int, others_from: int = 1 << 20, **offsets: int
+    window_bytes: int,
+    others_from: int = 1 << 20,
+    window_start: int = 0,
+    **offsets: int,
 ) -> tuple[PackingLease, list[list[ObjectKey]]]:
     """A lease placing the request's objects at chosen offsets.
 
     ``offsets`` maps ``c<chunk>g<group>`` to a destination offset; every other
-    object is packed back to back from ``others_from``.
+    object is packed back to back from ``others_from``. All offsets are
+    registration offsets, as is ``window_start``.
     """
     keys = resolve_obj_keys(vllm_request())
     objects = objects_to_place(fetch_model(), keys)
@@ -170,7 +176,7 @@ def _lease_with(
             offset = cursor
             cursor += obj.object_bytes
         locations[(obj.chunk_id, obj.object_group_id)] = ChunkLocation("n", offset)
-    return PackingLease(window_bytes, locations), keys
+    return PackingLease(window_bytes, locations, window_start), keys
 
 
 def test_an_object_reaching_past_the_window_is_refused() -> None:
@@ -198,6 +204,69 @@ def test_a_negative_offset_is_refused() -> None:
 
     with pytest.raises(ValueError, match="outside the"):
         build_request_fetch(fetch_model(), keys, MAX_RECORD_BYTES, lease)
+
+
+WINDOW_START = 3 << 30
+WINDOW_BYTES = 1 << 30
+
+
+def test_a_later_window_plans_registration_offsets() -> None:
+    """Offsets inside a window past the first are planned as given."""
+    placer = PackingPlacer(window_bytes=WINDOW_BYTES, window_start=WINDOW_START)
+    keys = resolve_obj_keys(vllm_request())
+    lease = placer.lease(objects_to_place(fetch_model(), keys))
+
+    fetch = build_request_fetch(fetch_model(), keys, MAX_RECORD_BYTES, lease)
+
+    assert min(p.dest_offset for p in fetch.request.placements) == WINDOW_START + 4096
+    assert min(s.offset for s in fetch.plan.slots) == WINDOW_START + 4096
+    assert max(s.offset + s.length for s in fetch.plan.slots) <= (
+        WINDOW_START + WINDOW_BYTES
+    )
+
+
+def test_an_object_before_the_window_start_is_refused() -> None:
+    """Bytes below the window belong to another window's lease."""
+    lease, keys = _lease_with(
+        WINDOW_BYTES,
+        others_from=WINDOW_START,
+        window_start=WINDOW_START,
+        c1g0=WINDOW_START - 1,
+    )
+
+    with pytest.raises(ValueError, match="outside the leased window"):
+        build_request_fetch(fetch_model(), keys, MAX_RECORD_BYTES, lease)
+
+
+def test_an_object_past_a_later_window_end_is_refused() -> None:
+    """The end bound moves with the window, not with its size alone."""
+    size = fetch_model().layout.object_group_bytes(0)
+    end = WINDOW_START + WINDOW_BYTES
+    lease, keys = _lease_with(
+        WINDOW_BYTES,
+        others_from=WINDOW_START,
+        window_start=WINDOW_START,
+        c1g0=end - size + 1,
+    )
+
+    with pytest.raises(ValueError, match="outside the leased window"):
+        build_request_fetch(fetch_model(), keys, MAX_RECORD_BYTES, lease)
+
+
+def test_an_object_ending_at_a_later_window_end_is_accepted() -> None:
+    """The last byte of a later window is usable."""
+    size = fetch_model().layout.object_group_bytes(0)
+    end = WINDOW_START + WINDOW_BYTES
+    lease, keys = _lease_with(
+        WINDOW_BYTES,
+        others_from=WINDOW_START,
+        window_start=WINDOW_START,
+        c1g0=end - size,
+    )
+
+    fetch = build_request_fetch(fetch_model(), keys, MAX_RECORD_BYTES, lease)
+
+    assert max(s.offset + s.length for s in fetch.plan.slots) == end
 
 
 def test_two_objects_sharing_bytes_are_refused() -> None:
