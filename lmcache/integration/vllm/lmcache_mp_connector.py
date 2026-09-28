@@ -63,9 +63,7 @@ from lmcache.integration.vllm.utils import (
     vllm_layout_hints,
 )
 from lmcache.utils import init_logger as lmcache_init_logger
-from lmcache.v1.multiprocess.layer_progress import (
-    LayerProgressRetrieveGenerationTimeoutError,
-)
+from lmcache.v1.multiprocess.layer_progress import LayerProgressRetrieveFailedError
 
 try:
     # First Party
@@ -812,8 +810,25 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         LMCache. No-op when layerwise mode is disabled or the layer is outside
         the transfer layout.
 
+        When the daemon reports the retrieve failed, the step's retrieved
+        blocks are reported through :meth:`get_block_ids_with_load_errors` and
+        the forward pass continues. vLLM then discards this step's output for
+        the affected requests and fails them (``kv_load_failure_policy="fail"``,
+        vLLM's default) or recomputes them (``"recompute"``; a hybrid model's
+        request restarts from its first token). The rest of this step's layer
+        waits return immediately, because the failed retrieve is no longer
+        active. This is safe because the daemon publishes a failure only after
+        every copy the retrieve queued has landed.
+
         Args:
             layer_name: vLLM KV cache layer name from the forward pass.
+
+        Raises:
+            LayerProgressError: Any other progress failure. Timeouts and a
+                stale generation keep raising, which stops the engine: the
+                daemon's state is then unknown and it may still be copying
+                into these blocks, so handing them back for recompute could
+                corrupt them. A wait during CUDA graph capture also raises.
         """
         if not self.use_layerwise:
             return
@@ -822,8 +837,15 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             return
         try:
             self.worker_adapter.wait_for_layer_load(layer_id)
-        except LayerProgressRetrieveGenerationTimeoutError:
-            return
+        except LayerProgressRetrieveFailedError as exc:
+            flagged = self.worker_adapter.report_failed_layer_load()
+            logger.warning(
+                "Layerwise KV load failed at layer %r (%s); reporting %d "
+                "blocks as load errors so vLLM recomputes them.",
+                layer_name,
+                exc,
+                len(flagged),
+            )
 
     def save_kv_layer(
         self,

@@ -32,7 +32,10 @@ record therefore tracks a single active retrieve generation at a time.
 # Standard
 from collections.abc import Callable
 from dataclasses import dataclass
+from multiprocessing import resource_tracker, shared_memory
+import os
 import struct
+import sys
 import time
 
 # First Party
@@ -46,7 +49,12 @@ class LayerProgressError(Exception):
 
 
 class LayerProgressRetrieveFailedError(LayerProgressError):
-    """The daemon reported that the retrieve failed before this layer landed."""
+    """The daemon reported that the retrieve failed before this layer landed.
+
+    The daemon publishes the failure only after every copy the retrieve queued
+    has landed, so the retrieve writes nothing more into the paged blocks and
+    they can be handed back to the engine for recompute.
+    """
 
 
 class LayerProgressRetrieveGenerationTimeoutError(LayerProgressError):
@@ -125,6 +133,28 @@ class LayerProgressRecord:
         if isinstance(buffer, memoryview) and buffer.readonly:
             raise TypeError("layer progress buffer must be writable")
         self._buffer = buffer
+
+    @classmethod
+    def from_shared_memory(
+        cls, segment: shared_memory.SharedMemory
+    ) -> "LayerProgressRecord":
+        """Attach a record to an open shared-memory segment.
+
+        Args:
+            segment: An open segment of at least :attr:`RECORD_SIZE` bytes. It
+                must stay open for as long as the record is used.
+
+        Returns:
+            A record backed by the segment's buffer.
+
+        Raises:
+            ValueError: If the segment is already closed, or too short.
+            TypeError: If the segment's buffer is not writable.
+        """
+        buffer = segment.buf
+        if buffer is None:
+            raise ValueError(f"shared memory segment {segment.name} is closed")
+        return cls(buffer)
 
     def read(self) -> LayerProgressSnapshot:
         """Return a consistent generation, watermark, and failure flag.
@@ -261,7 +291,9 @@ class LayerProgressWaiter:
                 ``schedule``.
             LayerProgressStaleGenerationError: If shared memory shows a newer
                 generation while this wait is in progress.
-            LayerProgressRetrieveFailedError: If the daemon set the failure flag.
+            LayerProgressRetrieveFailedError: If the daemon set the failure flag
+                under this ``generation``. A flag left by an older generation
+                is ignored.
             LayerProgressRetrieveGenerationTimeoutError: If the daemon never
                 published this generation before the timeout.
             LayerProgressRetrieveProgressTimeoutError: If the watermark stalled.
@@ -295,26 +327,23 @@ class LayerProgressWaiter:
         deadline = self._monotonic() + self._wait_timeout_seconds
         while True:
             snapshot = self._record.read()
-            if snapshot.retrieve_failed:
-                raise LayerProgressRetrieveFailedError(
-                    "retrieve failed before layer data was reported complete; "
-                    "check daemon logs for the transfer error"
-                )
             if snapshot.generation > generation:
                 raise LayerProgressStaleGenerationError(
                     f"expected retrieve generation {generation}, "
                     f"shared memory shows {snapshot.generation}"
                 )
             if snapshot.generation == generation:
+                # The failure flag belongs to the generation it was published
+                # under. An older generation's flag must not fail this wait:
+                # after a failed retrieve, the next one's waiter can start
+                # polling before its own generation is published.
+                if snapshot.retrieve_failed:
+                    raise LayerProgressRetrieveFailedError(
+                        "retrieve failed before layer data was reported "
+                        "complete; check daemon logs for the transfer error"
+                    )
                 if snapshot.watermark >= wait_ordinal:
                     return
-            elif snapshot.generation < generation:
-                pass
-            else:
-                raise LayerProgressStaleGenerationError(
-                    f"expected retrieve generation {generation}, "
-                    f"shared memory shows {snapshot.generation}"
-                )
             if self._monotonic() >= deadline:
                 if snapshot.generation < generation:
                     raise LayerProgressRetrieveGenerationTimeoutError(
@@ -342,6 +371,42 @@ def layer_progress_shm_name(instance_id: int) -> str:
     if instance_id < 0:
         raise ValueError("instance_id must be non-negative")
     return f"lmcache_mp_layer_progress_{instance_id}"
+
+
+def attach_layer_progress_shm(instance_id: int) -> shared_memory.SharedMemory:
+    """Attach to a worker's progress segment without taking ownership of it.
+
+    The worker creates and unlinks the segment; every other process only
+    attaches. A plain ``SharedMemory(name=...)`` attach is not safe for that:
+    CPython registers even attached segments with the attaching process's
+    resource tracker, which unlinks them when that process exits. The daemon
+    exiting or restarting would then delete every live worker's segment, and
+    the worker's own ``unlink()`` on teardown would fail. This attaches with
+    tracking disabled (``track=False`` on Python 3.13+, an explicit unregister
+    before that).
+
+    Callers must ``close()`` the returned segment and must never ``unlink()``
+    it.
+
+    Args:
+        instance_id: Worker GPU instance identifier from registration.
+
+    Returns:
+        The attached segment.
+
+    Raises:
+        FileNotFoundError: If the worker has not created the segment, or has
+            already removed it.
+        ValueError: If ``instance_id`` is negative.
+    """
+    name = layer_progress_shm_name(instance_id)
+    if sys.version_info >= (3, 13):
+        return shared_memory.SharedMemory(name=name, track=False)
+    segment = shared_memory.SharedMemory(name=name)
+    if os.name == "posix":
+        # The tracker keys POSIX segments by their slash-prefixed name.
+        resource_tracker.unregister(f"/{segment.name}", "shared_memory")
+    return segment
 
 
 class WorkerComputeLayerLaunchEventPool(LayerLaunchEventPool):

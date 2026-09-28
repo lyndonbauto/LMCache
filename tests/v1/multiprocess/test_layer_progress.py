@@ -155,6 +155,39 @@ def test_waiter_raises_when_retrieve_failed() -> None:
         waiter.wait_for_layer(1, 0, schedule)
 
 
+def test_a_previous_generations_failure_does_not_fail_the_next_wait() -> None:
+    """Retrieve 1 failed; a wait on retrieve 2 must not inherit that failure.
+
+    The next retrieve's waiter can start polling before the daemon publishes
+    the new generation, so it briefly sees the old generation's flag.
+    """
+    buf = bytearray(LayerProgressRecord.RECORD_SIZE)
+    record = LayerProgressRecord(buf)
+    record.begin_retrieve(1)
+    record.mark_retrieve_failed()
+    schedule = LayerwiseSchedule([[0, 1]])
+    polls = 0
+
+    def publish_generation_two_on_first_poll(_seconds: float) -> None:
+        nonlocal polls
+        polls += 1
+        if polls == 1:
+            record.begin_retrieve(2)
+            record.report_launch_recorded(1)
+
+    waiter = LayerProgressWaiter(
+        record,
+        RecordingEventPool(2),
+        poll_interval_seconds=0.001,
+        wait_timeout_seconds=5.0,
+        sleep=publish_generation_two_on_first_poll,
+    )
+
+    waiter.wait_for_layer(2, 0, schedule)
+
+    assert polls == 1
+
+
 def test_waiter_times_out_waiting_for_generation() -> None:
     buf = bytearray(LayerProgressRecord.RECORD_SIZE)
     record = LayerProgressRecord(buf)

@@ -57,6 +57,47 @@ def make_plan(layer_slot_counts: dict[int, int]) -> LayerFetchPlan:
     return LayerFetchPlan(tuple(slots), TEST_NODE_NAMES)
 
 
+class RecordingLauncher:
+    """A :class:`LayerLauncher` that records calls instead of touching a GPU.
+
+    ``calls`` holds ``"begin"``, ``("launch", layer_id)`` and ``"failed"`` in
+    the order they happened, so tests can assert exactly what the sink asked
+    the GPU side to do.
+    """
+
+    def __init__(self) -> None:
+        """Build a launcher with no calls recorded."""
+        self.calls: list[object] = []
+
+    def begin(self) -> None:
+        """Record that setup ran."""
+        self.calls.append("begin")
+
+    def launch_layer(self, layer_id: int) -> None:
+        """Record one layer launch.
+
+        Args:
+            layer_id: Global layer index.
+        """
+        self.calls.append(("launch", layer_id))
+
+    def mark_failed(self) -> None:
+        """Record that the retrieve was marked failed."""
+        self.calls.append("failed")
+
+    def launched_layers(self) -> list[int]:
+        """Return the launched layer ids, in launch order.
+
+        Returns:
+            Layer ids from every recorded launch.
+        """
+        return [
+            call[1]
+            for call in self.calls
+            if isinstance(call, tuple) and call[0] == "launch"
+        ]
+
+
 @dataclass(frozen=True)
 class SourceHarness:
     """One :class:`LayerArrivalSource` implementation under test.
@@ -115,12 +156,28 @@ def _recording_harness() -> SinkHarness:
     return SinkHarness(sink, sink)
 
 
+def _multiprocess_harness() -> SinkHarness:
+    """Track B's loader over real progress records (no GPU needed).
+
+    Imported here, not at module level, so these tests do not depend on the
+    multiprocess package unless this entry runs.
+    """
+    try:
+        # Local
+        from .multiprocess_sink_harness import multiprocess_sink_harness
+    except ImportError as exc:  # e.g. torch or the native extension missing
+        pytest.skip(f"multiprocess loader unavailable: {exc}")
+    sink, observer = multiprocess_sink_harness()
+    return SinkHarness(sink, observer)
+
+
 #: Every sink implementation the conformance suite runs against, by test id.
 #: Add one factory per implementation, as for sources. A factory may call
 #: ``pytest.skip`` when its implementation cannot be built here, e.g. without
 #: a GPU.
 SINK_HARNESS_FACTORIES: dict[str, Callable[[], SinkHarness]] = {
     "recording": _recording_harness,
+    "multiprocess": _multiprocess_harness,
 }
 
 

@@ -551,69 +551,74 @@ class LMCacheDrivenTransferContext(TransferContext):
             launch_count = self._layerwise_schedule.launch_count()
             shm = _open_or_create_layer_progress_shm(self._instance_id)
             try:
-                progress_record = LayerProgressRecord(shm.buf)
+                progress_record = LayerProgressRecord.from_shared_memory(shm)
                 self._layer_progress_shm = shm
             except Exception:
-                shm.close()
-                shm.unlink()
+                _release_layer_progress_shm(shm)
                 raise
 
-        future = self._submit_registration(
-            lambda: self._req_client.register_kv_cache(
-                self._instance_id,
-                wrap_kv_caches(kv_caches),
-                model_name,
-                world_size,
-                engine_type,
-                layout_hints,
-                list(engine_group_infos),
-                [],
-            )
-        )
-        raw_response = future.result(timeout=mq_timeout)
-        if self._is_closed():
-            return
-        if raw_response is None:
-            register_response = RegisterKvCacheResponse(
-                server_use_layerwise=False,
-                layer_event_ipc_handles=[],
-            )
-        elif isinstance(raw_response, RegisterKvCacheResponse):
-            register_response = raw_response
-        else:
-            register_response = RegisterKvCacheResponse(
-                server_use_layerwise=False,
-                layer_event_ipc_handles=[],
-            )
-        if use_layerwise != register_response.server_use_layerwise:
-            raise ValueError(
-                "layerwise config mismatch: worker use_layerwise="
-                f"{use_layerwise}, server use_layerwise="
-                f"{register_response.server_use_layerwise}"
-            )
-        if use_layerwise:
-            if progress_record is None or self._layerwise_schedule is None:
-                raise RuntimeError("layerwise registration state incomplete")
-            if len(register_response.layer_event_ipc_handles) != launch_count:
-                raise ValueError(
-                    "layer_event_ipc_handles length "
-                    f"({len(register_response.layer_event_ipc_handles)}) must "
-                    f"equal launch count ({launch_count})"
+        # Any failure from here on must release the segment this call created,
+        # or a named segment outlives a registration that never completed.
+        try:
+            future = self._submit_registration(
+                lambda: self._req_client.register_kv_cache(
+                    self._instance_id,
+                    wrap_kv_caches(kv_caches),
+                    model_name,
+                    world_size,
+                    engine_type,
+                    layout_hints,
+                    list(engine_group_infos),
+                    [],
                 )
-            imported_events = [
-                event_backend.import_event(handle, device)
-                for handle in register_response.layer_event_ipc_handles
-            ]
-            event_pool = WorkerComputeLayerLaunchEventPool(
-                imported_events,
-                event_backend,
-                launch_count,
             )
-            self._layer_progress_waiter = LayerProgressWaiter(
-                progress_record,
-                event_pool,
-                wait_timeout_seconds=layerwise_wait_timeout_seconds,
-            )
+            raw_response = future.result(timeout=mq_timeout)
+            if self._is_closed():
+                return
+            if raw_response is None:
+                register_response = RegisterKvCacheResponse(
+                    server_use_layerwise=False,
+                    layer_event_ipc_handles=[],
+                )
+            elif isinstance(raw_response, RegisterKvCacheResponse):
+                register_response = raw_response
+            else:
+                register_response = RegisterKvCacheResponse(
+                    server_use_layerwise=False,
+                    layer_event_ipc_handles=[],
+                )
+            if use_layerwise != register_response.server_use_layerwise:
+                raise ValueError(
+                    "layerwise config mismatch: worker use_layerwise="
+                    f"{use_layerwise}, server use_layerwise="
+                    f"{register_response.server_use_layerwise}"
+                )
+            if use_layerwise:
+                if progress_record is None or self._layerwise_schedule is None:
+                    raise RuntimeError("layerwise registration state incomplete")
+                if len(register_response.layer_event_ipc_handles) != launch_count:
+                    raise ValueError(
+                        "layer_event_ipc_handles length "
+                        f"({len(register_response.layer_event_ipc_handles)}) must "
+                        f"equal launch count ({launch_count})"
+                    )
+                imported_events = [
+                    event_backend.import_event(handle, device)
+                    for handle in register_response.layer_event_ipc_handles
+                ]
+                event_pool = WorkerComputeLayerLaunchEventPool(
+                    imported_events,
+                    event_backend,
+                    launch_count,
+                )
+                self._layer_progress_waiter = LayerProgressWaiter(
+                    progress_record,
+                    event_pool,
+                    wait_timeout_seconds=layerwise_wait_timeout_seconds,
+                )
+        except Exception:
+            self._release_layerwise_state()
+            raise
         self._device = device
         self._event_backend = event_backend
 
@@ -786,51 +791,65 @@ class LMCacheDrivenTransferContext(TransferContext):
         )
 
     def close(self) -> None:
-        """Release the message queue and cached event-backend state."""
+        """Release the message queue, event-backend state and progress segment.
+
+        Safe to call more than once, and after a failed load: the progress
+        segment is removed even if its failure flag is set, and a segment whose
+        name was already removed is not treated as an error.
+        """
         self._mark_closed()
-        if self._layer_progress_shm is not None:
-            self._layer_progress_shm.close()
-            self._layer_progress_shm.unlink()
-            self._layer_progress_shm = None
+        self._release_layerwise_state()
         self._device = None
         self._event_backend = None
-        self._layerwise_schedule = None
-        self._layer_progress_waiter = None
-        self._active_retrieve_generation = 0
 
     def wait_for_layer_load(self, layer_id: int) -> None:
         """Block the compute stream until ``layer_id`` has landed on the GPU.
+
+        Returns immediately when layerwise mode is off or torn down, when
+        ``layer_id`` is outside the schedule, or when no retrieve is active.
 
         Args:
             layer_id: Global layer index vLLM is about to compute.
 
         Raises:
-            RuntimeError: If :meth:`register` has not completed or layerwise mode
-                is disabled.
+            LayerProgressError: Any failure reported by the progress waiter;
+                the active retrieve is cleared before it propagates.
         """
-        if self._layer_progress_waiter is None or self._layerwise_schedule is None:
+        # Read once: teardown may clear these attributes concurrently.
+        waiter = self._layer_progress_waiter
+        schedule = self._layerwise_schedule
+        if waiter is None or schedule is None:
             return
-        if layer_id not in self._layerwise_schedule:
+        if layer_id not in schedule:
             return
-        if self._active_retrieve_generation <= 0:
+        generation = self._active_retrieve_generation
+        if generation <= 0:
             return
         try:
-            self._layer_progress_waiter.wait_for_layer(
-                self._active_retrieve_generation,
-                layer_id,
-                self._layerwise_schedule,
-            )
+            waiter.wait_for_layer(generation, layer_id, schedule)
         except LayerProgressError:
             self._active_retrieve_generation = 0
             raise
-        if (
-            self._layerwise_schedule.wait_ordinal(layer_id)
-            == self._layerwise_schedule.launch_count()
-        ):
+        if schedule.wait_ordinal(layer_id) == schedule.launch_count():
             self._active_retrieve_generation = 0
 
     def flush_inflight_stores(self) -> None:
         pass
+
+    def _release_layerwise_state(self) -> None:
+        """Drop the layerwise waiter and schedule, then release the segment.
+
+        References into the segment are dropped before it is closed, so a wait
+        that starts during teardown finds no waiter rather than a released
+        buffer.
+        """
+        self._layer_progress_waiter = None
+        self._layerwise_schedule = None
+        self._active_retrieve_generation = 0
+        segment = self._layer_progress_shm
+        self._layer_progress_shm = None
+        if segment is not None:
+            _release_layer_progress_shm(segment)
 
 
 def _open_or_create_layer_progress_shm(instance_id: int) -> shared_memory.SharedMemory:
@@ -844,13 +863,29 @@ def _open_or_create_layer_progress_shm(instance_id: int) -> shared_memory.Shared
         )
     except FileExistsError:
         stale = shared_memory.SharedMemory(name=name)
-        stale.close()
-        stale.unlink()
+        _release_layer_progress_shm(stale)
         return shared_memory.SharedMemory(
             create=True,
             size=LayerProgressRecord.RECORD_SIZE,
             name=name,
         )
+
+
+def _release_layer_progress_shm(segment: shared_memory.SharedMemory) -> None:
+    """Close and unlink a worker-owned progress segment.
+
+    An already-removed name is not an error: another process, a crashed
+    daemon's resource tracker, or an operator may have removed it first. The
+    segment is closed either way.
+
+    Args:
+        segment: A segment this worker created (or a stale one it replaces).
+    """
+    segment.close()
+    try:
+        segment.unlink()
+    except FileNotFoundError:
+        logger.debug("layer progress segment %s was already removed", segment.name)
 
 
 class EngineDrivenTransferContext(TransferContext):

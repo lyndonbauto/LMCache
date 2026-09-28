@@ -11,6 +11,7 @@ the per-object-group transfer plan the copy kernels run.
 
 # Standard
 from dataclasses import dataclass
+from enum import Enum
 from itertools import islice
 from typing import Any, Generator, Sequence
 
@@ -24,6 +25,7 @@ from lmcache.v1.gpu_connector.gpu_ops import (
     build_staging_copies,
     lmcache_memcpy_async_d2h,
     lmcache_memcpy_async_h2d,
+    lmcache_memcpy_async_h2d_range,
 )
 from lmcache.v1.memory_allocators.lazy_memory_allocator import LazyMemoryAllocator
 from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
@@ -36,8 +38,9 @@ from lmcache.v1.multiprocess.layer_progress import (
     DaemonLayerLaunchEventPool,
     LayerProgressRecord,
 )
-from lmcache.v1.multiprocess.layerwise_schedule import LayerwiseSchedule
+from lmcache.v1.multiprocess.layerwise_schedule import LayerLaunch, LayerwiseSchedule
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.platform.ops_types import PageBufferShapeDesc
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -583,7 +586,7 @@ class _LayerwiseBatchDescriptor:
 
     start_object_idx: int
     memory_object_batch: tuple[MemoryObj, ...]
-    object_group_buffers: tuple[object, ...]
+    object_group_buffers: tuple[torch.Tensor, ...]
     launch_params_by_kernel_group: dict[int, _LayerwiseKernelLaunchParams]
 
 
@@ -727,54 +730,460 @@ def transfer_kv_layerwise_h2d(
     """
     del transfer_key
 
-    kg_to_og = _kernel_group_to_object_group(cache_context)
-    direction = lmcache_native.TransferDirection.H2D
-    batch_descriptors_by_object_group = _build_layerwise_batch_descriptors(
+    # Every object is complete before this retrieve starts, so one copy per
+    # object is both correct and cheaper than one copy per layer plane.
+    retrieve = LayerwiseH2DRetrieve(
         cache_context,
         block_ids_gpu,
         memory_objs_by_group,
         skip_first_n_tokens,
+        schedule,
+        progress,
+        event_pool,
+        retrieve_generation,
+        staging=LayerStaging.WHOLE_OBJECT,
+    )
+    retrieve.begin()
+    for launch in schedule.launches:
+        retrieve.launch_layer(launch.layer_id)
+
+
+class LayerStaging(Enum):
+    """How :class:`LayerwiseH2DRetrieve` copies host bytes to GPU staging.
+
+    The choice is a correctness question, not only a performance one: it
+    depends on whether the host memory objects are complete when the retrieve
+    starts.
+    """
+
+    #: Copy only the launched layer's bytes, at its launch. Required whenever
+    #: later layers may still be arriving in host memory (arrival-driven
+    #: loading), because a whole-object copy would snapshot them early.
+    PER_LAYER = "per_layer"
+    #: Copy each object in full the first time any of its layers launches, then
+    #: reuse it. Only correct when every object is complete before the retrieve
+    #: begins. Fewer, larger copies, and the only mode GDS objects support.
+    WHOLE_OBJECT = "whole_object"
+
+
+@dataclass(frozen=True)
+class _LayerPlaneGeometry:
+    """Where one layer's bytes sit inside a kernel group's staging region.
+
+    A kernel group's staging view is either ``(kv_size, num_layers, slots,
+    hidden)``, where one layer is ``kv_size`` disjoint planes, or
+    ``(num_layers, slots, hidden)``, where one layer is a single contiguous
+    block.
+    """
+
+    num_planes: int
+    """Byte ranges per layer: ``kv_size``, or 1 for the layer-major layout."""
+
+    plane_stride_bytes: int
+    """Distance between consecutive planes of one layer; 0 if single-plane."""
+
+    layer_stride_bytes: int
+    """Distance between the same plane of consecutive layers."""
+
+    plane_bytes: int
+    """Length of one plane."""
+
+    def byte_ranges(self, position_in_group: int) -> tuple[tuple[int, int], ...]:
+        """Return ``(offset, length)`` pairs holding one layer's bytes.
+
+        Args:
+            position_in_group: The layer's index along its group's layer axis.
+
+        Returns:
+            One pair per plane, offsets relative to the kernel group's region.
+        """
+        start = position_in_group * self.layer_stride_bytes
+        return tuple(
+            (start + plane * self.plane_stride_bytes, self.plane_bytes)
+            for plane in range(self.num_planes)
+        )
+
+
+def _layer_plane_geometry(kernel_group_view: torch.Tensor) -> _LayerPlaneGeometry:
+    """Derive per-layer byte ranges from a kernel group's staging view.
+
+    Args:
+        kernel_group_view: A shaped staging view, as returned by
+            ``get_temp_kernel_group_buffer``.
+
+    Returns:
+        The geometry locating any single layer inside that view.
+
+    Raises:
+        ValueError: If the view is not contiguous or is neither 3- nor
+            4-dimensional, since the layer axis could then not be located.
+    """
+    if not kernel_group_view.is_contiguous():
+        raise ValueError("kernel group staging view must be contiguous")
+    itemsize = kernel_group_view.element_size()
+    if kernel_group_view.dim() == 4:
+        layer_stride_bytes = kernel_group_view.stride(1) * itemsize
+        return _LayerPlaneGeometry(
+            num_planes=kernel_group_view.shape[0],
+            plane_stride_bytes=kernel_group_view.stride(0) * itemsize,
+            layer_stride_bytes=layer_stride_bytes,
+            plane_bytes=layer_stride_bytes,
+        )
+    if kernel_group_view.dim() == 3:
+        layer_stride_bytes = kernel_group_view.stride(0) * itemsize
+        return _LayerPlaneGeometry(
+            num_planes=1,
+            plane_stride_bytes=0,
+            layer_stride_bytes=layer_stride_bytes,
+            plane_bytes=layer_stride_bytes,
+        )
+    raise ValueError(
+        f"unsupported kernel group staging shape {tuple(kernel_group_view.shape)}"
     )
 
-    progress.begin_retrieve(retrieve_generation)
 
-    staged_batches: set[tuple[int, int]] = set()
+@dataclass(frozen=True)
+class _KernelGroupLaunchConstants:
+    """Kernel arguments that depend only on the kernel group.
 
-    try:
-        for ordinal, launch in enumerate(schedule.launches):
-            object_group_id = kg_to_og[launch.kernel_group_index]
-            kernel_group_id = launch.kernel_group_index
-            for batch_descriptor in batch_descriptors_by_object_group[object_group_id]:
-                batch_key = (object_group_id, batch_descriptor.start_object_idx)
-                if batch_key not in staged_batches:
-                    for chunk_idx, memory_obj in enumerate(
-                        batch_descriptor.memory_object_batch
-                    ):
-                        lmcache_memcpy_async_h2d(
-                            memory_obj,
-                            batch_descriptor.object_group_buffers[chunk_idx],
-                        )
-                    staged_batches.add(batch_key)
+    Looked up once per retrieve instead of once per layer per batch.
+    """
 
-                launch_params = batch_descriptor.launch_params_by_kernel_group[
+    kv_pointers: torch.Tensor
+    shape_desc: PageBufferShapeDesc
+    slots_per_chunk: int
+    engine_kv_format: "lmcache_native.EngineKVFormat"
+
+
+class _RetrieveState(Enum):
+    """Lifecycle of one :class:`LayerwiseH2DRetrieve`."""
+
+    #: Constructed; nothing published to the progress record yet.
+    NOT_BEGUN = "not_begun"
+    #: Generation published; some scheduled layers may still be unlaunched.
+    IN_PROGRESS = "in_progress"
+    #: Every scheduled layer has been launched and published.
+    COMPLETE = "complete"
+    #: Failure published; no further layer may be launched.
+    FAILED = "failed"
+
+
+class LayerwiseH2DRetrieve:
+    """One layerwise H2D retrieve, launched one scheduled layer at a time.
+
+    Splits the whole-retrieve loop into three phases so a caller can copy each
+    layer only once it has actually arrived in host memory:
+
+    1. :meth:`begin` does the per-batch setup once and publishes the retrieve
+       generation to the shared progress record.
+    2. :meth:`launch_layer` copies exactly one layer -- the next one in
+       schedule order -- then records its completion event and advances the
+       watermark, in that order.
+    3. :meth:`mark_failed` publishes a failure so every worker waiting on this
+       retrieve wakes with an error instead of hanging.
+
+    Layers must be launched in :class:`LayerwiseSchedule` order. Launches share
+    ``cache_context.stream`` and the worker's wait is a watermark over schedule
+    ordinals, so launching out of order would make an earlier layer look ready
+    before its copy was queued.
+
+    With :attr:`LayerStaging.PER_LAYER` (the default), ``launch_layer(N)``
+    copies only layer ``N``'s bytes from the host objects, at that moment, so
+    the caller may launch layer ``N`` as soon as it has landed even while later
+    layers of the same objects are still being written.
+
+    Not thread-safe: all calls must come from one thread.
+    """
+
+    def __init__(
+        self,
+        cache_context: BaseCacheContext,
+        block_ids_gpu: list[torch.Tensor],
+        memory_objs_by_group: Sequence[Sequence[MemoryObj | None]],
+        skip_first_n_tokens: int,
+        schedule: LayerwiseSchedule,
+        progress: LayerProgressRecord,
+        event_pool: DaemonLayerLaunchEventPool,
+        retrieve_generation: int,
+        *,
+        staging: LayerStaging = LayerStaging.PER_LAYER,
+    ) -> None:
+        """Bind one retrieve's state without touching the device or the record.
+
+        Args:
+            cache_context: Registered worker cache context on the daemon.
+            block_ids_gpu: Staged GPU block-id tensors per kernel group.
+            memory_objs_by_group: Memory objects per object group (with None
+                padding for skipped prefix chunks).
+            skip_first_n_tokens: Tokens to skip at the start of the retrieve
+                range.
+            schedule: Global per-layer launch order for this layout.
+            progress: Shared progress record for this worker instance.
+            event_pool: IPC events recorded after each ordinal on
+                ``cache_context.stream``.
+            retrieve_generation: Generation the worker waits on for this
+                retrieve. Distinct from any transport fetch generation.
+            staging: How host bytes reach GPU staging. Defaults to
+                :attr:`LayerStaging.PER_LAYER`, the only mode that is correct
+                while later layers may still be arriving.
+
+        Raises:
+            ValueError: If ``retrieve_generation`` is not positive, since ``0``
+                means "no retrieve" to the worker waiter.
+        """
+        if retrieve_generation <= 0:
+            raise ValueError(
+                f"retrieve_generation must be positive, got {retrieve_generation}"
+            )
+        self._cache_context = cache_context
+        self._block_ids_gpu = block_ids_gpu
+        self._memory_objs_by_group = memory_objs_by_group
+        self._skip_first_n_tokens = skip_first_n_tokens
+        self._schedule = schedule
+        self._progress = progress
+        self._event_pool = event_pool
+        self._retrieve_generation = retrieve_generation
+        self._staging = staging
+        self._state = _RetrieveState.NOT_BEGUN
+        #: Index into ``schedule.launches`` of the next layer to launch.
+        self._next_ordinal = 0
+        #: Per-object-group batch setup; filled once by :meth:`begin`.
+        self._batch_descriptors_by_object_group: dict[
+            int, tuple[_LayerwiseBatchDescriptor, ...]
+        ] = {}
+        #: Kernel group index -> owning object group index; filled by begin.
+        self._kernel_to_object_group: dict[int, int] = {}
+        #: Kernel-group-invariant kernel arguments; filled by begin.
+        self._launch_constants: dict[int, _KernelGroupLaunchConstants] = {}
+        #: Per-layer byte ranges per kernel group; filled by begin, and only
+        #: for :attr:`LayerStaging.PER_LAYER`.
+        self._plane_geometry: dict[int, _LayerPlaneGeometry] = {}
+        #: (object group, batch start) pairs staged whole; only used for
+        #: :attr:`LayerStaging.WHOLE_OBJECT`.
+        self._staged_batches: set[tuple[int, int]] = set()
+
+    def begin(self) -> None:
+        """Do the once-per-retrieve setup and publish the retrieve generation.
+
+        Batch descriptors, per-kernel-group kernel arguments and (for per-layer
+        staging) per-layer byte ranges are all computed here, before the
+        generation is published, so a setup failure leaves the progress record
+        untouched -- the caller decides how to report it, matching the
+        pre-split behaviour.
+
+        Raises:
+            RuntimeError: If :meth:`begin` was already called.
+            ValueError: If a batch contains null memory objects on H2D; or,
+                with per-layer staging, if any memory object is a GDS object
+                or a staging view has an unsupported layout.
+        """
+        if self._state is not _RetrieveState.NOT_BEGUN:
+            raise RuntimeError(
+                f"retrieve generation {self._retrieve_generation} already began"
+            )
+        cache_context = self._cache_context
+        self._kernel_to_object_group = _kernel_group_to_object_group(cache_context)
+        self._batch_descriptors_by_object_group = _build_layerwise_batch_descriptors(
+            cache_context,
+            self._block_ids_gpu,
+            self._memory_objs_by_group,
+            self._skip_first_n_tokens,
+        )
+        kernel_groups = {
+            launch.kernel_group_index for launch in self._schedule.launches
+        }
+        self._launch_constants = {
+            kernel_group_id: _KernelGroupLaunchConstants(
+                kv_pointers=cache_context.get_kernel_group_kv_pointers(kernel_group_id),
+                shape_desc=cache_context.get_shape_desc(kernel_group_id),
+                slots_per_chunk=cache_context.get_slots_per_chunk_in_sw(
                     kernel_group_id
-                ]
-                device_ops.multi_layer_block_kv_transfer(
-                    cache_context.get_kernel_group_kv_pointers(kernel_group_id),
-                    list(launch_params.tmp_gpu_buffer_data_ptrs),
-                    launch_params.block_ids_curr_batch,
-                    cache_context.device,
-                    direction,
-                    cache_context.get_shape_desc(kernel_group_id),
-                    cache_context.get_slots_per_chunk_in_sw(kernel_group_id),
-                    cache_context.get_engine_kv_format(kernel_group_id),
-                    launch_params.recalculated_skip_blocks,
+                ),
+                engine_kv_format=cache_context.get_engine_kv_format(kernel_group_id),
+            )
+            for kernel_group_id in kernel_groups
+        }
+        if self._staging is LayerStaging.PER_LAYER:
+            for descriptors in self._batch_descriptors_by_object_group.values():
+                for descriptor in descriptors:
+                    if any(
+                        isinstance(memory_obj, GDSMemoryObject)
+                        for memory_obj in descriptor.memory_object_batch
+                    ):
+                        raise ValueError(
+                            "per-layer staging cannot read GDS memory objects; "
+                            "use LayerStaging.WHOLE_OBJECT for complete objects"
+                        )
+            self._plane_geometry = {
+                kernel_group_id: _layer_plane_geometry(
+                    cache_context.get_temp_kernel_group_buffer(0, kernel_group_id)
+                )
+                for kernel_group_id in kernel_groups
+            }
+        self._progress.begin_retrieve(self._retrieve_generation)
+        self._state = _RetrieveState.IN_PROGRESS
+
+    def launch_layer(self, layer_id: int) -> None:
+        """Copy one layer to the GPU and publish that it has landed.
+
+        Records the layer's completion event on the transfer stream *before*
+        advancing the watermark, so a worker that observes the watermark never
+        waits on an event that was not yet recorded. On any failure the
+        retrieve is marked failed before the exception propagates.
+
+        Args:
+            layer_id: Global layer index. Must be the next layer in schedule
+                order.
+
+        Raises:
+            RuntimeError: If :meth:`begin` has not run, the retrieve already
+                failed, or every scheduled layer was already launched.
+            ValueError: If ``layer_id`` is not the next layer in schedule order.
+                The retrieve is left unchanged so the caller can report it.
+        """
+        if self._state is not _RetrieveState.IN_PROGRESS:
+            raise RuntimeError(
+                f"cannot launch layer {layer_id}: retrieve generation "
+                f"{self._retrieve_generation} is {self._state.value}"
+            )
+        expected = self._schedule.launches[self._next_ordinal]
+        if layer_id != expected.layer_id:
+            raise ValueError(
+                f"expected layer {expected.layer_id} next in schedule order, "
+                f"got {layer_id}"
+            )
+        ordinal = self._next_ordinal
+        try:
+            self._launch_scheduled(expected)
+            self._event_pool.record_ordinal(ordinal, self._cache_context.stream)
+            self._progress.report_launch_recorded(ordinal + 1)
+        except Exception:
+            self.mark_failed()
+            raise
+        self._next_ordinal += 1
+        if self._next_ordinal == self._schedule.launch_count():
+            self._state = _RetrieveState.COMPLETE
+
+    def mark_failed(self) -> None:
+        """Publish that this retrieve failed, waking every worker waiter.
+
+        Safe to call in any state and more than once. The record's current
+        generation decides what happens:
+
+        - older than this retrieve's (never published): this generation is
+          published first, so the failure is attributed to this retrieve
+          rather than to whatever the record last held;
+        - equal: the failure flag is set;
+        - newer: nothing is written. A newer retrieve owns the record, and a
+          late failure from this one must neither fail nor rewind it.
+
+        Marking a completed retrieve failed is allowed and conservative: a
+        waiter that has not yet returned falls back to a full load instead of
+        trusting it.
+
+        Before setting the flag, waits for every copy this retrieve already
+        queued on the transfer stream. The worker reports a flagged retrieve's
+        blocks to vLLM for recompute, so no copy may still be landing in them.
+
+        Assumes this process is the record's only writer, which holds because
+        the MP server serialises retrieves per worker.
+        """
+        copies_queued = self._state is not _RetrieveState.NOT_BEGUN
+        self._state = _RetrieveState.FAILED
+        record_generation = self._progress.read().generation
+        if record_generation > self._retrieve_generation:
+            return
+        if copies_queued:
+            self._cache_context.stream.synchronize()
+        if record_generation < self._retrieve_generation:
+            self._progress.begin_retrieve(self._retrieve_generation)
+        self._progress.mark_retrieve_failed()
+
+    def _launch_scheduled(self, launch: LayerLaunch) -> None:
+        """Stage ``launch``'s bytes to GPU staging and run its layer kernel.
+
+        Args:
+            launch: The scheduled layer to transfer.
+        """
+        kernel_group_id = launch.kernel_group_index
+        object_group_id = self._kernel_to_object_group[kernel_group_id]
+        constants = self._launch_constants[kernel_group_id]
+        for batch_descriptor in self._batch_descriptors_by_object_group[
+            object_group_id
+        ]:
+            launch_params = batch_descriptor.launch_params_by_kernel_group[
+                kernel_group_id
+            ]
+            if self._staging is LayerStaging.PER_LAYER:
+                self._stage_layer(
+                    batch_descriptor,
+                    launch_params,
+                    self._plane_geometry[kernel_group_id],
                     launch.position_in_group,
-                    1,
+                )
+            else:
+                self._stage_whole_batch_once(object_group_id, batch_descriptor)
+            device_ops.multi_layer_block_kv_transfer(
+                constants.kv_pointers,
+                list(launch_params.tmp_gpu_buffer_data_ptrs),
+                launch_params.block_ids_curr_batch,
+                self._cache_context.device,
+                lmcache_native.TransferDirection.H2D,
+                constants.shape_desc,
+                constants.slots_per_chunk,
+                constants.engine_kv_format,
+                launch_params.recalculated_skip_blocks,
+                launch.position_in_group,
+                1,
+            )
+
+    def _stage_layer(
+        self,
+        batch_descriptor: _LayerwiseBatchDescriptor,
+        launch_params: _LayerwiseKernelLaunchParams,
+        geometry: _LayerPlaneGeometry,
+        position_in_group: int,
+    ) -> None:
+        """Copy one layer's planes of every object in a batch to GPU staging.
+
+        Each kernel group's staging view sits at a fixed offset inside its
+        object group's staging buffer, and a memory object is laid out
+        byte-for-byte like that buffer, so the same offsets address both.
+
+        Args:
+            batch_descriptor: The batch whose objects are staged.
+            launch_params: The kernel group's launch inputs for this batch.
+            geometry: Where one layer sits inside the kernel group's region.
+            position_in_group: The layer's index along its group's layer axis.
+        """
+        ranges = geometry.byte_ranges(position_in_group)
+        for chunk_idx, memory_obj in enumerate(batch_descriptor.memory_object_batch):
+            object_group_buffer = batch_descriptor.object_group_buffers[chunk_idx]
+            region_offset = (
+                launch_params.tmp_gpu_buffer_data_ptrs[chunk_idx]
+                - object_group_buffer.data_ptr()
+            )
+            for offset, length in ranges:
+                lmcache_memcpy_async_h2d_range(
+                    memory_obj, object_group_buffer, region_offset + offset, length
                 )
 
-            event_pool.record_ordinal(ordinal, cache_context.stream)
-            progress.report_launch_recorded(ordinal + 1)
-    except Exception:
-        progress.mark_retrieve_failed()
-        raise
+    def _stage_whole_batch_once(
+        self,
+        object_group_id: int,
+        batch_descriptor: _LayerwiseBatchDescriptor,
+    ) -> None:
+        """Copy every object of a batch to GPU staging, the first time only.
+
+        Args:
+            object_group_id: The object group the batch belongs to.
+            batch_descriptor: The batch whose objects are staged.
+        """
+        batch_key = (object_group_id, batch_descriptor.start_object_idx)
+        if batch_key in self._staged_batches:
+            return
+        for chunk_idx, memory_obj in enumerate(batch_descriptor.memory_object_batch):
+            lmcache_memcpy_async_h2d(
+                memory_obj, batch_descriptor.object_group_buffers[chunk_idx]
+            )
+        self._staged_batches.add(batch_key)
