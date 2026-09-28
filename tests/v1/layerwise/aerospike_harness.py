@@ -11,6 +11,7 @@ a node reply naming it as failed.
 """
 
 # Standard
+from collections.abc import Sequence
 from functools import cache
 from pathlib import Path
 from types import ModuleType
@@ -87,8 +88,19 @@ class FabricFreeClient(
 ):
     """A native client that also lands and declines its own slots."""
 
+    def pipelined_fetch_node_name(self) -> str:
+        """Return the one registered node, which the placer is built with.
 
-def fabric_free_connector(window_count: int = 1) -> FabricFreeClient:
+        Raises:
+            RuntimeError: Unless exactly one node is registered, as the
+                production client refuses a larger cluster.
+        """
+        ...
+
+
+def fabric_free_connector(
+    window_count: int = 1, node_names: Sequence[str] = TEST_NODE_NAMES
+) -> FabricFreeClient:
     """Build a fabric-free native client over ``window_count`` windows.
 
     Window ``w`` covers offsets ``[w * WINDOW_BYTES, (w + 1) * WINDOW_BYTES)``
@@ -96,6 +108,8 @@ def fabric_free_connector(window_count: int = 1) -> FabricFreeClient:
 
     Args:
         window_count: How many fetches may run at once.
+        node_names: The nodes registered for kv-sink fetches. Plans name
+            nodes by index into this list.
 
     Returns:
         The connector. It is both the native client a source runs over and
@@ -105,7 +119,7 @@ def fabric_free_connector(window_count: int = 1) -> FabricFreeClient:
         pytest.skip.Exception: If the test module cannot be built here.
     """
     connector: FabricFreeClient = _load_module().FabricFreeConnector(
-        list(TEST_NODE_NAMES), WINDOW_BYTES, _MAX_SLOTS, window_count=window_count
+        list(node_names), WINDOW_BYTES, _MAX_SLOTS, window_count=window_count
     )
     return connector
 

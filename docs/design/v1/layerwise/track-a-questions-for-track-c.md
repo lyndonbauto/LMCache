@@ -799,6 +799,14 @@ raises exactly when it doesn't.
       request would build, which depends only on the layout,
       `max_record_bytes` and the chunk count, so it can be computed before
       any window is leased.
+21. The fabric-free harness reports its node like the native driver:
+    `FabricFreeConnector.pipelined_fetch_node_name()` returns the one
+    registered node and raises `RuntimeError` for any other count.
+    - For Track C, `test_rdma_placer_end_to_end.py` now builds the placer
+      with `connector.pipelined_fetch_node_name()` rather than
+      `TEST_NODE_NAMES[0]`, so its placer gets the name the same way the
+      registration wiring will (item 16). That is the only change to your
+      file.
 
 These were verified on the Soft-RoCE VM
 ([rdma_testing_on_windows.md](../distributed/l2_adapters/rdma_testing_on_windows.md)):
@@ -807,7 +815,7 @@ These were verified on the Soft-RoCE VM
   C client 7.3.0;
 - device-free logic harness: 365 checks pass;
 - fabric harness over `rxe0`: 416 checks pass;
-- `tests/v1/layerwise/` and `tests/v1/distributed/` pass (1303 passed, 92
+- `tests/v1/layerwise/` and `tests/v1/distributed/` pass (1305 passed, 92
   skipped, with Track C's `d4bd73c5` merged), including the conformance
   suite over both sources, concurrent fetches over the real native pool, and
   Track C's end-to-end retrieve over the production placer;
@@ -862,7 +870,7 @@ needs the ones before it unless noted.
 | 7 | Concurrent fetches, one per window (W3, item 13) | `6fd5fc4d` | 3, 5, 6 |
 | 8 | Production `ChunkPlacer`, `NEVER_FETCHED`, registration check, single-node gate, node name, retention (items 15-17) | `dad66a2b`, `adaf1ced`, `8e18aabd`, after the merges of `2a3c104d` and `d4bd73c5` | 5, 7, and Track C's lease interface (`1280926c` to `d4bd73c5`) |
 | 9 | Remove the chunk-level issue path, connector and session (items 18-19) | `ba7b4e06`, `fd0b16c7` | 7 |
-| 10 | Slot limit through the storage manager (F4, item 20) | the next commit | 8 (shares the node-name plumbing) |
+| 10 | Slot limit through the storage manager (F4, item 20); the harness's node name (item 21) | `c295d527` and the next commit | 8 (shares the node-name plumbing) |
 
 Why this order: 2 and 3 touch only the transport and the adapters, so they
 can merge while 4 waits on `l1_manager` review. PR 4 is the only one that

@@ -77,6 +77,18 @@ class FabricFreeConnector {
     return pool_->max_slots_per_request();
   }
 
+  // Throws unless exactly one node is registered, as the production driver
+  // does: pipelined fetches run on single-node clusters only.
+  std::string pipelined_fetch_node_name() const {
+    const std::vector<std::string> names = registry_.node_names();
+    if (names.size() != 1) {
+      throw std::runtime_error(
+          "pipelined fetches need one registered node, but there are " +
+          std::to_string(names.size()));
+    }
+    return names.front();
+  }
+
   // Record keys stand in for digests: the session only needs them non-empty
   // and carries them opaquely into the command.
   uint16_t issue_pipelined_fetch_by_slots(
@@ -172,6 +184,8 @@ PYBIND11_MODULE(fabric_free_session, m) {
            &FabricFreeConnector::pipelined_fetch_init_error)
       .def("pipelined_max_slots_per_request",
            &FabricFreeConnector::pipelined_max_slots_per_request)
+      .def("pipelined_fetch_node_name",
+           &FabricFreeConnector::pipelined_fetch_node_name)
       .def("issue_pipelined_fetch_by_slots",
            &FabricFreeConnector::issue_pipelined_fetch_by_slots,
            py::arg("node_names"), py::arg("slots"))

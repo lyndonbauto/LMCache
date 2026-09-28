@@ -51,7 +51,6 @@ from lmcache.v1.layerwise.request_fetch import (
 
 # Local
 from .aerospike_harness import WINDOW_BYTES, FabricFreeClient, fabric_free_connector
-from .conftest import TEST_NODE_NAMES
 from .vllm_requests import (
     GROUP_LAYOUTS,
     MAX_RECORD_BYTES,
@@ -137,16 +136,16 @@ class _Setup:
             ),
             fetch_timeout_seconds=FETCH_TIMEOUT,
         )
+        self.connector: FabricFreeClient = fabric_free_connector(window_count)
         # Retain every fetched object, so a test can read back what landed.
         self.rdma_placer = RdmaWindowPlacer(
             self.l1,
             RdmaWindowLeaser(self.l1, rdma, self.clock),
             GROUP_LAYOUTS,
-            TEST_NODE_NAMES[0],
+            self.connector.pipelined_fetch_node_name(),
             lambda keys: [True] * len(keys),
         )
         self.placer = _RecordingPlacer(self.rdma_placer)
-        self.connector: FabricFreeClient = fabric_free_connector(window_count)
         self.keys = resolve_obj_keys(vllm_request())
 
     def readable(self, key: ObjectKey) -> bool:
