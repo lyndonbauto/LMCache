@@ -11,6 +11,87 @@ defect coming back.
 
 ---
 
+## Retrieve takes a sink factory; `run_pipelined_retrieve` takes a loader
+
+**Who is affected:** Track B (you implement the factory); anyone calling
+`run_pipelined_retrieve`, whose signature changed.
+
+**What changed** (design: [c9-wiring.md](c9-wiring.md), "Retrieve"):
+
+- **Sink factory.** `LMCacheDrivenTransferModule(ctx,
+  pipelined_sink_factory=...)` takes a `PipelinedSinkFactory` from
+  `lmcache/v1/multiprocess/pipelined_loading.py`. Its
+  `build(PipelinedLoadRequest) -> PipelinedSink` returns a `LayerLoadSink`
+  that also has `wait_for_copies()`. The sink reads objects from
+  `request.objects` (an `ObjectTable`) with `get(group, chunk)` when it loads
+  a layer, because the fallback swaps objects in part way through. With the
+  default `NO_PIPELINED_SINK_FACTORY`, models are not registered for
+  pipelined fetch and nothing is deferred.
+- **`run_pipelined_retrieve(model, keys, max_record_bytes, placer, source,
+  loader, keys_to_fetch=None, ...)`** now takes a `PipelinedLoader`
+  (`sink_for(lease)`, `wait_for_copies()`, `reload_whole(objects)`) instead
+  of a sink, and returns `PipelinedRetrieveResult(fetch, completion)`. It
+  raises `PipelinedRetrieveRefused` when nothing began. `keys_to_fetch`
+  limits the lease and plan to a subset of the request's keys (the deferred
+  ones), and `objects_to_place` and `build_request_fetch` take the same
+  argument.
+
+**Why.** The sink cannot be built before the lease exists, since its
+destination memory is the lease's; and releasing the lease must wait for
+the sink's copies (F2), which only the loader can wait for. The subset is
+needed because the L1 part is already read-locked by the lookup, so leasing
+its keys would be refused.
+
+---
+
+## The lookup can defer L2 hits; storage builds the placer
+
+**Who is affected:** Track A (new `StorageManager` and adapter accessors to
+review); Track B (the deferred keys are what your sink will load). No
+existing call changes.
+
+**What changed** (design: [c9-wiring.md](c9-wiring.md)):
+
+- **Deferral.** `PrefetchRequestSpec.l2_deferral: L2Deferral` (default
+  `NO_L2_DEFERRAL`). When its `accepts(adapter_ids, keys)` says yes, the
+  prefetch controller reports the L2 hits as found without loading them, and
+  releases their L2 locks. `StorageManager.query_prefetch_outcome(handle)`
+  returns them as `PrefetchResult.deferred_keys`.
+- **Storage accessors**, all following `pipelined_max_slots_per_request`:
+  - `pipelined_window_placer(group_layout_descs, model, max_chunks)`
+    builds Track A's `RdmaWindowPlacer` over the one `RdmaWindowLeaser`
+    storage now owns;
+  - `pipelined_max_record_bytes()`, backed by a new adapter method of the
+    same name (native: `max_record_bytes()`);
+  - `pipelined_adapter_id()`;
+  - `lock_resident_keys(keys)` and `load_into_l1(keys, ...)`, for shared
+    keys and the fallback.
+- **Registration** builds a `PipelinedModel` per model when
+  `--pipelined-fetch` is on; lookups of other models are unchanged.
+
+**Why.** Nothing built the leaser or placer in production, and storage is
+the only owner of the L1 they reserve in. Releasing L2 locks at deferral
+keeps lock lifetimes inside one scheduler step; a record that vanishes
+before retrieve is handled like an evicted one.
+
+---
+
+## `chunk_fetch_arguments` removed
+
+**Who is affected:** nobody. Its only caller, the native
+`issue_pipelined_fetch_by_keys`, was removed by Track A (their item 18).
+
+**What changed.** `chunk_fetch_arguments` and `ChunkFetchArguments` are gone
+from `native_fetch.py` and the package exports. `pipelined_fetch_arguments`
+is the only flattener, feeding `issue_pipelined_fetch_by_slots`.
+
+**Why.** The chunk-level call had a native planner re-expand chunk
+placements, and it bound a whole chunk to one node. The slot-level call
+takes the plan as given, so a second flattener only kept a dead shape
+alive.
+
+---
+
 ## A resumable pump; the lease hands out each object's memory
 
 **Who is affected:** Track A (the production lease must implement

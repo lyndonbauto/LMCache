@@ -60,11 +60,14 @@ from lmcache.lmcache_native import Bitmap
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
     DEFAULT_ATTN_WINDOW_DESC,
+    NO_L2_DEFERRAL,
     AttnWindowDesc,
+    L2Deferral,
     MemoryLayoutDesc,
     ObjectKey,
     PrefetchMode,
     PrefetchRequestSpec,
+    PrefetchResult,
     TrimPolicy,
 )
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_ranked
@@ -208,6 +211,8 @@ class InFlightPrefetchRequest:
     """The prefetch intent (see :class:`PrefetchMode`).  ``WARM`` forces all
     loaded keys permanent and acquires no read lock; ``LOOKUP`` defers
     retention to the policy and read-locks loaded keys."""
+    l2_deferral: L2Deferral = NO_L2_DEFERRAL
+    """Whether to leave the L2 hits unloaded (see :class:`L2Deferral`)."""
 
     # Lookup phase: adapter_idx -> task_id (removed as results arrive)
     pending_lookup_tasks: dict[int, L2TaskId] = field(default_factory=dict)
@@ -329,7 +334,7 @@ class PrefetchController(StorageControllerInterface):
         # published instead of busy-polling QUERY_PREFETCH_STATUS.
         self._prefetch_results_lock = threading.Lock()
         self._prefetch_results_cv = threading.Condition(self._prefetch_results_lock)
-        self._completed_results: dict[PrefetchRequestId, Bitmap] = {}
+        self._completed_results: dict[PrefetchRequestId, PrefetchResult] = {}
 
         # Map eventfds to adapter indices for quick lookup in poll.
         # Relies on the L2AdapterInterface contract that every adapter
@@ -479,6 +484,25 @@ class PrefetchController(StorageControllerInterface):
             Therefore, the caller need to make sure that never call
             query_lookup_result after calling this function, otherwise it will
             get None forever.
+        """
+        outcome = self.query_prefetch_outcome(request_id)
+        return outcome.retained if outcome is not None else None
+
+    def query_prefetch_outcome(
+        self, request_id: PrefetchRequestId
+    ) -> PrefetchResult | None:
+        """Query the full result of a prefetch request, including deferred keys.
+
+        Thread-safe. Like :meth:`query_prefetch_result`, each result can be
+        retrieved once, by either method, and retrieving it pops the lookup
+        result too.
+
+        Args:
+            request_id: The request ID from submit_prefetch_request.
+
+        Returns:
+            The retained bitmap and the deferred keys, or None if the request
+            is still in progress or its result was already retrieved.
         """
         with self._prefetch_results_lock:
             result = self._completed_results.pop(request_id, None)
@@ -892,6 +916,7 @@ class PrefetchController(StorageControllerInterface):
             policy=spec.policy,
             attn_desc=spec.attn_desc,
             mode=spec.mode,
+            l2_deferral=spec.l2_deferral,
             group_layout_descs=spec.group_layout_descs,
             l1_readlocks=l1_readlocks,
         )
@@ -1004,6 +1029,11 @@ class PrefetchController(StorageControllerInterface):
                 stale.gather(request.keys), read_locks=request.num_kv_readers
             )
 
+        if request.mode is PrefetchMode.LOOKUP and self._defer_request(
+            request, trimmed_plan, retained, hit_length
+        ):
+            return
+
         # Step 3 — reserve L1 write buffers for the plan keys.
         # If any failure (OOM or contention or others) happens,
         # we fall back to the L1-only longest hit (`l1_fallback_retain`).
@@ -1030,6 +1060,61 @@ class PrefetchController(StorageControllerInterface):
         # Step 5 — submit loads; report the hit.
         self._submit_load_tasks(request, trimmed_plan)
         self._report_lookup_hit(request, hit_length)
+
+    def _defer_request(
+        self,
+        request: InFlightPrefetchRequest,
+        trimmed_plan: dict[int, Bitmap],
+        retained: Bitmap,
+        hit_length: int,
+    ) -> bool:
+        """Complete a request without loading its L2 hits, if its deferral accepts.
+
+        Replaces steps 3 to 5 of :meth:`_transition_to_load_phase`: nothing is
+        reserved in L1 and no load is submitted. The L1 hits keep the locks
+        the lookup took. Every L2 lock is released, since the caller fetches
+        the deferred keys outside this controller and returns no lock, so a
+        deferred record may be gone by the time it is fetched.
+
+        Args:
+            request: The request, after the stale L1 locks were released.
+            trimmed_plan: The final load plan (adapter index -> key indices).
+            retained: The retained set over L1 hits and the plan.
+            hit_length: The hit, in chunks, the plan would serve.
+
+        Returns:
+            ``True`` if the request was deferred and completed, ``False`` if
+            the deferral declined and the caller should load as usual.
+        """
+        plan_bitmap = merge_bitmaps(trimmed_plan.values(), len(request.keys))
+        deferred_keys = plan_bitmap.gather(request.keys)
+        if not request.l2_deferral.accepts(sorted(trimmed_plan), deferred_keys):
+            return False
+
+        self._release_l2_locks(request, keep={})
+        # The L1-only fallback locks are not needed once the hit is final.
+        outside = request.l1_readlocks & ~retained
+        if outside.popcount() > 0:
+            self._l1_manager.finish_read(
+                outside.gather(request.keys), read_locks=request.num_kv_readers
+            )
+            request.l1_readlocks = request.l1_readlocks & retained
+        retained_keys = request.l1_readlocks.gather(request.keys)
+        if retained_keys:
+            self._l1_manager.touch_keys(retained_keys)
+        self._report_lookup_hit(request, hit_length)
+        self._event_bus.publish(
+            Event(
+                event_type=EventType.L2_PREFETCH_DEFERRED,
+                metadata={
+                    "request_id": request.request_id,
+                    "key_count": len(deferred_keys),
+                    "key_count_per_salt": Counter(k.cache_salt for k in deferred_keys),
+                },
+            )
+        )
+        self._complete_request(request.request_id, retained, tuple(deferred_keys))
+        return True
 
     def _reserve_load_buffers(
         self,
@@ -1453,10 +1538,21 @@ class PrefetchController(StorageControllerInterface):
     # Completion and cleanup
     # =========================================================================
 
-    def _complete_request(self, request_id: PrefetchRequestId, result: Bitmap) -> None:
-        """Store the retained-key bitmap and remove from in-flight tracking."""
+    def _complete_request(
+        self,
+        request_id: PrefetchRequestId,
+        result: Bitmap,
+        deferred_keys: tuple[ObjectKey, ...] = (),
+    ) -> None:
+        """Store the result and remove the request from in-flight tracking.
+
+        Args:
+            request_id: The completed request.
+            result: The retained-key bitmap.
+            deferred_keys: Retained keys left unloaded (see ``_defer_request``).
+        """
         with self._prefetch_results_lock:
-            self._completed_results[request_id] = result
+            self._completed_results[request_id] = PrefetchResult(result, deferred_keys)
             # Wake any WAIT_PREFETCH_STATUS handler blocked on this result.
             self._prefetch_results_cv.notify_all()
         removed = self._in_flight_requests.pop(request_id, None)

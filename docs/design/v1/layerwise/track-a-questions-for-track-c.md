@@ -34,6 +34,7 @@ how contract changes are made.
 | L4: sizing `window_bytes` from `request_bytes` | **Done:** `check_window_holds_request` | Track C: call it at registration |
 | F1-F5: review of `fetch-start-proposal.md` | **Option A agreed**; F1 (a finished lease stored its objects back to L2) fixed; F4's slot limit exposed (item 20) | Track C: F2, F3, F4's lookup check |
 | `WindowLease.memory_obj`, `run_resumable`, R5 (Track C, up to `d4bd73c5`) | **Merged**; `WindowPlacement` already had `memory_obj` | - |
+| C9 storage changes (Track C, up to `ae529b58`) | **Reviewed and merged**; one warning (leaser and node from different adapters) | Track C |
 
 ## Decisions
 
@@ -609,6 +610,69 @@ raises exactly when it doesn't.
   the failed blocks under `kv_load_failure_policy: "recompute"`, and by
   default fails the request.
 
+## Track A's review of the C9 storage changes (`track/c-planning` at `ae529b58`)
+
+Reviewed: the one `RdmaWindowLeaser` and `pipelined_window_placer`,
+`pipelined_max_record_bytes()`, `pipelined_adapter_id()`,
+`lock_resident_keys`, `load_into_l1`, leasing only `keys_to_fetch`, and the
+declined-slot path. No blocking issues.
+
+**Agreed as written:**
+
+- **One leaser, built with the first RDMA-enabled adapter.** Sharing it
+  across placers is what keeps a window from being leased twice and a
+  quarantine holding for every placer. `pipelined_window_placer` runs
+  `check_window_holds_request` (L4) and passes the prefetch policy's
+  `select_l1_retentions` (item 17).
+- **Leasing only `keys_to_fetch`.** The resident part is read-locked, and
+  the placer's `reserve_write(mode="new")` would refuse it. Resident objects
+  that sit in a window from an earlier fetch keep that window pinned against
+  reclaim (W1) while the retrieve holds them. That is correct, but with one
+  window it sends the next retrieve to the fallback.
+- **The declined slot.** `_finish_from_whole_objects` waits for the sink's
+  copies, releases `ABANDONED`, then reloads (F2). `abort_write` has
+  removed every window key by then, so `KEY_NOT_EXIST` is right, and
+  `load_into_l1` reserves fresh general-L1 objects (W4). `ObjectTable.put`
+  replaces the window objects, so the remaining layers read general L1, not
+  the freed window. A late write of the abandoned fetch can only land in the
+  quarantined window, which nothing allocates in for
+  `fetch_timeout_seconds`.
+- **`lock_resident_keys`.** A key another retrieve is fetching into a window
+  is write-locked and comes back busy, which F3 needs. `reserve_read` does
+  notify `on_l1_keys_reserved_read`, but the eviction policy ignores it, so
+  "no recency refresh" holds.
+- **`load_into_l1`** runs with the default `NO_L2_DEFERRAL`, so the reload
+  cannot defer again, and keys already resident are locked, not reloaded.
+
+**Warning: the leaser and the node may come from different adapters.** The
+leaser is built with the first adapter that enables RDMA reception. The
+node, `pipelined_adapter_id` and the slot and record limits come from the
+first adapter with a ready pipelined path. With one RDMA adapter these are
+the same, but nothing enforces it. `validate_windows_reserved` makes their
+window plans match, but not `fetch_timeout_seconds`. If the fetching adapter
+had the longer timeout, a quarantine would end while its late writes could
+still land. Either build the leaser from the config of the adapter
+`pipelined_adapter_id()` names, or refuse a second RDMA-enabled adapter in
+`_build_l2_adapter`.
+
+**Info:**
+
+- `NativeConnectorL2Adapter.pipelined_max_record_bytes` calls
+  `self._client.max_record_bytes()` directly, and `max_record_bytes` is not
+  in the pipelined-path protocols. A client without it raises
+  `AttributeError`, which passes both the storage manager's
+  `LayerwiseContractError` loop and registration's
+  `(LayerwiseContractError, ValueError)` handler. The Aerospike client
+  always binds it, so only stubs and harnesses are affected; the fabric-free
+  harness has no `max_record_bytes` and so can't go through registration.
+- The cap comes from the reading client's config. A writer configured with
+  a different `max_record_bytes` makes plans name the wrong records. That
+  fails safe (declined slots, then the fallback), but is worth a log line at
+  registration.
+- A `load_into_l1` that times out leaves its prefetch request running. Its
+  read locks expire with the read TTL; check that the controller drops a
+  result nobody queries.
+
 ## Work that follows
 
 **Track A, done:**
@@ -807,24 +871,22 @@ raises exactly when it doesn't.
       `TEST_NODE_NAMES[0]`, so its placer gets the name the same way the
       registration wiring will (item 16). That is the only change to your
       file.
-22. The storage manager builds the placer:
-    `StorageManager.rdma_window_placer(layouts, select_retentions) ->
-    ChunkPlacer`. It supersedes the manual construction in item 16, which
-    needed the storage manager's private L1. It uses the node and the RDMA
-    config of the first adapter, in registration order, with a ready
-    pipelined path and RDMA reception enabled, and otherwise raises
-    `LayerwiseContractError` with each adapter's reason. Every placer from
-    one storage manager shares one leaser, so the windows can't be leased
-    twice and a quarantine holds across placers.
-    - The fabric-free harness now has `event_fd`, `drain_completions` and
-      `close`, so a real `NativeConnectorL2Adapter` wraps it. The new
-      `test_storage_manager_placer.py` runs a whole retrieve with the placer
-      and the source from one `StorageManager`: a clean fetch, two placers
-      sharing the window, and a declined slot quarantining the window for
-      the next placer.
-    - For Track C, the registration wiring is
-      `storage_manager.rdma_window_placer(layouts,
-      policy.select_l1_retentions)`, then `check_window_holds_request` (L4).
+22. A retrieve through one real `StorageManager`. The fabric-free harness
+    now has `event_fd`, `drain_completions` and `close`, so a real
+    `NativeConnectorL2Adapter` wraps it. `test_storage_manager_placer.py`
+    runs whole retrieves with the placer from Track C's
+    `pipelined_window_placer` and the source from `layer_arrival_source`:
+    - a clean fetch lands in the storage manager's window and leaves every
+      object resident under the `retain` policy;
+    - two placers share the one window;
+    - a declined slot falls back, `lock_resident_keys` reports every key
+      absent at reload, and the window stays quarantined for the next
+      placer.
+
+    Track A had first added its own `StorageManager.rdma_window_placer`
+    (`2987f5fc`). Track C's `pipelined_window_placer` does the same and is
+    the one retrieve uses, so Track A's was removed in the merge of
+    `ae529b58`.
 
 These were verified on the Soft-RoCE VM
 ([rdma_testing_on_windows.md](../distributed/l2_adapters/rdma_testing_on_windows.md)):
@@ -869,8 +931,10 @@ That needs an Aerospike server, and for the slot path, one built from the
 
 - retrieve wiring per M4 and W4: one handler covers the placer and the
   pump, and the fallback goes into fresh general-L1 objects;
-- at registration, get the placer from `rdma_window_placer` (item 22) and
-  call `check_window_holds_request` (L4);
+- ~~at registration, build the placer and call `check_window_holds_request`
+  (L4).~~ Done in `pipelined_window_placer`;
+- the leaser-and-node point in
+  [Track A's review of the C9 storage changes](#track-as-review-of-the-c9-storage-changes-trackc-planning-at-ae529b58);
 - F2 to F4 of the review; for F4, the slot limit is item 20.
 
 **Together:** C9 over Soft-RoCE.

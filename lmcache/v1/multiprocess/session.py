@@ -5,7 +5,7 @@ in the multiprocess cache server.
 """
 
 # Standard
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Optional, overload
 import threading
@@ -13,6 +13,7 @@ import time
 
 # First Party
 from lmcache.logging import init_logger
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 from lmcache.v1.periodic_thread import (
@@ -50,6 +51,8 @@ class Session:
     _failed_retrieve_releases: set[tuple[int, int, int, int, int]] = field(
         default_factory=set, repr=False
     )
+    _deferred_keys: frozenset[ObjectKey] = field(default=frozenset(), repr=False)
+    _claimed_deferred_keys: set[ObjectKey] = field(default_factory=set, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def set_tokens(self, full_token_ids: list[int]) -> None:
@@ -154,16 +157,63 @@ class Session:
             self.prefetch_group_windows = group_windows
             self._lookup_generation += 1
             self._failed_retrieve_releases.clear()
+            self._deferred_keys = frozenset()
+            self._claimed_deferred_keys.clear()
 
     def record_prefetch_result(
         self,
         hit_chunks: int,
         locked_gids: tuple[int, ...],
+        deferred_keys: tuple[ObjectKey, ...] = (),
     ) -> None:
-        """Record the lock set acquired by the current lookup."""
+        """Record the lock set acquired by the current lookup.
+
+        Args:
+            hit_chunks: The model-wide hit length, in chunks.
+            locked_gids: The object groups the lookup locked.
+            deferred_keys: Hit keys the lookup counted without loading or
+                locking; the retrieve fetches them. Lock releases must skip
+                them (see :meth:`deferred_keys`).
+        """
         with self._lock:
             self.prefetch_hit_chunks = hit_chunks
             self.prefetch_locked_gids = locked_gids
+            self._deferred_keys = frozenset(deferred_keys)
+
+    def deferred_keys(self) -> frozenset[ObjectKey]:
+        """Return the current lookup's deferred keys.
+
+        They hold no lock of this request, before or after a retrieve fetches
+        them, so any release of the lookup's locks must leave them out:
+        L1 read locks are anonymous counts, and releasing one would drop
+        another request's lock.
+
+        Returns:
+            The keys, empty if the lookup deferred none.
+        """
+        with self._lock:
+            return self._deferred_keys
+
+    def claim_deferred_keys(self, keys: Sequence[ObjectKey]) -> list[ObjectKey]:
+        """Claim the deferred keys among ``keys`` for one retrieve to fetch.
+
+        Each deferred key is handed out once per lookup, so two retrieves of
+        the same range do not both fetch it.
+
+        Args:
+            keys: The keys the retrieve reads.
+
+        Returns:
+            The deferred, not yet claimed keys among ``keys``, in their order.
+        """
+        with self._lock:
+            claimed = [
+                key
+                for key in keys
+                if key in self._deferred_keys and key not in self._claimed_deferred_keys
+            ]
+            self._claimed_deferred_keys.update(claimed)
+            return claimed
 
     def prepare_failed_retrieve_release(
         self,

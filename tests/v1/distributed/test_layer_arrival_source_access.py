@@ -7,11 +7,9 @@ from contextlib import contextmanager
 
 # Third Party
 import pytest
-import torch
 
 # First Party
 from lmcache.v1.distributed import storage_manager as storage_manager_module
-from lmcache.v1.distributed.api import MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import (
     EvictionConfig,
     L1ManagerConfig,
@@ -394,48 +392,3 @@ def test_storage_manager_without_adapters_has_no_slot_limit() -> None:
     with _storage_manager([]) as sm:
         with pytest.raises(LayerwiseContractError, match="no L2 adapters"):
             sm.pipelined_max_slots_per_request()
-
-
-def _retain_all(keys: list[ObjectKey]) -> list[bool]:
-    return [True] * len(keys)
-
-
-_LAYOUTS = {0: MemoryLayoutDesc(shapes=[torch.Size([2, 16, 8])], dtypes=[torch.uint8])}
-
-
-def test_storage_manager_without_adapters_has_no_placer() -> None:
-    """With no L2 adapter there are no windows to lease."""
-    with _storage_manager([]) as sm:
-        with pytest.raises(LayerwiseContractError, match="no L2 adapters"):
-            sm.rdma_window_placer(_LAYOUTS, _retain_all)
-
-
-def test_storage_manager_without_a_pipelined_path_has_no_placer() -> None:
-    """The refusal carries each adapter's reason."""
-    with _storage_manager([_mock_adapter_config()]) as sm:
-        with pytest.raises(LayerwiseContractError, match="MockL2Adapter"):
-            sm.rdma_window_placer(_LAYOUTS, _retain_all)
-
-
-def test_storage_manager_refuses_a_placer_without_rdma_reception(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A ready pipelined path is not enough: the adapter must receive RDMA."""
-    client = PipelinedNativeClientStub()
-    monkeypatch.setattr(
-        storage_manager_module,
-        "create_l2_adapter",
-        lambda config, l1_memory_desc: NativeConnectorL2Adapter(
-            native_client=client, type_name="stub"
-        ),
-    )
-    with _storage_manager([_mock_adapter_config()]) as sm:
-        with pytest.raises(LayerwiseContractError, match="RDMA reception is disabled"):
-            sm.rdma_window_placer(_LAYOUTS, _retain_all)
-
-
-def test_storage_manager_refuses_a_placer_without_layouts() -> None:
-    """A placer needs every object group's layout."""
-    with _storage_manager([]) as sm:
-        with pytest.raises(ValueError, match="layout"):
-            sm.rdma_window_placer({}, _retain_all)

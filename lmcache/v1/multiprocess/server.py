@@ -24,6 +24,7 @@ from lmcache.v1.distributed.config import (
     parse_args_to_config,
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
+from lmcache.v1.layerwise.deferral import PipelinedFetchConfig, SharedKeyPolicy
 from lmcache.v1.mp_observability.config import (
     ObservabilityConfig,
     add_observability_args,
@@ -376,6 +377,12 @@ def run_cache_server(
         separate_object_groups=mp_config.separate_object_groups,
         full_sw_kv=is_blend,
         use_layerwise=mp_config.use_layerwise,
+        pipelined_fetch=PipelinedFetchConfig(
+            enabled=mp_config.pipelined_fetch,
+            max_chunks=mp_config.pipelined_max_chunks,
+            shared_keys=SharedKeyPolicy(mp_config.pipelined_shared_keys),
+            shared_wait_seconds=mp_config.pipelined_shared_wait_seconds,
+        ),
     )
 
     modules = _build_modules(ctx, mp_config, coordinator_config)

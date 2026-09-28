@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Flattening a fetch plan into the native pipelined-fetch arguments."""
 
-# Third Party
-import pytest
-
 # First Party
 from lmcache.v1.layerwise import (
     ChunkPlacement,
@@ -13,7 +10,6 @@ from lmcache.v1.layerwise import (
     ModelLayout,
     PlanRequest,
     RecordKeys,
-    chunk_fetch_arguments,
     pipelined_fetch_arguments,
 )
 
@@ -93,35 +89,3 @@ def test_one_chunk_on_two_nodes_is_expressible_per_slot() -> None:
         "node-a",
         "node-b",
     }
-
-
-def test_chunk_call_keeps_slots_in_plan_order() -> None:
-    """The chunk-level session numbers slots by position, as the plan does."""
-    request, keys, planner = _two_chunk_fetch()
-    plan = planner.plan(request, keys)
-
-    arguments = chunk_fetch_arguments(plan, request.placements)
-
-    assert arguments.slot_record_keys == [
-        (s.chunk_id, s.layer_id, s.plane, s.piece, s.record_key) for s in plan.slots
-    ]
-    assert arguments.slot_record_keys[0] == (0, 0, 0, 0, "key-a|s|0")
-
-
-def test_chunk_call_resolves_node_names_one_binding_per_chunk() -> None:
-    """Node indices become names, one binding per chunk."""
-    request, keys, planner = _two_chunk_fetch()
-    plan = planner.plan(request, keys)
-
-    arguments = chunk_fetch_arguments(plan, request.placements)
-
-    assert arguments.placements == [(0, 0, 0), (1, 0, 1 << 20)]
-    assert arguments.chunk_nodes == [(0, "node-b"), (1, "node-a")]
-
-
-def test_chunk_call_cannot_express_one_chunk_on_two_nodes() -> None:
-    """The chunk-level session binds a chunk to one node, so this is refused."""
-    request, plan = _one_chunk_on_two_nodes()
-
-    with pytest.raises(ValueError, match="binds a chunk to one node"):
-        chunk_fetch_arguments(plan, request.placements)

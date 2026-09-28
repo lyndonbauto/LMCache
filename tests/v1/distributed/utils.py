@@ -23,12 +23,14 @@ class PipelinedNativeClientStub:
     runs several fetches at once, each named by generation. Issues get
     generations counting up from ``generation``; ``ready_layers`` maps a
     generation to its landed layers. It reports ``MAX_SLOTS`` as its slot
-    limit. Setting ``init_error`` makes pipelined fetch not ready, with that
-    reason, and the slot limit 0, as the native client reports then.
+    limit and ``MAX_RECORD_BYTES`` as its record cap. Setting ``init_error``
+    makes pipelined fetch not ready, with that reason, and the slot limit 0,
+    as the native client reports then.
     """
 
     NODE_NAME = "BB9000000000001"
     MAX_SLOTS = 64
+    MAX_RECORD_BYTES = 1 << 20
 
     def __init__(self, generation: int = 7) -> None:
         self._efd = create_event_notifier()
@@ -62,6 +64,9 @@ class PipelinedNativeClientStub:
 
     def pipelined_max_slots_per_request(self) -> int:
         return 0 if self.init_error else self.MAX_SLOTS
+
+    def max_record_bytes(self) -> int:
+        return self.MAX_RECORD_BYTES
 
     def issue_pipelined_fetch_by_slots(
         self,

@@ -365,6 +365,28 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             )
         return max_slots
 
+    def pipelined_max_record_bytes(self) -> int:
+        """Return the record cap the native client writes objects under.
+
+        It is the server's record limit less a safety margin, fixed when
+        the client connects.
+
+        Returns:
+            The cap in bytes, always positive.
+
+        Raises:
+            LayerwiseContractError: If the native client has no pipelined
+                fetch path, pipelined fetch is not ready, or the client
+                reports no cap.
+        """
+        self._require_ready_pipelined_path()
+        max_record_bytes = int(self._client.max_record_bytes())
+        if max_record_bytes <= 0:
+            raise LayerwiseContractError(
+                f"{self._type_name}: native client reports no record cap"
+            )
+        return max_record_bytes
+
     def layer_arrival_source(self) -> LayerArrivalSource:
         """Return a new arrival source over the native pipelined fetch.
 

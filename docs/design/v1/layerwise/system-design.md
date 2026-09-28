@@ -338,7 +338,7 @@ A plan names records by **user key**. `RecordKeys` resolves a slot to a
 record index via `record_index_for` and forms the key the way `connector.cpp`
 does (`<cache key>|m` for a one-record object, `<cache key>|s|<index>`
 otherwise). Turning a key into a digest is the client's job:
-`issue_pipelined_fetch_by_keys` calls `record_digest_hex` for each slot and
+`issue_pipelined_fetch_by_slots` calls `record_digest_hex` for each slot and
 hands the session the digests it has always taken. Python never hashes --
 most OpenSSL builds disable RIPEMD-160 -- and when the transport stops using
 an info command, only the native side changes.
@@ -350,9 +350,8 @@ precise about why, so nobody re-attempts them in Python:
   which only the C client has. It reaches the plan as a name in
   `LayerFetchPlan.node_names`. Note that ownership is per *record*: each
   `|s|<i>` segment hashes to its own partition, so one chunk's records are
-  generally spread across nodes. The chunk-level native call binds a whole
-  chunk to one node (`ChunkNodeBinding`), and `chunk_fetch_arguments` refuses
-  a plan that would need otherwise.
+  generally spread across nodes. The slot-level native call can already
+  express that, since every slot carries its own node index.
 
   **Interim: single-node clusters only.** The planner still takes one node
   per object from the placer and sends every record of that object there.
@@ -373,11 +372,9 @@ reports the cap it writes under as `max_record_bytes()`.
 
 ### Slot-level issue: the plan is the only source of truth
 
-The chunk-level call has the native `SlotPlanner` re-expand chunk
-placements into slots, so there are two planners that must agree, and it
-cannot express per-record node ownership. It is being replaced by a
-slot-level call that takes the plan as given.
-`pipelined_fetch_arguments(plan)` produces its input:
+The native session takes the plan's slots as given
+(`issue_pipelined_fetch_by_slots`), so there is one planner, not two that
+must agree. `pipelined_fetch_arguments(plan)` produces its input:
 
 ```text
 node_names: ["node-a", "node-b"]
@@ -390,9 +387,9 @@ hashes each key with `record_digest_hex`, groups slots by
 `node_names[node_index]`, splits each node's sinks to its `max_sinks`, and
 counts readiness per layer from `layer_id`. It keeps the checks it does
 today: the device receive-queue cap (raised as `PlanTooLargeError`), sinks
-inside the leased window, declines, and stale generations.
-`chunk_fetch_arguments` and `issue_pipelined_fetch_by_keys` stay until the
-slot-level call replaces them.
+inside the leased window, declines, and stale generations. The chunk-level
+call, which had a native planner re-expand chunk placements, is gone, and
+`chunk_fetch_arguments` with it.
 
 ### Planning from a real request
 

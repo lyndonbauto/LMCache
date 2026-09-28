@@ -4,7 +4,7 @@ Distributed multi-tier storage manager for MP mode
 """
 
 # Standard
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import replace
 from typing import Iterator, Literal, Optional
@@ -22,6 +22,8 @@ from lmcache.v1.distributed.api import (
     PrefetchHandle,
     PrefetchMode,
     PrefetchRequestSpec,
+    PrefetchResult,
+    ResidentKeys,
     Tier,
     TrimPolicy,
 )
@@ -38,13 +40,15 @@ from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.config import L2AdapterConfigBase
 from lmcache.v1.distributed.l2_adapters.rdma_registration import (
-    L1RdmaConfig,
     rdma_config_of,
     validate_fetch_timeout_against_write_ttl,
     validate_windows_reserved,
 )
 from lmcache.v1.distributed.l2_adapters.rdma_window_leaser import RdmaWindowLeaser
-from lmcache.v1.distributed.l2_adapters.rdma_window_placer import RdmaWindowPlacer
+from lmcache.v1.distributed.l2_adapters.rdma_window_placer import (
+    RdmaWindowPlacer,
+    check_window_holds_request,
+)
 from lmcache.v1.distributed.l2_adapters.reconfiguration import (
     L2ReconfigurableAdapter,
     L2ReconfigureError,
@@ -67,7 +71,7 @@ from lmcache.v1.distributed.storage_controllers.store_policy import (
     create_store_policy,
 )
 from lmcache.v1.layerwise.contract import LayerArrivalSource, LayerwiseContractError
-from lmcache.v1.layerwise.request_fetch import ChunkPlacer
+from lmcache.v1.layerwise.request_fetch import ChunkPlacer, FetchModel
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.mp_observability.event import Event, EventType
@@ -109,18 +113,15 @@ class StorageManager:
         # Guards the _l2_adapters and _adapter_descriptors dicts.
         self._adapters_lock = threading.Lock()
         self._registered_l2_listeners: list[L2AdapterListener] = []
+        # The leaser over L1's RDMA windows, built with the one adapter that
+        # enables RDMA reception; None when no adapter does.
+        self._window_leaser: RdmaWindowLeaser | None = None
         self._l2_adapters: dict[int, L2AdapterInterface] = {}
         self._adapter_descriptors: dict[int, AdapterDescriptor] = {}
         for ac in config.l2_adapter_config.adapters:
             adapter_id, adapter, descriptor = self._build_l2_adapter(ac)
             self._l2_adapters[adapter_id] = adapter
             self._adapter_descriptors[adapter_id] = descriptor
-
-        # One leaser for every placer: the windows belong to L1, and two
-        # leasers would hand out the same window twice. Built by the first
-        # placer, since the quarantine length comes from an adapter's config.
-        self._window_leaser_lock = threading.Lock()
-        self._window_leaser: RdmaWindowLeaser | None = None
 
         PeriodicEventNotifier.create(
             interval_ms=config.periodic_notifier_interval_ms,
@@ -172,12 +173,14 @@ class StorageManager:
         )
         self._store_controller.start()
 
-        # Prefetch controller
+        # Prefetch controller. The policy is kept so layerwise placers retain
+        # fetched objects the way the controller's loads do.
+        self._prefetch_policy = create_prefetch_policy(config.prefetch_policy)
         self._prefetch_controller = PrefetchController(
             l1_manager=self._l1_manager,
             l2_adapters=list(self._l2_adapters.values()),
             adapter_descriptors=list(self._adapter_descriptors.values()),
-            policy=create_prefetch_policy(config.prefetch_policy),
+            policy=self._prefetch_policy,
             max_in_flight=config.prefetch_max_in_flight,
         )
         self._prefetch_controller.start()
@@ -396,6 +399,85 @@ class StorageManager:
                     "StorageManager.read_prefetched_results.__exit__",
                     {"keys": keys},
                 )
+
+    def load_into_l1(
+        self,
+        keys: list[ObjectKey],
+        group_layout_descs: dict[int, MemoryLayoutDesc],
+        timeout_seconds: float,
+    ) -> dict[ObjectKey, MemoryObj]:
+        """Load whole objects from L2 into general L1 and read-lock them, blocking.
+
+        For a retrieve that must have objects it did not prefetch, such as
+        the whole-object fallback of a layerwise fetch. It runs as one
+        prefetch request that retains every key found, so keys already in
+        L1 are locked rather than reloaded. Objects are kept in L1 or freed
+        after the read as the prefetch policy decides.
+
+        Args:
+            keys: Keys to load, each at most once.
+            group_layout_descs: ``{object_group_id: layout}`` for every
+                object group ``keys`` belong to.
+            timeout_seconds: How long to wait for the load.
+
+        Returns:
+            The keys now read-locked in L1 (one lock each), with their memory.
+            A key missing from the result was in neither L1 nor L2, or failed
+            to load. The caller releases the rest with
+            :meth:`finish_read_prefetched`.
+
+        Raises:
+            LMCacheTimeoutError: If the load did not finish in time. The
+                request keeps running, and the read locks it takes expire
+                with the L1 read TTL.
+        """
+        if not keys:
+            return {}
+        request_id = self._prefetch_controller.submit_prefetch_request(
+            PrefetchRequestSpec(
+                keys=keys,
+                group_layout_descs=group_layout_descs,
+                policy=TrimPolicy.SPARSE,
+            )
+        )
+        if not self._prefetch_controller.wait_prefetch_result(
+            request_id, timeout_seconds
+        ):
+            raise LMCacheTimeoutError(
+                f"loading {len(keys)} objects into L1 took longer than "
+                f"{timeout_seconds}s"
+            )
+        retained = self._prefetch_controller.query_prefetch_result(request_id)
+        loaded = retained.gather(keys) if retained is not None else []
+        objects = self._l1_manager.unsafe_read(loaded)
+        return {key: obj for key, (_err, obj) in objects.items() if obj is not None}
+
+    def lock_resident_keys(self, keys: list[ObjectKey]) -> ResidentKeys:
+        """Read-lock the keys L1 can serve now, and say why it cannot serve the rest.
+
+        One read lock per locked key. Unlike a lookup, this takes no L2 part
+        and does not refresh eviction recency.
+
+        Args:
+            keys: Keys to check, each at most once.
+
+        Returns:
+            The keys split into locked (with their memory), busy (being
+            written) and absent.
+        """
+        results = self._l1_manager.reserve_read(keys)
+        locked: dict[ObjectKey, MemoryObj] = {}
+        busy: list[ObjectKey] = []
+        absent: list[ObjectKey] = []
+        for key in keys:
+            err, obj = results[key]
+            if err == L1Error.SUCCESS and obj is not None:
+                locked[key] = obj
+            elif err == L1Error.KEY_NOT_EXIST:
+                absent.append(key)
+            else:
+                busy.append(key)
+        return ResidentKeys(locked, tuple(busy), tuple(absent))
 
     @enable_tracing()
     def finish_read_prefetched(
@@ -722,13 +804,37 @@ class StorageManager:
             done, None if it's still in progress. Derive the prefix hit count
             via ``count_leading_ones``.
         """
+        outcome = self.query_prefetch_outcome(handle)
+        return outcome.retained if outcome is not None else None
+
+    def query_prefetch_outcome(
+        self,
+        handle: PrefetchHandle,
+    ) -> PrefetchResult | None:
+        """Query the result of a prefetch task, including its deferred keys.
+
+        Each result is returned once, by this method or
+        :meth:`query_prefetch_status`.
+
+        Args:
+            handle: The handle of the prefetch task.
+
+        Returns:
+            None if the prefetch is still in progress. Otherwise the found-key
+            bitmap over original positions, and the keys the lookup deferred
+            (see ``PrefetchRequestSpec.l2_deferral``). Deferred keys count as
+            found but hold no lock; the caller fetches them.
+        """
         l2_r: Bitmap | None = None
+        deferred_keys: tuple[ObjectKey, ...] = ()
         if handle.prefetch_request_id != -1:
-            l2_r = self._prefetch_controller.query_prefetch_result(
+            outcome = self._prefetch_controller.query_prefetch_outcome(
                 handle.prefetch_request_id
             )
-            if l2_r is None:
+            if outcome is None:
                 return None
+            l2_r = outcome.retained
+            deferred_keys = outcome.deferred_keys
 
         found = self._combine_found(handle, l2_r)
         # popcount (not count_leading_ones) so the log is accurate for
@@ -742,17 +848,18 @@ class StorageManager:
             l2_hits = l2_r.popcount() if l2_r is not None else 0
             logger.info(
                 "Prefetch request completed (L1+L2): "
-                "%d/%d retained keys (%d L1, %d L2) in %.1f ms "
+                "%d/%d retained keys (%d L1, %d L2, %d deferred) in %.1f ms "
                 "(external_request_id=%s, prefetch_request_id=%d)",
                 total_hits,
                 handle.total_requested_keys,
                 l1_hits,
                 l2_hits,
+                len(deferred_keys),
                 elapsed_ms,
                 handle.external_request_id,
                 handle.prefetch_request_id,
             )
-        return found
+        return PrefetchResult(found, deferred_keys)
 
     def set_kv_plane_bytes(self, plane_bytes: int) -> None:
         """Pass the K/V plane size on to every L2 adapter.
@@ -881,68 +988,115 @@ class StorageManager:
             + ("; ".join(reasons) or "no L2 adapters are registered")
         )
 
-    def rdma_window_placer(
-        self,
-        layouts: Mapping[int, MemoryLayoutDesc],
-        select_retentions: Callable[[list[ObjectKey]], list[bool]],
-    ) -> ChunkPlacer:
-        """Return the ``ChunkPlacer`` a layerwise retrieve leases windows from.
+    def pipelined_adapter_id(self) -> int:
+        """Return the id of the adapter pipelined fetches read from.
 
-        Build one per registered model, once its layouts are known. The
-        placer reserves a retrieve's objects in one of L1's RDMA windows, on
-        the node of the first adapter, in registration order, that has a
-        ready pipelined path and RDMA reception enabled. Every placer from
-        one storage manager shares one window leaser, so a window leased,
-        quarantined or pinned through one placer is unavailable to the
-        others.
-
-        Args:
-            layouts: ``{object_group_id: layout}``, the L1 memory layout of
-                each of the model's object groups.
-            select_retentions: Given the keys of one lease's objects, in
-                order, returns whether to keep each in L1 after its fetch
-                finishes, as the prefetch policy's ``select_l1_retentions``
-                does.
+        The same adapter the other ``pipelined_*`` accessors and
+        :meth:`layer_arrival_source` use: the first, in registration order,
+        with a ready pipelined path. A lookup compares it with the adapters
+        its load plan reads from.
 
         Returns:
-            A new placer.
+            The adapter id, as ``AdapterDescriptor.index``.
 
         Raises:
-            LayerwiseContractError: If no L2 adapter has both a ready
-                pipelined path and RDMA reception enabled, with each
-                adapter's reason. Retrieve then loads whole objects.
-            ValueError: If ``layouts`` is empty.
+            LayerwiseContractError: If no L2 adapter has a ready pipelined
+                path, with each adapter's reason.
         """
-        if not layouts:
-            raise ValueError("a placer needs the layout of every object group")
         with self._adapters_lock:
-            entries = [
-                (self._adapter_descriptors[adapter_id], adapter)
-                for adapter_id, adapter in self._l2_adapters.items()
-            ]
+            adapters = list(self._l2_adapters.items())
         reasons: list[str] = []
-        for descriptor, adapter in entries:
+        for adapter_id, adapter in adapters:
             try:
-                node_name = adapter.pipelined_fetch_node_name()
+                adapter.pipelined_fetch_node_name()
             except LayerwiseContractError as exc:
                 reasons.append(str(exc))
                 continue
-            rdma = rdma_config_of(descriptor.config)
-            if not rdma.is_enabled():
-                reasons.append(
-                    f"{descriptor.type_name}: RDMA reception is disabled in its config"
-                )
-                continue
-            return RdmaWindowPlacer(
-                self._l1_manager,
-                self._shared_window_leaser(rdma),
-                layouts,
-                node_name,
-                select_retentions,
-            )
+            return adapter_id
         raise LayerwiseContractError(
-            "no L2 adapter can place a pipelined retrieve: "
+            "no L2 adapter has a pipelined fetch path: "
             + ("; ".join(reasons) or "no L2 adapters are registered")
+        )
+
+    def pipelined_max_record_bytes(self) -> int:
+        """Return the record cap the pipelined adapter writes objects under.
+
+        A layerwise plan must use the cap the objects were written with.
+        Adapters are asked in registration order, as by
+        :meth:`pipelined_fetch_node_name`.
+
+        Returns:
+            The cap in bytes from the first adapter with a ready pipelined
+            path, always positive.
+
+        Raises:
+            LayerwiseContractError: If no L2 adapter has a ready pipelined
+                path, with each adapter's reason.
+        """
+        with self._adapters_lock:
+            adapters = list(self._l2_adapters.values())
+        reasons: list[str] = []
+        for adapter in adapters:
+            try:
+                return adapter.pipelined_max_record_bytes()
+            except LayerwiseContractError as exc:
+                reasons.append(str(exc))
+        raise LayerwiseContractError(
+            "no L2 adapter has a pipelined record cap: "
+            + ("; ".join(reasons) or "no L2 adapters are registered")
+        )
+
+    def pipelined_window_placer(
+        self,
+        group_layout_descs: Mapping[int, MemoryLayoutDesc],
+        model: FetchModel,
+        max_pipelined_chunks: int,
+    ) -> ChunkPlacer:
+        """Build the layerwise placer for one registered model.
+
+        Objects are reserved inside L1's RDMA windows and fetched from the
+        pipelined adapter's one node. Fetched objects are kept in L1 or
+        freed as the prefetch policy's ``select_l1_retentions`` decides, the
+        same as objects the prefetch controller loads.
+
+        Args:
+            group_layout_descs: ``{object_group_id: layout}`` for every
+                object group of the model.
+            model: The model's fetch model, used to check that one window
+                holds its largest pipelined retrieve.
+            max_pipelined_chunks: The most chunks one pipelined retrieve of
+                this model may read.
+
+        Returns:
+            A placer for this model's retrieves.
+
+        Raises:
+            LayerwiseContractError: If no adapter enables RDMA reception, or
+                none has a ready pipelined path (including a cluster of more
+                than one node), with the reason.
+            ValueError: If one window cannot hold ``max_pipelined_chunks``
+                chunks of this model, or ``max_pipelined_chunks`` is not
+                positive. The message states the window size needed.
+        """
+        leaser = self._window_leaser
+        if leaser is None:
+            raise LayerwiseContractError(
+                "no L2 adapter enables RDMA reception, so L1 has no RDMA windows"
+            )
+        node_name = self.pipelined_fetch_node_name()
+        align_bytes = self._l1_memory_desc.align_bytes
+        check_window_holds_request(
+            self._l1_config.memory_config.rdma_window_bytes,
+            model,
+            max_pipelined_chunks,
+            align_bytes,
+        )
+        return RdmaWindowPlacer(
+            self._l1_manager,
+            leaser,
+            group_layout_descs,
+            node_name,
+            self._prefetch_policy.select_l1_retentions,
         )
 
     def touch_l1_keys(self, keys: list[ObjectKey]):
@@ -1398,24 +1552,6 @@ class StorageManager:
         with self._adapters_lock:
             return bool(self._l2_adapters)
 
-    def _shared_window_leaser(self, rdma: L1RdmaConfig) -> RdmaWindowLeaser:
-        """Return the one window leaser, building it from ``rdma`` if needed.
-
-        ``_build_l2_adapter`` has already checked that every RDMA adapter's
-        window plan is the one L1 reserved, so any enabled ``rdma`` fits.
-
-        Args:
-            rdma: An enabled adapter RDMA config, used only on the first
-                call.
-
-        Returns:
-            The leaser over L1's windows.
-        """
-        with self._window_leaser_lock:
-            if self._window_leaser is None:
-                self._window_leaser = RdmaWindowLeaser(self._l1_manager, rdma)
-            return self._window_leaser
-
     def _build_l2_adapter(
         self,
         config: L2AdapterConfigBase,
@@ -1440,6 +1576,9 @@ class StorageManager:
         validate_windows_reserved(
             config, memory_config.rdma_window_count, memory_config.rdma_window_bytes
         )
+        rdma_config = rdma_config_of(config)
+        if rdma_config.is_enabled() and self._window_leaser is None:
+            self._window_leaser = RdmaWindowLeaser(self._l1_manager, rdma_config)
 
         adapter_id = self._next_adapter_id
         self._next_adapter_id += 1

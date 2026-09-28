@@ -19,9 +19,10 @@ key serialization, and the adapter imports this package.
 
 # Standard
 from collections.abc import Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from enum import Enum
-from typing import Protocol, runtime_checkable
+from typing import Generic, Protocol, TypeVar, runtime_checkable
 import threading
 
 # First Party
@@ -38,6 +39,8 @@ from lmcache.v1.layerwise.planner import (
     RecordKeys,
 )
 from lmcache.v1.memory_management import MemoryObj
+
+ModelT = TypeVar("ModelT")
 
 
 def first_in_window_chunk(num_chunks: int, window_chunks: int) -> int:
@@ -277,25 +280,32 @@ class RequestFetch:
     plan: LayerFetchPlan
 
 
-class FetchModelRegistry:
-    """Registered models' :class:`FetchModel`, by ``(model_name, world_size)``.
+class ModelRegistry(Generic[ModelT]):
+    """One value per registered model, by ``(model_name, world_size)``.
 
     Reference-counted the same way as the layout descriptor registry: every
     worker of a model registers it, and the entry lives until the last one
     unregisters. Thread-safe.
     """
 
-    def __init__(self) -> None:
-        self._models: dict[tuple[str, int], tuple[FetchModel, int]] = {}
+    def __init__(self, what: str) -> None:
+        """Create an empty registry.
+
+        Args:
+            what: What the values are, for the error :meth:`find` raises,
+                e.g. ``"layerwise fetch layout"``.
+        """
+        self._what = what
+        self._models: dict[tuple[str, int], tuple[ModelT, int]] = {}
         self._lock = threading.Lock()
 
-    def register(self, model_name: str, world_size: int, model: FetchModel) -> None:
+    def register(self, model_name: str, world_size: int, model: ModelT) -> None:
         """Add one registration of a model; the latest ``model`` is kept.
 
         Args:
             model_name: The model name.
             world_size: The world size.
-            model: The model's fetch layout and attention windows.
+            model: The value to keep for the model.
         """
         key = (model_name, world_size)
         with self._lock:
@@ -306,7 +316,7 @@ class FetchModelRegistry:
         """Drop one registration; the entry goes with the last one.
 
         Unregistering a model that was never registered is a no-op, since a
-        model whose layout could not be planned is never registered.
+        model a value could not be built for is never registered.
 
         Args:
             model_name: The model name.
@@ -323,28 +333,35 @@ class FetchModelRegistry:
             else:
                 self._models[key] = (model, count - 1)
 
-    def find(self, model_name: str, world_size: int) -> FetchModel:
-        """Return a registered model's fetch layout.
+    def find(self, model_name: str, world_size: int) -> ModelT:
+        """Return a registered model's value.
 
         Args:
             model_name: The model name.
             world_size: The world size.
 
         Returns:
-            The model's :class:`FetchModel`.
+            The value registered for the model.
 
         Raises:
-            KeyError: If the model is not registered, or its layout could not
-                be planned; the caller should load whole objects instead.
+            KeyError: If the model is not registered, or no value could be
+                built for it; the caller should load whole objects instead.
         """
         with self._lock:
             entry = self._models.get((model_name, world_size))
         if entry is None:
             raise KeyError(
-                f"no layerwise fetch layout for model {model_name!r} with "
-                f"world size {world_size}"
+                f"no {self._what} for model {model_name!r} with world size {world_size}"
             )
         return entry[0]
+
+
+class FetchModelRegistry(ModelRegistry[FetchModel]):
+    """Registered models' :class:`FetchModel`, by ``(model_name, world_size)``."""
+
+    def __init__(self) -> None:
+        """Create an empty registry."""
+        super().__init__("layerwise fetch layout")
 
 
 def request_cache_keys(
@@ -392,8 +409,26 @@ def request_cache_keys(
     return cache_keys
 
 
+def _fetched_cache_keys(
+    obj_keys_per_obj_group: Sequence[Sequence[ObjectKey]],
+    attn_desc: AttnWindowDesc,
+    keys_to_fetch: AbstractSet[ObjectKey] | None,
+) -> dict[tuple[int, int], str]:
+    """:func:`request_cache_keys`, kept to ``keys_to_fetch`` when given."""
+    cache_keys = request_cache_keys(obj_keys_per_obj_group, attn_desc)
+    if keys_to_fetch is None:
+        return cache_keys
+    return {
+        (chunk_id, group_id): cache_key
+        for (chunk_id, group_id), cache_key in cache_keys.items()
+        if obj_keys_per_obj_group[group_id][chunk_id] in keys_to_fetch
+    }
+
+
 def objects_to_place(
-    model: FetchModel, obj_keys_per_obj_group: Sequence[Sequence[ObjectKey]]
+    model: FetchModel,
+    obj_keys_per_obj_group: Sequence[Sequence[ObjectKey]],
+    keys_to_fetch: AbstractSet[ObjectKey] | None = None,
 ) -> tuple[ObjectToPlace, ...]:
     """List the objects a retrieve reads, for :meth:`ChunkPlacer.lease`.
 
@@ -401,6 +436,10 @@ def objects_to_place(
         model: The registered model's layout and windows.
         obj_keys_per_obj_group: The request's object keys, as described for
             :func:`request_cache_keys`.
+        keys_to_fetch: Fetch only the objects with these keys, e.g. the
+            ones a lookup deferred while the rest are in L1. ``None``
+            fetches every object the retrieve reads. Chunk ids stay the
+            chunks' indices in the request.
 
     Returns:
         One entry per object read, ordered by chunk, then object group.
@@ -411,7 +450,9 @@ def objects_to_place(
         KeyError: If the layout does not cover an object group the request
             reads.
     """
-    cache_keys = request_cache_keys(obj_keys_per_obj_group, model.attn_desc)
+    cache_keys = _fetched_cache_keys(
+        obj_keys_per_obj_group, model.attn_desc, keys_to_fetch
+    )
     return tuple(
         ObjectToPlace(
             chunk_id,
@@ -428,6 +469,7 @@ def build_request_fetch(
     obj_keys_per_obj_group: Sequence[Sequence[ObjectKey]],
     max_record_bytes: int,
     lease: WindowLease,
+    keys_to_fetch: AbstractSet[ObjectKey] | None = None,
 ) -> RequestFetch:
     """Plan the pipelined fetch of every object a retrieve would read.
 
@@ -442,6 +484,7 @@ def build_request_fetch(
         max_record_bytes: The record cap the objects were written under;
             the connector reports it as ``max_record_bytes()``.
         lease: The request's window lease, which places each object.
+        keys_to_fetch: As for :func:`objects_to_place`; pass the same set.
 
     Returns:
         The placements and the plan built from them. Placements are ordered
@@ -455,7 +498,9 @@ def build_request_fetch(
         KeyError: If the layout does not cover an object group the request
             reads, or the lease cannot locate an object.
     """
-    cache_keys = request_cache_keys(obj_keys_per_obj_group, model.attn_desc)
+    cache_keys = _fetched_cache_keys(
+        obj_keys_per_obj_group, model.attn_desc, keys_to_fetch
+    )
     window_start = lease.window_start()
     window_end = window_start + lease.window_bytes()
     node_indices: dict[str, int] = {}

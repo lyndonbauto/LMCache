@@ -321,11 +321,11 @@ reserves every object of the retrieve in it, all or nothing:
 
 ```python
 # At registration, once the model's layouts are known:
-placer = storage_manager.rdma_window_placer(layouts,
-                                            policy.select_l1_retentions)
+placer = storage_manager.pipelined_window_placer(layouts, fetch_model,
+                                                 max_pipelined_chunks)
 #   layouts: {group_id: MemoryLayoutDesc} of the registered model
-#   last argument: which objects stay in L1 afterwards
-# At retrieve:
+#   raises ValueError if one window cannot hold max_pipelined_chunks
+# At retrieve, for the keys L1 does not already hold:
 lease = placer.lease(objects_to_place(model, obj_keys))
 lease.locate(chunk_id, group_id)   # ChunkLocation(node_name, slab offset)
 ...                                # build_request_fetch, pump, sink copies
@@ -336,16 +336,17 @@ lease.release(LeaseOutcome.ABANDONED)      # abort_write; window quarantined,
                                            # fallback uses general L1 (W4)
 ```
 
-- **Built by the storage manager.** `StorageManager.rdma_window_placer`
-  builds an `RdmaWindowPlacer` over its own L1, on the node of the first
-  adapter, in registration order, with a ready pipelined path and RDMA
-  reception enabled. It raises `LayerwiseContractError` with each adapter's
-  reason when none qualifies, and retrieve then loads whole objects. Every
-  placer from one storage manager shares one `RdmaWindowLeaser`, because the
-  windows belong to L1: two leasers would hand out the same window twice,
-  and a window quarantined through one placer must stay quarantined for the
-  others. The leaser takes its quarantine length from the first qualifying
-  adapter's `fetch_timeout_seconds`.
+- **Built by the storage manager.** `StorageManager.pipelined_window_placer`
+  (Track C) builds an `RdmaWindowPlacer` over its own L1, on the pipelined
+  adapter's node, retaining objects as the prefetch policy's
+  `select_l1_retentions` decides, after running `check_window_holds_request`.
+  It raises `LayerwiseContractError` when no adapter enables RDMA reception
+  or none has a ready pipelined path, and retrieve then loads whole objects.
+  Every placer shares the storage manager's one `RdmaWindowLeaser`, because
+  the windows belong to L1: two leasers would hand out the same window
+  twice, and a window quarantined through one placer must stay quarantined
+  for the others. The leaser is built with the first RDMA-enabled adapter's
+  config, so its quarantine is that adapter's `fetch_timeout_seconds`.
 - **Retention, and no write-back.** Fetched objects follow the prefetch
   policy, as today's whole-object loads do: the ones it doesn't retain are
   reserved temporary and freed when the lease finishes. `FINISHED` ends the
@@ -385,7 +386,7 @@ lease.release(LeaseOutcome.ABANDONED)      # abort_write; window quarantined,
   `pipelined_fetch_init_error`, every fetch falls back, and nothing is
   registered with any node. The node count is checked only at init.
   `StorageManager.pipelined_fetch_node_name()` returns that one node, and
-  `rdma_window_placer` builds the placer with it. It raises
+  `pipelined_window_placer` builds the placer with it. It raises
   `LayerwiseContractError`, carrying the init error, when no adapter has a
   ready pipelined path.
 - **The slot limit is known before the fetch.**

@@ -3,7 +3,8 @@
 
 The prefetch-controller tests cover the condition-variable wait in isolation;
 these cover the ``LookupModule`` handler that ``WAIT_PREFETCH_STATUS`` dispatches
-to, i.e. the ``wait_prefetch_status -> query_prefetch_status`` path: count
+to, i.e. the ``wait_prefetch_status -> query_prefetch_status`` path (which
+reads ``StorageManager.query_prefetch_outcome``): count
 computation, event emission, and exactly-once job consumption. The storage
 manager is mocked, so no GPU or native bitmap is needed.
 """
@@ -14,14 +15,16 @@ import threading
 
 # First Party
 from lmcache.lmcache_native import Bitmap
-from lmcache.v1.distributed.api import PrefetchHandle
+from lmcache.v1.distributed.api import PrefetchHandle, PrefetchResult
 from lmcache.v1.multiprocess.modules.lookup import LookupModule, _PrefetchJob
 
 
 def _make_ctx(wait_result=True, found=None):
     storage_manager = mock.Mock()
     storage_manager.wait_prefetch_status.return_value = wait_result
-    storage_manager.query_prefetch_status.return_value = found
+    storage_manager.query_prefetch_outcome.return_value = (
+        None if found is None else PrefetchResult(found)
+    )
     ctx = mock.Mock()
     ctx.storage_manager = storage_manager
     ctx.event_bus = mock.Mock()
@@ -70,7 +73,7 @@ def test_wait_prefetch_status_returns_count_and_consumes_job():
     # later reconstruct which keys the prefetch read-locked.
     ctx.session_manager.get_or_create.assert_called_once_with("req")
     session = ctx.session_manager.get_or_create.return_value
-    session.record_prefetch_result.assert_called_once_with(4, (0,))
+    session.record_prefetch_result.assert_called_once_with(4, (0,), ())
 
 
 def test_wait_prefetch_status_timeout_returns_none_and_keeps_job():
@@ -85,7 +88,7 @@ def test_wait_prefetch_status_timeout_returns_none_and_keeps_job():
     module._prefetch_jobs["req"] = job
 
     assert module.wait_prefetch_status("req", timeout=0.5) is None
-    ctx.storage_manager.query_prefetch_status.assert_not_called()
+    ctx.storage_manager.query_prefetch_outcome.assert_not_called()
     # Job is kept so a later wait/query can still resolve it.
     assert module._prefetch_jobs["req"] is job
 

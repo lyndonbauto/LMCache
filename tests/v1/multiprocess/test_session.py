@@ -9,6 +9,7 @@ import time
 import pytest
 
 # First Party
+from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.session import Session, SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
@@ -357,3 +358,53 @@ class TestSessionManagerRemoveReturnsSession:
         """remove() on a non-existent request_id should return None."""
         mgr = SessionManager(hasher, ttl=600, cleanup_interval=None)
         assert mgr.remove("no-such-id") is None
+
+
+def _object_key(i: int) -> ObjectKey:
+    return ObjectKey(chunk_hash=ObjectKey.IntHash2Bytes(i), model_name="m", kv_rank=0)
+
+
+def _lookup_key() -> IPCCacheServerKey:
+    return IPCCacheServerKey.from_token_ids(
+        model_name="m",
+        world_size=1,
+        worker_id=None,
+        token_ids=list(range(8)),
+        request_id="req-1",
+    )
+
+
+class TestSessionDeferredKeys:
+    def test_a_lookup_without_deferral_has_no_deferred_keys(
+        self, session: Session
+    ) -> None:
+        session.record_prefetch_result(2, (0,))
+        assert session.deferred_keys() == frozenset()
+        assert session.claim_deferred_keys([_object_key(0)]) == []
+
+    def test_recorded_deferred_keys_are_reported(self, session: Session) -> None:
+        session.record_prefetch_result(2, (0,), (_object_key(0), _object_key(1)))
+        assert session.deferred_keys() == {_object_key(0), _object_key(1)}
+
+    def test_each_deferred_key_is_claimed_once(self, session: Session) -> None:
+        session.record_prefetch_result(3, (0,), (_object_key(0), _object_key(1)))
+
+        first = session.claim_deferred_keys(
+            [_object_key(2), _object_key(1), _object_key(0)]
+        )
+        second = session.claim_deferred_keys([_object_key(0), _object_key(1)])
+
+        assert first == [_object_key(1), _object_key(0)]
+        assert second == []
+        # Claimed keys still hold no lock, so releases must still skip them.
+        assert session.deferred_keys() == {_object_key(0), _object_key(1)}
+
+    def test_a_new_lookup_forgets_the_deferred_keys(self, session: Session) -> None:
+        session.record_prefetch_result(1, (0,), (_object_key(0),))
+        session.claim_deferred_keys([_object_key(0)])
+
+        session.begin_lookup(_lookup_key(), (-1,))
+
+        assert session.deferred_keys() == frozenset()
+        session.record_prefetch_result(1, (0,), (_object_key(0),))
+        assert session.claim_deferred_keys([_object_key(0)]) == [_object_key(0)]
