@@ -195,7 +195,13 @@ def _publish_layerwise_retrieve_terminal(
     instance_id: int,
     retrieve_generation: int,
 ) -> None:
-    """Publish a terminal layerwise retrieve state under ``retrieve_generation``."""
+    """Publish that layerwise retrieve ``retrieve_generation`` failed.
+
+    Uses :meth:`LayerProgressRecord.fail_retrieve`, so a newer retrieve's
+    record is never touched. Callers publish only before any layer copy of
+    this retrieve was queued, or after ``LayerwiseH2DRetrieve.mark_failed``
+    already drained them.
+    """
     if not ctx.use_layerwise or retrieve_generation <= 0:
         return
     progress = entry.layer_progress if entry is not None else None
@@ -206,10 +212,11 @@ def _publish_layerwise_retrieve_terminal(
             progress = LayerProgressRecord.from_shared_memory(shm_to_close)
         except FileNotFoundError:
             return
-    progress.begin_retrieve(retrieve_generation)
-    progress.mark_retrieve_failed()
-    if shm_to_close is not None:
-        shm_to_close.close()
+    try:
+        progress.fail_retrieve(retrieve_generation)
+    finally:
+        if shm_to_close is not None:
+            shm_to_close.close()
 
 
 @dataclass

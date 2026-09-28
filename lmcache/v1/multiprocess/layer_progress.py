@@ -216,6 +216,34 @@ class LayerProgressRecord:
         flags |= _FLAG_RETRIEVE_FAILED
         _RECORD_STRUCT.pack_into(self._buffer, 0, generation, watermark, flags)
 
+    def fail_retrieve(self, generation: int) -> None:
+        """Publish that retrieve ``generation`` failed, leaving newer ones alone.
+
+        What the record holds decides what is written:
+
+        - a newer generation: nothing. A late failure must neither fail nor
+          rewind the retrieve that now owns the record;
+        - ``generation`` itself: the failure flag, keeping the watermark;
+        - an older generation: ``generation`` is published first, so the
+          failure is attributed to it rather than to the older retrieve.
+
+        Assumes a single writer, as every other writer method does.
+
+        Args:
+            generation: The failed retrieve's generation; strictly positive.
+
+        Raises:
+            ValueError: If ``generation`` is not positive.
+        """
+        if generation <= 0:
+            raise ValueError("generation must be positive")
+        record_generation = self.read().generation
+        if record_generation > generation:
+            return
+        if record_generation < generation:
+            self.begin_retrieve(generation)
+        self.mark_retrieve_failed()
+
 
 class LayerLaunchEventPool:
     """CUDA IPC events indexed by launch ordinal (injectable in tests)."""

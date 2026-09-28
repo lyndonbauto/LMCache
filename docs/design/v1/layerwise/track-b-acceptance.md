@@ -1151,3 +1151,76 @@ raised.
 - Track B, layerwise, pipelined-loading and deferred-retrieve suites: 446
   passed, 30 skipped.
 - Ruff, isort, codespell and mypy clean on the changed sources.
+
+### Step 14 -- Post-merge review and a faster staging copy (2026-09-28)
+
+Track B fast-forwarded to `track/c-planning` at `b16a1617`, which adds Track
+C's `test_qstore` fix (`694eb6b8`). Then the Track B code the merges touched
+was reviewed for duplicate paths and slow spots, and measured on the RTX 3060.
+
+**Fixed:**
+
+- **One rule for publishing a failed retrieve.** `LayerwiseH2DRetrieve.mark_failed`
+  and the daemon's `_publish_layerwise_retrieve_terminal` each wrote the
+  failure differently. The terminal path always called `begin_retrieve`,
+  which zeroes the watermark and would overwrite a newer retrieve's record.
+  Both now call `LayerProgressRecord.fail_retrieve(generation)`: leave a
+  newer generation alone, keep this generation's watermark, and publish an
+  older record's generation first. The waiter checks the flag before the
+  watermark, so the worker sees no difference. The terminal path now closes
+  an attached segment in a `finally`.
+- **Per-layer hot path.** Each kernel group's staging-region offset inside
+  its object-group buffer is computed once per retrieve, not twice per chunk
+  per layer, and a layer's byte ranges are built once per launch, not once
+  per batch.
+- **Faster range copy.** For a non-lazy object into a CUDA buffer,
+  `lmcache_memcpy_async_h2d_range` now issues one native
+  `device_ops.lmcache_memcpy_async` (a raw `cudaMemcpyAsync`, GIL released)
+  instead of slicing two tensors for `copy_`. The native call uses the
+  current device's stream; retrieve already runs under
+  `torch_dev.device(cache_context.device)`. CPU tensors and non-CUDA devices
+  keep the tensor copy.
+
+**Measured on the RTX 3060** (WSL2, which inflates per-call GPU API cost):
+
+| Per-copy issue cost (4 KiB copies, GPU never backed up) | CPU |
+| --- | --- |
+| Old helper (tensor `copy_`) | 25.6 µs |
+| Pre-sliced tensor `copy_` | 20.8 µs |
+| Native raw-pointer copy | 10.3 µs |
+
+At production shape (32 layers; 8 chunks x 2 planes = 16 range copies of
+512 KiB per layer; kernel stubbed), issuing one layer fell from 317 µs to
+175 µs, against 740 µs of GPU copy time at 11.3 GB/s. CPU cost per layer
+went from 0.43 to 0.24 of the copy time. This matters on servers: a PCIe
+Gen5 link copies the same layer in about 0.15 ms, so at the old cost the
+staging loop would have been roughly 2x CPU-bound there.
+
+**Not fixed; for later:**
+
+- **One native call per plane per chunk remains.** Removing the rest of the
+  Python cost needs a batched copy per layer in C++ (`execute_object_group_transfer`
+  batches whole lazy objects only). Worth measuring first on a native Linux
+  server, since WSL2 overstates per-call cost.
+- **R8 grows with the pipelined path (raise with Track C).** The daemon runs
+  one worker's retrieves one at a time, and a pipelined retrieve holds the
+  thread for its whole fetch. With several loading requests in one step, the
+  worker waits only on the last retrieve, whose generation is published only
+  after the earlier fetches finish. Their fetch times add up against the
+  worker's 5 s wait for layer 0, and a timeout now stops the engine.
+  Pipelining also helps only the last request of such a step.
+
+**Tested:**
+
+- `fail_retrieve`: newer generation untouched, current keeps its watermark,
+  older published first, generation 0 refused (4 new tests).
+- New GPU test: the native range copy writes exactly its bytes.
+- GPU, all `cuda` tests in the Track B files (7): pass, including per-layer
+  staging, objects swapped between layers, and the overlap harness.
+- TTFT simulation: same savings as Step 11 in three scenarios (about 41, 41
+  and 21 ms). The transfer-bound one saved 84 ms because the GPU did not slow
+  down from heat this run; model and measurement agree within 3 ms.
+- CPU: Track B, layerwise, pipelined-loading, deferred-retrieve, layout,
+  skip and qstore suites: 506 passed, 30 skipped. vLLM 0.30.0 venv, connector
+  and adapter: 60 passed.
+- Ruff, isort, codespell and mypy clean on the changed sources.

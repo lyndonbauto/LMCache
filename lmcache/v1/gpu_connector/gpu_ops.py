@@ -13,6 +13,10 @@ from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
 from lmcache.v1.platform.ops_types import StagingCopy
 import lmcache.lmcache_native as lmcache_native
 
+#: Alignment that keeps ``device_ops.lmcache_memcpy_async`` from splitting a
+#: copy: its pieces end at multiples of the alignment past the host offset.
+_SINGLE_COPY_ALIGNMENT = 1 << 62
+
 
 # Helper functions
 def lmcache_memcpy_async_h2d(
@@ -68,7 +72,8 @@ def lmcache_memcpy_async_h2d_range(
     ``[byte_offset, byte_offset + nbytes)`` of the memory object land at the
     same offsets of ``gpu_buffer``. Used to stage a single layer of an object
     whose other layers may still be arriving. Non-blocking; runs on the
-    current stream and does not synchronize.
+    current stream and does not synchronize. For a CUDA ``gpu_buffer``, its
+    device must be the current device.
 
     Args:
         memory_obj: Host memory object to read from.
@@ -107,6 +112,20 @@ def lmcache_memcpy_async_h2d_range(
             lmcache_native.TransferDirection.H2D,
             memory_obj.meta.address + byte_offset,
             LazyMemoryAllocator.PIN_CHUNK_SIZE,
+        )
+    elif gpu_buffer.is_cuda:
+        # One raw cudaMemcpyAsync, issued without the GIL: per-layer staging
+        # issues one call per plane per chunk, and slicing two tensors for
+        # copy_ costs about 2.5x the CPU time. The native call copies on the
+        # current device's stream, so the caller must have made gpu_buffer's
+        # device current (retrieve runs under torch_dev.device(...)).
+        device_ops.lmcache_memcpy_async(
+            gpu_buffer.data_ptr() + byte_offset,
+            src_tensor.data_ptr() + byte_offset,
+            nbytes,
+            lmcache_native.TransferDirection.H2D,
+            0,
+            _SINGLE_COPY_ALIGNMENT,
         )
     else:
         gpu_buffer.view(torch.uint8)[byte_offset:end].copy_(

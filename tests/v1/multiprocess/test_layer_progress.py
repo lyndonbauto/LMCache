@@ -62,6 +62,46 @@ class RecordingEventPool(LayerLaunchEventPool):
         self.waited.append(ordinal)
 
 
+def _record_at(generation: int, watermark: int) -> LayerProgressRecord:
+    record = LayerProgressRecord(bytearray(LayerProgressRecord.RECORD_SIZE))
+    if generation:
+        record.begin_retrieve(generation)
+        record.report_launch_recorded(watermark)
+    return record
+
+
+def test_failing_the_current_retrieve_keeps_its_watermark() -> None:
+    record = _record_at(4, 3)
+
+    record.fail_retrieve(4)
+
+    snap = record.read()
+    assert (snap.generation, snap.watermark, snap.retrieve_failed) == (4, 3, True)
+
+
+def test_failing_a_retrieve_newer_than_the_record_publishes_it_first() -> None:
+    record = _record_at(4, 3)
+
+    record.fail_retrieve(5)
+
+    snap = record.read()
+    assert (snap.generation, snap.watermark, snap.retrieve_failed) == (5, 0, True)
+
+
+def test_a_late_failure_leaves_a_newer_retrieve_alone() -> None:
+    record = _record_at(6, 2)
+
+    record.fail_retrieve(5)
+
+    snap = record.read()
+    assert (snap.generation, snap.watermark, snap.retrieve_failed) == (6, 2, False)
+
+
+def test_failing_generation_zero_is_rejected() -> None:
+    with pytest.raises(ValueError, match="positive"):
+        _record_at(0, 0).fail_retrieve(0)
+
+
 def test_record_begin_and_watermark() -> None:
     buf = bytearray(LayerProgressRecord.RECORD_SIZE)
     record = LayerProgressRecord(buf)

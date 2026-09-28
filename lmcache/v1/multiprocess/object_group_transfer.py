@@ -623,6 +623,10 @@ class _LayerwiseKernelLaunchParams:
     recalculated_skip_blocks: int
     block_ids_curr_batch: torch.Tensor
     tmp_gpu_buffer_data_ptrs: tuple[int, ...]
+    #: Per slot, where this kernel group's staging region starts inside the
+    #: slot's object group buffer, in bytes. Per-layer staging adds a layer's
+    #: plane offsets to it.
+    staging_region_offsets: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -721,6 +725,14 @@ def _build_layerwise_batch_descriptors(
                         recalculated_skip_blocks=recalculated_skip_blocks,
                         block_ids_curr_batch=block_ids_curr_batch,
                         tmp_gpu_buffer_data_ptrs=tmp_gpu_buffer_data_ptrs,
+                        staging_region_offsets=tuple(
+                            data_ptr - buffer.data_ptr()
+                            for data_ptr, buffer in zip(
+                                tmp_gpu_buffer_data_ptrs,
+                                object_group_buffers,
+                                strict=True,
+                            )
+                        ),
                     )
                 )
 
@@ -1148,14 +1160,11 @@ class LayerwiseH2DRetrieve:
         """
         copies_queued = self._state is not _RetrieveState.NOT_BEGUN
         self._state = _RetrieveState.FAILED
-        record_generation = self._progress.read().generation
-        if record_generation > self._retrieve_generation:
+        if self._progress.read().generation > self._retrieve_generation:
             return
         if copies_queued:
             self._cache_context.stream.synchronize()
-        if record_generation < self._retrieve_generation:
-            self._progress.begin_retrieve(self._retrieve_generation)
-        self._progress.mark_retrieve_failed()
+        self._progress.fail_retrieve(self._retrieve_generation)
 
     def wait_for_copies(self) -> None:
         """Block until every copy this retrieve has queued has finished.
@@ -1176,6 +1185,11 @@ class LayerwiseH2DRetrieve:
         kernel_group_id = launch.kernel_group_index
         object_group_id = self._kernel_to_object_group[kernel_group_id]
         constants = self._launch_constants[kernel_group_id]
+        layer_ranges: tuple[tuple[int, int], ...] = ()
+        if self._staging is LayerStaging.PER_LAYER:
+            layer_ranges = self._plane_geometry[kernel_group_id].byte_ranges(
+                launch.position_in_group
+            )
         for batch_descriptor in self._batch_descriptors_by_object_group[
             object_group_id
         ]:
@@ -1184,11 +1198,7 @@ class LayerwiseH2DRetrieve:
             ]
             if self._staging is LayerStaging.PER_LAYER:
                 self._stage_layer(
-                    object_group_id,
-                    batch_descriptor,
-                    launch_params,
-                    self._plane_geometry[kernel_group_id],
-                    launch.position_in_group,
+                    object_group_id, batch_descriptor, launch_params, layer_ranges
                 )
             else:
                 self._stage_whole_batch_once(object_group_id, batch_descriptor)
@@ -1211,8 +1221,7 @@ class LayerwiseH2DRetrieve:
         object_group_id: int,
         batch_descriptor: _LayerwiseBatchDescriptor,
         launch_params: _LayerwiseKernelLaunchParams,
-        geometry: _LayerPlaneGeometry,
-        position_in_group: int,
+        layer_ranges: tuple[tuple[int, int], ...],
     ) -> None:
         """Copy one layer's planes of every object in a batch to GPU staging.
 
@@ -1224,18 +1233,14 @@ class LayerwiseH2DRetrieve:
             object_group_id: The object group the batch belongs to.
             batch_descriptor: The batch whose objects are staged.
             launch_params: The kernel group's launch inputs for this batch.
-            geometry: Where one layer sits inside the kernel group's region.
-            position_in_group: The layer's index along its group's layer axis.
+            layer_ranges: The layer's ``(offset, length)`` byte ranges inside
+                the kernel group's staging region.
         """
-        ranges = geometry.byte_ranges(position_in_group)
         memory_objs = self._batch_objects(object_group_id, batch_descriptor)
         for chunk_idx, memory_obj in enumerate(memory_objs):
             object_group_buffer = batch_descriptor.object_group_buffers[chunk_idx]
-            region_offset = (
-                launch_params.tmp_gpu_buffer_data_ptrs[chunk_idx]
-                - object_group_buffer.data_ptr()
-            )
-            for offset, length in ranges:
+            region_offset = launch_params.staging_region_offsets[chunk_idx]
+            for offset, length in layer_ranges:
                 lmcache_memcpy_async_h2d_range(
                     memory_obj, object_group_buffer, region_offset + offset, length
                 )

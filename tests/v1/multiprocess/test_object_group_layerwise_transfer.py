@@ -433,7 +433,7 @@ def test_transfer_kv_layerwise_batch_setup_once_per_batch(
     def counting_temp_og_buffer(slot: int, _og: int) -> object:
         nonlocal temp_og_buffer_calls
         temp_og_buffer_calls += 1
-        return object()
+        return SimpleNamespace(data_ptr=lambda: 0)
 
     cache_context = MagicMock()
     cache_context.lmcache_tokens_per_chunk = 16
@@ -863,6 +863,25 @@ def test_range_copy_moves_only_the_requested_bytes() -> None:
     gpu_ops.lmcache_memcpy_async_h2d_range(memory_obj, device, 4, 3)
 
     assert device.tolist() == [0] * 4 + [4, 5, 6] + [0] * 9
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="requires an available CUDA runtime"
+)
+def test_range_copy_on_gpu_moves_only_the_requested_bytes() -> None:
+    """The native CUDA range copy writes exactly its range, and nothing else."""
+    host = torch.arange(64, dtype=torch.uint8).pin_memory()
+    memory_obj = MagicMock()
+    memory_obj.raw_tensor = host
+    memory_obj.get_size = lambda: host.nbytes
+    memory_obj.parent = lambda: None
+    device = torch.zeros(64, dtype=torch.uint8, device="cuda")
+
+    gpu_ops.lmcache_memcpy_async_h2d_range(memory_obj, device, 17, 9)
+    torch.cuda.current_stream().synchronize()
+
+    assert device.tolist() == [0] * 17 + list(range(17, 26)) + [0] * 38
 
 
 @pytest.mark.parametrize(
