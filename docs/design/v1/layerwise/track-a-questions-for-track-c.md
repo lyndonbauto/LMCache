@@ -33,6 +33,7 @@ how contract changes are made.
 | L3: releasing a lease as `NEVER_FETCHED` | **Done:** aborts the writes without quarantine | - |
 | L4: sizing `window_bytes` from `request_bytes` | **Done:** `check_window_holds_request` | Track C: call it at registration |
 | F1-F5: review of `fetch-start-proposal.md` | **Option A agreed**; F1 (a finished lease stored its objects back to L2) fixed | Track A: F4's limit if wanted; Track C: F2, F3, F4 |
+| `WindowLease.memory_obj`, `run_resumable`, R5 (Track C, up to `d4bd73c5`) | **Merged**; `WindowPlacement` already had `memory_obj` | - |
 
 ## Decisions
 
@@ -98,7 +99,7 @@ a test-only pybind module,
 | `land_slot(slot, generation)` | an encoded immediate, as `RdmaContext::poll_notifications` would |
 | `decline_slot(slot, generation)` | the reply of the command carrying `slot`, with `failed=<slot>` |
 
-The factory skips when `make`, a C++ compiler, or pybind11 is missing. All 15
+The factory skips when `make`, a C++ compiler, or pybind11 is missing. All 18
 conformance tests pass for it on the Soft-RoCE VM.
 
 ### M2: bounded windows, data stays in place
@@ -135,7 +136,8 @@ allocator.
   [aerospike_rdma.md](../distributed/l2_adapters/aerospike_rdma.md#the-windows-are-reserved-outside-the-general-allocator).
   This is pending review by the `l1_manager` maintainers.
 - `RdmaWindowLeaser` hands out windows with reclaim and quarantine (done
-  item 9). Nothing calls it yet; the production `ChunkPlacer` will.
+  item 9). The production `ChunkPlacer`, `RdmaWindowPlacer`, leases through
+  it (done item 15).
 - Every window is published, as one registration per node (done item 11).
   Plan offsets are slab offsets, not window-relative, so the
   "offsets are window-relative" point above no longer holds.
@@ -288,7 +290,12 @@ What this requires of Track A's code:
 
 ## Raised while building the placer
 
-### N1. An object's records are not on one node (open, for Track C)
+### N1. An object's records are not on one node (deferred)
+
+**Deferred 2026-09-25** to the owner of the client-server interaction.
+Until then pipelined fetches are single-node only, and the native driver
+refuses them on a larger cluster (done item 15). The analysis below still
+describes what the fix needs.
 
 `ChunkPlacer.locate(chunk_id, object_group_id, object_bytes)` returns one
 node per object, and `ChunkPlacement.node_index` documents why: "A chunk's
@@ -357,10 +364,11 @@ and `tests/v1/distributed/` pass (1243 passed), and the Aerospike source
 passes all 18 source conformance tests, including the three that pin "the
 first reply for a slot is final".
 
-Track A will implement `ChunkPlacer` and `WindowLease` on top of
-`RdmaWindowPlacer`. Four points first.
+Track A raised four points before implementing `ChunkPlacer` and
+`WindowLease`. All four are resolved; see
+[Track C's replies](#track-cs-replies-on-l1-to-l4-trackc-planning-at-2a3c104d).
 
-### L1. Lease offsets are window-relative; the wire needs slab offsets (open)
+### L1. Lease offsets are window-relative; the wire needs slab offsets (done)
 
 `ChunkLocation.dest_offset` is window-relative, and `build_request_fetch`
 rejects an object outside `[0, window_bytes)`. Since P1, the native side
@@ -388,7 +396,7 @@ The plan then carries slab offsets, which is what the wire and
 `memory_obj.meta.address` use. `system-design.md` section 11 ("offsets
 are relative to the leased window") would change to match.
 
-### L2. `ObjectToPlace` has no object key (open)
+### L2. `ObjectToPlace` has no object key (done)
 
 Placing an object means reserving it in L1, and `reserve_write` needs the
 object's `ObjectKey`. `ObjectToPlace` has only `chunk_id`, `object_group_id`
@@ -400,14 +408,14 @@ also needs come from the registered model, so the placer takes them at
 construction. Track A's own `ObjectToPlace` in `rdma_window_placer.py` then
 goes away, so the name isn't defined twice.
 
-### L3. Releasing a lease as `NEVER_FETCHED` (Track A)
+### L3. Releasing a lease as `NEVER_FETCHED` (done)
 
 `WindowPlacement` has `complete()`, which keeps the objects, and `abandon()`,
 which aborts the writes and quarantines the window. `NEVER_FETCHED` needs a
 third path: abort the writes without quarantine, since nothing was issued.
 Track A adds it. No change is needed from Track C.
 
-### L4. Sizing `window_bytes` from `request_bytes` (open)
+### L4. Sizing `window_bytes` from `request_bytes` (done)
 
 `system-design.md` says the connector sizes `window_bytes` as
 `request_bytes(max_pipelined_chunks, slab_alignment)`. It can't, as done
@@ -417,22 +425,28 @@ config. Track A will use `request_bytes` for the check at registration and
 report the size needed. Please change the doc to say "checks" rather than
 "sizes".
 
-### N1 still applies
+### N1 still applies (since deferred)
 
 `ChunkLocation` still has one `node_name` per object. An object's records
 are usually on different nodes, so the node has to be per record, as N1
-describes. Until the planner takes a node per record, Track A's lease can
-place objects but can't give a correct node.
+describes. Track C has since deferred N1, and the pipelined path runs on
+single-node clusters only.
 
-### Out of date in `track-c-status.md`
+### Out of date in `track-c-status.md` (still, at `d4bd73c5`)
 
-These are listed as blocked on Track A but are done:
+Its "blocked on" table lists these as waiting for Track A, but they are
+done:
 
 - the fabric-free `ArrivalDriver` (S1);
-- publishing every window (P1);
+- the production `ChunkPlacer` / `WindowLease` and what it needed: the
+  allocator reservation (pending `l1_manager` review), publishing every
+  window (P1), and the `request_bytes` check (L4, done items 15 to 17);
 - `StorageManager.begin_pipelined_fetch`, removed in M4. The native
   `issue_pipelined_fetch_by_keys` is still there, and Track A removes it once
   `chunk_fetch_arguments` goes.
+
+Its Track B answers also still ask Track A to confirm that a slot lands
+exactly at its plan offset. That is confirmed in the replies section below.
 
 `fetch-start-proposal.md` open question 3 calls concurrent fetches "a later
 Track A item". W3 is done, so one lease per (request, rank) is possible now.
@@ -487,6 +501,20 @@ retrieve. Windows are the scarce resource, and nothing is leased for a
 request that never reaches retrieve. Points from the transport side, most
 important first.
 
+Track C's commits up to `d4bd73c5`, merged since, settle three things the
+proposal left for later:
+
+- `WindowLease.memory_obj` is in the protocol. `WindowPlacement` already
+  implemented it, and Track C's end-to-end test checks that each object's
+  memory sits at its planned offset.
+- `LayerArrivalPump.run_resumable` abandons only the source on a transport
+  failure and raises `LoadLeftOpenError` with the layers still to load, so
+  the fallback continues the same load.
+- R5, open question 1, is answered in
+  [vllm-load-failure.md](vllm-load-failure.md): raising inside attention
+  kills vLLM's engine, so the daemon fails a retrieve only by abandoning
+  the sink.
+
 ### F1. A finished lease writes its objects back to L2 (Track A bug, fixed)
 
 `WindowPlacement.release(FINISHED)` calls `L1Manager.finish_write` on
@@ -519,6 +547,11 @@ stream, so retrieve must release the lease only after the sink's last copy
 has completed, not when it was enqueued. The same holds on the fallback
 path: its release is `ABANDONED`, which quarantines the window, so it is
 safe for `fetch_timeout_seconds` but shouldn't rely on that.
+
+With `run_resumable`, the sink stays open after the source is abandoned.
+Retrieve should release the lease `ABANDONED` when `LoadLeftOpenError` is
+raised, but the window objects must not be reused while the sink may still
+be copying earlier layers out of them.
 
 ### F3. Two requests deferring the same keys
 
@@ -569,9 +602,12 @@ raises exactly when it doesn't.
   `fetch_timeout_seconds` (30 s by default). With four windows, four
   failures inside 30 s send every pipelined request to the fallback until
   the quarantines end. That is correct but worth a metric.
-- **A record gone at retrieve (Q1).** On the transport side, the server
-  declines the slot, the layer becomes `UNSERVABLE`, and the pump gives up
-  on it at once rather than after the timeout.
+- **A record gone at retrieve (Q1, answered by R5).** On the transport
+  side, the server declines the slot, the layer becomes `UNSERVABLE`, and
+  the pump gives up on it at once rather than after the timeout. Per
+  `vllm-load-failure.md`, the daemon then abandons the sink. vLLM recomputes
+  the failed blocks under `kv_load_failure_policy: "recompute"`, and by
+  default fails the request.
 
 ## Work that follows
 
@@ -627,9 +663,9 @@ raises exactly when it doesn't.
    Two differences from the M2 sketch. `release` takes an outcome enum, not
    a boolean. `lease` returns the window's slab offset, and
    `lease.pool()` gives the pool for `reserve_write`.
-10. The destination half of the placer: `RdmaWindowPlacer.place(objects,
-    layouts) -> WindowPlacement`, with `dest_offset`, `complete` and
-    `abandon`. See
+10. The destination half of the placer, since replaced by item 15's API:
+    `RdmaWindowPlacer.place(objects, layouts) -> WindowPlacement`, with
+    `dest_offset`, `complete` and `abandon`. See
     [aerospike_rdma.md](../distributed/l2_adapters/aerospike_rdma.md#placing-a-retrieves-objects).
     - It raises per W2.
     - `abandon` performs W4's first two steps: abort the writes, then
@@ -706,7 +742,8 @@ raises exactly when it doesn't.
     fetch isn't ready, the same failure retrieve already falls back on.
     For Track C, the registration wiring can then build
     `RdmaWindowPlacer(l1_manager, leaser, layouts,
-    storage_manager.pipelined_fetch_node_name())`.
+    storage_manager.pipelined_fetch_node_name(),
+    policy.select_l1_retentions)`, the last argument per item 17.
 17. The placer follows the prefetch retention policy and never stores its
     objects back to L2 (F1). `RdmaWindowPlacer` takes `select_retentions`,
     which defaults to keeping nothing. `FINISHED` ends with
@@ -722,8 +759,8 @@ These were verified on the Soft-RoCE VM
   C client 7.3.0;
 - device-free logic harness: 364 checks pass;
 - fabric harness over `rxe0`: 415 checks pass;
-- `tests/v1/layerwise/` and `tests/v1/distributed/` pass (1289 passed, 92
-  skipped, with Track C's `2a3c104d` merged), including the conformance
+- `tests/v1/layerwise/` and `tests/v1/distributed/` pass (1294 passed, 92
+  skipped, with Track C's `d4bd73c5` merged), including the conformance
   suite over both sources, concurrent fetches over the real native pool, and
   Track C's end-to-end retrieve over the production placer;
 - the pytest wrappers in `tests/v1/distributed/rdma/` pass.
@@ -744,9 +781,21 @@ That needs an Aerospike server, and for the slot path, one built from the
 5. ~~Retire or internalize `begin_pipelined_fetch` /
    `is_pipelined_layer_ready` (M4).~~ Done as item 12.
 6. ~~Later: concurrent fetches (W3).~~ Done as item 13.
+7. Remove the native `issue_pipelined_fetch_by_keys` once Track C removes
+   `chunk_fetch_arguments`.
+8. Expose `pipelined_max_slots_per_request()` through the storage manager,
+   if Track C wants it for the lookup-time check (F4).
+9. Run A7 on an EFA instance, and A8 against a server built from the
+   `kv-sink` branch. A8 also checks the server's side of "a slot lands at
+   its plan offset".
 
-**Track C:** retrieve wiring per M4 and W4. One handler covers the placer and
-the pump, and the fallback goes into fresh general-L1 objects.
+**Track C:**
+
+- retrieve wiring per M4 and W4: one handler covers the placer and the
+  pump, and the fallback goes into fresh general-L1 objects;
+- at registration, build the placer (item 16) and call
+  `check_window_holds_request` (L4);
+- F2 to F4 of the review.
 
 **Together:** C9 over Soft-RoCE.
 
@@ -762,7 +811,7 @@ needs the ones before it unless noted.
 | 5 | Lease and placer (items 9-10) | `0703d954`, `d4a5651b` | 4 |
 | 6 | One registration covering every window (P1, item 11) | `1c33157a` | 2, 4 |
 | 7 | Concurrent fetches, one per window (W3, item 13) | `6fd5fc4d` | 3, 5, 6 |
-| 8 | Production `ChunkPlacer`, `NEVER_FETCHED`, registration check, single-node gate (item 15) | the commit after the merge of `2a3c104d` | 5, 7, and Track C's lease interface (`1280926c` to `2a3c104d`) |
+| 8 | Production `ChunkPlacer`, `NEVER_FETCHED`, registration check, single-node gate, node name, retention (items 15-17) | `dad66a2b`, `adaf1ced`, `8e18aabd`, after the merges of `2a3c104d` and `d4bd73c5` | 5, 7, and Track C's lease interface (`1280926c` to `d4bd73c5`) |
 
 Why this order: 2 and 3 touch only the transport and the adapters, so they
 can merge while 4 waits on `l1_manager` review. PR 4 is the only one that
