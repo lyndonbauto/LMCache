@@ -28,6 +28,7 @@ from lmcache.v1.distributed.l2_adapters.mock_l2_adapter import (
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.memory_management import MemoryObj, MemoryObjMetadata, TensorMemoryObj
+from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 
 LAYOUT = MemoryLayoutDesc(shapes=[torch.Size([16, 256])], dtypes=[torch.float32])
 
@@ -64,27 +65,36 @@ def _store_in_l2(adapter: MockL2Adapter, keys: list[ObjectKey], fill: float) -> 
         time.sleep(0.01)
 
 
+def _config(
+    mock_bandwidth_gb: float, prefetch_policy: str = "default"
+) -> StorageManagerConfig:
+    return StorageManagerConfig(
+        l1_manager_config=L1ManagerConfig(
+            memory_config=L1MemoryManagerConfig(
+                size_in_bytes=8 << 20,
+                use_lazy=False,
+                init_size_in_bytes=8 << 20,
+                align_bytes=0x1000,
+                shm_name="",
+            ),
+            write_ttl_seconds=600,
+            read_ttl_seconds=300,
+        ),
+        eviction_config=EvictionConfig(eviction_policy="LRU"),
+        l2_adapter_config=L2AdaptersConfig(
+            adapters=[
+                MockL2AdapterConfig(
+                    max_size_gb=0.01, mock_bandwidth_gb=mock_bandwidth_gb
+                )
+            ]
+        ),
+        prefetch_policy=prefetch_policy,
+    )
+
+
 @pytest.fixture
 def storage_manager() -> Iterator[StorageManager]:
-    sm = StorageManager(
-        StorageManagerConfig(
-            l1_manager_config=L1ManagerConfig(
-                memory_config=L1MemoryManagerConfig(
-                    size_in_bytes=8 << 20,
-                    use_lazy=False,
-                    init_size_in_bytes=8 << 20,
-                    align_bytes=0x1000,
-                    shm_name="",
-                ),
-                write_ttl_seconds=600,
-                read_ttl_seconds=300,
-            ),
-            eviction_config=EvictionConfig(eviction_policy="LRU"),
-            l2_adapter_config=L2AdaptersConfig(
-                adapters=[MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)]
-            ),
-        )
-    )
+    sm = StorageManager(_config(mock_bandwidth_gb=10.0))
     yield sm
     sm.close()
 
@@ -114,3 +124,40 @@ def test_a_key_in_neither_tier_is_left_out(storage_manager: StorageManager) -> N
 
 def test_no_keys_loads_nothing(storage_manager: StorageManager) -> None:
     assert storage_manager.load_into_l1([], {0: LAYOUT}, timeout_seconds=0.0) == {}
+
+
+def _released(sm: StorageManager, keys: list[ObjectKey]) -> bool:
+    status = sm.report_status()["prefetch_controller"]
+    idle = not (
+        status["submission_queue_size"]
+        or status["pending_queue_size"]
+        or status["in_flight_request_count"]
+    )
+    deleted, skipped = sm.delete_l1_keys(keys)
+    return (
+        idle
+        and status["completed_results_count"] == 0
+        and (deleted, skipped) == (len(keys), 0)
+    )
+
+
+def test_a_load_that_times_out_unlocks_its_keys_when_it_finishes() -> None:
+    """Nobody reads a timed-out load's result, so it must not strand locks."""
+    # 3 x 16 KiB at 100 KB/s: the load takes about half a second. ``retain``
+    # keeps the loaded objects in L1 once unlocked, so they can be seen.
+    sm = StorageManager(_config(mock_bandwidth_gb=1e-4, prefetch_policy="retain"))
+    try:
+        keys = [_key(i) for i in range(3)]
+        _store_in_l2(_mock_adapter(sm), keys, fill=1.0)
+
+        with pytest.raises(LMCacheTimeoutError):
+            sm.load_into_l1(keys, {0: LAYOUT}, timeout_seconds=0.0)
+
+        # Nothing in flight, no result left behind, and every key loaded and
+        # unlocked: a non-forced delete removes them all.
+        deadline = time.monotonic() + 10.0
+        while not _released(sm, keys):
+            assert time.monotonic() < deadline, "the late load was never released"
+            time.sleep(0.05)
+    finally:
+        sm.close()

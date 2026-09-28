@@ -278,6 +278,11 @@ defaults, wait plus first layer stays under the worker's 5 s.
 - **A pipelined retrieve holds a GPU worker thread** for the whole fetch.
   `RETRIEVE` runs with client affinity, so the same worker's next STORE
   waits behind it. The windows (4 by default) bound how many run at once.
+- **Reused keys pin their window.** A deferred key another fetch left in
+  L1 (under `retain`) still sits in that fetch's window. While this
+  retrieve holds its read lock the window cannot be reclaimed, so with one
+  window this retrieve's own lease is refused and it loads whole objects.
+  Served, slower; more windows make it rare.
 - **Metric meaning.** `MP_LOOKUP_PREFETCH_END` counts deferred hits as found
   before they are loaded (unchanged from the proposal).
 

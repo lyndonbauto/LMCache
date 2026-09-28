@@ -1558,3 +1558,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
             return
         self._ctx.pipelined_models.register(model_name, world_size, model)
+        # The cap is the reader's; objects written under another cap make
+        # the fetch decline slots and fall back.
+        logger.info(
+            "%s fetches layer by layer from L2 adapter %d, reading records of "
+            "at most %d bytes",
+            model_name,
+            model.adapter_id,
+            model.max_record_bytes,
+        )

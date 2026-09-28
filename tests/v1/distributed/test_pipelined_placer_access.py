@@ -220,6 +220,26 @@ def test_without_a_pipelined_adapter_there_is_no_record_cap() -> None:
             sm.pipelined_max_record_bytes()
 
 
+def test_a_client_without_a_record_cap_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Refused like a path that is not ready, so registration skips the model."""
+
+    class _NoCap(PipelinedNativeClientStub):
+        max_record_bytes = None  # type: ignore[assignment]
+
+    monkeypatch.setattr(
+        storage_manager_module,
+        "create_l2_adapter",
+        lambda config, l1_memory_desc: NativeConnectorL2Adapter(
+            native_client=_NoCap(), type_name="stub"
+        ),
+    )
+    with _storage_manager([_rdma_adapter_config()]) as sm:
+        with pytest.raises(LayerwiseContractError, match="record cap"):
+            sm.pipelined_max_record_bytes()
+
+
 def test_without_rdma_windows_there_is_no_placer(
     stub_adapters: Callable[[], PipelinedNativeClientStub],
 ) -> None:

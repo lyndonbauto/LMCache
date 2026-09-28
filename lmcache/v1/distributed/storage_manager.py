@@ -63,6 +63,9 @@ from lmcache.v1.distributed.storage_controllers import (
     PrefetchController,
     StoreController,
 )
+from lmcache.v1.distributed.storage_controllers.prefetch_controller import (
+    PrefetchRequestId,
+)
 from lmcache.v1.distributed.storage_controllers.prefetch_policy import (
     create_prefetch_policy,
 )
@@ -431,8 +434,8 @@ class StorageManager:
 
         Raises:
             LMCacheTimeoutError: If the load did not finish in time. The
-                request keeps running, and the read locks it takes expire
-                with the L1 read TTL.
+                request keeps running; when it finishes, its result is
+                claimed and the read locks it took are released.
         """
         if not keys:
             return {}
@@ -446,6 +449,12 @@ class StorageManager:
         if not self._prefetch_controller.wait_prefetch_result(
             request_id, timeout_seconds
         ):
+            threading.Thread(
+                target=self._release_late_load,
+                args=(request_id, keys),
+                name="lmcache-late-load-release",
+                daemon=True,
+            ).start()
             raise LMCacheTimeoutError(
                 f"loading {len(keys)} objects into L1 took longer than "
                 f"{timeout_seconds}s"
@@ -1605,6 +1614,27 @@ class StorageManager:
         # the observability bus carry their backend identity.
         adapter.set_backend_identity(descriptor.type_name, shared=config.shared)
         return adapter_id, adapter, descriptor
+
+    def _release_late_load(
+        self, request_id: PrefetchRequestId, keys: list[ObjectKey]
+    ) -> None:
+        """Claim a timed-out :meth:`load_into_l1` result and unlock its keys.
+
+        Nobody else reads the result, so without this it would stay in the
+        prefetch controller and its keys would stay locked until the read
+        TTL. Waits at most the write TTL, which bounds any L2 load.
+
+        Args:
+            request_id: The load's prefetch request.
+            keys: The keys it was asked to load.
+        """
+        self._prefetch_controller.wait_prefetch_result(
+            request_id, self._l1_config.write_ttl_seconds
+        )
+        retained = self._prefetch_controller.query_prefetch_result(request_id)
+        loaded = retained.gather(keys) if retained is not None else []
+        if loaded:
+            self.finish_read_prefetched(loaded)
 
     def _should_enable_l2_eviction(
         self,

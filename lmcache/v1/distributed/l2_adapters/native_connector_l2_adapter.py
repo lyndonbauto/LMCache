@@ -376,11 +376,16 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
 
         Raises:
             LayerwiseContractError: If the native client has no pipelined
-                fetch path, pipelined fetch is not ready, or the client
-                reports no cap.
+                fetch path, pipelined fetch is not ready, or the client does
+                not report a positive cap.
         """
         self._require_ready_pipelined_path()
-        max_record_bytes = int(self._client.max_record_bytes())
+        getter = getattr(self._client, "max_record_bytes", None)
+        if getter is None:
+            raise LayerwiseContractError(
+                f"{self._type_name}: native client does not report a record cap"
+            )
+        max_record_bytes = int(getter())
         if max_record_bytes <= 0:
             raise LayerwiseContractError(
                 f"{self._type_name}: native client reports no record cap"
