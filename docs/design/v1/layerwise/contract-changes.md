@@ -11,6 +11,38 @@ defect coming back.
 
 ---
 
+## The lookup can defer L2 hits; storage builds the placer
+
+**Who is affected:** Track A (new `StorageManager` and adapter accessors to
+review); Track B (the deferred keys are what your sink will load). No
+existing call changes.
+
+**What changed** (design: [c9-wiring.md](c9-wiring.md)):
+
+- **Deferral.** `PrefetchRequestSpec.l2_deferral: L2Deferral` (default
+  `NO_L2_DEFERRAL`). When its `accepts(adapter_ids, keys)` says yes, the
+  prefetch controller reports the L2 hits as found without loading them, and
+  releases their L2 locks. `StorageManager.query_prefetch_outcome(handle)`
+  returns them as `PrefetchResult.deferred_keys`.
+- **Storage accessors**, all following `pipelined_max_slots_per_request`:
+  - `pipelined_window_placer(group_layout_descs, model, max_chunks)`
+    builds Track A's `RdmaWindowPlacer` over the one `RdmaWindowLeaser`
+    storage now owns;
+  - `pipelined_max_record_bytes()`, backed by a new adapter method of the
+    same name (native: `max_record_bytes()`);
+  - `pipelined_adapter_id()`;
+  - `lock_resident_keys(keys)` and `load_into_l1(keys, ...)`, for shared
+    keys and the fallback.
+- **Registration** builds a `PipelinedModel` per model when
+  `--pipelined-fetch` is on; lookups of other models are unchanged.
+
+**Why.** Nothing built the leaser or placer in production, and storage is
+the only owner of the L1 they reserve in. Releasing L2 locks at deferral
+keeps lock lifetimes inside one scheduler step; a record that vanishes
+before retrieve is handled like an evicted one.
+
+---
+
 ## `chunk_fetch_arguments` removed
 
 **Who is affected:** nobody. Its only caller, the native

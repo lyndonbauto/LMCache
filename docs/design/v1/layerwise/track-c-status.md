@@ -18,7 +18,7 @@ items are in [system-design.md](system-design.md) section 11 and
 | C6 out-of-order pump | Done |
 | C7 failure paths abandon both sides | Done |
 | C8 conformance suite | Done: the scripted and Aerospike sources, over the real native session (fabric-free) |
-| C9 end to end | In progress: retrieve wiring (see below); over Soft-RoCE needs all three tracks |
+| C9 end to end | In progress ([c9-wiring.md](c9-wiring.md)). Done: deferred lookup mode, storage accessors (placer, record cap, adapter id, resident-key locks, whole load into L1), `--pipelined-*` options, registration, lookup eligibility, session record of deferred keys. Next: retrieve orchestration and wiring. Over Soft-RoCE needs all three tracks |
 | C10 no hardware in tests | Holds |
 
 ## Doable now
@@ -95,8 +95,9 @@ All done (2026-09-25):
     `LayerArrivalStatus.RESIDENT`. Track A confirmed the client side and the
     mock server; the real server's side waits on their A8.
   - *Timeout order (R6):* the pump's default is now 2.5 s, below the
-    worker's 5 s. A startup check needs the worker's value in the
-    registration, which lands with C9.
+    worker's 5 s. The daemon cannot see the worker's value, so C9 checks
+    only what it owns: `--pipelined-shared-wait-seconds` must be below the
+    pump's 2.5 s.
 
 ## Future work
 

@@ -412,3 +412,101 @@ def test_registry_windows_updated_on_reregister() -> None:
     )
 
     assert registry.find_attn_desc("m", 1).num_chunks_in_sw == [-1, 4]
+
+
+def _pipelined_ctx(enabled: bool = True) -> Any:
+    """A mocked context with real pipelined settings and model registry."""
+    # First Party
+    from lmcache.v1.layerwise.deferral import PipelinedFetchConfig
+    from lmcache.v1.layerwise.request_fetch import ModelRegistry
+    from lmcache.v1.multiprocess.engine_context import LayoutDescRegistry
+
+    ctx = MagicMock()
+    ctx.chunk_size = 16
+    ctx.use_layerwise = False
+    ctx.layout_desc_registry = LayoutDescRegistry()
+    ctx.pipelined_fetch = PipelinedFetchConfig(enabled=enabled, max_chunks=8)
+    ctx.pipelined_models = ModelRegistry("pipelined fetch setup")
+    ctx.storage_manager.pipelined_max_record_bytes.return_value = 1 << 20
+    ctx.storage_manager.pipelined_max_slots_per_request.return_value = 512
+    ctx.storage_manager.pipelined_adapter_id.return_value = 3
+    return ctx
+
+
+def _pipelined_layout() -> Any:
+    # First Party
+    from lmcache.v1.distributed.api import MemoryLayoutDesc
+
+    return MemoryLayoutDesc(shapes=[torch.Size([2, 2, 16, 32])], dtypes=[torch.float16])
+
+
+def test_registration_sets_up_the_pipelined_fetch_until_the_worker_leaves(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_lmcache_native: Any,
+) -> None:
+    """With the pipelined fetch on, the model's placer and limits are kept."""
+    # First Party
+    from lmcache.utils import EngineType
+
+    layout_desc = _pipelined_layout()
+    ctx = _pipelined_ctx()
+    module = _registration_module(monkeypatch, ctx, layout_desc)
+    module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [], [])
+
+    model = ctx.pipelined_models.find("model", 1)
+    ctx.storage_manager.pipelined_window_placer.assert_called_once_with(
+        {0: layout_desc}, module.fetch_model("model", 1), 8
+    )
+    assert model.placer is ctx.storage_manager.pipelined_window_placer.return_value
+    assert model.fetch_model is module.fetch_model("model", 1)
+    assert (model.max_record_bytes, model.max_slots) == (1 << 20, 512)
+    assert (model.adapter_id, model.max_chunks) == (3, 8)
+
+    module.unregister_kv_cache(1)
+    with pytest.raises(KeyError, match="no pipelined fetch setup"):
+        ctx.pipelined_models.find("model", 1)
+
+
+def test_a_pipelined_setup_storage_refuses_does_not_fail_registration(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_lmcache_native: Any,
+) -> None:
+    """A model the pipelined path cannot serve loads whole objects instead."""
+    # First Party
+    from lmcache.utils import EngineType
+    from lmcache.v1.layerwise import LayerwiseContractError
+
+    ctx = _pipelined_ctx()
+    ctx.storage_manager.pipelined_window_placer.side_effect = LayerwiseContractError(
+        "no RDMA windows"
+    )
+    module = _registration_module(monkeypatch, ctx, _pipelined_layout())
+    module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [], [])
+
+    module.fetch_model("model", 1)
+    with pytest.raises(KeyError):
+        ctx.pipelined_models.find("model", 1)
+    module.unregister_kv_cache(1)
+
+
+@pytest.mark.parametrize(
+    ("enabled", "world_size"), [(False, 1), (True, 2)], ids=["disabled", "tp2"]
+)
+def test_the_pipelined_setup_is_skipped_when_it_cannot_apply(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_lmcache_native: Any,
+    enabled: bool,
+    world_size: int,
+) -> None:
+    """Disabled, or above world size one: storage is not even asked."""
+    # First Party
+    from lmcache.utils import EngineType
+
+    ctx = _pipelined_ctx(enabled=enabled)
+    module = _registration_module(monkeypatch, ctx, _pipelined_layout())
+    module.register_kv_cache(1, [], "model", world_size, EngineType.VLLM, {}, [], [])
+
+    ctx.storage_manager.pipelined_window_placer.assert_not_called()
+    with pytest.raises(KeyError):
+        ctx.pipelined_models.find("model", world_size)
+    module.unregister_kv_cache(1)

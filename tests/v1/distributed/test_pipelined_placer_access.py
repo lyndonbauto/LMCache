@@ -194,6 +194,23 @@ def test_the_record_cap_comes_from_the_pipelined_adapter(
         )
 
 
+def test_the_adapter_id_names_the_pipelined_adapter(
+    stub_adapters: Callable[[], PipelinedNativeClientStub],
+) -> None:
+    with _storage_manager([_rdma_adapter_config()]) as sm:
+        (descriptor, _adapter), *_ = sm.l2_adapters()
+        assert sm.pipelined_adapter_id() == descriptor.index
+
+
+def test_without_a_pipelined_adapter_there_is_no_adapter_id() -> None:
+    with _storage_manager(
+        [MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)],
+        window_count=0,
+    ) as sm:
+        with pytest.raises(LayerwiseContractError, match="MockL2Adapter"):
+            sm.pipelined_adapter_id()
+
+
 def test_without_a_pipelined_adapter_there_is_no_record_cap() -> None:
     with _storage_manager(
         [MockL2AdapterConfig(max_size_gb=0.01, mock_bandwidth_gb=10.0)],

@@ -54,25 +54,34 @@ with `FetchModel.request_bytes` and checks it against the window.
 ## Registration
 
 `register_kv_cache` already builds the model's `FetchModel`. With
-`--pipelined-fetch` on, it also asks storage for a placer:
+`--pipelined-fetch` on and `world_size == 1`, it also builds a
+`PipelinedModel` (`lmcache/v1/layerwise/deferral.py`) from storage:
 
 ```python
-placer = storage_manager.pipelined_window_placer(group_layout_descs)
-check_window_holds_request(
-    storage_manager.rdma_window_bytes(), model, max_chunks, align_bytes
+PipelinedModel(
+    fetch_model=fetch_model,
+    placer=sm.pipelined_window_placer(group_layout_descs, fetch_model, max_chunks),
+    max_record_bytes=sm.pipelined_max_record_bytes(),
+    max_slots=sm.pipelined_max_slots_per_request(),
+    adapter_id=sm.pipelined_adapter_id(),
+    max_chunks=max_chunks,
 )
 ```
 
-`StorageManager` builds the one `RdmaWindowLeaser` at init from the adapter
-that enables RDMA, since it owns the L1. Each placer gets the
-prefetch policy's `select_l1_retentions` (Track A's F1). Any refusal,
-whether no RDMA adapter, the path not ready, a multi-node cluster (F5), or a
-window too small, is logged once. The model is then registered without a
-placer, and every lookup for it takes today's path.
+and registers it in `MPCacheServerContext.pipelined_models`, a refcounted
+`ModelRegistry[PipelinedModel]` that `_release_entries` unregisters from.
 
-The record cap the objects were written under comes from the same adapter,
-through a new `StorageManager.pipelined_max_record_bytes()` that follows
-Track A's accessor pattern (`pipelined_max_slots_per_request`).
+`StorageManager` builds the one `RdmaWindowLeaser` at init from the adapter
+that enables RDMA, since it owns the L1. `pipelined_window_placer` runs
+`check_window_holds_request` against the L1's `rdma_window_bytes` and gives
+each placer the prefetch policy's `select_l1_retentions` (Track A's F1). Any
+refusal, whether no RDMA adapter, the path not ready, a multi-node cluster
+(F5), or a window too small, is logged as a warning, and every lookup for
+that model takes today's path.
+
+The record cap and adapter id come from the same adapter as the placer,
+through `pipelined_max_record_bytes()` and `pipelined_adapter_id()`, which
+follow Track A's accessor pattern (`pipelined_max_slots_per_request`).
 
 ## Lookup: deciding to defer
 
@@ -86,8 +95,9 @@ spec carries `NO_L2_DEFERRAL` and nothing changes:
 
 The rest is only known after the L2 lookup, inside the controller. After
 `_transition_to_load_phase` computes the trimmed plan and releases stale L1
-locks, it asks `spec.l2_deferral.accepts(adapter_id, keys)`. The deferral
-accepts only if:
+locks, it asks `spec.l2_deferral.accepts(adapter_ids, keys)`, with the
+plan's adapters and every key it would load. `PipelinedDeferral` accepts
+only if:
 
 - the whole plan is on one adapter, the one with the pipelined path;
 - the plan names at most `--pipelined-max-chunks` chunks;
@@ -109,11 +119,13 @@ and pops the result once, like the old method.
 
 ## Session: remembering what was deferred
 
-`query_prefetch_status` records the deferred keys on the session
-(`Session.record_deferred_keys`). Retrieve takes them with
-`Session.claim_deferred_keys()`, which returns them once, so a repeated
-retrieve cannot fetch twice. Two release paths must skip them, because
-deferred keys hold no L1 read lock:
+`query_prefetch_status` reads `StorageManager.query_prefetch_outcome` and
+records the deferred keys with the hit length, in one
+`Session.record_prefetch_result(hit_chunks, gids, deferred_keys)`. Retrieve
+takes them with `Session.claim_deferred_keys(keys)`, which hands each out
+once per lookup, so a repeated retrieve cannot fetch twice. Two release
+paths must skip `Session.deferred_keys()`, before and after a retrieve
+claims them, because deferred keys hold no L1 read lock of this request:
 
 - `free_lookup_locks`;
 - `_release_failed_retrieve_locks`.
@@ -195,9 +207,11 @@ the readable keys and reports the rest as busy (write-locked) or absent:
 
 **The budget is shared with the worker.** The worker's wait for layer 0
 starts when it enters attention, and it covers leasing, any shared-key wait,
-the pump's first layer (2.5 s) and any fallback. It is 5 s by default. So
-the `wait` budget must stay small, and the daemon refuses to start if it
-plus the pump's layer timeout reaches the worker's wait.
+the pump's first layer (2.5 s) and any fallback. It is 5 s by default, twice
+the pump's per-layer timeout, and it is set on the worker, so the daemon
+cannot see it. The daemon therefore refuses a `wait` budget that is not
+below the pump's per-layer timeout (`PipelinedFetchConfig`); with the
+defaults, wait plus first layer stays under the worker's 5 s.
 
 ## Failure summary
 

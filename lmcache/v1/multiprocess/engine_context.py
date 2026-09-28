@@ -21,6 +21,8 @@ from lmcache.v1.gpu_connector.gds_context import (
     get_gds_context,
     initialize_gds_context,
 )
+from lmcache.v1.layerwise.deferral import PipelinedFetchConfig, PipelinedModel
+from lmcache.v1.layerwise.request_fetch import ModelRegistry
 from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 from lmcache.v1.multiprocess.session import SessionManager
@@ -197,6 +199,12 @@ class MPCacheServerContext:
         separate_object_groups: Whether to split kernel groups into one object
             group per sliding-window size at KV-cache registration. Default
             False.
+        pipelined_fetch: Settings for the pipelined retrieve; disabled by
+            default.
+
+    Raises:
+        ValueError: If ``pipelined_fetch`` is enabled without
+            ``use_layerwise``.
     """
 
     def __init__(
@@ -207,11 +215,18 @@ class MPCacheServerContext:
         separate_object_groups: bool = False,
         full_sw_kv: bool = False,
         use_layerwise: bool = False,
+        pipelined_fetch: PipelinedFetchConfig = PipelinedFetchConfig(),  # noqa: B008
     ) -> None:
+        if pipelined_fetch.enabled and not use_layerwise:
+            raise ValueError("the pipelined fetch requires use_layerwise")
         self._chunk_size = chunk_size
         self._separate_object_groups = separate_object_groups
         self._full_sw_kv = full_sw_kv
         self._use_layerwise = use_layerwise
+        self._pipelined_fetch = pipelined_fetch
+        self._pipelined_models: ModelRegistry[PipelinedModel] = ModelRegistry(
+            "pipelined fetch setup"
+        )
 
         # Initialize the process-global GDS context.
         # No-op when GDS L1 is disabled (config is None).
@@ -257,6 +272,21 @@ class MPCacheServerContext:
     def use_layerwise(self) -> bool:
         """Whether MP retrieve uses per-layer H2D launches."""
         return self._use_layerwise
+
+    @property
+    def pipelined_fetch(self) -> PipelinedFetchConfig:
+        """Settings for the pipelined retrieve."""
+        return self._pipelined_fetch
+
+    @property
+    def pipelined_models(self) -> ModelRegistry[PipelinedModel]:
+        """Registered models the pipelined retrieve can serve.
+
+        Filled at KV-cache registration only when :attr:`pipelined_fetch` is
+        enabled and the model's setup succeeded; a model absent here always
+        loads whole objects at lookup.
+        """
+        return self._pipelined_models
 
     @property
     def storage_manager(self) -> StorageManager:

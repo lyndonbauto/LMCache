@@ -168,6 +168,38 @@ def test_grpc_server_workers_must_be_positive(workers):
         _parse_mp(["--grpc-server-workers", workers])
 
 
+def test_pipelined_fetch_defaults_are_off_and_recompute():
+    config = _parse_mp([])
+    assert not config.pipelined_fetch
+    assert config.pipelined_max_chunks == 64
+    assert config.pipelined_shared_keys == "recompute"
+    assert config.pipelined_shared_wait_seconds == 1.0
+
+
+def test_pipelined_fetch_flags_are_parsed():
+    config = _parse_mp(
+        [
+            "--use-layerwise",
+            "--pipelined-fetch",
+            "--pipelined-max-chunks",
+            "16",
+            "--pipelined-shared-keys",
+            "wait",
+            "--pipelined-shared-wait-seconds",
+            "0.5",
+        ]
+    )
+    assert config.pipelined_fetch
+    assert config.pipelined_max_chunks == 16
+    assert config.pipelined_shared_keys == "wait"
+    assert config.pipelined_shared_wait_seconds == 0.5
+
+
+def test_pipelined_fetch_requires_layerwise():
+    with pytest.raises(ValueError, match="requires --use-layerwise"):
+        _parse_mp(["--pipelined-fetch"])
+
+
 def test_instance_id_defaults_to_uuid4():
     # No --instance-id flag => a random UUID v4 is minted.
     config = _parse_mp([])

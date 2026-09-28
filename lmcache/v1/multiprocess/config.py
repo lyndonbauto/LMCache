@@ -63,6 +63,25 @@ class MPServerConfig:
     """When True, H2D retrieve launches one kernel per layer in global layer
     order and workers wait per layer instead of on one completion event."""
 
+    pipelined_fetch: bool = False
+    """When True (requires use_layerwise), a lookup whose L2 hits one RDMA
+    window can hold reports them without loading them, and the retrieve
+    fetches them layer by layer into the window. See
+    docs/design/v1/layerwise/c9-wiring.md."""
+
+    pipelined_max_chunks: int = 64
+    """Most chunks one request may fetch layer by layer. Registration checks
+    that one RDMA window holds this many chunks of the model."""
+
+    pipelined_shared_keys: Literal["recompute", "wait"] = "recompute"
+    """What a pipelined retrieve does with a key another request is loading:
+    'recompute' fails the retrieve so vLLM recomputes; 'wait' waits up to
+    pipelined_shared_wait_seconds for it."""
+
+    pipelined_shared_wait_seconds: float = 1.0
+    """How long pipelined_shared_keys='wait' waits; must be below the
+    per-layer timeout (2.5 s)."""
+
     enable_segmented_prefix: bool = False
     """CacheBlend only (engine_type='blend'): on a mid-prefix L2 retrieve
     failure, retain the gapped contiguous prefix so the post-gap chunks stay
@@ -130,10 +149,13 @@ class MPServerConfig:
         Raises:
             ValueError: If a timeout is non-finite, the reap timeout is
                 negative or a non-zero value below the 30 s floor, or the
-                registration grace is below the reap timeout.
+                registration grace is below the reap timeout; or if
+                pipelined_fetch is set without use_layerwise.
         """
         reap = self.worker_reap_timeout_seconds
         grace = self.worker_registration_grace_seconds
+        if self.pipelined_fetch and not self.use_layerwise:
+            raise ValueError("--pipelined-fetch requires --use-layerwise")
         if self.grpc_server_workers < 1:
             raise ValueError(
                 f"grpc server workers must be >= 1; got {self.grpc_server_workers}"
@@ -427,6 +449,36 @@ def add_mp_server_args(
         "(Default is False)",
     )
     mp_group.add_argument(
+        "--pipelined-fetch",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Fetch a request's L2 hits layer by layer into an RDMA window "
+        "during retrieve instead of loading them at lookup. Requires "
+        "--use-layerwise and an L2 adapter with a pipelined path. "
+        "(Default is False)",
+    )
+    mp_group.add_argument(
+        "--pipelined-max-chunks",
+        type=int,
+        default=64,
+        help="Most chunks one request may fetch layer by layer. Default is 64.",
+    )
+    mp_group.add_argument(
+        "--pipelined-shared-keys",
+        choices=["recompute", "wait"],
+        default="recompute",
+        help="What a pipelined retrieve does with a key another request is "
+        "loading: 'recompute' fails the retrieve so vLLM recomputes; 'wait' "
+        "waits up to --pipelined-shared-wait-seconds. Default is recompute.",
+    )
+    mp_group.add_argument(
+        "--pipelined-shared-wait-seconds",
+        type=float,
+        default=1.0,
+        help="How long --pipelined-shared-keys wait waits; must be below "
+        "2.5. Default is 1.0.",
+    )
+    mp_group.add_argument(
         "--worker-reap-timeout-seconds",
         type=float,
         default=120.0,
@@ -501,6 +553,10 @@ def parse_args_to_mp_server_config(
         engine_type=args.engine_type,
         separate_object_groups=args.separate_object_groups,
         use_layerwise=args.use_layerwise,
+        pipelined_fetch=args.pipelined_fetch,
+        pipelined_max_chunks=args.pipelined_max_chunks,
+        pipelined_shared_keys=args.pipelined_shared_keys,
+        pipelined_shared_wait_seconds=args.pipelined_shared_wait_seconds,
         enable_segmented_prefix=args.enable_segmented_prefix,
         enable_dedup_content=args.enable_dedup_content,
         supported_transfer_mode=args.supported_transfer_mode,

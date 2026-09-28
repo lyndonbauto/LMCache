@@ -988,6 +988,36 @@ class StorageManager:
             + ("; ".join(reasons) or "no L2 adapters are registered")
         )
 
+    def pipelined_adapter_id(self) -> int:
+        """Return the id of the adapter pipelined fetches read from.
+
+        The same adapter the other ``pipelined_*`` accessors and
+        :meth:`layer_arrival_source` use: the first, in registration order,
+        with a ready pipelined path. A lookup compares it with the adapters
+        its load plan reads from.
+
+        Returns:
+            The adapter id, as ``AdapterDescriptor.index``.
+
+        Raises:
+            LayerwiseContractError: If no L2 adapter has a ready pipelined
+                path, with each adapter's reason.
+        """
+        with self._adapters_lock:
+            adapters = list(self._l2_adapters.items())
+        reasons: list[str] = []
+        for adapter_id, adapter in adapters:
+            try:
+                adapter.pipelined_fetch_node_name()
+            except LayerwiseContractError as exc:
+                reasons.append(str(exc))
+                continue
+            return adapter_id
+        raise LayerwiseContractError(
+            "no L2 adapter has a pipelined fetch path: "
+            + ("; ".join(reasons) or "no L2 adapters are registered")
+        )
+
     def pipelined_max_record_bytes(self) -> int:
         """Return the record cap the pipelined adapter writes objects under.
 

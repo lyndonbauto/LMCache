@@ -22,6 +22,8 @@ from lmcache.v1.distributed.api import (
 )
 from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
+from lmcache.v1.layerwise import LayerwiseContractError
+from lmcache.v1.layerwise.deferral import PipelinedModel
 from lmcache.v1.layerwise.planner import ModelLayout
 from lmcache.v1.layerwise.request_fetch import (
     FetchModel,
@@ -362,6 +364,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             locked_gids,
             group_windows=group_windows,
         )
+        deferred = session.deferred_keys()
+        if deferred:
+            obj_keys = [obj_key for obj_key in obj_keys if obj_key not in deferred]
         if not session.claim_failed_retrieve_release(
             instance_id, key, lookup_generation
         ):
@@ -468,6 +473,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 entry.model_name, entry.world_size
             )
             self._fetch_models.unregister(entry.model_name, entry.world_size)
+            self._ctx.pipelined_models.unregister(entry.model_name, entry.world_size)
         del entry
         entries.clear()
         # ipc_collect() only unmaps a CUDA-IPC-imported segment once its last
@@ -644,9 +650,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 exc_info=True,
             )
         else:
-            self._fetch_models.register(
-                model_name, world_size, FetchModel(fetch_layout, attn_desc)
-            )
+            fetch_model = FetchModel(fetch_layout, attn_desc)
+            self._fetch_models.register(model_name, world_size, fetch_model)
+            if self._ctx.pipelined_fetch.enabled:
+                self._register_pipelined_model(
+                    model_name, world_size, fetch_model, group_layout_descs
+                )
 
         layerwise_schedule: LayerwiseSchedule | None = None
         layer_progress: LayerProgressRecord | None = None
@@ -1333,3 +1342,52 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 },
             )
         )
+
+    def _register_pipelined_model(
+        self,
+        model_name: str,
+        world_size: int,
+        fetch_model: FetchModel,
+        group_layout_descs: dict[int, MemoryLayoutDesc],
+    ) -> None:
+        """Make a model's lookups eligible for the pipelined retrieve.
+
+        On any reason the model cannot be served -- a world size above one,
+        no ready pipelined path, or a window too small for the chunk cap --
+        logs it and leaves the model loading whole objects at lookup.
+
+        Args:
+            model_name: The model being registered.
+            world_size: Its world size.
+            fetch_model: Its registered layout and attention windows.
+            group_layout_descs: Its per-object-group layouts.
+        """
+        if world_size != 1:
+            logger.warning(
+                "Pipelined fetch serves world size 1 only; %s (world size %d) "
+                "loads whole objects at lookup",
+                model_name,
+                world_size,
+            )
+            return
+        max_chunks = self._ctx.pipelined_fetch.max_chunks
+        storage_manager = self._ctx.storage_manager
+        try:
+            model = PipelinedModel(
+                fetch_model=fetch_model,
+                placer=storage_manager.pipelined_window_placer(
+                    group_layout_descs, fetch_model, max_chunks
+                ),
+                max_record_bytes=storage_manager.pipelined_max_record_bytes(),
+                max_slots=storage_manager.pipelined_max_slots_per_request(),
+                adapter_id=storage_manager.pipelined_adapter_id(),
+                max_chunks=max_chunks,
+            )
+        except (LayerwiseContractError, ValueError):
+            logger.warning(
+                "Cannot fetch %s layer by layer; it loads whole objects at lookup",
+                model_name,
+                exc_info=True,
+            )
+            return
+        self._ctx.pipelined_models.register(model_name, world_size, model)

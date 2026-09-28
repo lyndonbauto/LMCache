@@ -21,7 +21,7 @@ key serialization, and the adapter imports this package.
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum
-from typing import Protocol, runtime_checkable
+from typing import Generic, Protocol, TypeVar, runtime_checkable
 import threading
 
 # First Party
@@ -38,6 +38,8 @@ from lmcache.v1.layerwise.planner import (
     RecordKeys,
 )
 from lmcache.v1.memory_management import MemoryObj
+
+ModelT = TypeVar("ModelT")
 
 
 def first_in_window_chunk(num_chunks: int, window_chunks: int) -> int:
@@ -277,25 +279,32 @@ class RequestFetch:
     plan: LayerFetchPlan
 
 
-class FetchModelRegistry:
-    """Registered models' :class:`FetchModel`, by ``(model_name, world_size)``.
+class ModelRegistry(Generic[ModelT]):
+    """One value per registered model, by ``(model_name, world_size)``.
 
     Reference-counted the same way as the layout descriptor registry: every
     worker of a model registers it, and the entry lives until the last one
     unregisters. Thread-safe.
     """
 
-    def __init__(self) -> None:
-        self._models: dict[tuple[str, int], tuple[FetchModel, int]] = {}
+    def __init__(self, what: str) -> None:
+        """Create an empty registry.
+
+        Args:
+            what: What the values are, for the error :meth:`find` raises,
+                e.g. ``"layerwise fetch layout"``.
+        """
+        self._what = what
+        self._models: dict[tuple[str, int], tuple[ModelT, int]] = {}
         self._lock = threading.Lock()
 
-    def register(self, model_name: str, world_size: int, model: FetchModel) -> None:
+    def register(self, model_name: str, world_size: int, model: ModelT) -> None:
         """Add one registration of a model; the latest ``model`` is kept.
 
         Args:
             model_name: The model name.
             world_size: The world size.
-            model: The model's fetch layout and attention windows.
+            model: The value to keep for the model.
         """
         key = (model_name, world_size)
         with self._lock:
@@ -306,7 +315,7 @@ class FetchModelRegistry:
         """Drop one registration; the entry goes with the last one.
 
         Unregistering a model that was never registered is a no-op, since a
-        model whose layout could not be planned is never registered.
+        model a value could not be built for is never registered.
 
         Args:
             model_name: The model name.
@@ -323,28 +332,35 @@ class FetchModelRegistry:
             else:
                 self._models[key] = (model, count - 1)
 
-    def find(self, model_name: str, world_size: int) -> FetchModel:
-        """Return a registered model's fetch layout.
+    def find(self, model_name: str, world_size: int) -> ModelT:
+        """Return a registered model's value.
 
         Args:
             model_name: The model name.
             world_size: The world size.
 
         Returns:
-            The model's :class:`FetchModel`.
+            The value registered for the model.
 
         Raises:
-            KeyError: If the model is not registered, or its layout could not
-                be planned; the caller should load whole objects instead.
+            KeyError: If the model is not registered, or no value could be
+                built for it; the caller should load whole objects instead.
         """
         with self._lock:
             entry = self._models.get((model_name, world_size))
         if entry is None:
             raise KeyError(
-                f"no layerwise fetch layout for model {model_name!r} with "
-                f"world size {world_size}"
+                f"no {self._what} for model {model_name!r} with world size {world_size}"
             )
         return entry[0]
+
+
+class FetchModelRegistry(ModelRegistry[FetchModel]):
+    """Registered models' :class:`FetchModel`, by ``(model_name, world_size)``."""
+
+    def __init__(self) -> None:
+        """Create an empty registry."""
+        super().__init__("layerwise fetch layout")
 
 
 def request_cache_keys(

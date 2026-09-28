@@ -11,13 +11,16 @@ import time
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import (
     DEFAULT_ATTN_WINDOW_DESC,
+    NO_L2_DEFERRAL,
     AttnWindowDesc,
+    L2Deferral,
     ObjectKey,
     PrefetchHandle,
     PrefetchRequestSpec,
     ipc_key_to_object_keys,
 )
 from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_ranked
+from lmcache.v1.layerwise.deferral import PipelinedDeferral
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
 from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
@@ -299,6 +302,7 @@ class LookupModule:
                 group_layout_descs=group_layout_descs,
                 num_kv_readers=num_kv_readers,
                 attn_desc=attn_desc,
+                l2_deferral=self._l2_deferral_for(key, num_kv_readers),
             ),
             external_request_id=key.request_id,
         )
@@ -372,9 +376,10 @@ class LookupModule:
             )
             return 0
 
-        found = self._ctx.storage_manager.query_prefetch_status(job.handle)
-        if found is None:
+        outcome = self._ctx.storage_manager.query_prefetch_outcome(job.handle)
+        if outcome is None:
             return None
+        found = outcome.retained
 
         stride = job.attn_desc.num_object_groups * job.world_size
         num_chunks = job.handle.total_requested_keys // stride
@@ -389,10 +394,12 @@ class LookupModule:
         # free_lookup_locks can reconstruct which keys the prefetch
         # read-locked (see ``unfold``: full-attention groups lock the whole
         # hit prefix, sliding-window groups only its in-window suffix).
+        # Deferred keys are counted in found_count but hold no lock.
         session = self._ctx.session_manager.get_or_create(job.request_id)
         session.record_prefetch_result(
             found_count,
             tuple(range(job.attn_desc.num_object_groups)),
+            outcome.deferred_keys,
         )
 
         # ``l1_hit_chunks`` is the prefix L1 could serve on its own under each
@@ -503,10 +510,13 @@ class LookupModule:
         # Release exactly the groups the prefetch locked (std lookup: all;
         # CB prefix leg: its prefix set) -- releasing an unlocked group
         # would drop another request's lock on the shared object key.
-        locked_gids = self._ctx.session_manager.get_or_create(
-            key.request_id
-        ).prefetch_locked_gids
-        obj_keys = resolve_prefetched_obj_keys(self._ctx, key, hit_chunks, locked_gids)
+        session = self._ctx.session_manager.get_or_create(key.request_id)
+        obj_keys = resolve_prefetched_obj_keys(
+            self._ctx, key, hit_chunks, session.prefetch_locked_gids
+        )
+        deferred = session.deferred_keys()
+        if deferred:
+            obj_keys = [obj_key for obj_key in obj_keys if obj_key not in deferred]
 
         if not obj_keys:
             return
@@ -600,6 +610,34 @@ class LookupModule:
             for group_keys in per_group:
                 obj_keys.extend(group_keys[lo:hi])
         return obj_keys
+
+    def _l2_deferral_for(
+        self, key: IPCCacheServerKey, num_kv_readers: int
+    ) -> L2Deferral:
+        """Return the deferral for a lookup, or none if it cannot be pipelined.
+
+        Only a single-reader, world-size-one lookup of a model with a
+        registered pipelined setup is eligible; the controller then decides,
+        from the load plan, whether to defer.
+
+        Args:
+            key: The lookup's key.
+            num_kv_readers: Read locks the lookup takes per key.
+
+        Returns:
+            A :class:`PipelinedDeferral`, or ``NO_L2_DEFERRAL``.
+        """
+        if (
+            not self._ctx.pipelined_fetch.enabled
+            or key.world_size != 1
+            or num_kv_readers != 1
+        ):
+            return NO_L2_DEFERRAL
+        try:
+            model = self._ctx.pipelined_models.find(key.model_name, key.world_size)
+        except KeyError:
+            return NO_L2_DEFERRAL
+        return PipelinedDeferral(model)
 
     def _register_prefetch_job(self, job: _PrefetchJob) -> None:
         with self._prefetch_job_lock:
