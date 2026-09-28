@@ -11,6 +11,28 @@ defect coming back.
 
 ---
 
+## `DeferredFetchResult` reports an outcome, not a load
+
+**Who is affected:** anyone constructing `DeferredFetchResult` (test fakes of
+`fetch_deferred_objects`). Readers of `.load` are not.
+
+**What changed.** `DeferredFetchResult(load, locked_keys)` is now
+`DeferredFetchResult(outcome, locked_keys)`, where `outcome` is a
+`PipelinedOutcome` (`pipelined_loading.py`): `PIPELINED`, `FELL_BACK`,
+`NO_SOURCE` or `REFUSED` from this call. `load` is a property derived from
+it (`PIPELINED` and `FELL_BACK` give `DeferredLoad.PIPELINED`). Retrieve
+publishes the outcome as `pipelined_outcome` on `MP_RETRIEVE_END`, with the
+retrieve-level values `NOT_DEFERRED`, `LOADED_WHOLE`, `REUSED`,
+`SHARED_KEYS_BUSY` and `FAILED` (see [c9-wiring.md](c9-wiring.md),
+"Observability").
+
+**What breaks.** `DeferredFetchResult(DeferredLoad.X, ...)` call sites.
+
+**Why.** `load` said only what the caller must do next. A fallback and a
+clean pipelined retrieve looked the same, and so did a missing source and a
+refused lease, so the first real run could not tell whether it was using the
+path at all.
+
 ## Retrieve takes a sink factory; `run_pipelined_retrieve` takes a loader
 
 **Who is affected:** Track B (you implement the factory); anyone calling

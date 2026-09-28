@@ -33,6 +33,7 @@ from lmcache.v1.multiprocess.pipelined_loading import (
     DeferredLoad,
     ObjectTable,
     PipelinedLoadRequest,
+    PipelinedOutcome,
     PipelinedSink,
     fetch_deferred_objects,
 )
@@ -209,6 +210,7 @@ def test_a_pipelined_fetch_loads_from_the_window_objects() -> None:
     result, table = _fetch(storage, placer, factory)
 
     assert result.load is DeferredLoad.PIPELINED
+    assert result.outcome is PipelinedOutcome.PIPELINED
     assert result.locked_keys == ()
     (sink,) = factory.sinks
     assert sink.finished_generations() and sink.waits == 1
@@ -236,6 +238,7 @@ def test_without_a_layerwise_source_the_objects_are_loaded_whole() -> None:
     result, table = _fetch(storage, factory=factory)
 
     assert result.load is DeferredLoad.WHOLE
+    assert result.outcome is PipelinedOutcome.NO_SOURCE
     assert set(result.locked_keys) == set(_deferred_keys())
     assert factory.sinks == []
     assert all(table.get(g, c).label.startswith("whole:") for g, c in DEFERRED)
@@ -249,6 +252,7 @@ def test_a_refused_lease_loads_the_objects_whole() -> None:
     result, _ = _fetch(storage, placer)
 
     assert result.load is DeferredLoad.WHOLE
+    assert result.outcome is PipelinedOutcome.REFUSED
     (loaded,) = storage.loads
     assert set(loaded) == set(_deferred_keys())
 
@@ -261,6 +265,7 @@ def test_a_transport_failure_swaps_in_whole_objects_for_the_rest() -> None:
     result, table = _fetch(storage, factory=factory)
 
     assert result.load is DeferredLoad.PIPELINED
+    assert result.outcome is PipelinedOutcome.FELL_BACK
     assert set(result.locked_keys) == set(_deferred_keys())
     (sink,) = factory.sinks
     assert sink.finished_generations() and not sink.abandoned_generations()

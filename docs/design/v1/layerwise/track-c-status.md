@@ -18,7 +18,7 @@ items are in [system-design.md](system-design.md) section 11 and
 | C6 out-of-order pump | Done |
 | C7 failure paths abandon both sides | Done |
 | C8 conformance suite | Done: the scripted and Aerospike sources, over the real native session (fabric-free) |
-| C9 end to end | In progress ([c9-wiring.md](c9-wiring.md)). Done: deferred lookup mode, storage accessors (placer, record cap, adapter id, resident-key locks, whole load into L1), `--pipelined-*` options, registration, lookup eligibility, session record of deferred keys, retrieve orchestration (`run_pipelined_retrieve` with a loader, fallback, shared-key policy), retrieve wiring behind a `PipelinedSinkFactory`. Track B's `MultiprocessPipelinedSinkFactory` is merged and installed in `_build_modules`, so `--pipelined-fetch` now runs the whole path. Next: a GPU run, then over Soft-RoCE with all three tracks |
+| C9 end to end | In progress ([c9-wiring.md](c9-wiring.md)). Done: deferred lookup mode, storage accessors (placer, record cap, adapter id, resident-key locks, whole load into L1), `--pipelined-*` options, registration, lookup eligibility, session record of deferred keys, retrieve orchestration (`run_pipelined_retrieve` with a loader, fallback, shared-key policy), retrieve wiring behind a `PipelinedSinkFactory`. Track B's `MultiprocessPipelinedSinkFactory` is merged and installed in `_build_modules`, so `--pipelined-fetch` now runs the whole path. Each retrieve reports how it was served (`pipelined_outcome` on `MP_RETRIEVE_END`, the `lmcache_mp.num_deferred_retrieves` counter). `test_three_track_retrieve.py` runs all three tracks' production pieces on CPU. Next: a GPU run, then over Soft-RoCE, following [c9-bring-up.md](c9-bring-up.md) |
 | C10 no hardware in tests | Holds |
 
 ## Doable now
@@ -145,7 +145,7 @@ is the part that would change.
 | ~~A failed retrieve that does not kill vLLM~~ | Done: the connector reports failed blocks (`1138782d`) | Track B |
 | The real server writes exactly at the plan offset | A8 against a server built from the `kv-sink` branch | Track A |
 | The default vLLM config (piecewise CUDA graphs) | B5, a real vLLM run on native Linux | Track B |
-| C9 on a GPU, then over Soft-RoCE | One Linux box with a GPU, Soft-RoCE and a `kv-sink` server | All three |
+| C9 on a GPU, then over Soft-RoCE | One Linux box with a GPU, Soft-RoCE and a `kv-sink` server; runbook in [c9-bring-up.md](c9-bring-up.md) | All three |
 | A real TTFT number | EFA hardware (A7), after the above | All three |
 
 ## PR split for upstream

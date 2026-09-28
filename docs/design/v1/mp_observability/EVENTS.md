@@ -189,7 +189,7 @@ to correlate START/END pairs.
 | `MP_STORE_END` | `device`, `stored_count`, `engine_id`, `model_name`, `total_bytes`, `num_tokens`, `transfer_key` | `str`, `int`, `int`, `str`, `int`, `int`, `str` |
 | `MP_TRANSFER_PHASE_SAMPLES` | `samples`, `ended_transfer_key` | `list[tuple[int, int, int, float, int, str, float, float]]` — `(phase, direction, device_index, elapsed_ms, nbytes, session_id, start_time_s, end_time_s)` per finished executor section, plus the `transfer_key` (`str`) of the transfer whose END published this event -- its authoritative completion signal, present even when `samples` is empty; `phase` is a `TransferPhase` value (0 = kernel, 1 = staging), `direction` a `TransferDirection` value, the `session_id` slot carries the `transfer_key` of the store/retrieve operation (see `next_transfer_key`), `start_time_s`/`end_time_s` its bounds on the EventRecorder wall clock (empty / `0.0` only if the call's anchor event could not be recorded) |
 | `MP_RETRIEVE_START` | `device`, `engine_id`, `model_name`, `transfer_key` | `str`, `int`, `str`, `str` |
-| `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `model_name`, `cache_salt`, `total_bytes`, `num_tokens`, `transfer_key` | `str`, `int`, `int`, `str`, `str`, `int`, `int`, `str` |
+| `MP_RETRIEVE_END` | `device`, `retrieved_count`, `engine_id`, `model_name`, `cache_salt`, `total_bytes`, `num_tokens`, `transfer_key`, `pipelined_outcome`, `deferred_count` | `str`, `int`, `int`, `str`, `str`, `int`, `int`, `str`, `str`, `int` |
 | `MP_LOOKUP_PREFETCH_START` | *(none)* | — |
 | `MP_LOOKUP_PREFETCH_END` | `found_count`, `requested_tokens`, `hit_tokens`, `l1_hit_tokens`, `l2_hit_tokens`, `early_exit_reason`, `model_name`, `cache_salt` | `int`, `int`, `int`, `int`, `int`, `str`, `str`, `str` |
 | `MP_LOOKUP` | `request_id`, `chunk_hashes`, `model_name`, `chunk_size`, `seq_len`, `dtypes`, `shapes` | `str`, `list[str]`, `str`, `int`, `int`, `list[str]`, `list[list[int]]` |
@@ -219,6 +219,14 @@ Denormalized token count (`num_chunks * chunk_size`) so subscribers need
 not know `chunk_size`.  Fail-closed, matching `total_bytes`: `0` when the
 store committed nothing (`stored_count == 0`) or the retrieve did not
 fully succeed.
+
+### `pipelined_outcome` / `deferred_count` on `MP_RETRIEVE_END`
+
+How the retrieve served the L2 hits its lookup deferred to a layerwise
+pipelined fetch: a `PipelinedOutcome` value (`not_deferred`, `pipelined`,
+`fell_back`, `no_source`, `refused`, `loaded_whole`, `reused`,
+`shared_keys_busy`, `failed`), and how many keys it claimed from the
+session. See `docs/design/v1/layerwise/c9-wiring.md`, "Observability".
 
 ### `MP_LOOKUP_PREFETCH_END` metadata
 

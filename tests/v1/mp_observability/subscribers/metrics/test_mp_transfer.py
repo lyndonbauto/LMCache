@@ -27,6 +27,7 @@ _SUBMITTED_STORES = "lmcache_mp.num_submitted_stores"
 _FINISHED_STORES = "lmcache_mp.num_finished_stores"
 _SUBMITTED_RETRIEVES = "lmcache_mp.num_submitted_retrieves"
 _FINISHED_RETRIEVES = "lmcache_mp.num_finished_retrieves"
+_DEFERRED_RETRIEVES = "lmcache_mp.num_deferred_retrieves"
 
 _DEVICE = f"{torch_device_type}:0"
 _OTHER_DEVICE = f"{torch_device_type}:1"
@@ -77,6 +78,7 @@ def _retrieve_end(
     retrieved_count: int = 4,
     device: str = _DEVICE,
     session_id: str = "req-1",
+    pipelined_outcome: str = "not_deferred",
 ) -> Event:
     return Event(
         event_type=EventType.MP_RETRIEVE_END,
@@ -89,6 +91,7 @@ def _retrieve_end(
             "cache_salt": "",
             "total_bytes": 1024,
             "num_tokens": 256,
+            "pipelined_outcome": pipelined_outcome,
         },
     )
 
@@ -187,6 +190,32 @@ class TestRetrieveCounters:
 
         assert counter_value(delta, _SUBMITTED_STORES, device=_DEVICE) == 0
         assert counter_value(delta, _FINISHED_STORES, device=_DEVICE) == 0
+
+
+class TestDeferredRetrieveCounter:
+    def test_counts_deferred_retrieves_by_outcome(self, subscriber):
+        before = read_tagged_counters()
+        subscriber._on_retrieve_finished(_retrieve_end(pipelined_outcome="pipelined"))
+        subscriber._on_retrieve_finished(_retrieve_end(pipelined_outcome="pipelined"))
+        subscriber._on_retrieve_finished(_retrieve_end(pipelined_outcome="fell_back"))
+        delta = counter_delta(before, read_tagged_counters())
+
+        assert counter_value(delta, _DEFERRED_RETRIEVES, outcome="pipelined") == 2
+        assert counter_value(delta, _DEFERRED_RETRIEVES, outcome="fell_back") == 1
+
+    def test_a_retrieve_with_nothing_deferred_is_not_counted(self, subscriber):
+        before = read_tagged_counters()
+        subscriber._on_retrieve_finished(_retrieve_end())
+        subscriber._on_retrieve_finished(
+            Event(event_type=EventType.MP_RETRIEVE_END, session_id="req-x")
+        )
+        delta = counter_delta(before, read_tagged_counters())
+
+        assert not any(
+            value
+            for (name, _attrs), value in delta.items()
+            if name == _DEFERRED_RETRIEVES
+        )
 
 
 # ---------------------------------------------------------------------------

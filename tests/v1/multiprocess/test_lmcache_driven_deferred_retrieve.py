@@ -27,6 +27,7 @@ from lmcache.v1.multiprocess.pipelined_loading import (
     DeferredFetchResult,
     DeferredLoad,
     PipelinedLoadRequest,
+    PipelinedOutcome,
     PipelinedSinkFactory,
 )
 
@@ -74,6 +75,11 @@ class _Harness:
     group_transfers: list[tuple[int, list[object]]] = field(default_factory=list)
     retrieve_end: list[dict[str, object]] = field(default_factory=list)
 
+    def outcome(self) -> object:
+        """The ``pipelined_outcome`` of the one retrieve run."""
+        [end] = self.retrieve_end
+        return end["pipelined_outcome"]
+
     def retrieve(self) -> bool:
         _handle, ok = self.module.retrieve(
             key=SimpleNamespace(
@@ -97,11 +103,15 @@ def _harness(
     resident: Iterable[str] = (),
     loaded: Iterable[str] | None = None,
     sink_factory: PipelinedSinkFactory | None = None,
+    missing_from_l1: Iterable[str] = (),
+    busy: Iterable[str] = (),
 ) -> _Harness:
     """Build a module over mocks, with ``deferred`` left in L2 by the lookup.
 
     ``resident`` are deferred keys another fetch already put in L1;
     ``loaded`` are the keys a whole load finds (default: all of them).
+    ``missing_from_l1`` are keys the L1 read cannot find, and ``busy`` are
+    deferred keys another request is still fetching.
     """
     monkeypatch.setattr(mod, "DeviceHostFuncDispatcher", MagicMock())
     monkeypatch.setattr(mod, "downsample_and_stage_block_ids", lambda cc, b: b)
@@ -138,19 +148,23 @@ def _harness(
     )
     monkeypatch.setattr(module, "get_and_touch_context_entry", lambda _id: entry)
 
+    missing = set(missing_from_l1)
+
     @contextmanager
     def read(keys: list[str]) -> Iterator[list[MagicMock]]:
         h.reads.append(list(keys))
-        yield [_obj(k) for k in keys]
+        yield [_obj(k) for k in keys if k not in missing]
 
     storage.read_prefetched_results.side_effect = read
 
     resident_set = set(resident)
+    busy_set = set(busy)
 
     def lock_resident(keys: list[str]) -> ResidentKeys:
         locked = {k: _obj(k) for k in keys if k in resident_set}
-        absent = tuple(k for k in keys if k not in resident_set)
-        return ResidentKeys(locked, (), absent)  # type: ignore[arg-type]
+        in_flight = tuple(k for k in keys if k in busy_set)
+        absent = tuple(k for k in keys if k not in resident_set and k not in busy_set)
+        return ResidentKeys(locked, in_flight, absent)  # type: ignore[arg-type]
 
     storage.lock_resident_keys.side_effect = lock_resident
     found = None if loaded is None else set(loaded)
@@ -163,14 +177,14 @@ def _harness(
     ):
         h.fetches.append((tuple(keys_to_fetch), request.objects.by_group()))
         if delivery is DeferredLoad.PIPELINED:
-            return DeferredFetchResult(DeferredLoad.PIPELINED, ())
+            return DeferredFetchResult(PipelinedOutcome.PIPELINED, ())
         placed = {}
         for g, group in enumerate(keys_per_group):
             for c, k in enumerate(group):
                 if k in keys_to_fetch:
                     placed[(g, c)] = _obj(k)
         request.objects.put(placed)
-        return DeferredFetchResult(DeferredLoad.WHOLE, tuple(keys_to_fetch))
+        return DeferredFetchResult(PipelinedOutcome.REFUSED, tuple(keys_to_fetch))
 
     monkeypatch.setattr(mod, "fetch_deferred_objects", fetch)
 
@@ -219,6 +233,8 @@ def test_a_pipelined_retrieve_reads_only_l1_and_fetches_the_deferred(monkeypatch
     [end] = h.retrieve_end
     assert end["retrieved_count"] == NUM_GROUPS * NUM_CHUNKS
     assert end["num_tokens"] == NUM_CHUNKS * CHUNK_SIZE
+    assert end["pipelined_outcome"] == "pipelined"
+    assert end["deferred_count"] == len(DEFERRED)
 
 
 def test_a_whole_delivery_runs_the_layerwise_transfer_over_every_object(
@@ -232,6 +248,7 @@ def test_a_whole_delivery_runs_the_layerwise_transfer_over_every_object(
     assert [_names(g) for g in transferred] == KEYS
     assert sorted(h.released) == sorted(L1_KEYS + DEFERRED)
     assert h.retrieve_end[0]["num_tokens"] == NUM_CHUNKS * CHUNK_SIZE
+    assert h.retrieve_end[0]["pipelined_outcome"] == "refused"
 
 
 def test_a_key_another_fetch_left_in_l1_is_read_not_fetched(monkeypatch):
@@ -262,6 +279,7 @@ def test_a_retrieve_that_is_not_layerwise_loads_the_deferred_keys_whole(
         (g, KEYS[g]) for g in range(NUM_GROUPS)
     ]
     assert sorted(h.released) == sorted(L1_KEYS + DEFERRED)
+    assert h.outcome() == "loaded_whole"
 
 
 def test_a_whole_load_missing_a_key_fails_and_unlocks_what_it_loaded(
@@ -274,6 +292,7 @@ def test_a_whole_load_missing_a_key_fails_and_unlocks_what_it_loaded(
     h.storage.finish_read_prefetched.assert_called_once_with(DEFERRED[:1])
     assert h.reads == []
     assert h.group_transfers == []
+    assert h.outcome() == "failed"
 
 
 def test_a_whole_load_that_raises_unlocks_the_reused_keys(monkeypatch):
@@ -294,5 +313,39 @@ def test_without_a_sink_factory_deferred_keys_are_not_claimed(monkeypatch):
     assert h.reads == KEYS
     assert h.fetches == []
     h.storage.lock_resident_keys.assert_not_called()
+    assert h.outcome() == "not_deferred"
+    assert h.retrieve_end[0]["deferred_count"] == 0
     [transferred] = h.layerwise_transfers
     assert [_names(g) for g in transferred] == KEYS
+
+
+def test_a_retrieve_that_fails_before_reading_a_reused_key_still_unlocks_it(
+    monkeypatch,
+):
+    reused = DEFERRED[0]
+    h = _harness(monkeypatch, resident=[reused], missing_from_l1=[KEYS[0][0]])
+
+    assert h.retrieve() is False
+
+    # Group 0's read failed, so nothing was read, but the reused key's lock
+    # (taken by this retrieve) is released after the stream work.
+    assert h.released == [reused]
+    assert h.fetches == []
+
+
+def test_every_deferred_key_already_in_l1_is_reported_as_reused(monkeypatch):
+    h = _harness(monkeypatch, resident=DEFERRED)
+
+    assert h.retrieve() is True
+
+    assert h.fetches == []
+    assert h.outcome() == "reused"
+
+
+def test_a_busy_shared_key_under_recompute_is_reported(monkeypatch):
+    h = _harness(monkeypatch, busy=DEFERRED[:1])
+
+    assert h.retrieve() is False
+
+    assert h.fetches == []
+    assert h.outcome() == "shared_keys_busy"

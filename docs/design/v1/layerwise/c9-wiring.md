@@ -190,16 +190,17 @@ run_pipelined_retrieve(
 4. `fetch_deferred_objects(storage, model, keys, keys_to_fetch, factory,
    request, layouts)` runs `run_pipelined_retrieve` over the deferred keys
    only (`keys_to_fetch`), since the L1 keys are already read-locked and
-   leasing them would be refused. It returns `DeferredFetchResult(load,
-   locked_keys)`:
-   - `PIPELINED`: the sink delivered every layer, so retrieve transfers
-     nothing more;
-   - `WHOLE`: no source, or the lease or plan was refused. The objects were
-     loaded whole into the table, and retrieve runs today's
+   leasing them would be refused. It returns `DeferredFetchResult(outcome,
+   locked_keys)`, whose `load` property says what retrieve does next:
+   - `PIPELINED` (outcome `pipelined` or `fell_back`): the sink delivered
+     every layer, so retrieve transfers nothing more;
+   - `WHOLE` (outcome `no_source` or `refused`): the objects were loaded
+     whole into the table, and retrieve runs today's
      `transfer_kv_layerwise_h2d` over it.
 5. `locked_keys` (whole loads, fallback reloads) are released with the L1
    part by the end-of-retrieve `finish_read_prefetched` stream callback,
-   after the copies.
+   after the copies. So are keys reused in step 1, even when the retrieve
+   fails before reading them.
 
 **The sink factory is the hand-off to Track B.** The module takes a
 `PipelinedSinkFactory` at construction:
@@ -217,9 +218,10 @@ class PipelinedSink(LayerLoadSink, Protocol):
 record, the event pool, the worker's `retrieve_generation` and the transfer
 key. The sink reads the table with `ObjectTable.get(group, chunk)` when it
 loads a layer, and maps the pump's generation to `retrieve_generation`,
-because the two are numbered independently. Until Track B's factory is
-wired into `_build_modules`, the default `NO_PIPELINED_SINK_FACTORY` keeps
-models unregistered, so nothing is deferred.
+because the two are numbered independently. `_build_modules` installs Track
+B's `MultiprocessPipelinedSinkFactory` (`pipelined_sink.py`). A module built
+with the default `NO_PIPELINED_SINK_FACTORY` keeps models unregistered, so
+nothing is deferred.
 
 **Per-layer staging.** Today's layerwise path stages whole objects to the
 GPU before the first layer that needs them. Window objects are incomplete
@@ -254,6 +256,31 @@ the pump's per-layer timeout, and it is set on the worker, so the daemon
 cannot see it. The daemon therefore refuses a `wait` budget that is not
 below the pump's per-layer timeout (`PipelinedFetchConfig`); with the
 defaults, wait plus first layer stays under the worker's 5 s.
+
+## Observability
+
+`MP_RETRIEVE_END` carries `pipelined_outcome` (a `PipelinedOutcome` value)
+and `deferred_count` (keys claimed from the session):
+
+| `pipelined_outcome` | Meaning |
+|---|---|
+| `not_deferred` | Nothing claimed; today's path |
+| `pipelined` | Every layer came through the window |
+| `fell_back` | A layer was declined or timed out; the rest loaded whole |
+| `no_source` | The adapter gave no layer-arrival source; loaded whole |
+| `refused` | Lease or plan refused; loaded whole |
+| `loaded_whole` | Not layerwise, or no `PipelinedModel`; loaded whole |
+| `reused` | Every deferred key was already readable in L1 |
+| `shared_keys_busy` | A shared key was busy past the policy; vLLM recomputes |
+| `failed` | Anything else raised; vLLM recomputes |
+
+`MPTransferCountersSubscriber` counts every outcome except `not_deferred` in
+`lmcache_mp.num_deferred_retrieves` (attr `outcome`), and the retrieve-end
+debug log prints it. `pipelined / sum(...)` is the share served layer by
+layer.
+
+[c9-bring-up.md](c9-bring-up.md) is the runbook for the first GPU and
+Soft-RoCE run, with a triage table by outcome.
 
 ## Failure summary
 

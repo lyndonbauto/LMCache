@@ -26,6 +26,11 @@ from opentelemetry import metrics
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.event_bus import EventCallback, EventSubscriber
 
+#: ``pipelined_outcome`` of a retrieve whose lookup deferred nothing; the
+#: value of ``PipelinedOutcome.NOT_DEFERRED``, kept literal so this module
+#: stays free of multiprocess imports.
+_NOT_DEFERRED = "not_deferred"
+
 
 class MPTransferCountersSubscriber(EventSubscriber):
     """Maintains OTel counters for submitted and finished GPU transfers.
@@ -41,12 +46,19 @@ class MPTransferCountersSubscriber(EventSubscriber):
     - ``lmcache_mp.num_finished_retrieves`` — GPU retrieves completed
       (``MP_RETRIEVE_END``)
 
+    And one counter for the layerwise pipelined retrieve (attr: ``outcome``):
+
+    - ``lmcache_mp.num_deferred_retrieves`` — retrieves whose lookup
+      deferred L2 hits, by how they were served (``MP_RETRIEVE_END``'s
+      ``pipelined_outcome``: ``pipelined``, ``fell_back``, ``refused``, ...).
+      Retrieves with nothing deferred are not counted.
+
     "Finished" counts a transfer *leaving* the device stream, not its
     success: a store that committed nothing (``stored_count == 0``) and a
     retrieve that missed both increment. Use ``lmcache_mp.num_chunks_loaded``
     and the L0↔L1 throughput histograms for success and volume.
 
-    ``device`` is the only attribute on all four counters. The SUBMITTED
+    ``device`` is the only attribute on the four transfer counters. The SUBMITTED
     events carry no ``engine_id`` / ``model_name`` (see EVENTS.md), so
     labeling the END side more richly would force a PromQL aggregation to
     line the two label sets up again before subtracting them.
@@ -80,6 +92,13 @@ class MPTransferCountersSubscriber(EventSubscriber):
                 "stream (regardless of how many chunks were retrieved)."
             ),
         )
+        self._deferred_retrieves = meter.create_counter(
+            "lmcache_mp.num_deferred_retrieves",
+            description=(
+                "Retrieves whose lookup deferred L2 hits to a layerwise "
+                "pipelined fetch, by how they were served."
+            ),
+        )
 
     # -- EventSubscriber interface -----------------------------------------
 
@@ -104,6 +123,9 @@ class MPTransferCountersSubscriber(EventSubscriber):
 
     def _on_retrieve_finished(self, event: Event) -> None:
         self._finished_retrieves.add(1, attributes=self._device_attrs(event))
+        outcome = event.metadata.get("pipelined_outcome")
+        if outcome is not None and outcome != _NOT_DEFERRED:
+            self._deferred_retrieves.add(1, attributes={"outcome": str(outcome)})
 
     # -- Attributes --------------------------------------------------------
 
