@@ -47,7 +47,10 @@ from lmcache.v1.multiprocess.layerwise_sink import (
     LayerLauncher,
     MultiprocessLayerLoadSink,
 )
-from lmcache.v1.multiprocess.object_group_transfer import LayerwiseH2DRetrieve
+from lmcache.v1.multiprocess.object_group_transfer import (
+    FixedMemoryObjects,
+    LayerwiseH2DRetrieve,
+)
 
 #: Hybrid layout: kernel groups hold global layers [0, 2] and [1, 3], so the
 #: schedule interleaves them as 0, 1, 2, 3. Covers every layer the suite uses.
@@ -247,7 +250,7 @@ def multiprocess_sink_harness() -> tuple[
         return LayerwiseH2DRetrieve(
             _cache_context(),
             [torch.tensor([0]), torch.tensor([0])],
-            [[]],
+            FixedMemoryObjects([[]]),
             0,
             schedule,
             record,

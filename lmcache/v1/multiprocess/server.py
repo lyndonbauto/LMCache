@@ -58,6 +58,7 @@ from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import (
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.modules.management import ManagementModule
 from lmcache.v1.multiprocess.modules.p2p_controller import P2PController
+from lmcache.v1.multiprocess.pipelined_sink import MultiprocessPipelinedSinkFactory
 from lmcache.v1.multiprocess.transport.base import RequestServer
 from lmcache.v1.multiprocess.transport.server_factory import create_request_server
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
@@ -178,12 +179,19 @@ def _build_modules(
     # be constructed with them as liveness targets / reap listeners. They are
     # the InstanceLivenessTargets the reaper scans.
     transfer_modules: list[EngineModule] = []
+    # The pipelined sink only runs for models registered for the pipelined
+    # fetch, which needs --pipelined-fetch; without it nothing is deferred.
+    sink_factory = MultiprocessPipelinedSinkFactory()
     if mp_config.supported_transfer_mode == "lmcache_driven":
-        transfer_modules.append(LMCacheDrivenTransferModule(ctx))
+        transfer_modules.append(
+            LMCacheDrivenTransferModule(ctx, pipelined_sink_factory=sink_factory)
+        )
     elif mp_config.supported_transfer_mode == "engine_driven":
         transfer_modules.append(EngineDrivenTransferModule(ctx))
     elif mp_config.supported_transfer_mode == "auto":
-        transfer_modules.append(LMCacheDrivenTransferModule(ctx))
+        transfer_modules.append(
+            LMCacheDrivenTransferModule(ctx, pipelined_sink_factory=sink_factory)
+        )
         transfer_modules.append(EngineDrivenTransferModule(ctx))
     else:
         raise ValueError(

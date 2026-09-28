@@ -1091,3 +1091,63 @@ Decisions (D17 narrowed, D20 reversed):
   passed.
 - Ruff, isort clean; mypy clean on the changed sources apart from the two
   errors in `lmcache_mp_connector.py` that are identical on `HEAD`.
+
+### Step 13 -- The pipelined sink factory (C9 hand-off) (2026-09-28)
+
+`track/c-planning` at `e3c665db` already contained every Track B commit, so
+Track B fast-forwarded to it. Track C's C9 wiring builds one sink per
+pipelined retrieve through `PipelinedSinkFactory.build(PipelinedLoadRequest)`
+and asked for two things.
+
+**1. `wait_for_copies()`.** The retrieve releases the RDMA window only after
+it returns. `LayerwiseH2DRetrieve.wait_for_copies` synchronises the transfer
+stream once the retrieve has begun, the same drain `mark_failed` uses, so no
+copy still reads window memory. The sink exposes it.
+
+**2. Swapped objects.** On a transport failure, the fallback releases the
+window and puts whole objects into the request's `ObjectTable`, then keeps
+loading on the same sink. `begin()` used to capture the objects, so later
+layers would have read freed window memory.
+
+- `LayerwiseH2DRetrieve` now takes a `MemoryObjectLookup`
+  (`get(group, chunk)`, `by_group()`). Track C's `ObjectTable` satisfies it;
+  `FixedMemoryObjects` wraps fixed lists for the whole-retrieve path.
+- `begin()` builds batch geometry from one snapshot, because positions do
+  not change. Batch descriptors now hold positions, not objects.
+- Every launch reads each batch's current objects from the lookup. An empty
+  position raises and marks the retrieve failed.
+
+**Factory and wiring.**
+
+- New `lmcache/v1/multiprocess/pipelined_sink.py`:
+  `MultiprocessPipelinedSinkFactory.build(request)` returns
+  `PipelinedRetrieveSink`, which wraps `MultiprocessLayerLoadSink.for_retrieve`
+  over a per-layer-staging `LayerwiseH2DRetrieve`, plus `wait_for_copies`.
+  It is separate from `layerwise_sink.py` so that module stays free of GPU
+  imports.
+- The pump's fetch generation stays inside the sink's contract checks; the
+  launcher publishes `request.retrieve_generation` to the worker.
+- `server._build_modules` installs the factory in both LMCache-driven
+  transfer modes. Pipelined loading still runs only for models registered
+  with `--pipelined-fetch`.
+
+**Generation timeout.** Track C confirmed that Step 12's change (the timeout
+raises instead of being ignored) covers the silent-corruption risk they
+raised.
+
+**Tested:**
+
+- Objects swapped between layers are what later layers copy, on CPU and GPU.
+- An empty position at launch fails the retrieve.
+- `wait_for_copies` drains only after the retrieve began.
+- End to end with Track C's `ObjectTable`, `LayerArrivalPump.run_resumable`
+  and a source that declines layer 2: layers 0-1 copy from the window object,
+  the fallback swaps in a whole object, layers 2-3 copy from it, the worker
+  record reaches retrieve generation 41 with watermark 4, and
+  `wait_for_copies` drains the stream.
+- The factory sink serves one load only.
+- Mutation: capturing the objects at `begin()` fails the four swap and
+  empty-position tests, including the GPU test.
+- Track B, layerwise, pipelined-loading and deferred-retrieve suites: 446
+  passed, 30 skipped.
+- Ruff, isort, codespell and mypy clean on the changed sources.

@@ -18,11 +18,12 @@ from lmcache.v1.layerwise import (
     LayerFetchPlan,
     LayerUnservableError,
     LayerwiseContractError,
+    LoadLeftOpenError,
     ScriptedLayerArrivalSource,
     SlotPlacement,
     UnservableLayerArrivalSource,
 )
-from lmcache.v1.memory_management import GDSMemoryObject
+from lmcache.v1.memory_management import GDSMemoryObject, MemoryObj
 from lmcache.v1.multiprocess import object_group_transfer
 from lmcache.v1.multiprocess.layer_progress import (
     DaemonLayerLaunchEventPool,
@@ -33,6 +34,8 @@ from lmcache.v1.multiprocess.layer_progress import (
 )
 from lmcache.v1.multiprocess.layerwise_schedule import LayerwiseSchedule
 from lmcache.v1.multiprocess.layerwise_sink import MultiprocessLayerLoadSink
+from lmcache.v1.multiprocess.pipelined_loading import ObjectTable, PipelinedLoadRequest
+from lmcache.v1.multiprocess.pipelined_sink import MultiprocessPipelinedSinkFactory
 
 
 def _make_cache_context() -> MagicMock:
@@ -108,7 +111,7 @@ def _make_retrieve_on(
     return object_group_transfer.LayerwiseH2DRetrieve(
         cache_context,
         [torch.tensor([0, 1]), torch.tensor([0, 1])],
-        [[MagicMock()]],
+        object_group_transfer.FixedMemoryObjects([[MagicMock()]]),
         0,
         schedule,
         progress,
@@ -172,9 +175,26 @@ class _RealStaging:
             2 * self.kernel_group_bytes, dtype=torch.uint8, device=device
         )
         self.staging.view(torch.float32).fill_(_SENTINEL)
-        self.memory_obj = MagicMock()
-        self.memory_obj.raw_tensor = self.host
-        self.memory_obj.get_size = lambda: self.host.nbytes
+        self._pinned = device != "cpu"
+        self.memory_obj = self._memory_obj_over(self.host)
+
+    def whole_object(self, value: float) -> MagicMock:
+        """Return another host object with every layer already at ``value``.
+
+        Stands in for an object a fallback loaded whole into L1.
+        """
+        host = torch.zeros(
+            2 * self.kernel_group_bytes, dtype=torch.uint8, pin_memory=self._pinned
+        )
+        host.view(torch.float32).fill_(value)
+        return self._memory_obj_over(host)
+
+    @staticmethod
+    def _memory_obj_over(host: torch.Tensor) -> MagicMock:
+        memory_obj = MagicMock()
+        memory_obj.raw_tensor = host
+        memory_obj.get_size = lambda: host.nbytes
+        return memory_obj
 
     def kernel_group(self, flat: torch.Tensor, kernel_group_id: int) -> torch.Tensor:
         """Return one kernel group's shaped float32 view into ``flat``."""
@@ -207,10 +227,23 @@ class _RealStaging:
         staging: object_group_transfer.LayerStaging,
     ) -> object_group_transfer.LayerwiseH2DRetrieve:
         """Build a retrieve over this chunk with the given staging mode."""
+        return self.retrieve_over(
+            schedule,
+            object_group_transfer.FixedMemoryObjects([[self.memory_obj]]),
+            staging,
+        )
+
+    def retrieve_over(
+        self,
+        schedule: LayerwiseSchedule,
+        objects: object_group_transfer.MemoryObjectLookup,
+        staging: object_group_transfer.LayerStaging,
+    ) -> object_group_transfer.LayerwiseH2DRetrieve:
+        """Build a retrieve reading its one chunk's object from ``objects``."""
         return object_group_transfer.LayerwiseH2DRetrieve(
             self.cache_context(),
             [torch.tensor([0, 1]), torch.tensor([0, 1])],
-            [[self.memory_obj]],
+            objects,
             0,
             schedule,
             LayerProgressRecord(bytearray(LayerProgressRecord.RECORD_SIZE)),
@@ -806,7 +839,7 @@ def test_per_layer_staging_rejects_gds_objects_before_publishing() -> None:
     retrieve = object_group_transfer.LayerwiseH2DRetrieve(
         _make_cache_context(),
         [torch.tensor([0, 1]), torch.tensor([0, 1])],
-        [[MagicMock(spec=GDSMemoryObject)]],
+        object_group_transfer.FixedMemoryObjects([[MagicMock(spec=GDSMemoryObject)]]),
         0,
         schedule,
         progress,
@@ -857,3 +890,178 @@ def test_a_non_positive_generation_is_rejected() -> None:
 
     with pytest.raises(ValueError, match="must be positive"):
         _make_retrieve(schedule, progress, retrieve_generation=0)
+
+
+def _check_objects_read_at_each_launch(device: str) -> None:
+    """Swap an object between layers and check which one each layer copied."""
+    schedule = LayerwiseSchedule([[0, 2], [1, 3]])
+    real = _RealStaging(_KV_SIZE, device)
+    table = ObjectTable([[real.memory_obj]])
+    retrieve = real.retrieve_over(
+        schedule, table, object_group_transfer.LayerStaging.PER_LAYER
+    )
+    retrieve.begin()
+    real.arrive(0, 0, 10.0)
+    retrieve.launch_layer(0)
+    real.arrive(1, 0, 11.0)
+    retrieve.launch_layer(1)
+
+    table.put({(0, 0): real.whole_object(99.0)})
+    retrieve.launch_layer(2)
+    retrieve.launch_layer(3)
+
+    assert torch.all(real.staged(0, 0) == 10.0)
+    assert torch.all(real.staged(1, 0) == 11.0)
+    assert torch.all(real.staged(0, 1) == 99.0)
+    assert torch.all(real.staged(1, 1) == 99.0)
+
+
+def test_objects_are_read_at_each_launch(kernel_calls: list[int]) -> None:
+    """An object swapped in between layers is what the later layers copy.
+
+    This is the pipelined fallback: layers 0 and 1 came from the window
+    object, then the fallback put a whole object at the same position.
+    """
+    _check_objects_read_at_each_launch("cpu")
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="requires an available CUDA runtime"
+)
+def test_objects_are_read_at_each_launch_on_gpu(kernel_calls: list[int]) -> None:
+    """Same as the CPU test, with pinned host objects and real async copies."""
+    _check_objects_read_at_each_launch("cuda")
+
+
+class _ObjectsThatVanish:
+    """A lookup whose one object is gone after ``begin`` read it."""
+
+    def __init__(self, memory_obj: MemoryObj) -> None:
+        self._memory_obj = memory_obj
+
+    def get(self, object_group_id: int, chunk_id: int) -> MemoryObj | None:
+        return None
+
+    def by_group(self) -> list[list[MemoryObj | None]]:
+        return [[self._memory_obj]]
+
+
+def test_an_empty_position_at_launch_fails_the_retrieve(
+    kernel_calls: list[int],
+) -> None:
+    """A missing object is refused and reported, not copied from nothing."""
+    schedule = LayerwiseSchedule([[0, 2], [1, 3]])
+    real = _RealStaging(_KV_SIZE)
+    retrieve = real.retrieve_over(
+        schedule,
+        _ObjectsThatVanish(real.memory_obj),
+        object_group_transfer.LayerStaging.PER_LAYER,
+    )
+    retrieve.begin()
+
+    with pytest.raises(ValueError, match="no memory object for chunk 0"):
+        retrieve.launch_layer(0)
+    assert kernel_calls == []
+
+
+def test_wait_for_copies_drains_the_stream_once_copies_were_queued() -> None:
+    schedule = LayerwiseSchedule([[0, 1]])
+    progress = LayerProgressRecord(bytearray(LayerProgressRecord.RECORD_SIZE))
+    cache_context = _make_cache_context()
+    retrieve = _make_retrieve_on(cache_context, schedule, progress)
+
+    retrieve.wait_for_copies()
+    cache_context.stream.synchronize.assert_not_called()
+
+    retrieve.begin()
+    retrieve.wait_for_copies()
+    cache_context.stream.synchronize.assert_called_once_with()
+
+
+class _DeclinesLayerTwo(ScriptedLayerArrivalSource):
+    """Delivers layers 0 and 1 at once, then declines layer 2."""
+
+    def begin_fetch(self, plan: LayerFetchPlan) -> int:
+        generation = super().begin_fetch(plan)
+        self.deliver_layer(0)
+        self.deliver_layer(1)
+        self.decline_layer(2)
+        return generation
+
+
+def _pipelined_request(
+    real: _RealStaging,
+    schedule: LayerwiseSchedule,
+    table: ObjectTable,
+    progress: LayerProgressRecord,
+    retrieve_generation: int,
+) -> PipelinedLoadRequest:
+    return PipelinedLoadRequest(
+        cache_context=real.cache_context(),
+        block_ids_gpu=[torch.tensor([0, 1]), torch.tensor([0, 1])],
+        objects=table,
+        skip_first_n_tokens=0,
+        schedule=schedule,
+        progress=progress,
+        event_pool=_RecordingEventPool(schedule.launch_count()),
+        retrieve_generation=retrieve_generation,
+        transfer_key="retrieve-key",
+    )
+
+
+def test_the_factory_sink_resumes_after_a_transport_failure(
+    kernel_calls: list[int],
+) -> None:
+    """The C9 flow end to end with Track C's pump and object table.
+
+    The pump loads layers 0-1 from the window object and leaves the load open
+    when layer 2 is declined. The fallback swaps a whole object into the
+    table and continues the same load. The worker's record carries the
+    retrieve generation, not the pump's.
+    """
+    schedule = LayerwiseSchedule([[0, 2], [1, 3]])
+    real = _RealStaging(_KV_SIZE)
+    real.arrive(0, 0, 10.0)
+    real.arrive(1, 0, 11.0)
+    table = ObjectTable([[real.memory_obj]])
+    progress = LayerProgressRecord(bytearray(LayerProgressRecord.RECORD_SIZE))
+    request = _pipelined_request(real, schedule, table, progress, 41)
+    sink = MultiprocessPipelinedSinkFactory().build(request)
+
+    with pytest.raises(LoadLeftOpenError) as left_open:
+        LayerArrivalPump(_DeclinesLayerTwo(), sink).run_resumable(_plan_for(schedule))
+    assert left_open.value.remaining_layers == (2, 3)
+    assert progress.read().watermark == 2
+
+    table.put({(0, 0): real.whole_object(99.0)})
+    for layer_id in left_open.value.remaining_layers:
+        sink.load_layer(layer_id)
+    sink.finish_load(left_open.value.generation)
+    sink.wait_for_copies()
+
+    snapshot = progress.read()
+    assert (snapshot.generation, snapshot.watermark) == (41, 4)
+    assert not snapshot.retrieve_failed
+    assert torch.all(real.staged(0, 0) == 10.0)
+    assert torch.all(real.staged(1, 0) == 11.0)
+    assert torch.all(real.staged(0, 1) == 99.0)
+    assert torch.all(real.staged(1, 1) == 99.0)
+    request.cache_context.stream.synchronize.assert_called_once_with()
+
+
+def test_the_factory_sink_serves_one_load() -> None:
+    """A second load would republish the retrieve's generation; refuse it."""
+    schedule = LayerwiseSchedule([[0, 2], [1, 3]])
+    real = _RealStaging(_KV_SIZE)
+    progress = LayerProgressRecord(bytearray(LayerProgressRecord.RECORD_SIZE))
+    sink = MultiprocessPipelinedSinkFactory().build(
+        _pipelined_request(
+            real, schedule, ObjectTable([[real.memory_obj]]), progress, 5
+        )
+    )
+    sink.begin_load(1, (0, 1, 2, 3))
+    sink.abandon_load(1)
+
+    with pytest.raises(LayerwiseContractError, match="already ran"):
+        sink.begin_load(2, (0, 1, 2, 3))
