@@ -71,25 +71,35 @@ Failure paths:
 - Stale generation in shared memory: worker raises `LayerProgressStaleGenerationError`.
 - Layer not in the schedule: connector `wait_for_layer_load` is a no-op.
 
-**What vLLM sees.** The four "this layer's KV did not land" errors share the
-base class `LayerProgressLoadError`: retrieve failed, generation never
-published, watermark stalled, stale generation. The connector's
-`wait_for_layer_load` catches that class and calls the worker adapter's
-`report_failed_layer_load()`, which adds the blocks of every retrieve submitted
-this step to `get_block_ids_with_load_errors()`. The forward pass then
-continues; later layer waits return at once because the failed retrieve is no
-longer active. vLLM's scheduler truncates each affected request's computed
-tokens to the first bad block and discards this step's output for it, then
-either recomputes (`kv_load_failure_policy="recompute"`, the default) or fails
-the request (`"fail"`).
+**What vLLM sees.** Only a reported failure is recoverable. When a wait raises
+`LayerProgressRetrieveFailedError`, the connector's `wait_for_layer_load`
+calls the worker adapter's `report_failed_layer_load()`, which adds the blocks
+of every retrieve submitted this step to `get_block_ids_with_load_errors()`.
+The forward pass then continues; later layer waits return at once because the
+failed retrieve is no longer active. vLLM discards this step's output for each
+affected request, then fails it (`kv_load_failure_policy="fail"`, vLLM
+0.30.0's default) or recomputes it (`"recompute"`: from the first bad block,
+or from token 0 for a hybrid model's request). Details, checked against
+vLLM 0.30.0: [vllm-load-failure.md](../layerwise/vllm-load-failure.md).
 
 ```
-layer 7 wait raises LayerProgressLoadError
+daemon: pump abandons -> mark_failed: drain transfer stream, then set flag
+worker: layer 7 wait raises LayerProgressRetrieveFailedError
   -> connector: report_failed_layer_load()        # this step's retrieves only
   -> layers 8..N: no active retrieve, return
   -> get_block_ids_with_load_errors() -> {blocks}  # same step, as sync loads need
-  -> vLLM: drop this step's tokens, recompute from first bad block
+  -> vLLM: drop this step's tokens; fail or recompute
 ```
+
+Handing blocks back is safe only if nothing will write them again.
+`LayerwiseH2DRetrieve.mark_failed` therefore synchronises the transfer stream
+before it sets the flag, so every copy the retrieve queued has landed first.
+Every other wait error keeps raising, which stops the engine: after a
+generation or progress timeout, or with a stale generation, the daemon's
+state is unknown and it may still be copying into these blocks, so a
+recompute could be silently corrupted. With the pump's per-layer timeout
+(2.5 s) below the worker's (5 s), a slow layer ends as a reported failure, and
+a worker timeout means the daemon is hung.
 
 Why every retrieve of the step, not only the one whose wait failed: each
 request submits its own retrieve, and the transfer context waits on the latest
@@ -102,14 +112,11 @@ belong to another request.
 
 Limits:
 
-- Models with more than one vLLM KV cache group (hybrid models) raise
-  `RuntimeError` instead. vLLM rejects block-level load-error reports for them,
-  and its alternative (`finished_recving` failures) covers only requests parked
-  in `WAITING_FOR_REMOTE_KVS`, which layerwise loads never are.
+- Deployments that want recovery rather than a failed request must set
+  `kv_load_failure_policy: "recompute"`.
+- On a hybrid model, recompute redoes the whole request.
 - Configuration errors (`LayerProgressIncompatibleWithCudaGraphError`,
   `LayerProgressLayerNotScheduledError`) are not load errors and still raise.
-- A missing generation costs one full `layerwise_wait_timeout_seconds` before
-  the step gives up.
 
 ## Arrival-driven launch
 

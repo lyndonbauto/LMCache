@@ -58,7 +58,7 @@ def test_scheduler_reports_synchronous_load_when_layerwise_enabled() -> None:
 
 
 def _worker_connector(
-    num_kv_cache_groups: int, wait_error: Exception
+    wait_error: Exception,
 ) -> tuple["LMCacheMPConnector", MagicMock]:
     """Build a layerwise worker connector whose layer waits raise *wait_error*.
 
@@ -73,38 +73,12 @@ def _worker_connector(
     connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
     connector.use_layerwise = True
     connector._layer_name_to_index = {"layers.0": 0}
-    connector._num_vllm_kv_cache_groups = num_kv_cache_groups
     connector.worker_adapter = adapter
     return connector, adapter
 
 
-@pytest.mark.parametrize(
-    "error_name",
-    [
-        "LayerProgressRetrieveFailedError",
-        "LayerProgressRetrieveGenerationTimeoutError",
-        "LayerProgressRetrieveProgressTimeoutError",
-        "LayerProgressStaleGenerationError",
-    ],
-)
-def test_failed_layer_load_is_reported_for_recompute(error_name: str) -> None:
-    """A load failure must reach vLLM as load errors, not crash or pass silently."""
-    pytest.importorskip("vllm")
-
-    # First Party
-    from lmcache.v1.multiprocess import layer_progress
-
-    connector, adapter = _worker_connector(
-        1, getattr(layer_progress, error_name)("boom")
-    )
-
-    connector.wait_for_layer_load("layers.0")
-
-    adapter.report_failed_layer_load.assert_called_once_with()
-
-
-def test_failed_layer_load_raises_for_multiple_kv_cache_groups() -> None:
-    """vLLM rejects block-level reports for hybrid models, so fail loudly."""
+def test_failed_retrieve_is_reported_for_recompute() -> None:
+    """A reported failure reaches vLLM as load errors, not an engine crash."""
     pytest.importorskip("vllm")
 
     # First Party
@@ -112,27 +86,36 @@ def test_failed_layer_load_raises_for_multiple_kv_cache_groups() -> None:
         LayerProgressRetrieveFailedError,
     )
 
-    connector, adapter = _worker_connector(2, LayerProgressRetrieveFailedError("boom"))
+    connector, adapter = _worker_connector(LayerProgressRetrieveFailedError("boom"))
 
-    with pytest.raises(RuntimeError, match="more than one KV cache group"):
-        connector.wait_for_layer_load("layers.0")
-    adapter.report_failed_layer_load.assert_not_called()
+    connector.wait_for_layer_load("layers.0")
+
+    adapter.report_failed_layer_load.assert_called_once_with()
 
 
-def test_non_load_layer_progress_error_propagates() -> None:
-    """Configuration errors are not load failures and keep raising."""
+@pytest.mark.parametrize(
+    "error_name",
+    [
+        "LayerProgressRetrieveGenerationTimeoutError",
+        "LayerProgressRetrieveProgressTimeoutError",
+        "LayerProgressStaleGenerationError",
+        "LayerProgressIncompatibleWithCudaGraphError",
+    ],
+)
+def test_other_layer_progress_errors_propagate(error_name: str) -> None:
+    """The daemon may still write these blocks, so they are not handed back.
+
+    A never-published generation is no longer ignored either.
+    """
     pytest.importorskip("vllm")
 
     # First Party
-    from lmcache.v1.multiprocess.layer_progress import (
-        LayerProgressIncompatibleWithCudaGraphError,
-    )
+    from lmcache.v1.multiprocess import layer_progress
 
-    connector, adapter = _worker_connector(
-        1, LayerProgressIncompatibleWithCudaGraphError("capture")
-    )
+    error_type = getattr(layer_progress, error_name)
+    connector, adapter = _worker_connector(error_type("boom"))
 
-    with pytest.raises(LayerProgressIncompatibleWithCudaGraphError):
+    with pytest.raises(error_type):
         connector.wait_for_layer_load("layers.0")
     adapter.report_failed_layer_load.assert_not_called()
 

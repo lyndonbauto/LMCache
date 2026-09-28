@@ -41,7 +41,7 @@ def _make_cache_context() -> MagicMock:
     cache_context.lmcache_tokens_per_chunk = 16
     cache_context.max_batch_size = 4
     cache_context.device = torch.device("cpu")
-    cache_context.stream = object()
+    cache_context.stream = MagicMock(name="transfer_stream")
     cache_context.calculate_num_blocks = lambda tokens, _gid: max(1, tokens // 16)
     cache_context.get_temp_object_group_buffer = MagicMock()
     cache_context.get_temp_kernel_group_buffer = MagicMock(
@@ -93,8 +93,20 @@ def _make_retrieve(
     Uses whole-object staging because these tests stub the copies out; the
     per-layer staging path is covered with real tensors further down.
     """
+    return _make_retrieve_on(
+        _make_cache_context(), schedule, progress, retrieve_generation
+    )
+
+
+def _make_retrieve_on(
+    cache_context: MagicMock,
+    schedule: LayerwiseSchedule,
+    progress: LayerProgressRecord,
+    retrieve_generation: int = 1,
+) -> object_group_transfer.LayerwiseH2DRetrieve:
+    """Like :func:`_make_retrieve`, over a caller-supplied cache context."""
     return object_group_transfer.LayerwiseH2DRetrieve(
-        _make_cache_context(),
+        cache_context,
         [torch.tensor([0, 1]), torch.tensor([0, 1])],
         [[MagicMock()]],
         0,
@@ -301,7 +313,7 @@ def test_transfer_kv_layerwise_records_before_watermark(
     cache_context.lmcache_tokens_per_chunk = 16
     cache_context.max_batch_size = 4
     cache_context.device = torch.device("cpu")
-    cache_context.stream = object()
+    cache_context.stream = MagicMock(name="transfer_stream")
     cache_context.calculate_num_blocks = lambda tokens, _gid: max(1, tokens // 16)
     cache_context.get_temp_object_group_buffer = MagicMock()
     cache_context.get_temp_kernel_group_buffer = MagicMock(
@@ -394,7 +406,7 @@ def test_transfer_kv_layerwise_batch_setup_once_per_batch(
     cache_context.lmcache_tokens_per_chunk = 16
     cache_context.max_batch_size = 4
     cache_context.device = torch.device("cpu")
-    cache_context.stream = object()
+    cache_context.stream = MagicMock(name="transfer_stream")
     cache_context.calculate_num_blocks = counting_calculate_num_blocks
     cache_context.get_temp_object_group_buffer = counting_temp_og_buffer
     cache_context.get_temp_kernel_group_buffer = MagicMock(
@@ -645,6 +657,42 @@ def test_a_late_failure_leaves_a_newer_retrieve_untouched() -> None:
     assert snapshot.generation == 5
     assert snapshot.watermark == 1
     assert not snapshot.retrieve_failed
+
+
+def test_a_failure_is_published_only_after_queued_copies_land(
+    kernel_calls: list[int],
+) -> None:
+    """The worker hands a failed retrieve's blocks back for recompute, so no
+    copy may still be landing in them when it sees the flag."""
+    schedule = LayerwiseSchedule([[0, 2], [1, 3]])
+    progress = LayerProgressRecord(bytearray(LayerProgressRecord.RECORD_SIZE))
+    cache_context = _make_cache_context()
+    flag_seen_while_draining: list[bool] = []
+    cache_context.stream.synchronize.side_effect = lambda: (
+        flag_seen_while_draining.append(progress.read().retrieve_failed)
+    )
+    retrieve = _make_retrieve_on(cache_context, schedule, progress)
+    retrieve.begin()
+    retrieve.launch_layer(0)
+
+    retrieve.mark_failed()
+
+    assert kernel_calls
+    assert flag_seen_while_draining == [False]
+    assert progress.read().retrieve_failed
+
+
+def test_a_retrieve_that_never_began_fails_without_draining() -> None:
+    """Nothing was queued, so there is nothing to wait for."""
+    schedule = LayerwiseSchedule([[0, 1]])
+    progress = LayerProgressRecord(bytearray(LayerProgressRecord.RECORD_SIZE))
+    cache_context = _make_cache_context()
+    retrieve = _make_retrieve_on(cache_context, schedule, progress)
+
+    retrieve.mark_failed()
+
+    cache_context.stream.synchronize.assert_not_called()
+    assert progress.read().retrieve_failed
 
 
 def test_failing_after_an_older_generation_publishes_this_one() -> None:

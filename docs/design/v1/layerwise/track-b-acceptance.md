@@ -323,7 +323,7 @@ request to the pump is the integration step (C9).
 | B1 contract implemented, conformance suite passes | Done (Step 9): registered in Track C's shared loader suite, all 27 tests pass against the real sink and launcher |
 | B2 layer N ready while later layers outstanding | Ordering proven at logic level with the real pump, and on GPU in one process. Per-layer staging of arriving data proven with real tensors on CPU and GPU (Step 6). Needs the C9 hand-off to read partly written objects; cross-process not proven |
 | B3 launch order, event before watermark | Pre-existing tests still pass; enforced per layer by `LayerwiseH2DRetrieve` |
-| B4 failure wakes every waiter | *Wake with an error* proven on the real record and waiter (< 1 s, not at timeout). Step 10: a failed layer wait now reaches vLLM as load errors for the step's blocks, which vLLM recomputes; verified against vLLM `main` and tested with vLLM 0.30.0. Not a whole-request *fallback*: the step is redone, not rescued. Hybrid models (more than one KV cache group) still raise, because vLLM gives them no recovery path |
+| B4 failure wakes every waiter | *Wake with an error* proven on the real record and waiter (< 1 s, not at timeout). Steps 10 and 12: a reported failure now reaches vLLM as load errors for the step's blocks, after the daemon has drained its queued copies; vLLM fails or recomputes the requests per `kv_load_failure_policy`, hybrid models included. Timeouts and a stale generation still stop the engine, deliberately. The in-daemon whole-object *fallback* is Track C's (`run_resumable`, their PR 2); the sink needs no change for it |
 | B5 default vLLM config (piecewise CUDA graphs) | Not started; needs a real vLLM run on native Linux |
 | B6 shared-memory lifetime | Done (Step 7): teardown after a failed load, already-removed segment, double close, re-register, stale segment, failed register; daemon no longer deletes live workers' segments on exit |
 | B7 per-batch setup hoisted | Pre-existing call-count test still passes |
@@ -812,6 +812,13 @@ under a new retrieve generation.
 
 ### Step 10 -- R5: a failed layer wait becomes a vLLM recompute (2026-09-25)
 
+> **Partly superseded by Step 12.** Checked against vLLM 0.30.0 (the version
+> CI installs), the default policy is `"fail"`, not `"recompute"`, and hybrid
+> models *are* accepted (their requests restart from token 0), so the
+> multi-group `RuntimeError` below was removed. Only a reported failure is
+> now handed back to vLLM; timeouts and a stale generation raise again (D20
+> is reversed). The reading below was of an older vLLM `main`.
+
 **Before:** a failed layer wait raised out of `wait_for_layer_load` into
 vLLM's forward pass and crashed the step, except for
 `LayerProgressRetrieveGenerationTimeoutError`, which the connector swallowed
@@ -988,3 +995,99 @@ cd /mnt/c/Repos/LMCache
 .venv/bin/python benchmarks/layerwise/simulate_ttft.py --repeats 9 --arrival-p99-ratio 2.0
 .venv/bin/python benchmarks/layerwise/simulate_ttft.py --repeats 9 --chunk-tokens 2048 --planes 1
 ```
+
+### Step 12 -- Track C's answers merged; failure handling corrected (2026-09-25)
+
+Track B's Steps 9-11 were committed (`48288b94`), then `track/c-planning` was
+merged up to `d4bd73c5`, past the `74351fcf` Track C pointed to: that range
+adds their R5 write-up, `LayerArrivalPump.run_resumable` and
+`WindowLease.memory_obj`. No conflicts.
+
+**What Track C settled:**
+
+- **Gap test (raised in Step 9):** the shared test now loads 0, 2, 3 to the
+  end and checks readiness after each copy.
+- **R6 (timeout order): closed.** `DEFAULT_LAYER_TIMEOUT_SECONDS` is 2.5 s,
+  below the worker's 5 s, so the pump gives up first and its abandon reaches
+  the worker as the failure flag. A startup check comes with C9, once
+  registration carries the worker's timeout.
+- **Fallback vs abandon:** the fallback continues the *same* generation. On a
+  transport failure `run_resumable` abandons only the source and leaves the
+  load open; retrieve loads the remaining objects whole, calls `load_layer`
+  for the rest in order, then `finish_load`. A loader failure still abandons
+  both. For the sink this is an ordinary load that pauses; no change needed.
+- **C9:** after the fetch-start proposal is accepted. PR 2 drives the pump
+  with `RecordingLayerLoadSink`; PR 3 swaps in ours via `for_retrieve`.
+- **Reading objects still being written:** retrieve passes the placement's
+  own objects (`WindowLease.memory_obj`) to the sink; layer N is safe to read
+  from the moment the pump calls `load_layer(N)`.
+- **Layout:** `RESIDENT` now documents that every K/V plane of the layer in
+  every chunk the group reads has landed, at its normal object offset --
+  complete, not contiguous. That is exactly what `LayerStaging.PER_LAYER`
+  copies (`kv_size` disjoint planes per object).
+- **R5:** answered in [vllm-load-failure.md](vllm-load-failure.md), against
+  vLLM 0.30.0.
+
+**Where Track C's R5 answer corrected Step 10.** Their reading is of
+vLLM 0.30.0, which is what CI installs; mine was of an older `main`. Checked
+in the installed 0.30.0 source:
+
+- `kv_load_failure_policy` defaults to `"fail"`, not `"recompute"`.
+- `_update_requests_with_invalid_blocks` accepts hybrid requests and resets
+  them to token 0; there is no multi-group `RuntimeError`. The connector's
+  multi-group guard is removed.
+- **Timeouts must keep raising.** After a timeout the daemon may still be
+  copying into the blocks; handing them to vLLM for recompute could be
+  silently corrupted by a late copy. Stopping the engine is the safer
+  failure. The same holds for a stale generation, whose cause is a
+  bookkeeping mismatch with the daemon's state unknown.
+
+The same argument reaches the one error that *is* handed back: when the pump
+abandons, copies the daemon already queued can still be landing. So:
+
+Decisions (D17 narrowed, D20 reversed):
+
+- **D21. Only `LayerProgressRetrieveFailedError` is reported to vLLM.**
+  Timeouts, a stale generation and configuration errors raise. The
+  `LayerProgressLoadError` base class from Step 10 is removed, since it would
+  now cover one error.
+- **D22. The daemon drains before it fails.**
+  `LayerwiseH2DRetrieve.mark_failed` synchronises the transfer stream before
+  setting the flag, whenever the retrieve had begun, so everything it queued
+  has landed before the worker hands the blocks back. Cost only on the
+  failure path. Every other failure publisher runs before any layerwise copy
+  is queued, or after `mark_failed` already ran.
+- **D23. The conformance harness reports only a load's own layers as
+  issued.** Track C's stricter gap test asserts `issued_layers == (0, 2, 3)`.
+  Our sink also launches skipped scheduled layers so the watermark tracks
+  schedule position (D15); that is internal, and the contract speaks only of
+  the load's layers. The harness now filters to them, and Track B's own tests
+  still check that gap layers are launched.
+
+**For Track C** (not blocking):
+
+1. The fallback's whole-object loads must land in the **same** memory
+   objects the sink's launcher was built with. `LayerwiseH2DRetrieve` takes
+   its objects at construction; if the fallback loads into new objects, the
+   remaining layers would be staged from the old ones.
+2. A paused load must resume within the worker's per-layer wait (5 s), or the
+   worker times out -- which now stops the engine (D21).
+3. D23: we read `issued_layers` as "the load's layers issued". If the suite
+   means every layer the loader copied, the gap test should allow extra
+   non-load layers.
+4. R8 (Step 10) still stands: only a step's latest retrieve is waited on.
+
+**Tested:**
+
+- Connector: a reported failure is handed to vLLM; generation timeout,
+  progress timeout, stale generation and the CUDA-graph error propagate
+  (5 tests, vLLM-gated).
+- `LayerwiseH2DRetrieve`: the flag is set only after the stream drains, and
+  a retrieve that never began fails without draining (2 new tests). Mutation:
+  draining after setting the flag fails the first.
+- Loader conformance suite with Track C's new tests, both harnesses: pass.
+- Main venv, Track B and layerwise suites plus the GPU tests: 439 passed, 9
+  skipped (vLLM-gated). vLLM 0.30.0 venv, connector and adapter files: 60
+  passed.
+- Ruff, isort clean; mypy clean on the changed sources apart from the two
+  errors in `lmcache_mp_connector.py` that are identical on `HEAD`.

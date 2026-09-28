@@ -754,7 +754,6 @@ def test_wait_for_layer_load_propagates_load_errors(fake_adapter) -> None:
     """The adapter leaves recovery to the caller."""
     # First Party
     from lmcache.v1.multiprocess.layer_progress import (
-        LayerProgressLoadError,
         LayerProgressRetrieveFailedError,
     )
 
@@ -764,7 +763,7 @@ def test_wait_for_layer_load_propagates_load_errors(fake_adapter) -> None:
         LayerProgressRetrieveFailedError("boom")
     )
 
-    with pytest.raises(LayerProgressLoadError):
+    with pytest.raises(LayerProgressRetrieveFailedError):
         adapter.wait_for_layer_load(0)
 
 

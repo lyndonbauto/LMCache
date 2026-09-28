@@ -24,6 +24,7 @@ generation, and the waiter ignores an older generation's failure flag).
 """
 
 # Standard
+from collections.abc import Callable
 from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -89,7 +90,7 @@ def _cache_context() -> MagicMock:
     cache_context.lmcache_tokens_per_chunk = 16
     cache_context.max_batch_size = 4
     cache_context.device = torch.device("cpu")
-    cache_context.stream = object()
+    cache_context.stream = MagicMock(name="transfer_stream")
     cache_context.get_temp_kernel_group_buffer = lambda _slot, _kernel_group: (
         torch.zeros((2, 2, 4, 8))
     )
@@ -127,6 +128,7 @@ class _ProgressRecordObserver:
         """
         self._schedule = schedule
         self._loads: dict[int, _LoadRecord] = {}
+        self._load_layers: dict[int, frozenset[int]] = {}
 
     def track(self, fetch_generation: int, load: _LoadRecord) -> None:
         """Associate a fetch generation with the record its load publishes to.
@@ -137,16 +139,27 @@ class _ProgressRecordObserver:
         """
         self._loads[fetch_generation] = load
 
-    def issued_layers(self, generation: int) -> tuple[int, ...]:
-        """Return the layers whose copies the load has published, in order.
+    def track_layers(self, fetch_generation: int, layer_ids: tuple[int, ...]) -> None:
+        """Record the layers a load was begun with.
 
-        Includes layers the sink launched on the way past a gap in the load.
+        Args:
+            fetch_generation: The generation passed to ``begin_load``.
+            layer_ids: The layers passed to ``begin_load``.
+        """
+        self._load_layers[fetch_generation] = frozenset(layer_ids)
+
+    def issued_layers(self, generation: int) -> tuple[int, ...]:
+        """Return the load's layers whose copies have been published, in order.
+
+        The sink also launches scheduled layers a load skips, so the watermark
+        tracks schedule position; those are not layers of the load and are
+        left out here.
 
         Args:
             generation: The generation passed to ``begin_load``.
 
         Returns:
-            Scheduled layers covered by that load's watermark.
+            The load's layers covered by its watermark.
         """
         load = self._loads.get(generation)
         if load is None:
@@ -154,8 +167,11 @@ class _ProgressRecordObserver:
         snapshot = load.record.read()
         if snapshot.generation != load.retrieve_generation:
             return ()
+        load_layers = self._load_layers.get(generation, frozenset())
         launches = self._schedule.launches[: snapshot.watermark]
-        return tuple(launch.layer_id for launch in launches)
+        return tuple(
+            launch.layer_id for launch in launches if launch.layer_id in load_layers
+        )
 
     def wait_outcome(self, layer_id: int, generation: int) -> LayerWaitOutcome:
         """Return what a waiter on ``layer_id`` would see now, without blocking.
@@ -184,6 +200,31 @@ class _ProgressRecordObserver:
         except LayerProgressError:
             return LayerWaitOutcome.PENDING
         return LayerWaitOutcome.READY
+
+
+class _ObservedSink(MultiprocessLayerLoadSink):
+    """The real sink, telling the observer which layers each load covers."""
+
+    def __init__(
+        self,
+        schedule: LayerwiseSchedule,
+        launchers: Callable[[int], LayerLauncher],
+        observer: _ProgressRecordObserver,
+    ) -> None:
+        """Build the sink and remember the observer to tell.
+
+        Args:
+            schedule: The launch order the sink and its launchers share.
+            launchers: Launcher factory, as for the real sink.
+            observer: Told each accepted load's layers.
+        """
+        super().__init__(schedule, launchers)
+        self._observer = observer
+
+    def begin_load(self, generation: int, layer_ids: tuple[int, ...]) -> None:
+        """Begin the load, then record its layers with the observer."""
+        super().begin_load(generation, layer_ids)
+        self._observer.track_layers(generation, layer_ids)
 
 
 def multiprocess_sink_harness() -> tuple[
@@ -216,4 +257,4 @@ def multiprocess_sink_harness() -> tuple[
             retrieve_generation,
         )
 
-    return MultiprocessLayerLoadSink(schedule, launcher_for), observer
+    return _ObservedSink(schedule, launcher_for, observer), observer

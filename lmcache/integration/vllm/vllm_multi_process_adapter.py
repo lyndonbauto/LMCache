@@ -1528,11 +1528,11 @@ class LMCacheMPWorkerAdapter:
             layer_id: Global layer index vLLM is about to compute.
 
         Raises:
-            LayerProgressLoadError: The layer's KV did not land for the active
-                retrieve. Callers that can recover should call
+            LayerProgressRetrieveFailedError: The daemon reported the retrieve
+                failed. Callers that can recover should call
                 :meth:`report_failed_layer_load`.
-            LayerProgressError: Any other progress failure, such as a wait
-                during CUDA graph capture.
+            LayerProgressError: Any other progress failure, such as a timeout,
+                a stale generation or a wait during CUDA graph capture.
         """
         if self.transfer_ctx is None:
             return

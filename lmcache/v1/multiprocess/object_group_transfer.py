@@ -1081,13 +1081,20 @@ class LayerwiseH2DRetrieve:
         waiter that has not yet returned falls back to a full load instead of
         trusting it.
 
+        Before setting the flag, waits for every copy this retrieve already
+        queued on the transfer stream. The worker reports a flagged retrieve's
+        blocks to vLLM for recompute, so no copy may still be landing in them.
+
         Assumes this process is the record's only writer, which holds because
         the MP server serialises retrieves per worker.
         """
+        copies_queued = self._state is not _RetrieveState.NOT_BEGUN
         self._state = _RetrieveState.FAILED
         record_generation = self._progress.read().generation
         if record_generation > self._retrieve_generation:
             return
+        if copies_queued:
+            self._cache_context.stream.synchronize()
         if record_generation < self._retrieve_generation:
             self._progress.begin_retrieve(self._retrieve_generation)
         self._progress.mark_retrieve_failed()
