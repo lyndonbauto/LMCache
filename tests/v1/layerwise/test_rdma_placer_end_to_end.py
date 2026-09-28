@@ -35,17 +35,21 @@ from lmcache.v1.distributed.l2_adapters.rdma_window_placer import (
 )
 from lmcache.v1.layerwise import (
     NO_GENERATION,
-    LayerArrivalPump,
     LayerArrivalSource,
     LayerArrivalStatus,
     LayerFetchPlan,
+    LayerLoadSink,
     LayerwiseContractError,
 )
 from lmcache.v1.layerwise.fakes import RecordingLayerLoadSink
-from lmcache.v1.layerwise.pipelined_retrieve import run_pipelined_retrieve
+from lmcache.v1.layerwise.pipelined_retrieve import (
+    RetrieveCompletion,
+    run_pipelined_retrieve,
+)
 from lmcache.v1.layerwise.request_fetch import (
     LeaseOutcome,
     ObjectToPlace,
+    WindowLease,
     objects_to_place,
 )
 
@@ -114,6 +118,30 @@ class _Tap:
         return self.plan
 
 
+class _Loader:
+    """Loads through a recording sink; notes each key's L1 state at reload."""
+
+    def __init__(self, l1: L1Manager) -> None:
+        self._l1 = l1
+        self.sink = RecordingLayerLoadSink()
+        self.reloaded: list[ObjectToPlace] = []
+        self.key_states_at_reload: list[L1Error] = []
+
+    def sink_for(self, lease: WindowLease) -> LayerLoadSink:
+        return self.sink
+
+    def wait_for_copies(self) -> None:
+        """The recording sink copies nothing."""
+
+    def reload_whole(self, objects: Sequence[ObjectToPlace]) -> None:
+        self.reloaded = list(objects)
+        results = self._l1.reserve_read([o.key for o in objects])
+        self.key_states_at_reload = [err for err, _ in results.values()]
+        locked = [key for key, (err, _) in results.items() if err == L1Error.SUCCESS]
+        if locked:
+            self._l1.finish_read(locked)
+
+
 class _Setup:
     def __init__(self, window_count: int) -> None:
         self.clock = _Clock()
@@ -147,6 +175,7 @@ class _Setup:
         )
         self.placer = _RecordingPlacer(self.rdma_placer)
         self.keys = resolve_obj_keys(vllm_request())
+        self.completions: list[RetrieveCompletion] = []
 
     def readable(self, key: ObjectKey) -> bool:
         err, _ = self.l1.reserve_read([key])[key]
@@ -157,21 +186,27 @@ class _Setup:
 
     def retrieve(
         self, decline_slot: int | None = None
-    ) -> tuple[RecordingLayerLoadSink, list[BaseException], LayerFetchPlan]:
+    ) -> tuple[_Loader, list[BaseException], LayerFetchPlan]:
         """Run one retrieve, landing every slot except ``decline_slot``."""
         source = AerospikeLayerArrivalSource(
             self.connector, NativePlanIssuer(self.connector)
         )
         tap = _Tap(source)
-        sink = RecordingLayerLoadSink()
-        pump = LayerArrivalPump(tap, sink, poll_interval_seconds=0.001)
+        loader = _Loader(self.l1)
         errors: list[BaseException] = []
 
         def run() -> None:
             try:
-                run_pipelined_retrieve(
-                    fetch_model(), self.keys, MAX_RECORD_BYTES, self.placer, pump
+                result = run_pipelined_retrieve(
+                    fetch_model(),
+                    self.keys,
+                    MAX_RECORD_BYTES,
+                    self.placer,
+                    tap,
+                    loader,
+                    poll_interval_seconds=0.001,
                 )
+                self.completions.append(result.completion)
             except BaseException as exc:
                 errors.append(exc)
 
@@ -185,7 +220,7 @@ class _Setup:
                 self.connector.land_slot(index, tap.generation)
         thread.join(JOIN_TIMEOUT)
         assert not thread.is_alive(), "retrieve did not finish"
-        return sink, errors, plan
+        return loader, errors, plan
 
 
 def _stored_keys() -> list[ObjectKey]:
@@ -210,9 +245,11 @@ def two_windows() -> Iterator[_Setup]:
 def test_a_landed_retrieve_loads_every_layer_and_keeps_the_data(
     one_window: _Setup,
 ) -> None:
-    sink, errors, plan = one_window.retrieve()
+    loader, errors, plan = one_window.retrieve()
 
     assert errors == []
+    assert one_window.completions == [RetrieveCompletion.PIPELINED]
+    sink = loader.sink
     assert sink.loaded_layers() == plan.layer_ids()
     assert sink.finished_generations() and not sink.abandoned_generations()
     assert all(one_window.readable(k) for k in _stored_keys())
@@ -223,14 +260,14 @@ def test_a_later_window_is_planned_with_slab_offsets(two_windows: _Setup) -> Non
     held = two_windows.rdma_placer.lease([held_object])
     assert held.window_start() == 0
 
-    sink, errors, plan = two_windows.retrieve()
+    loader, errors, plan = two_windows.retrieve()
 
     assert errors == []
     (lease,) = two_windows.placer.leases
     assert lease.window_start() == WINDOW_BYTES
     assert min(s.offset for s in plan.slots) >= WINDOW_BYTES
     assert max(s.offset + s.length for s in plan.slots) <= 2 * WINDOW_BYTES
-    assert sink.loaded_layers() == plan.layer_ids()
+    assert loader.sink.loaded_layers() == plan.layer_ids()
     held.release(LeaseOutcome.ABANDONED)
 
 
@@ -249,10 +286,16 @@ def test_each_objects_memory_sits_at_its_planned_offset(one_window: _Setup) -> N
 def test_a_declined_slot_falls_back_and_quarantines_the_window(
     one_window: _Setup,
 ) -> None:
-    sink, errors, _ = one_window.retrieve(decline_slot=0)
+    """The load finishes from whole objects, whose keys the window freed."""
+    loader, errors, plan = one_window.retrieve(decline_slot=0)
 
-    assert len(errors) == 1 and isinstance(errors[0], LayerwiseContractError)
-    assert sink.abandoned_generations()
+    assert errors == []
+    assert one_window.completions == [RetrieveCompletion.FELL_BACK]
+    assert loader.sink.loaded_layers() == plan.layer_ids()
+    assert loader.sink.finished_generations()
+    assert not loader.sink.abandoned_generations()
+    assert [o.key for o in loader.reloaded] == _stored_keys()
+    assert set(loader.key_states_at_reload) == {L1Error.KEY_NOT_EXIST}
     assert not any(one_window.readable(k) for k in _stored_keys())
     with pytest.raises(LayerwiseContractError):
         one_window.placer.lease(objects_to_place(fetch_model(), one_window.keys))

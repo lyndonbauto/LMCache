@@ -19,6 +19,7 @@ key serialization, and the adapter imports this package.
 
 # Standard
 from collections.abc import Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from enum import Enum
 from typing import Generic, Protocol, TypeVar, runtime_checkable
@@ -408,8 +409,26 @@ def request_cache_keys(
     return cache_keys
 
 
+def _fetched_cache_keys(
+    obj_keys_per_obj_group: Sequence[Sequence[ObjectKey]],
+    attn_desc: AttnWindowDesc,
+    keys_to_fetch: AbstractSet[ObjectKey] | None,
+) -> dict[tuple[int, int], str]:
+    """:func:`request_cache_keys`, kept to ``keys_to_fetch`` when given."""
+    cache_keys = request_cache_keys(obj_keys_per_obj_group, attn_desc)
+    if keys_to_fetch is None:
+        return cache_keys
+    return {
+        (chunk_id, group_id): cache_key
+        for (chunk_id, group_id), cache_key in cache_keys.items()
+        if obj_keys_per_obj_group[group_id][chunk_id] in keys_to_fetch
+    }
+
+
 def objects_to_place(
-    model: FetchModel, obj_keys_per_obj_group: Sequence[Sequence[ObjectKey]]
+    model: FetchModel,
+    obj_keys_per_obj_group: Sequence[Sequence[ObjectKey]],
+    keys_to_fetch: AbstractSet[ObjectKey] | None = None,
 ) -> tuple[ObjectToPlace, ...]:
     """List the objects a retrieve reads, for :meth:`ChunkPlacer.lease`.
 
@@ -417,6 +436,10 @@ def objects_to_place(
         model: The registered model's layout and windows.
         obj_keys_per_obj_group: The request's object keys, as described for
             :func:`request_cache_keys`.
+        keys_to_fetch: Fetch only the objects with these keys, e.g. the
+            ones a lookup deferred while the rest are in L1. ``None``
+            fetches every object the retrieve reads. Chunk ids stay the
+            chunks' indices in the request.
 
     Returns:
         One entry per object read, ordered by chunk, then object group.
@@ -427,7 +450,9 @@ def objects_to_place(
         KeyError: If the layout does not cover an object group the request
             reads.
     """
-    cache_keys = request_cache_keys(obj_keys_per_obj_group, model.attn_desc)
+    cache_keys = _fetched_cache_keys(
+        obj_keys_per_obj_group, model.attn_desc, keys_to_fetch
+    )
     return tuple(
         ObjectToPlace(
             chunk_id,
@@ -444,6 +469,7 @@ def build_request_fetch(
     obj_keys_per_obj_group: Sequence[Sequence[ObjectKey]],
     max_record_bytes: int,
     lease: WindowLease,
+    keys_to_fetch: AbstractSet[ObjectKey] | None = None,
 ) -> RequestFetch:
     """Plan the pipelined fetch of every object a retrieve would read.
 
@@ -458,6 +484,7 @@ def build_request_fetch(
         max_record_bytes: The record cap the objects were written under;
             the connector reports it as ``max_record_bytes()``.
         lease: The request's window lease, which places each object.
+        keys_to_fetch: As for :func:`objects_to_place`; pass the same set.
 
     Returns:
         The placements and the plan built from them. Placements are ordered
@@ -471,7 +498,9 @@ def build_request_fetch(
         KeyError: If the layout does not cover an object group the request
             reads, or the lease cannot locate an object.
     """
-    cache_keys = request_cache_keys(obj_keys_per_obj_group, model.attn_desc)
+    cache_keys = _fetched_cache_keys(
+        obj_keys_per_obj_group, model.attn_desc, keys_to_fetch
+    )
     window_start = lease.window_start()
     window_end = window_start + lease.window_bytes()
     node_indices: dict[str, int] = {}

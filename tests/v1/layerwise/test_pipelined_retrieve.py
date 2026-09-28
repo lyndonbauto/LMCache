@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for :func:`run_pipelined_retrieve`: lease, plan, pump, release.
+"""Tests for :func:`run_pipelined_retrieve`: lease, plan, pump, fall back, release.
 
 Every way a retrieve can end is driven here with the real pump, the scripted
-transport and the recording loader, and each is checked for two things the
-caller relies on: which error it raises (so one handler can fall back), and
-how the window lease was released (which decides whether the window is
-quarantined).
+transport and the recording loader, and each is checked for what the caller
+relies on: which error it raises (a refusal means nothing began, so it can
+load whole objects), how the window lease was released (which decides
+whether the window is quarantined), and that the window outlives every copy
+out of it.
 """
 
 # Standard
@@ -17,11 +18,9 @@ import pytest
 # First Party
 from lmcache.v1.distributed.api import ObjectKey
 from lmcache.v1.layerwise import (
-    LayerArrivalPump,
     LayerArrivalSource,
-    LayerArrivalTimeoutError,
     LayerFetchPlan,
-    LayerUnservableError,
+    LayerLoadSink,
     LayerwiseContractError,
     PlanTooLargeError,
     RecordingLayerLoadSink,
@@ -29,13 +28,18 @@ from lmcache.v1.layerwise import (
     UnservableLayerArrivalSource,
     pipelined_retrieve,
 )
-from lmcache.v1.layerwise.pipelined_retrieve import run_pipelined_retrieve
+from lmcache.v1.layerwise.pipelined_retrieve import (
+    PipelinedRetrieveRefused,
+    PipelinedRetrieveResult,
+    RetrieveCompletion,
+    run_pipelined_retrieve,
+)
 from lmcache.v1.layerwise.pump import DEFAULT_LAYER_TIMEOUT_SECONDS
 from lmcache.v1.layerwise.request_fetch import (
     ChunkLocation,
     LeaseOutcome,
     ObjectToPlace,
-    RequestFetch,
+    WindowLease,
 )
 
 # Local
@@ -50,6 +54,17 @@ class LandingSource(ScriptedLayerArrivalSource):
         generation = super().begin_fetch(plan)
         for slot_index in reversed(range(len(plan.slots))):
             self.land_slot(slot_index, generation)
+        return generation
+
+
+class FailsOnSecondLayerSource(ScriptedLayerArrivalSource):
+    """Delivers the first layer, then declines the second."""
+
+    def begin_fetch(self, plan: LayerFetchPlan) -> int:
+        generation = super().begin_fetch(plan)
+        first, second = plan.layer_ids()[:2]
+        self.deliver_layer(first)
+        self.decline_layer(second)
         return generation
 
 
@@ -71,6 +86,53 @@ class FailingSink(RecordingLayerLoadSink):
         if len(self.loaded_layers()) == 1:
             raise RuntimeError("gpu copy failed")
         super().load_layer(layer_id)
+
+
+class FakeLoader:
+    """A loader over a recording sink that logs what it was asked, and when.
+
+    Each log entry notes the lease's outcomes at that moment, so a test can
+    tell whether the window was still held.
+    """
+
+    def __init__(self, sink: RecordingLayerLoadSink | None = None) -> None:
+        self.sink = sink if sink is not None else RecordingLayerLoadSink()
+        self.lease: PackingLease | None = None
+        self.log: list[tuple[str, tuple[LeaseOutcome, ...]]] = []
+        self.reloaded: list[tuple[ObjectToPlace, ...]] = []
+        self.fail_reload = False
+        self.fail_wait = False
+        self.fail_sink_for = False
+
+    def sink_for(self, lease: WindowLease) -> LayerLoadSink:
+        if self.fail_sink_for:
+            raise RuntimeError("cannot build the sink")
+        assert isinstance(lease, PackingLease)
+        self.lease = lease
+        self._note("sink_for")
+        return self.sink
+
+    def wait_for_copies(self) -> None:
+        self._note("wait")
+        if self.fail_wait:
+            raise RuntimeError("copy stream failed")
+
+    def reload_whole(self, objects: Sequence[ObjectToPlace]) -> None:
+        self._note("reload")
+        if self.fail_reload:
+            raise RuntimeError("record gone")
+        self.reloaded.append(tuple(objects))
+
+    def steps(self) -> list[str]:
+        return [step for step, _ in self.log]
+
+    def outcomes_at(self, step: str) -> tuple[LeaseOutcome, ...]:
+        (outcomes,) = [outcomes for name, outcomes in self.log if name == step]
+        return outcomes
+
+    def _note(self, step: str) -> None:
+        held = tuple(self.lease.outcomes) if self.lease is not None else ()
+        self.log.append((step, held))
 
 
 class OverlappingPlacer(PackingPlacer):
@@ -125,25 +187,20 @@ class FailingReleasePlacer(PackingPlacer):
 def _run(
     placer: PackingPlacer,
     source: LayerArrivalSource,
-    sink: RecordingLayerLoadSink | None = None,
+    loader: FakeLoader | None = None,
     keys: list[list[ObjectKey]] | None = None,
     layer_timeout_seconds: float = DEFAULT_LAYER_TIMEOUT_SECONDS,
-) -> tuple[RecordingLayerLoadSink, RequestFetch]:
-    sink = sink if sink is not None else RecordingLayerLoadSink()
-    pump = LayerArrivalPump(
-        source,
-        sink,
-        poll_interval_seconds=0.001,
-        layer_timeout_seconds=layer_timeout_seconds,
-    )
-    fetch = run_pipelined_retrieve(
+) -> PipelinedRetrieveResult:
+    return run_pipelined_retrieve(
         fetch_model(),
         keys if keys is not None else resolve_obj_keys(vllm_request()),
         MAX_RECORD_BYTES,
         placer,
-        pump,
+        source,
+        loader if loader is not None else FakeLoader(),
+        layer_timeout_seconds=layer_timeout_seconds,
+        poll_interval_seconds=0.001,
     )
-    return sink, fetch
 
 
 def _only_outcome(placer: PackingPlacer) -> LeaseOutcome:
@@ -152,15 +209,20 @@ def _only_outcome(placer: PackingPlacer) -> LeaseOutcome:
     return outcome
 
 
-def test_a_finished_retrieve_loads_every_layer_and_releases_finished() -> None:
-    """Every planned layer reaches the loader in order; the window is reusable."""
+def test_a_finished_retrieve_loads_every_layer_then_releases_finished() -> None:
+    """Every layer reaches the loader in order; the copies end before release."""
     placer = PackingPlacer()
     source = LandingSource()
+    loader = FakeLoader()
 
-    sink, fetch = _run(placer, source)
+    result = _run(placer, source, loader)
 
-    assert sink.loaded_layers() == fetch.plan.layer_ids()
+    assert result.completion is RetrieveCompletion.PIPELINED
+    assert loader.sink.loaded_layers() == result.fetch.plan.layer_ids()
+    assert len(loader.sink.finished_generations()) == 1
     assert len(source.finished_generations()) == 1
+    assert loader.steps() == ["sink_for", "wait"]
+    assert loader.outcomes_at("wait") == ()
     assert _only_outcome(placer) is LeaseOutcome.FINISHED
 
 
@@ -168,129 +230,215 @@ def test_the_placer_is_asked_for_exactly_the_objects_the_plan_covers() -> None:
     """The lease covers the request's objects, and only those are fetched."""
     placer = PackingPlacer()
 
-    _, fetch = _run(placer, LandingSource())
+    result = _run(placer, LandingSource())
 
     (request,) = placer.requests
     assert {(o.chunk_id, o.object_group_id) for o in request} == {
-        (p.chunk_id, p.object_group_id) for p in fetch.request.placements
+        (p.chunk_id, p.object_group_id) for p in result.fetch.request.placements
     }
 
 
-def test_a_request_too_large_for_any_window_raises_plan_too_large() -> None:
-    """The caller can split; nothing was leased, begun or loaded."""
+def test_a_request_too_large_for_any_window_is_refused() -> None:
+    """Nothing was leased or begun; the cause says splitting would help."""
     placer = PackingPlacer(window_bytes=4096)
     source = LandingSource()
-    sink = RecordingLayerLoadSink()
+    loader = FakeLoader()
 
-    with pytest.raises(PlanTooLargeError):
-        _run(placer, source, sink)
+    with pytest.raises(PipelinedRetrieveRefused) as caught:
+        _run(placer, source, loader)
 
+    assert isinstance(caught.value.__cause__, PlanTooLargeError)
     assert placer.leases == []
+    assert loader.steps() == []
     assert source.finished_generations() == source.abandoned_generations() == ()
-    assert sink.loaded_layers() == ()
 
 
-def test_no_free_window_raises_a_plain_contract_error() -> None:
-    """Splitting would not help, so it is not PlanTooLargeError."""
+def test_no_free_window_is_refused() -> None:
     placer = PackingPlacer()
     placer.busy = True
 
-    with pytest.raises(LayerwiseContractError) as caught:
+    with pytest.raises(PipelinedRetrieveRefused) as caught:
         _run(placer, LandingSource())
 
-    assert not isinstance(caught.value, PlanTooLargeError)
+    assert not isinstance(caught.value.__cause__, PlanTooLargeError)
     assert placer.leases == []
 
 
-def test_keys_that_do_not_match_the_model_fall_back_without_a_lease() -> None:
-    """A layout mismatch is a contract error, and no window is taken for it."""
+def test_keys_that_do_not_match_the_model_are_refused_without_a_lease() -> None:
     placer = PackingPlacer()
     keys = resolve_obj_keys(vllm_request())[:2]
 
-    with pytest.raises(LayerwiseContractError, match="cannot plan"):
+    with pytest.raises(PipelinedRetrieveRefused, match="cannot plan"):
         _run(placer, LandingSource(), keys=keys)
 
     assert placer.requests == []
 
 
-def test_a_bad_placement_releases_the_window_as_never_fetched() -> None:
-    """Planning refused the lease's layout before anything was issued."""
+def test_a_bad_placement_is_refused_and_the_window_released_never_fetched() -> None:
     placer = OverlappingPlacer()
     source = LandingSource()
+    loader = FakeLoader()
 
-    with pytest.raises(LayerwiseContractError, match="overlap"):
-        _run(placer, source)
+    with pytest.raises(PipelinedRetrieveRefused, match="overlap"):
+        _run(placer, source, loader)
 
     assert _only_outcome(placer) is LeaseOutcome.NEVER_FETCHED
+    assert loader.steps() == []
     assert source.finished_generations() == source.abandoned_generations() == ()
 
 
 def test_a_lease_that_crashes_while_placing_is_still_released() -> None:
     """A non-planning error propagates unchanged; nothing was issued."""
     placer = CrashingLocatePlacer()
-    source = LandingSource()
 
     with pytest.raises(RuntimeError, match="window pool crashed"):
-        _run(placer, source)
+        _run(placer, LandingSource())
+
+    assert _only_outcome(placer) is LeaseOutcome.NEVER_FETCHED
+
+
+def test_a_loader_that_cannot_build_its_sink_releases_never_fetched() -> None:
+    placer = PackingPlacer()
+    source = LandingSource()
+    loader = FakeLoader()
+    loader.fail_sink_for = True
+
+    with pytest.raises(RuntimeError, match="cannot build the sink"):
+        _run(placer, source, loader)
 
     assert _only_outcome(placer) is LeaseOutcome.NEVER_FETCHED
     assert source.finished_generations() == source.abandoned_generations() == ()
 
 
-def test_a_declined_layer_releases_the_window_as_abandoned() -> None:
-    """The transport gave up mid-fetch; writes may still be on the wire."""
-    placer = PackingPlacer()
-    sink = RecordingLayerLoadSink()
+@pytest.mark.parametrize(
+    "error",
+    [PlanTooLargeError("receive queue too short"), LayerwiseContractError("no")],
+    ids=["too-large", "unsupported"],
+)
+def test_a_refusal_at_begin_fetch_is_refused_and_abandons_the_window(
+    error: LayerwiseContractError,
+) -> None:
+    """No load began, so the caller may load whole objects.
 
-    with pytest.raises(LayerUnservableError):
-        _run(placer, UnservableLayerArrivalSource(), sink)
-
-    assert _only_outcome(placer) is LeaseOutcome.ABANDONED
-    assert len(sink.abandoned_generations()) == 1
-
-
-def test_a_layer_that_never_arrives_releases_the_window_as_abandoned() -> None:
-    """A timeout is an abandon: the missing slot may still land later."""
-    placer = PackingPlacer()
-    source = ScriptedLayerArrivalSource()
-
-    with pytest.raises(LayerArrivalTimeoutError):
-        _run(placer, source, layer_timeout_seconds=0.01)
-
-    assert _only_outcome(placer) is LeaseOutcome.ABANDONED
-    assert len(source.abandoned_generations()) == 1
-
-
-def test_a_refusal_at_begin_fetch_releases_the_window_as_abandoned() -> None:
-    """The transport may have issued part of the plan before refusing it.
-
-    Quarantining a window that turned out to be untouched costs one fetch
-    timeout; reusing one that still receives writes corrupts the next request.
+    The transport may have issued part of the plan before refusing it, so the
+    window is quarantined: that costs one fetch timeout, while reusing one
+    that still receives writes corrupts the next request.
     """
     placer = PackingPlacer()
+    loader = FakeLoader()
 
-    with pytest.raises(PlanTooLargeError):
-        _run(placer, RefusingSource(PlanTooLargeError("receive queue too short")))
+    with pytest.raises(PipelinedRetrieveRefused) as caught:
+        _run(placer, RefusingSource(error), loader)
 
+    assert caught.value.__cause__ is error
+    assert _only_outcome(placer) is LeaseOutcome.ABANDONED
+    assert loader.sink.abandoned_generations() == ()
+    assert loader.sink.finished_generations() == ()
+
+
+def test_a_transport_failure_continues_the_same_load_from_whole_objects() -> None:
+    """Layers before the failure come from the window, the rest from L1.
+
+    The worker's waiters see one load that finishes: no abandon, no new
+    generation.
+    """
+    placer = PackingPlacer()
+    source = FailsOnSecondLayerSource()
+    loader = FakeLoader()
+
+    result = _run(placer, source, loader)
+
+    assert result.completion is RetrieveCompletion.FELL_BACK
+    assert loader.sink.loaded_layers() == result.fetch.plan.layer_ids()
+    assert len(loader.sink.finished_generations()) == 1
+    assert loader.sink.abandoned_generations() == ()
+    assert len(source.abandoned_generations()) == 1
+    (request,) = placer.requests
+    assert loader.reloaded == [request]
+
+
+def test_the_fallback_waits_for_copies_then_releases_before_reloading() -> None:
+    """Copies out of the window end first; the reload needs the keys free."""
+    placer = PackingPlacer()
+    loader = FakeLoader()
+
+    _run(placer, FailsOnSecondLayerSource(), loader)
+
+    assert loader.steps() == ["sink_for", "wait", "reload"]
+    assert loader.outcomes_at("wait") == ()
+    assert loader.outcomes_at("reload") == (LeaseOutcome.ABANDONED,)
     assert _only_outcome(placer) is LeaseOutcome.ABANDONED
 
 
-def test_a_loader_failure_propagates_unchanged_and_abandons_the_window() -> None:
-    """Loader errors are not contract errors; the window is still quarantined."""
+def test_a_layer_that_never_arrives_falls_back_too() -> None:
     placer = PackingPlacer()
-    sink = FailingSink()
+    loader = FakeLoader()
+
+    result = _run(
+        placer, ScriptedLayerArrivalSource(), loader, layer_timeout_seconds=0.01
+    )
+
+    assert result.completion is RetrieveCompletion.FELL_BACK
+    assert loader.sink.loaded_layers() == result.fetch.plan.layer_ids()
+    assert _only_outcome(placer) is LeaseOutcome.ABANDONED
+
+
+def test_a_failed_reload_abandons_the_load() -> None:
+    """The fallback could not get the objects; vLLM recomputes."""
+    placer = PackingPlacer()
+    loader = FakeLoader()
+    loader.fail_reload = True
+
+    with pytest.raises(RuntimeError, match="record gone"):
+        _run(placer, UnservableLayerArrivalSource(), loader)
+
+    assert len(loader.sink.abandoned_generations()) == 1
+    assert loader.sink.finished_generations() == ()
+    assert _only_outcome(placer) is LeaseOutcome.ABANDONED
+
+
+def test_a_failed_wait_before_the_fallback_abandons_the_load() -> None:
+    placer = PackingPlacer()
+    loader = FakeLoader()
+    loader.fail_wait = True
+
+    with pytest.raises(RuntimeError, match="copy stream failed"):
+        _run(placer, UnservableLayerArrivalSource(), loader)
+
+    assert "reload" not in loader.steps()
+    assert len(loader.sink.abandoned_generations()) == 1
+    assert _only_outcome(placer) is LeaseOutcome.ABANDONED
+
+
+def test_a_loader_failure_abandons_the_load_after_its_copies() -> None:
+    """Loader errors propagate unchanged; the window is still quarantined."""
+    placer = PackingPlacer()
+    loader = FakeLoader(FailingSink())
 
     with pytest.raises(RuntimeError, match="gpu copy failed"):
-        _run(placer, LandingSource(), sink)
+        _run(placer, LandingSource(), loader)
+
+    assert len(loader.sink.abandoned_generations()) == 1
+    assert loader.outcomes_at("wait") == ()
+    assert _only_outcome(placer) is LeaseOutcome.ABANDONED
+
+
+def test_a_failed_wait_after_every_layer_abandons_the_window() -> None:
+    """The copies may still read the window, so it is not reused."""
+    placer = PackingPlacer()
+    loader = FakeLoader()
+    loader.fail_wait = True
+
+    with pytest.raises(RuntimeError, match="copy stream failed"):
+        _run(placer, LandingSource(), loader)
 
     assert _only_outcome(placer) is LeaseOutcome.ABANDONED
-    assert len(sink.abandoned_generations()) == 1
 
 
-def test_a_failing_release_does_not_mask_the_fetch_error(
+def test_a_failing_release_does_not_mask_the_load_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The caller must see why the fetch failed, not why the release did.
+    """The caller must see why the load failed, not why the release did.
 
     The module logger does not propagate, so the test spies on it directly.
     """
@@ -302,8 +450,8 @@ def test_a_failing_release_does_not_mask_the_fetch_error(
     )
     placer = FailingReleasePlacer()
 
-    with pytest.raises(LayerUnservableError):
-        _run(placer, UnservableLayerArrivalSource())
+    with pytest.raises(RuntimeError, match="gpu copy failed"):
+        _run(placer, LandingSource(), FakeLoader(FailingSink()))
 
     assert _only_outcome(placer) is LeaseOutcome.ABANDONED
     assert logged == ["Releasing a window lease as ABANDONED failed"]
@@ -320,7 +468,6 @@ def test_a_failing_release_after_success_is_raised() -> None:
 
 
 def test_each_retrieve_takes_and_returns_its_own_lease() -> None:
-    """Back-to-back retrieves each release exactly once, as finished."""
     placer = PackingPlacer()
     for _ in range(3):
         _run(placer, LandingSource())
@@ -328,12 +475,11 @@ def test_each_retrieve_takes_and_returns_its_own_lease() -> None:
     assert [lease.outcomes for lease in placer.leases] == [[LeaseOutcome.FINISHED]] * 3
 
 
-def test_every_refusal_is_one_handler_away_from_a_fallback() -> None:
-    """Placer, planner and transport refusals all satisfy a single except."""
+def test_every_refusal_is_one_handler_away_from_a_whole_load() -> None:
+    """Placer, planner and begin_fetch refusals all satisfy a single except."""
     scenarios: list[tuple[PackingPlacer, LayerArrivalSource]] = [
         (PackingPlacer(window_bytes=4096), LandingSource()),
         (OverlappingPlacer(), LandingSource()),
-        (PackingPlacer(), UnservableLayerArrivalSource()),
         (PackingPlacer(), RefusingSource(LayerwiseContractError("unsupported"))),
     ]
     busy = PackingPlacer()
@@ -341,8 +487,37 @@ def test_every_refusal_is_one_handler_away_from_a_fallback() -> None:
     scenarios.append((busy, LandingSource()))
 
     for placer, source in scenarios:
-        with pytest.raises(LayerwiseContractError):
-            _run(placer, source)
+        loader = FakeLoader()
+        with pytest.raises(PipelinedRetrieveRefused):
+            _run(placer, source, loader)
+        assert loader.sink.abandoned_generations() == ()
+
+
+def test_only_the_keys_to_fetch_are_leased_and_planned() -> None:
+    """The deferred objects keep their chunk ids; the rest stay out of it."""
+    keys = resolve_obj_keys(vllm_request())
+    placer = PackingPlacer()
+    everything = _run(placer, LandingSource(), keys=keys).fetch.request.placements
+    later = {
+        (p.chunk_id, p.object_group_id) for p in everything[len(everything) // 2 :]
+    }
+    deferred = {keys[group][chunk] for chunk, group in later}
+
+    result = run_pipelined_retrieve(
+        fetch_model(),
+        keys,
+        MAX_RECORD_BYTES,
+        placer,
+        LandingSource(),
+        FakeLoader(),
+        keys_to_fetch=deferred,
+        poll_interval_seconds=0.001,
+    )
+
+    assert {o.key for o in placer.requests[-1]} == deferred
+    placed = {(p.chunk_id, p.object_group_id) for p in result.fetch.request.placements}
+    assert placed == later
+    assert result.completion is RetrieveCompletion.PIPELINED
 
 
 def test_object_sizes_reach_the_placer_unrounded() -> None:
