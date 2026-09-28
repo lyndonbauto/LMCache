@@ -71,10 +71,12 @@ PipelinedModel(
 and registers it in `MPCacheServerContext.pipelined_models`, a refcounted
 `ModelRegistry[PipelinedModel]` that `_release_entries` unregisters from.
 
-`StorageManager` builds the one `RdmaWindowLeaser` at init from the adapter
-that enables RDMA, since it owns the L1. `pipelined_window_placer` runs
-`check_window_holds_request` against the L1's `rdma_window_bytes` and gives
-each placer the prefetch policy's `select_l1_retentions` (Track A's F1). Any
+`StorageManager` owns the one `RdmaWindowLeaser`, since it owns the L1;
+Track A's `rdma_window_placer(layouts, select_retentions)` builds it with
+the first placer, so every placer shares one leaser and one quarantine.
+`pipelined_window_placer` calls it with the prefetch policy's
+`select_l1_retentions` (Track A's F1), then runs
+`check_window_holds_request` against the L1's `rdma_window_bytes`. Any
 refusal, whether no RDMA adapter, the path not ready, a multi-node cluster
 (F5), or a window too small, is logged as a warning, and every lookup for
 that model takes today's path.

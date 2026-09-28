@@ -1082,15 +1082,16 @@ class StorageManager:
                 chunks of this model, or ``max_pipelined_chunks`` is not
                 positive. The message states the window size needed.
         """
+        placer = self.rdma_window_placer(
+            group_layout_descs, self._prefetch_policy.select_l1_retentions
+        )
         check_window_holds_request(
             self._l1_config.memory_config.rdma_window_bytes,
             model,
             max_pipelined_chunks,
             self._l1_memory_desc.align_bytes,
         )
-        return self.rdma_window_placer(
-            group_layout_descs, self._prefetch_policy.select_l1_retentions
-        )
+        return placer
 
     def rdma_window_placer(
         self,

@@ -9,7 +9,7 @@ the node name, the RDMA config and the windows all come from one place.
 """
 
 # Standard
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 import threading
 
@@ -40,10 +40,10 @@ from lmcache.v1.distributed.l2_adapters.rdma_registration import (
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.layerwise import (
     NO_GENERATION,
-    LayerArrivalPump,
     LayerArrivalSource,
     LayerArrivalStatus,
     LayerFetchPlan,
+    LayerLoadSink,
     LayerwiseContractError,
 )
 from lmcache.v1.layerwise.fakes import RecordingLayerLoadSink
@@ -51,6 +51,8 @@ from lmcache.v1.layerwise.pipelined_retrieve import run_pipelined_retrieve
 from lmcache.v1.layerwise.request_fetch import (
     ChunkPlacer,
     LeaseOutcome,
+    ObjectToPlace,
+    WindowLease,
     objects_to_place,
 )
 
@@ -102,9 +104,27 @@ class _Tap:
         return self.plan
 
 
+class _Loader:
+    """Loads through a recording sink; notes what the fallback reloads."""
+
+    def __init__(self) -> None:
+        self.sink = RecordingLayerLoadSink()
+        self.reloaded: list[ObjectToPlace] = []
+
+    def sink_for(self, lease: WindowLease) -> LayerLoadSink:
+        return self.sink
+
+    def wait_for_copies(self) -> None:
+        """The recording sink copies nothing."""
+
+    def reload_whole(self, objects: Sequence[ObjectToPlace]) -> None:
+        self.reloaded = list(objects)
+
+
 @dataclass
 class _Retrieved:
     sink: RecordingLayerLoadSink
+    reloaded: list[ObjectToPlace]
     errors: list[BaseException]
     plan: LayerFetchPlan
 
@@ -122,15 +142,20 @@ class _Storage:
     ) -> _Retrieved:
         """Run one retrieve, landing every slot except ``decline_slot``."""
         tap = _Tap(self.manager.layer_arrival_source())
-        sink = RecordingLayerLoadSink()
-        pump = LayerArrivalPump(tap, sink, poll_interval_seconds=0.001)
+        loader = _Loader()
         errors: list[BaseException] = []
         keys = resolve_obj_keys(vllm_request())
 
         def run() -> None:
             try:
                 run_pipelined_retrieve(
-                    fetch_model(), keys, MAX_RECORD_BYTES, placer, pump
+                    fetch_model(),
+                    keys,
+                    MAX_RECORD_BYTES,
+                    placer,
+                    tap,
+                    loader,
+                    poll_interval_seconds=0.001,
                 )
             except BaseException as exc:
                 errors.append(exc)
@@ -145,7 +170,7 @@ class _Storage:
                 self.connector.land_slot(index, tap.generation)
         thread.join(JOIN_TIMEOUT)
         assert not thread.is_alive(), "retrieve did not finish"
-        return _Retrieved(sink, errors, plan)
+        return _Retrieved(loader.sink, loader.reloaded, errors, plan)
 
 
 def _stored_keys() -> list[ObjectKey]:
@@ -224,9 +249,11 @@ def test_a_declined_slot_quarantines_the_window_for_every_placer(
 ) -> None:
     retrieved = storage.retrieve(storage.placer(), decline_slot=0)
 
-    assert len(retrieved.errors) == 1
-    assert isinstance(retrieved.errors[0], LayerwiseContractError)
-    assert retrieved.sink.abandoned_generations()
+    # The load is finished from whole objects rather than abandoned.
+    assert retrieved.errors == []
+    assert retrieved.sink.finished_generations()
+    assert not retrieved.sink.abandoned_generations()
+    assert [o.key for o in retrieved.reloaded] == _stored_keys()
     # The abandoned fetch's writes were aborted, so none of its objects exist.
     assert storage.manager.delete_l1_keys(_stored_keys()) == (0, 0)
     objects = objects_to_place(fetch_model(), resolve_obj_keys(vllm_request()))
