@@ -141,10 +141,12 @@ is the part that would change.
 
 | Item | Waiting on | Owner |
 |---|---|---|
-| Pipelined retrieve enabled for real | A working `LayerLoadSink`; Track B's branch has only the stub (`layerwise_sink.py`, 2026-09-22) | Track B |
-| A failed retrieve that does not kill vLLM | The connector reporting failed blocks instead of raising ([vllm-load-failure.md](vllm-load-failure.md)) | Track B |
+| ~~Pipelined retrieve enabled for real~~ | Done 2026-09-28: `MultiprocessPipelinedSinkFactory` merged | Track B |
+| ~~A failed retrieve that does not kill vLLM~~ | Done: the connector reports failed blocks (`1138782d`) | Track B |
 | The real server writes exactly at the plan offset | A8 against a server built from the `kv-sink` branch | Track A |
-| C9 over Soft-RoCE | All of the above | All three |
+| The default vLLM config (piecewise CUDA graphs) | B5, a real vLLM run on native Linux | Track B |
+| C9 on a GPU, then over Soft-RoCE | One Linux box with a GPU, Soft-RoCE and a `kv-sink` server | All three |
+| A real TTFT number | EFA hardware (A7), after the above | All three |
 
 ## PR split for upstream
 
