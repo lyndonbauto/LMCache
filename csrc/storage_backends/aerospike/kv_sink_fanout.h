@@ -81,6 +81,31 @@ ClusterRegistrationResult register_all_nodes(aerospike* as,
                                              RdmaContext* context,
                                              NodeRegistry* registry);
 
+// Outcome of releasing every node's region.
+struct ClusterDeregistrationResult {
+  uint32_t deregistered = 0;
+  std::vector<NodeRegistrationFailure> failures;
+};
+
+// Send "kv-sink-deregister" for each node's region in `registry`.
+//
+// Call before destroying the queue pairs the regions write into. The server
+// tears a region down once its in-flight fetches drain, so our memory must
+// stay registered until this returns. A registered node that is no longer in
+// the cluster, or that refuses the command, is recorded as a failure rather
+// than thrown, so one node does not keep the rest registered.
+//
+// Args:
+//   as: connected Aerospike client.
+//   policy: info policy, or nullptr for the client default.
+//   registry: the regions to release; not modified.
+//
+// Returns the per-node outcome. Throws std::runtime_error only when the
+// cluster-wide info call itself fails.
+ClusterDeregistrationResult deregister_all_nodes(aerospike* as,
+                                                 const as_policy_info* policy,
+                                                 const NodeRegistry& registry);
+
 }  // namespace rdma
 }  // namespace connector
 }  // namespace lmcache

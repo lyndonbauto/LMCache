@@ -404,7 +404,10 @@ lease.release(LeaseOutcome.ABANDONED)      # abort_write; window quarantined,
   the first slot's window (`validate_slots_in_one_window`). The mock server
   writes at `client_addr + offset` and refuses anything outside the window,
   and `rdma_equivalence_test` checks that no bytes land outside the requested
-  offsets. The real server's side is unverified until A8.
+  offsets. The real server's side is checked by A8
+  (`test_aerospike_pipelined_rdma_integration.py`): every object a real
+  server lands through the placer reads back byte-exact; see
+  [Running A8](#running-a8-against-a-real-server).
 
 Every window is reachable: each node's `kv-sink-register` publishes the whole
 window range, and the session keeps each request inside its window. See
@@ -849,11 +852,19 @@ will perform.
 On the RC path each `RDMA_WRITE_WITH_IMM` consumes one posted receive work
 request, so the queue pair's `max_recv_wr` must be at least the slot count of
 the largest request LMCache will plan. `RdmaContext` queries `ibv_query_device`
-when the device is opened and records `max_qp_wr` and `max_cq`. At init,
-`enable_layer_notifications()` clamps the depth derived from the leased window
-and record cap to those limits, logs the device-reported numbers next to the
-requested and effective depths, and sizes both the completion queue and the
-receive queue to the effective value. That depth is shared by every window
+when the device is opened and records `max_qp_wr` and `max_cqe` (entries per
+completion queue; `max_cq` is the number of queues, and Soft-RoCE reports
+1,048,576 of those but only 32,767 entries each). At init,
+`desired_notification_depth` asks for `kMaxSlotsPerRequest` (65536, the
+16-bit slot index) per window, or the window's byte count when that is
+smaller, and `enable_layer_notifications()` clamps it to those limits, logs
+the device-reported numbers next to the requested and effective depths, and
+sizes both the completion queue and the receive queue to the effective value.
+The window and record cap are not a bound: a slot is one plane piece of one
+layer, often far smaller than the record cap (the A8 test's 64 KiB window
+holds 28 slots of 2–4 KiB each under a 960 KiB cap), and the model's layout
+arrives only after the queue pair exists. Receives carry no buffer, so the
+extra depth costs only queue and completion entries. That depth is shared by every window
 (see [Concurrent fetches](#concurrent-fetches)), so each fetch gets
 `effective / window_count` slots.
 `PipelinedFetchSession::begin_request_from_slots` rejects a plan whose `slot_count()` exceeds its share with an error
@@ -1214,6 +1225,80 @@ The harness asserts five things, not just the memcmp:
    than written, which is the bounded-window guarantee actually being exercised,
 5. the region handle is held per node, via `NodeRegistry`.
 
+### Running A8 against a real server
+
+`tests/v1/distributed/test_aerospike_pipelined_rdma_integration.py` runs a
+layerwise retrieve through a real `StorageManager` whose Aerospike adapter
+has RDMA reception on, against a server built from the aerospike-server
+branch `feat/kv-sink-fetch-pipelined`. Nothing is mocked: registration, the
+placer, the plan, `kv-sink-fetch-pipelined`, the server's writes with
+immediate and the completions are all production code. It checks that:
+
+1. a clean fetch completes `PIPELINED`, every layer reaches the sink, and
+   every object left in L1 holds exactly the bytes that were stored;
+2. with one segment record deleted, the server reports that slot failed, the
+   retrieve falls back, and a real whole reload returns every other object
+   byte-exact.
+
+Stock CE has no `kv-sink-*` commands, so it also needs `RDMA_DEVICE` and
+skips without it; CI's Docker server does not run it.
+
+On the Soft-RoCE VM, build the server from a checkout of that branch and its
+submodules (`bin/install-dependencies.sh`, then `make -j2`; the build reads
+its version from `git describe --tags`, so an exported tree needs a local
+commit and a bare `x.y.z.w` tag). Run it as a normal user with a config like
+the CI template, sized for a small VM:
+
+```text
+service { run-as-daemon false; work-directory /home/vk/as-run/work; ... }
+namespace lmcache {
+    replication-factor 1
+    nsup-period 120
+    max-record-size 1048576
+    stop-writes-sys-memory-pct 100   # 1.8 GB RAM would stop every write
+    storage-engine memory { data-size 512M }   # the minimum
+}
+```
+
+The work directory needs `smd/` created beforehand. The server registers its
+64 MiB data stripes for RDMA on first use, so raise its locked-memory limit
+once it is up, or every write fails `Cannot allocate memory` and the fetch
+falls back:
+
+```bash
+sudo prlimit --pid "$(pgrep -x asd)" --memlock=unlimited:unlimited
+RUN_AEROSPIKE_INTEGRATION=1 AEROSPIKE_TEST_HOST=127.0.0.1 \
+AEROSPIKE_TEST_PORT=3000 AEROSPIKE_TEST_NAMESPACE=lmcache \
+RDMA_DEVICE=rxe0 RDMA_GID_INDEX=1 \
+  pytest tests/v1/distributed/test_aerospike_pipelined_rdma_integration.py
+```
+
+The two existing integration suites pass against the same server.
+
+Even with the limit raised, a freshly started server can fail the first
+registration of a stripe with `cannot register {lmcache} stripe N ...
+Cannot allocate memory` and then succeed on the next fetch that touches it.
+The records in that stripe are not written, so that fetch falls back.
+`test_a_pipelined_fetch_lands_every_stored_byte_in_l1` then fails with
+`FELL_BACK`, but only on the first run after a restart. This is on the
+server side (`stripe_mr_get` in `kv_sink_verbs.c` does not retry), and the
+client's fallback is the intended response.
+
+The first runs found three client bugs that the mock writer could not show:
+
+- **The register reply was read from our own echoed command.**
+  `aerospike_info_node()` returns `<command>\t<response>`, and the command
+  carries our `qpn`, `psn` and `gid`. `find_info_field` took the first match,
+  so our queue pair was connected to itself and every server write arrived
+  out of sequence and was retried until the server gave up. It now searches
+  only after the tab. `rdma res show qp` shows it directly: the client's QP
+  had `rqpn` equal to its own `lqpn`.
+- **The notification depth assumed full-cap records.** See
+  [Receive queue depth](#receive-queue-depth-and-device-limits).
+- **The completion queue was clamped by `max_cq` (a queue count) rather than
+  `max_cqe`** (entries per queue), so a deep queue failed `ibv_create_cq`
+  with `EINVAL`. The fanout error now also names each node's reason.
+
 ## What is not proven yet
 
 Being precise about this, because the gap matters:
@@ -1223,10 +1308,10 @@ Being precise about this, because the gap matters:
 | Build profile, default-off | **Verified.** Default native build compiles and links with no libibverbs. |
 | `rdma_context.{h,cpp}` | **Verified on RC.** QP reaches RTS and the data path executes over Soft-RoCE. The EFA/SRD path compiles but has never run. |
 | `kv_sink_client.{h,cpp}` codec | **Verified.** Register and fetch commands round-trip against the mock writer. |
-| Per-node `kv-sink-register` fanout | **Implemented and compiling** via `aerospike_info_foreach`. Never run against a cluster. |
+| Per-node `kv-sink-register` / `kv-sink-deregister` fanout | **Verified against one real node** (A8), including 17 client lifetimes in a row against the server's 16 region slots. Never run against a multi-node cluster, which pipelined fetches refuse anyway. |
 | `PipelinedFetchSession` driver | **Implemented** and covered by `pipelined_fetch_session_test` (no device). |
 | `PipelinedFetchPool`, one fetch per window | **Verified on RC.** Two fetches in different windows complete from one completion queue over Soft-RoCE, and a late write for an abandoned fetch is not credited to its window's next fetch. |
-| Connector + Python pipelined path | **Implemented (device-free).** `AerospikeNativeConnector::issue_pipelined_fetch_by_slots` is the only issue entry point: it takes the plan's slots as given (Option 1), then begins, sends each node's `aerospike_info_node` command and feeds the replies without holding the driver lock across I/O. The chunk-level `issue_pipelined_fetch` and `issue_pipelined_fetch_by_keys` are removed. `set_object_group_layouts` converts registered `MemoryLayoutDesc` shapes in C++; `finish_pipelined_fetch` / `abandon_pipelined_fetch` and `pipelined_fetch_init_error` are bound through pybind and reached through `AerospikeLayerArrivalSource`. Python hands over record user keys, and the connector derives each sink's digest with `record_digest_hex` (verified against the reference client on a real server). Covered by `pipelined_fetch_issue_test` and Python adapter tests. **Not verified over a fabric** with real digests from a prefetch load. |
+| Connector + Python pipelined path | **Implemented (device-free).** `AerospikeNativeConnector::issue_pipelined_fetch_by_slots` is the only issue entry point: it takes the plan's slots as given (Option 1), then begins, sends each node's `aerospike_info_node` command and feeds the replies without holding the driver lock across I/O. The chunk-level `issue_pipelined_fetch` and `issue_pipelined_fetch_by_keys` are removed. `set_object_group_layouts` converts registered `MemoryLayoutDesc` shapes in C++; `finish_pipelined_fetch` / `abandon_pipelined_fetch` and `pipelined_fetch_init_error` are bound through pybind and reached through `AerospikeLayerArrivalSource`. Python hands over record user keys, and the connector derives each sink's digest with `record_digest_hex` (verified against the reference client on a real server). Covered by `pipelined_fetch_issue_test` and Python adapter tests. **Verified over Soft-RoCE against a real server** (A8): a retrieve through `StorageManager` lands every stored byte. |
 | Adapter plumbing, descriptor, window plan | **Implemented and unit-tested.** |
 | Write-lock TTL invariant | **Implemented and unit-tested** (startup check). |
 | Windows reserved outside general L1; `delete_if_none_locked`, `abort_write` | **Implemented and unit-tested** on pinned CPU memory. No lease yet, so nothing allocates in a window in production. |
@@ -1234,10 +1319,9 @@ Being precise about this, because the gap matters:
 | Real RDMA write landing in L1 | **Verified** over Soft-RoCE (`rxe0` on `lo`, GID index 1). |
 | Byte-equivalence assertion | **Verified.** Both chunks byte-identical, nothing outside the requested offsets, out-of-window write refused. |
 | Same over EFA/SRD | **Not achieved — needs an EFA instance.** |
-| Against a real Aerospike server | **Not achieved — needs Sriram's server branch deployed.** |
+| Against a real Aerospike server | **Verified over Soft-RoCE (A8)** with a server built from `feat/kv-sink-fetch-pipelined`: a clean pipelined fetch and a missing-record fallback, both byte-exact. |
 
-The remaining two rows are the ones that matter now, and neither is a local
-environment problem.
+EFA/SRD is the remaining gap, and it is not a local environment problem.
 
 **EFA/SRD is a genuine gap, not a formality.** Soft-RoCE only supports RC, so
 the SRD path — `efadv_create_qp_ex`, the qkey at INIT, and the `ibv_create_ah`
@@ -1250,7 +1334,9 @@ on a real EFA instance before treating the M2 gate as passable.
 **The mock writer is a mock of a protocol, not of an implementation.** It
 implements the `kv-sink-*` command strings as specified, so it proves our side
 of the contract. It cannot catch a divergence between that specification and
-what the server actually does.
+what the server actually does, nor what the Aerospike client does to a reply:
+its replies have no echoed command, which is how the register-reply bug above
+passed every mock test. A8 is the check for both.
 
 ## Open questions
 
@@ -1261,6 +1347,36 @@ and no separate window lifetime for the non-pipelined path. See
 [The write-lock TTL invariant](#the-write-lock-ttl-invariant-enforced-at-startup)
 for the mechanism, the TTL hazard it creates, and the startup check that now
 enforces it.
+
+### Resolved: regions are deregistered on close
+
+The server holds at most 16 regions (`MAX_REGIONS` in `kv_sink.c`) and
+refuses the next registration with `too many regions`. Without a deregister
+every client lifetime leaked one, so the 17th client start fell back to
+whole-object loads until the server restarted.
+
+`AerospikeNativeConnector::close()` now calls
+`AerospikePipelinedRdmaDriver::shutdown()` before the workers stop, because
+the deregister needs the shared Aerospike client and the workers' shutdown
+closes it:
+
+```
+close()
+  └─ shutdown(&as_)                      under the driver lock
+       ├─ deregister_all_nodes()          kv-sink-deregister:region=<id> per node
+       │                                  (reply writes=<n>;bytes=<n>)
+       └─ drop the pool, invalidate the registry, mark the driver closed
+  └─ ConnectorBase::close()              workers stop, client closes
+```
+
+`shutdown()` never throws: a node that refuses or has left the cluster is
+logged to stderr and keeps its region until the server reaps it. The RDMA
+context outlives `shutdown()`, because the completion pollers use it outside
+the driver lock. A fetch issued after close reports "the connector is
+closed" through `pipelined_fetch_init_error`.
+`test_closing_releases_the_servers_region` opens and closes 17 storage
+managers in a row, and the server logs `kv-sink: deregistered region N` for
+each.
 
 ### Still open: registration lifecycle on node restart
 

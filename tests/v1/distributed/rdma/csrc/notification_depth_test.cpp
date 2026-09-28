@@ -18,6 +18,7 @@ namespace {
 using lmcache::connector::rdma::ChunkPlacement;
 using lmcache::connector::rdma::FetchSlot;
 using lmcache::connector::rdma::KernelGroupLayout;
+using lmcache::connector::rdma::kMaxSlotsPerRequest;
 using lmcache::connector::rdma::NodeRegistration;
 using lmcache::connector::rdma::NodeRegistry;
 using lmcache::connector::rdma::notification_depth_budget;
@@ -72,7 +73,7 @@ void test_budget_clamps_to_device_caps() {
   caps.max_recv_wr_per_qp = 128;
   caps.max_cq_entries = 256;
   const NotificationDepthBudget budget =
-      notification_depth_budget(kWindowBytes, kRecordCap, caps);
+      notification_depth_budget(kWindowBytes, caps);
   check(budget.desired_depth > budget.effective_depth,
         "window-derived desired depth exceeds injected device recv cap");
   check(budget.effective_depth == 128,
@@ -82,7 +83,7 @@ void test_budget_clamps_to_device_caps() {
   check(budget.effective_depth <= caps.max_recv_wr_per_qp,
         "effective depth never exceeds max_recv_wr_per_qp");
   check(budget.effective_depth <= caps.max_cq_entries,
-        "effective depth never exceeds max_cq");
+        "effective depth never exceeds max_cqe");
 }
 
 void test_budget_accepts_when_device_is_loose() {
@@ -91,11 +92,28 @@ void test_budget_accepts_when_device_is_loose() {
   caps.max_recv_wr_per_qp = 65536;
   caps.max_cq_entries = 65536;
   const NotificationDepthBudget budget =
-      notification_depth_budget(kWindowBytes, kRecordCap, caps);
+      notification_depth_budget(kWindowBytes, caps);
   check(budget.desired_depth == budget.effective_depth,
         "loose device leaves desired depth unchanged");
   check(budget.max_slots_per_request == budget.effective_depth,
         "max slots equals effective depth");
+}
+
+void test_budget_covers_slots_smaller_than_the_record_cap() {
+  std::cout << "budget covers slots smaller than the record cap\n";
+  RdmaDeviceCaps loose;
+  loose.max_recv_wr_per_qp = 1u << 20;
+  loose.max_cq_entries = 1u << 20;
+  // A 64 KiB window against a ~1 MiB record cap: a plan of 2 KiB plane
+  // pieces still has dozens of slots.
+  const NotificationDepthBudget small_window =
+      notification_depth_budget(64u << 10, loose);
+  check(small_window.max_slots_per_request == kMaxSlotsPerRequest,
+        "a window smaller than one record keeps the full slot-index range");
+  const NotificationDepthBudget tiny_window =
+      notification_depth_budget(100, loose);
+  check(tiny_window.max_slots_per_request == 100,
+        "a window below the slot-index range gets one slot per byte");
 }
 
 void test_budget_splits_depth_across_windows() {
@@ -104,9 +122,9 @@ void test_budget_splits_depth_across_windows() {
   loose.max_recv_wr_per_qp = 1u << 20;
   loose.max_cq_entries = 1u << 20;
   const NotificationDepthBudget one =
-      notification_depth_budget(kWindowBytes, kRecordCap, loose);
+      notification_depth_budget(kWindowBytes, loose);
   const NotificationDepthBudget four =
-      notification_depth_budget(kWindowBytes, kRecordCap, loose, 4);
+      notification_depth_budget(kWindowBytes, loose, 4);
   check(four.desired_depth == 4 * one.desired_depth,
         "four windows ask for four windows' worth of receives");
   check(four.max_slots_per_request == one.max_slots_per_request,
@@ -116,7 +134,7 @@ void test_budget_splits_depth_across_windows() {
   tight.max_recv_wr_per_qp = 100;
   tight.max_cq_entries = 1u << 20;
   const NotificationDepthBudget clamped =
-      notification_depth_budget(kWindowBytes, kRecordCap, tight, 4);
+      notification_depth_budget(kWindowBytes, tight, 4);
   check(clamped.effective_depth == 100, "the device still clamps the total");
   check(clamped.max_slots_per_request == 25,
         "each of four windows gets a quarter of the clamped depth");
@@ -189,6 +207,7 @@ int main() {
   try {
     test_budget_clamps_to_device_caps();
     test_budget_accepts_when_device_is_loose();
+    test_budget_covers_slots_smaller_than_the_record_cap();
     test_budget_splits_depth_across_windows();
     test_begin_request_rejects_plan_above_device_slot_cap();
     test_begin_request_accepts_plan_within_device_slot_cap();

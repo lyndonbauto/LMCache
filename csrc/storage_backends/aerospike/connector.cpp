@@ -125,7 +125,7 @@ AerospikeNativeConnector::AerospikeNativeConnector(
 #ifdef LMCACHE_AEROSPIKE_RDMA
     if (l1_rdma_registration_.is_enabled()) {
       pipelined_rdma_ = std::make_unique<AerospikePipelinedRdmaDriver>(
-          l1_rdma_registration_, ns_, max_record_bytes_);
+          l1_rdma_registration_, ns_);
       try_initialize_pipelined_rdma();
     }
 #endif
@@ -153,6 +153,12 @@ void AerospikeNativeConnector::close() {
     closed_native_ = true;
   }
 
+#ifdef LMCACHE_AEROSPIKE_RDMA
+  // The shared client closes once the workers stop, and deregistering needs it.
+  if (pipelined_rdma_ && connected_) {
+    pipelined_rdma_->shutdown(&as_);
+  }
+#endif
   ConnectorBase<WorkerAerospikeConn>::close();
 }
 

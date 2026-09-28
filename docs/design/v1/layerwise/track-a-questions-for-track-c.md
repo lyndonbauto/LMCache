@@ -492,8 +492,8 @@ Merged into `track/a-transport`. Track A's answers:
   - The mock server writes at `client_addr + offset` and refuses anything
     outside the registered window. `rdma_equivalence_test` checks that no
     bytes land outside the requested offsets.
-  - Caveat: the real server's side, that it writes exactly `length` bytes at
-    `offset`, is unverified until A8.
+  - The real server's side, that it writes exactly `length` bytes at
+    `offset`, is confirmed by A8 (done item 23).
 
 ## Track A's review of `fetch-start-proposal.md`
 
@@ -887,24 +887,52 @@ still land. Either build the leaser from the config of the adapter
     (`2987f5fc`). Track C's `pipelined_window_placer` does the same and is
     the one retrieve uses, so Track A's was removed in the merge of
     `ae529b58`.
+23. A8: a real server, over Soft-RoCE.
+    `test_aerospike_pipelined_rdma_integration.py` runs a retrieve through a
+    real `StorageManager` whose Aerospike adapter has RDMA on, against a
+    server built from `feat/kv-sink-fetch-pipelined` (`512b0c20`). Nothing
+    is mocked. A clean fetch completes `PIPELINED` and every object left in
+    L1 holds exactly the stored bytes; with one segment record deleted, the
+    server fails that slot, the retrieve falls back, and a real whole reload
+    returns the rest byte-exact. The first runs found three client bugs,
+    now fixed:
+    - the register reply was parsed from our own command, which
+      `aerospike_info_node()` echoes before a tab, so our queue pair was
+      connected to itself and no write ever completed;
+    - the notification depth was `window_bytes / max_record_bytes`, one slot
+      for a 64 KiB window, but a slot is one plane piece of one layer, and
+      the test's plan has 28 slots of 2–4 KiB. It is now the 16-bit slot
+      limit per window, clamped by the device;
+    - the completion queue was clamped by `max_cq` (the number of queues)
+      rather than `max_cqe` (entries per queue).
+
+    The client also never sent `kv-sink-deregister`, so each client
+    lifetime leaked a region and the server refused registration after 16.
+    `AerospikeNativeConnector::close()` now deregisters every node before
+    the shared client closes, and
+    `test_closing_releases_the_servers_region` runs 17 client lifetimes in
+    a row. A fresh server can also fail its first registration of a data
+    stripe with `ENOMEM` and fall back on that one fetch; that is on the
+    server side (see "Running A8 against a real server" in
+    `aerospike_rdma.md`).
+    For Track C, `pipelined_max_slots_per_request()` (item 20) now returns
+    32767 on Soft-RoCE instead of a record-cap-derived count, so the F4
+    eligibility check rarely refuses on slot count.
 
 These were verified on the Soft-RoCE VM
 ([rdma_testing_on_windows.md](../distributed/l2_adapters/rdma_testing_on_windows.md)):
 
 - `lmcache_aerospike` builds with `BUILD_WITH_AEROSPIKE_RDMA=1` against
   C client 7.3.0;
-- device-free logic harness: 365 checks pass;
-- fabric harness over `rxe0`: 416 checks pass;
-- `tests/v1/layerwise/` and `tests/v1/distributed/` pass (1312 passed, 92
-  skipped, with Track C's `d4bd73c5` merged), including the conformance
-  suite over both sources, concurrent fetches over the real native pool,
-  Track C's end-to-end retrieve over the production placer, and a retrieve
-  whose placer and source both come from one `StorageManager`;
+- `make test` (device-free logic and fabric harness over `rxe0`) passes;
+- `tests/v1/layerwise/` and `tests/v1/distributed/` pass (1405 passed, 95
+  skipped, at Track C's `b16a1617`), including the conformance suite over
+  both sources, concurrent fetches over the real native pool, Track C's
+  end-to-end retrieve over the production placer, and a retrieve whose
+  placer and source both come from one `StorageManager`;
+- against the `feat/kv-sink-fetch-pipelined` server: the two existing
+  Aerospike integration suites and A8, 15 passed;
 - the pytest wrappers in `tests/v1/distributed/rdma/` pass.
-
-`record_node` and `issue_pipelined_fetch_by_slots` have not run end to end.
-That needs an Aerospike server, and for the slot path, one built from the
-`kv-sink` branch (A8).
 
 **Track A, next:**
 
@@ -923,9 +951,9 @@ That needs an Aerospike server, and for the slot path, one built from the
    path.~~ Done as item 19.
 8. ~~Expose `pipelined_max_slots_per_request()` through the storage
    manager (F4).~~ Done as item 20.
-9. Run A7 on an EFA instance, and A8 against a server built from the
-   `kv-sink` branch. A8 also checks the server's side of "a slot lands at
-   its plan offset".
+9. Run A7 on an EFA instance. ~~A8 against a server built from the
+   `kv-sink` branch.~~ Done as item 23.
+10. ~~Send `kv-sink-deregister` when the client closes.~~ Done in item 23.
 
 **Track C:**
 
