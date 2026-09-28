@@ -4,7 +4,7 @@ Distributed multi-tier storage manager for MP mode
 """
 
 # Standard
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import replace
 from typing import Iterator, Literal, Optional
@@ -40,7 +40,6 @@ from lmcache.v1.distributed.l2_adapters import create_l2_adapter
 from lmcache.v1.distributed.l2_adapters.base import AdapterUsage, L2AdapterInterface
 from lmcache.v1.distributed.l2_adapters.config import L2AdapterConfigBase
 from lmcache.v1.distributed.l2_adapters.rdma_registration import (
-    L1RdmaConfig,
     rdma_config_of,
     validate_fetch_timeout_against_write_ttl,
     validate_windows_reserved,
@@ -114,18 +113,18 @@ class StorageManager:
         # Guards the _l2_adapters and _adapter_descriptors dicts.
         self._adapters_lock = threading.Lock()
         self._registered_l2_listeners: list[L2AdapterListener] = []
+        # The leaser over L1's RDMA windows, built with the first adapter that
+        # enables RDMA reception; None when no adapter does. Its quarantine
+        # follows that adapter's fetch timeout, so only that adapter may
+        # fetch into the windows.
+        self._window_leaser: RdmaWindowLeaser | None = None
+        self._window_leaser_adapter_id: int | None = None
         self._l2_adapters: dict[int, L2AdapterInterface] = {}
         self._adapter_descriptors: dict[int, AdapterDescriptor] = {}
         for ac in config.l2_adapter_config.adapters:
             adapter_id, adapter, descriptor = self._build_l2_adapter(ac)
             self._l2_adapters[adapter_id] = adapter
             self._adapter_descriptors[adapter_id] = descriptor
-
-        # One leaser for every placer: the windows belong to L1, and two
-        # leasers would hand out the same window twice. Built by the first
-        # placer, since the quarantine length comes from an adapter's config.
-        self._window_leaser_lock = threading.Lock()
-        self._window_leaser: RdmaWindowLeaser | None = None
 
         PeriodicEventNotifier.create(
             interval_ms=config.periodic_notifier_interval_ms,
@@ -1058,10 +1057,10 @@ class StorageManager:
     ) -> ChunkPlacer:
         """Build the layerwise placer for one registered model.
 
-        :meth:`rdma_window_placer`, after checking that one window holds the
-        model's largest pipelined retrieve. Fetched objects are kept in L1
-        or freed as the prefetch policy's ``select_l1_retentions`` decides,
-        the same as objects the prefetch controller loads.
+        Objects are reserved inside L1's RDMA windows and fetched from the
+        pipelined adapter's one node. Fetched objects are kept in L1 or
+        freed as the prefetch policy's ``select_l1_retentions`` decides, the
+        same as objects the prefetch controller loads.
 
         Args:
             group_layout_descs: ``{object_group_id: layout}`` for every
@@ -1075,86 +1074,40 @@ class StorageManager:
             A placer for this model's retrieves.
 
         Raises:
-            LayerwiseContractError: If no L2 adapter has both a ready
-                pipelined path (so a single-node cluster) and RDMA reception
-                enabled, with each adapter's reason.
+            LayerwiseContractError: If no adapter enables RDMA reception,
+                none has a ready pipelined path (including a cluster of more
+                than one node), or the adapter with the pipelined path is not
+                the one L1's windows were built with, with the reason.
             ValueError: If one window cannot hold ``max_pipelined_chunks``
                 chunks of this model, or ``max_pipelined_chunks`` is not
                 positive. The message states the window size needed.
         """
-        placer = self.rdma_window_placer(
-            group_layout_descs, self._prefetch_policy.select_l1_retentions
-        )
+        leaser = self._window_leaser
+        if leaser is None:
+            raise LayerwiseContractError(
+                "no L2 adapter enables RDMA reception, so L1 has no RDMA windows"
+            )
+        adapter_id = self.pipelined_adapter_id()
+        if adapter_id != self._window_leaser_adapter_id:
+            raise LayerwiseContractError(
+                f"the pipelined path is on L2 adapter {adapter_id}, but L1's "
+                f"RDMA windows follow adapter {self._window_leaser_adapter_id}'s "
+                "fetch timeout; a quarantine could end while late writes land"
+            )
+        node_name = self.pipelined_fetch_node_name()
+        align_bytes = self._l1_memory_desc.align_bytes
         check_window_holds_request(
             self._l1_config.memory_config.rdma_window_bytes,
             model,
             max_pipelined_chunks,
-            self._l1_memory_desc.align_bytes,
+            align_bytes,
         )
-        return placer
-
-    def rdma_window_placer(
-        self,
-        layouts: Mapping[int, MemoryLayoutDesc],
-        select_retentions: Callable[[list[ObjectKey]], list[bool]],
-    ) -> ChunkPlacer:
-        """Return the ``ChunkPlacer`` a layerwise retrieve leases windows from.
-
-        Build one per registered model, once its layouts are known. The
-        placer reserves a retrieve's objects in one of L1's RDMA windows, on
-        the node of the first adapter, in registration order, that has a
-        ready pipelined path and RDMA reception enabled. Every placer from
-        one storage manager shares one window leaser, so a window leased,
-        quarantined or pinned through one placer is unavailable to the
-        others.
-
-        Args:
-            layouts: ``{object_group_id: layout}``, the L1 memory layout of
-                each of the model's object groups.
-            select_retentions: Given the keys of one lease's objects, in
-                order, returns whether to keep each in L1 after its fetch
-                finishes, as the prefetch policy's ``select_l1_retentions``
-                does.
-
-        Returns:
-            A new placer.
-
-        Raises:
-            LayerwiseContractError: If no L2 adapter has both a ready
-                pipelined path and RDMA reception enabled, with each
-                adapter's reason. Retrieve then loads whole objects.
-            ValueError: If ``layouts`` is empty.
-        """
-        if not layouts:
-            raise ValueError("a placer needs the layout of every object group")
-        with self._adapters_lock:
-            entries = [
-                (self._adapter_descriptors[adapter_id], adapter)
-                for adapter_id, adapter in self._l2_adapters.items()
-            ]
-        reasons: list[str] = []
-        for descriptor, adapter in entries:
-            try:
-                node_name = adapter.pipelined_fetch_node_name()
-            except LayerwiseContractError as exc:
-                reasons.append(str(exc))
-                continue
-            rdma = rdma_config_of(descriptor.config)
-            if not rdma.is_enabled():
-                reasons.append(
-                    f"{descriptor.type_name}: RDMA reception is disabled in its config"
-                )
-                continue
-            return RdmaWindowPlacer(
-                self._l1_manager,
-                self._shared_window_leaser(rdma),
-                layouts,
-                node_name,
-                select_retentions,
-            )
-        raise LayerwiseContractError(
-            "no L2 adapter can place a pipelined retrieve: "
-            + ("; ".join(reasons) or "no L2 adapters are registered")
+        return RdmaWindowPlacer(
+            self._l1_manager,
+            leaser,
+            group_layout_descs,
+            node_name,
+            self._prefetch_policy.select_l1_retentions,
         )
 
     def touch_l1_keys(self, keys: list[ObjectKey]):
@@ -1610,24 +1563,6 @@ class StorageManager:
         with self._adapters_lock:
             return bool(self._l2_adapters)
 
-    def _shared_window_leaser(self, rdma: L1RdmaConfig) -> RdmaWindowLeaser:
-        """Return the one window leaser, building it from ``rdma`` if needed.
-
-        ``_build_l2_adapter`` has already checked that every RDMA adapter's
-        window plan is the one L1 reserved, so any enabled ``rdma`` fits.
-
-        Args:
-            rdma: An enabled adapter RDMA config, used only on the first
-                call.
-
-        Returns:
-            The leaser over L1's windows.
-        """
-        with self._window_leaser_lock:
-            if self._window_leaser is None:
-                self._window_leaser = RdmaWindowLeaser(self._l1_manager, rdma)
-            return self._window_leaser
-
     def _build_l2_adapter(
         self,
         config: L2AdapterConfigBase,
@@ -1654,6 +1589,10 @@ class StorageManager:
         )
         adapter_id = self._next_adapter_id
         self._next_adapter_id += 1
+        rdma_config = rdma_config_of(config)
+        if rdma_config.is_enabled() and self._window_leaser is None:
+            self._window_leaser = RdmaWindowLeaser(self._l1_manager, rdma_config)
+            self._window_leaser_adapter_id = adapter_id
         adapter: L2AdapterInterface = create_l2_adapter(config, self._l1_memory_desc)
         if config.serde_config is not None:
             adapter = SerdeL2AdapterWrapper(

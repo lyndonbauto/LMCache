@@ -71,15 +71,17 @@ PipelinedModel(
 and registers it in `MPCacheServerContext.pipelined_models`, a refcounted
 `ModelRegistry[PipelinedModel]` that `_release_entries` unregisters from.
 
-`StorageManager` owns the one `RdmaWindowLeaser`, since it owns the L1;
-Track A's `rdma_window_placer(layouts, select_retentions)` builds it with
-the first placer, so every placer shares one leaser and one quarantine.
-`pipelined_window_placer` calls it with the prefetch policy's
-`select_l1_retentions` (Track A's F1), then runs
-`check_window_holds_request` against the L1's `rdma_window_bytes`. Any
-refusal, whether no RDMA adapter, the path not ready, a multi-node cluster
-(F5), or a window too small, is logged as a warning, and every lookup for
-that model takes today's path.
+`StorageManager` builds the one `RdmaWindowLeaser` at init from the adapter
+that enables RDMA (startup refuses a second one), since it owns the L1, so
+every placer shares one leaser and one quarantine. `pipelined_window_placer`
+runs `check_window_holds_request` against the L1's `rdma_window_bytes` and
+gives each placer the prefetch policy's `select_l1_retentions` (Track A's
+F1). It also refuses when the adapter with the pipelined path is not the
+one the leaser was built from: the quarantine follows that adapter's
+`fetch_timeout_seconds`, so another adapter's late writes could land after
+it ends. Any refusal, whether no RDMA adapter, the path not ready or on the
+wrong adapter, a multi-node cluster (F5), or a window too small, is logged
+as a warning, and every lookup for that model takes today's path.
 
 The record cap and adapter id come from the same adapter as the placer,
 through `pipelined_max_record_bytes()` and `pipelined_adapter_id()`, which

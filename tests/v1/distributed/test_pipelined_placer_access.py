@@ -240,6 +240,29 @@ def test_a_path_that_is_not_ready_gives_no_placer(
             sm.pipelined_window_placer({0: LAYOUT}, _model(), 1)
 
 
+def test_a_pipelined_path_on_another_adapter_than_the_windows_gives_no_placer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The windows' quarantine follows the RDMA adapter's fetch timeout, so a
+    ready path on an adapter without RDMA reception must not fetch into them."""
+    not_ready = PipelinedNativeClientStub()
+    not_ready.init_error = "no route to the cluster"
+    clients = iter([not_ready, PipelinedNativeClientStub()])
+    monkeypatch.setattr(
+        storage_manager_module,
+        "create_l2_adapter",
+        lambda config, l1_memory_desc: NativeConnectorL2Adapter(
+            native_client=next(clients), type_name="stub"
+        ),
+    )
+    no_rdma = AerospikeL2AdapterConfig(hosts="stub:3000")
+    with _storage_manager([_rdma_adapter_config(), no_rdma]) as sm:
+        (_first, _), (second, _) = sm.l2_adapters()
+        assert sm.pipelined_adapter_id() == second.index
+        with pytest.raises(LayerwiseContractError, match="fetch timeout"):
+            sm.pipelined_window_placer({0: LAYOUT}, _model(), 1)
+
+
 def test_a_window_too_small_for_the_chunk_cap_is_refused(
     stub_adapters: Callable[[], PipelinedNativeClientStub],
 ) -> None:
