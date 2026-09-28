@@ -24,6 +24,7 @@ from .contract import (
     LayerFetchPlan,
     LayerLoadSink,
     LayerUnservableError,
+    LayerwiseContractError,
 )
 
 #: Default gap between arrival polls. Deliberately short: a layer copy is tens
@@ -39,6 +40,48 @@ DEFAULT_POLL_INTERVAL_SECONDS = 0.0001
 #: before the worker does, so an equal timeout still expires first; the
 #: margin covers the time the abandon takes to reach the worker.
 DEFAULT_LAYER_TIMEOUT_SECONDS = 2.5
+
+
+class LoadLeftOpenError(LayerwiseContractError):
+    """The transport failed mid-fetch, and the loader's load was left open.
+
+    Raised only by :meth:`LayerArrivalPump.run_resumable`. The transport side
+    has been abandoned. The loader's load for :attr:`generation` is still
+    active, and the caller now owns it: either load
+    :attr:`remaining_layers` in order some other way and finish it, or
+    abandon it. Leaving it open strands the worker's waiters until their
+    timeout.
+
+    Attributes:
+        generation: The generation of the fetch and of the open load.
+        remaining_layers: The plan's layers not yet loaded, ascending. The
+            first is the layer the transport failed on.
+        transport_error: What the transport reported: a
+            :class:`~.contract.LayerUnservableError` or a
+            :class:`~.contract.LayerArrivalTimeoutError`.
+    """
+
+    def __init__(
+        self,
+        generation: int,
+        remaining_layers: tuple[int, ...],
+        transport_error: LayerwiseContractError,
+    ) -> None:
+        """Record the open load and the transport failure that left it open.
+
+        Args:
+            generation: The generation of the fetch and of the open load.
+            remaining_layers: The plan's layers not yet loaded, ascending.
+            transport_error: The transport's failure.
+        """
+        super().__init__(
+            f"transport failed on layer {remaining_layers[0]} of generation "
+            f"{generation}; the load is still open with {len(remaining_layers)} "
+            f"layers to go: {transport_error}"
+        )
+        self.generation = generation
+        self.remaining_layers = remaining_layers
+        self.transport_error = transport_error
 
 
 class LayerArrivalPump:
@@ -112,14 +155,48 @@ class LayerArrivalPump:
             LayerwiseContractError: If either side reports a contract
                 violation. Both sides have been abandoned.
         """
+        try:
+            return self.run_resumable(plan)
+        except LoadLeftOpenError as exc:
+            self._sink.abandon_load(exc.generation)
+            raise exc.transport_error from None
+
+    def run_resumable(self, plan: LayerFetchPlan) -> int:
+        """Like :meth:`run`, but leave the load open if the transport fails.
+
+        For a caller that can still deliver the remaining layers some other
+        way, e.g. by loading the missing objects whole. Abandoning the load
+        would fail the worker's waiters at once, and a new generation would
+        make them raise as stale, so the fallback has to continue this one.
+
+        Args:
+            plan: The slots to fetch and the layers to load.
+
+        Returns:
+            The generation the transport assigned to this fetch.
+
+        Raises:
+            LoadLeftOpenError: If some layer will never arrive or did not
+                arrive in time. Only the transport side has been abandoned;
+                the caller must finish or abandon the load (see the error).
+            LayerwiseContractError: If either side reports a contract
+                violation, or the loader fails. Both sides have been
+                abandoned.
+        """
         layer_ids = plan.layer_ids()
         generation = self._source.begin_fetch(plan)
         try:
             self._sink.begin_load(generation, layer_ids)
-            for layer_id in layer_ids:
-                self._await_layer(layer_id, generation)
+            for index, layer_id in enumerate(layer_ids):
+                try:
+                    self._await_layer(layer_id, generation)
+                except (LayerUnservableError, LayerArrivalTimeoutError) as exc:
+                    self._source.abandon_fetch(generation)
+                    raise LoadLeftOpenError(generation, layer_ids[index:], exc) from exc
                 self._sink.load_layer(layer_id)
             self._sink.finish_load(generation)
+        except LoadLeftOpenError:
+            raise
         except BaseException:
             # Abandon rather than finish: outstanding writes may still be in
             # flight, and the loader may have waiters parked on layers that

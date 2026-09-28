@@ -305,12 +305,14 @@ def test_a_request_planned_from_its_cache_lookup_reads_back_its_objects(
     from lmcache.v1.layerwise.request_fetch import (
         ChunkLocation,
         FetchModel,
-        LeaseOutcome,
         build_request_fetch,
         objects_to_place,
     )
     from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
     from lmcache.v1.multiprocess.token_hasher import TokenHasher
+
+    # Local
+    from ..layerwise.placers import PackingLease
 
     layouts = {0: HYBRID, 1: UNIFORM}
     kernel_layers = {0: [[0, 1], [2]], 1: [[3, 4, 5, 6]]}
@@ -341,36 +343,14 @@ def test_a_request_planned_from_its_cache_lookup_reads_back_its_objects(
             payloads[(chunk_id, group_id)] = values
             _store(adapter, key, values)
 
-    class _PackedLease:
-        """Objects packed back to back from the start of a 1 GiB window."""
-
-        def __init__(self, sizes: dict[tuple[int, int], int]) -> None:
-            self.offsets: dict[tuple[int, int], int] = {}
-            cursor = 0
-            for key, size in sizes.items():
-                self.offsets[key] = cursor
-                cursor += size
-
-        def window_start(self) -> int:
-            return 0
-
-        def window_bytes(self) -> int:
-            return 1 << 30
-
-        def locate(self, chunk_id: int, object_group_id: int) -> ChunkLocation:
-            return ChunkLocation("node", self.offsets[(chunk_id, object_group_id)])
-
-        def release(self, outcome: LeaseOutcome) -> None:
-            pass
-
     layout = ModelLayout.from_registration(layouts, kernel_layers)
     model = FetchModel(layout, attn)
-    lease = _PackedLease(
-        {
-            (o.chunk_id, o.object_group_id): o.object_bytes
-            for o in objects_to_place(model, keys)
-        }
-    )
+    locations: dict[tuple[int, int], ChunkLocation] = {}
+    cursor = 0
+    for obj in objects_to_place(model, keys):
+        locations[(obj.chunk_id, obj.object_group_id)] = ChunkLocation("node", cursor)
+        cursor += obj.object_bytes
+    lease = PackingLease(1 << 30, locations)
     fetch = build_request_fetch(
         model,
         keys,

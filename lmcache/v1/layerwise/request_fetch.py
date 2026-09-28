@@ -37,6 +37,7 @@ from lmcache.v1.layerwise.planner import (
     PlanRequest,
     RecordKeys,
 )
+from lmcache.v1.memory_management import MemoryObj
 
 
 def first_in_window_chunk(num_chunks: int, window_chunks: int) -> int:
@@ -146,6 +147,28 @@ class WindowLease(Protocol):
 
         Returns:
             The object's node and destination offset.
+
+        Raises:
+            KeyError: If the object was not among those the lease placed.
+        """
+        ...
+
+    def memory_obj(self, chunk_id: int, object_group_id: int) -> MemoryObj:
+        """Return the L1 object one placed object is fetched into.
+
+        The loader reads fetched layers through this handle while the
+        object's later layers are still landing. The object stays
+        write-reserved in L1 until the lease is released ``FINISHED``, so an
+        ordinary L1 read refuses it, which also keeps other requests from
+        seeing it half written. Its address is the offset :meth:`locate`
+        returns.
+
+        Args:
+            chunk_id: Index of the chunk within the request.
+            object_group_id: Object group the object belongs to.
+
+        Returns:
+            The object's memory, valid until the lease is released.
 
         Raises:
             KeyError: If the object was not among those the lease placed.

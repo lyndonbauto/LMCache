@@ -235,6 +235,18 @@ def test_a_later_window_is_planned_with_slab_offsets(two_windows: _Setup) -> Non
     held.release(LeaseOutcome.ABANDONED)
 
 
+def test_each_objects_memory_sits_at_its_planned_offset(one_window: _Setup) -> None:
+    objects = objects_to_place(fetch_model(), one_window.keys)
+    lease = one_window.placer.lease(objects)
+
+    for obj in objects:
+        location = lease.locate(obj.chunk_id, obj.object_group_id)
+        memory_obj = lease.memory_obj(obj.chunk_id, obj.object_group_id)
+        assert memory_obj.meta.address == location.dest_offset
+        assert memory_obj.get_size() >= obj.object_bytes
+    lease.release(LeaseOutcome.NEVER_FETCHED)
+
+
 def test_a_declined_slot_falls_back_and_quarantines_the_window(
     one_window: _Setup,
 ) -> None:
