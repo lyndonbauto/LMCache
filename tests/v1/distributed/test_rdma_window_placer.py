@@ -18,6 +18,7 @@ import torch
 from lmcache.v1.distributed.api import AttnWindowDesc, MemoryLayoutDesc, ObjectKey
 from lmcache.v1.distributed.config import L1ManagerConfig, L1MemoryManagerConfig
 from lmcache.v1.distributed.error import L1Error
+from lmcache.v1.distributed.internal_api import L1ManagerListener
 from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.rdma_registration import (
     L1RdmaConfig,
@@ -25,7 +26,6 @@ from lmcache.v1.distributed.l2_adapters.rdma_registration import (
     RdmaWindowPlan,
 )
 from lmcache.v1.distributed.l2_adapters.rdma_window_leaser import RdmaWindowLeaser
-from lmcache.v1.distributed.internal_api import L1ManagerListener
 from lmcache.v1.distributed.l2_adapters.rdma_window_placer import (
     RdmaWindowPlacer,
     check_window_holds_request,

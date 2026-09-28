@@ -30,7 +30,10 @@ from lmcache.v1.distributed.l1_manager import L1Manager
 from lmcache.v1.distributed.l2_adapters.aerospike_l2_adapter import (
     AerospikeL2AdapterConfig,
 )
-from lmcache.v1.distributed.l2_adapters.config import L2AdaptersConfig
+from lmcache.v1.distributed.l2_adapters.config import (
+    L2AdapterConfigBase,
+    L2AdaptersConfig,
+)
 from lmcache.v1.distributed.l2_adapters.rdma_registration import (
     L1RdmaConfig,
     RdmaTransport,
@@ -500,7 +503,7 @@ def test_a_missing_window_cannot_be_reclaimed(
 
 
 def _storage_config(
-    adapters: list[AerospikeL2AdapterConfig],
+    adapters: list[L2AdapterConfigBase],
 ) -> StorageManagerConfig:
     return StorageManagerConfig(
         l1_manager_config=L1ManagerConfig(

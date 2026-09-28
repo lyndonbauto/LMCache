@@ -77,7 +77,7 @@ def _load_module() -> ModuleType:
         pytest.skip("fabric_free_session built but no module was found")
     spec = importlib.util.spec_from_file_location("fabric_free_session", built[0])
     if spec is None or spec.loader is None:
-        pytest.skip(f"cannot load {built[0]}")
+        raise ImportError(f"cannot load {built[0]}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module

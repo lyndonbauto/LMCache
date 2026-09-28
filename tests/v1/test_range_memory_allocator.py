@@ -46,8 +46,10 @@ def test_writes_land_in_the_slab_range(
 ) -> None:
     obj = allocator.allocate(ONE_PAGE, torch.uint8)
     assert obj is not None
+    tensor = obj.tensor
+    assert tensor is not None
 
-    obj.tensor.fill_(7)
+    tensor.fill_(7)
 
     start = obj.meta.address
     assert torch.all(slab[start : start + ALIGN] == 7)
