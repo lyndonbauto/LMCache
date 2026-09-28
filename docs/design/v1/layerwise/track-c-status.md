@@ -18,7 +18,7 @@ items are in [system-design.md](system-design.md) section 11 and
 | C6 out-of-order pump | Done |
 | C7 failure paths abandon both sides | Done |
 | C8 conformance suite | Done: the scripted and Aerospike sources, over the real native session (fabric-free) |
-| C9 end to end | In progress ([c9-wiring.md](c9-wiring.md)). Done: deferred lookup mode, storage accessors (placer, record cap, adapter id, resident-key locks, whole load into L1), `--pipelined-*` options, registration, lookup eligibility, session record of deferred keys, retrieve orchestration (`run_pipelined_retrieve` with a loader, fallback, shared-key policy), retrieve wiring behind a `PipelinedSinkFactory`. Next: Track B's sink factory, installed in `_build_modules`. Over Soft-RoCE needs all three tracks |
+| C9 end to end | In progress ([c9-wiring.md](c9-wiring.md)). Done: deferred lookup mode, storage accessors (placer, record cap, adapter id, resident-key locks, whole load into L1), `--pipelined-*` options, registration, lookup eligibility, session record of deferred keys, retrieve orchestration (`run_pipelined_retrieve` with a loader, fallback, shared-key policy), retrieve wiring behind a `PipelinedSinkFactory`. Track B's `MultiprocessPipelinedSinkFactory` is merged and installed in `_build_modules`, so `--pipelined-fetch` now runs the whole path. Next: a GPU run, then over Soft-RoCE with all three tracks |
 | C10 no hardware in tests | Holds |
 
 ## Doable now
