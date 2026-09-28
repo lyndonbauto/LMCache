@@ -460,6 +460,25 @@ class L2AdapterInterface(ABC):
             f"{type(self).__name__} has no layer-pipelined fetch path"
         )
 
+    def pipelined_max_record_bytes(self) -> int:
+        """Return the record cap this backend writes objects under.
+
+        A layerwise plan names each stored record, and how many records an
+        object has depends on this cap, so the planner must use the one the
+        objects were written with. The default raises: most backends have no
+        layer-pipelined path.
+
+        Returns:
+            The cap in bytes, always positive.
+
+        Raises:
+            LayerwiseContractError: If this backend has no ready pipelined
+                fetch path.
+        """
+        raise LayerwiseContractError(
+            f"{type(self).__name__} has no layer-pipelined fetch path"
+        )
+
     def layer_arrival_source(self) -> LayerArrivalSource:
         """Return a source that fetches and reports layers for this backend.
 

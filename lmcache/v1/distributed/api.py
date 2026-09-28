@@ -21,6 +21,7 @@ from lmcache.logging import init_logger
 if TYPE_CHECKING:
     # First Party
     from lmcache.lmcache_native import Bitmap
+    from lmcache.v1.memory_management import MemoryObj
     from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
 logger = init_logger(__name__)
@@ -472,6 +473,28 @@ class PrefetchResult:
 
     retained: "Bitmap"
     deferred_keys: tuple[ObjectKey, ...] = ()
+
+
+@dataclass(frozen=True)
+class ResidentKeys:
+    """Which of some keys L1 can serve right now.
+
+    Returned by ``StorageManager.lock_resident_keys``. Every key asked about
+    is in exactly one of the three fields, and each field keeps the order
+    the keys were asked in.
+
+    Attributes:
+        locked: Keys that were readable, now read-locked by the caller, with
+            their memory. The caller releases them with
+            ``finish_read_prefetched``.
+        busy: Keys that exist but are being written, e.g. by another
+            request's fetch. Not locked.
+        absent: Keys not in L1. Not locked.
+    """
+
+    locked: dict[ObjectKey, "MemoryObj"]
+    busy: tuple[ObjectKey, ...]
+    absent: tuple[ObjectKey, ...]
 
 
 @dataclass(frozen=True)
