@@ -439,6 +439,14 @@ in-flight transfer in the subtraction forever.
 > the signature.  The store path publishes its SUBMITTED sentinel *after*
 > the equivalent check, so it is unaffected.
 
+| OTel metric name | Prometheus name | Type | Source event | Calculation |
+|---|---|---|---|---|
+| `lmcache_mp.num_deferred_retrieves` | `lmcache_mp_num_deferred_retrieves_total` | Counter (attr: `outcome`) | `MP_RETRIEVE_END` | +1 per event whose `pipelined_outcome` is not `not_deferred` |
+
+**What it answers:** Of the retrieves whose lookup deferred L2 hits to the
+layerwise pipelined fetch, how many were served layer by layer (`pipelined`)
+and how many fell back (`fell_back`, `refused`, `no_source`, ...) or failed?
+
 ---
 
 ## L1 ↔ L2 Throughput Histograms

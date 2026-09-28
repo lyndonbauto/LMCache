@@ -24,7 +24,10 @@ from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.layerwise import LayerwiseContractError
 from lmcache.v1.layerwise.deferral import PipelinedModel
-from lmcache.v1.layerwise.pipelined_retrieve import resolve_shared_keys
+from lmcache.v1.layerwise.pipelined_retrieve import (
+    SharedKeysBusyError,
+    resolve_shared_keys,
+)
 from lmcache.v1.layerwise.planner import ModelLayout
 from lmcache.v1.layerwise.request_fetch import (
     FetchModel,
@@ -66,6 +69,7 @@ from lmcache.v1.multiprocess.pipelined_loading import (
     DeferredLoad,
     ObjectTable,
     PipelinedLoadRequest,
+    PipelinedOutcome,
     PipelinedSinkFactory,
     fetch_deferred_objects,
 )
@@ -210,6 +214,22 @@ def _publish_layerwise_retrieve_terminal(
     progress.mark_retrieve_failed()
     if shm_to_close is not None:
         shm_to_close.close()
+
+
+@dataclass(frozen=True)
+class _DeferredKeys:
+    """What a retrieve does with the deferred keys its session handed it.
+
+    ``to_fetch`` are fetched layer by layer. ``locked`` are the keys this
+    retrieve read-locked itself (reused from another fetch, or loaded whole
+    up front); they are read with the L1 part, and released by the retrieve
+    even if it fails before reading them.
+    """
+
+    to_fetch: tuple[ObjectKey, ...] = ()
+    locked: tuple[ObjectKey, ...] = ()
+    #: The outcome when nothing is left to fetch layer by layer.
+    outcome: PipelinedOutcome = PipelinedOutcome.NOT_DEFERRED
 
 
 @dataclass
@@ -1189,17 +1209,19 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 and getattr(entry, "layer_progress", None) is not None
                 and getattr(entry, "daemon_layer_event_pool", None) is not None
             )
-            keys_to_fetch: tuple[ObjectKey, ...] = ()
+            deferred = _DeferredKeys()
+            claimed: tuple[ObjectKey, ...] = ()
+            outcome = PipelinedOutcome.NOT_DEFERRED
             fetched_in_window: tuple[ObjectKey, ...] = ()
             try:
-                keys_to_fetch = self._resolve_deferred_keys(
-                    key,
-                    model_name,
-                    obj_keys_per_obj_group,
-                    group_skips,
-                    skipped_groups,
-                    layerwise_active,
+                claimed = self._claim_deferred_keys(
+                    key, obj_keys_per_obj_group, group_skips, skipped_groups
                 )
+                deferred = self._resolve_deferred_keys(
+                    key, model_name, claimed, layerwise_active
+                )
+                keys_to_fetch = deferred.to_fetch
+                outcome = deferred.outcome
                 fetch_set = frozenset(keys_to_fetch)
                 for obj_group_id in range(num_object_groups):
                     if obj_group_id in skipped_groups:
@@ -1287,6 +1309,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         prefetched_keys.extend(deferred_fetch.locked_keys)
                         memory_objs_by_group = table.by_group()
                         delivery = deferred_fetch.load
+                        outcome = deferred_fetch.outcome
                         if delivery is DeferredLoad.PIPELINED:
                             fetched_in_window = keys_to_fetch
                     if delivery is DeferredLoad.WHOLE:
@@ -1301,22 +1324,30 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             retrieve_generation,
                             transfer_key=transfer_key,
                         )
-            except Exception:
+            except Exception as exc:
                 logger.exception("Cannot retrieve keys due to exception")
                 retrieve_succeeded = False
+                if claimed:
+                    outcome = (
+                        PipelinedOutcome.SHARED_KEYS_BUSY
+                        if isinstance(exc, SharedKeysBusyError)
+                        else PipelinedOutcome.FAILED
+                    )
                 if layerwise_active:
                     _publish_layerwise_retrieve_terminal(
                         self._ctx, entry, instance_id, retrieve_generation
                     )
             finally:
                 event_backend.record_event(event, cache_context.stream)
+                retrieved_count = len(set(prefetched_keys).union(fetched_in_window))
+                read_keys = set(prefetched_keys)
+                prefetched_keys.extend(k for k in deferred.locked if k not in read_keys)
                 if prefetched_keys:
                     submit_callback_to_stream(
                         cache_context.cupy_stream,
                         "finish_read_prefetched",
                         prefetched_keys,
                     )
-                retrieved_count = len(set(prefetched_keys).union(fetched_in_window))
                 num_tokens = (
                     num_chunks * self._ctx.chunk_size
                     if retrieved_count == expected_retained
@@ -1336,6 +1367,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             "total_bytes": total_bytes,
                             "num_tokens": num_tokens,
                             "transfer_key": transfer_key,
+                            "pipelined_outcome": outcome.value,
+                            "deferred_count": len(claimed),
                         },
                     ),
                 )
@@ -1405,38 +1438,27 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
         )
 
-    def _resolve_deferred_keys(
+    def _claim_deferred_keys(
         self,
         key: IPCCacheServerKey,
-        model_name: str,
         obj_keys_per_obj_group: list[list[ObjectKey]],
         group_skips: list[int],
         skipped_groups: set[int],
-        layerwise_active: bool,
     ) -> tuple[ObjectKey, ...]:
-        """Claim this retrieve's deferred keys and say which to fetch.
+        """Take the session's deferred keys among this retrieve's reads.
 
-        Deferred keys another fetch left readable are read-locked for reuse,
-        and busy ones are handled by ``--pipelined-shared-keys``. If this
-        retrieve cannot fetch layer by layer, the rest are loaded whole. Keys
-        locked here are read, and released, like the lookup's.
+        Takes no locks. Each key is handed out once per lookup, so a repeated
+        retrieve cannot fetch twice.
 
         Args:
             key: The retrieve's key.
-            model_name: The registered model.
             obj_keys_per_obj_group: The retrieve's keys per object group.
             group_skips: Per group, the first chunk read.
             skipped_groups: Groups the retrieve does not read.
-            layerwise_active: Whether this retrieve loads layer by layer.
 
         Returns:
-            The deferred keys still to fetch layer by layer, in request
-            order; empty when every key is now in L1.
-
-        Raises:
-            SharedKeysBusyError: If a busy key made the retrieve give up.
-            LayerwiseContractError: If a whole load missed a key.
-            LMCacheTimeoutError: If a whole load took too long.
+            The claimed keys in request order; empty without a pipelined
+            sink, a session, or deferred keys.
         """
         if self._pipelined_sink_factory is NO_PIPELINED_SINK_FACTORY:
             return ()
@@ -1449,23 +1471,59 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             if group_id not in skipped_groups
             for obj_key in keys[group_skips[group_id] :]
         ]
-        deferred = session.claim_deferred_keys(in_window)
-        if not deferred:
-            return ()
+        return tuple(session.claim_deferred_keys(in_window))
+
+    def _resolve_deferred_keys(
+        self,
+        key: IPCCacheServerKey,
+        model_name: str,
+        claimed: tuple[ObjectKey, ...],
+        layerwise_active: bool,
+    ) -> _DeferredKeys:
+        """Say which claimed deferred keys to fetch layer by layer.
+
+        Deferred keys another fetch left readable are read-locked for reuse,
+        and busy ones are handled by ``--pipelined-shared-keys``. If this
+        retrieve cannot fetch layer by layer, the rest are loaded whole. Keys
+        locked here are read, and released, like the lookup's; the retrieve
+        releases them itself if it fails before reading them.
+
+        Args:
+            key: The retrieve's key.
+            model_name: The registered model.
+            claimed: The keys :meth:`_claim_deferred_keys` took.
+            layerwise_active: Whether this retrieve loads layer by layer.
+
+        Returns:
+            The deferred keys still to fetch layer by layer, in request
+            order (empty when every key is now in L1), the keys locked here,
+            and the outcome when nothing is left to fetch.
+
+        Raises:
+            SharedKeysBusyError: If a busy key made the retrieve give up.
+            LayerwiseContractError: If a whole load missed a key.
+            LMCacheTimeoutError: If a whole load took too long.
+        """
+        if not claimed:
+            return _DeferredKeys()
         storage_manager = self._ctx.storage_manager
         config = self._ctx.pipelined_fetch
         resolution = resolve_shared_keys(
-            storage_manager, deferred, config.shared_keys, config.shared_wait_seconds
+            storage_manager,
+            list(claimed),
+            config.shared_keys,
+            config.shared_wait_seconds,
         )
         to_fetch = resolution.to_fetch
+        reused = tuple(resolution.reused)
         if not to_fetch:
-            return ()
+            return _DeferredKeys(locked=reused, outcome=PipelinedOutcome.REUSED)
         try:
             self._ctx.pipelined_models.find(model_name, key.world_size)
         except KeyError:
             layerwise_active = False
         if layerwise_active:
-            return to_fetch
+            return _DeferredKeys(to_fetch=tuple(to_fetch), locked=reused)
         try:
             loaded = storage_manager.load_into_l1(
                 list(to_fetch),
@@ -1484,7 +1542,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 f"{len(to_fetch) - len(loaded)} deferred object(s) could not "
                 "be loaded whole"
             )
-        return ()
+        return _DeferredKeys(
+            locked=reused + tuple(loaded), outcome=PipelinedOutcome.LOADED_WHOLE
+        )
 
     def _group_layout_descs(
         self, model_name: str, world_size: int

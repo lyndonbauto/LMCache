@@ -57,10 +57,12 @@ class MPServerLoggingSubscriber(EventSubscriber):
 
     def _on_retrieve_end(self, event: Event) -> None:
         logger.debug(
-            "MP retrieve end: session=%s device=%s retrieved_count=%s",
+            "MP retrieve end: session=%s device=%s retrieved_count=%s "
+            "pipelined_outcome=%s",
             event.session_id,
             event.metadata.get("device"),
             event.metadata.get("retrieved_count"),
+            event.metadata.get("pipelined_outcome"),
         )
 
     def _on_lookup_prefetch_start(self, event: Event) -> None:

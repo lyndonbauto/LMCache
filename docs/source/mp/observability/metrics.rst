@@ -523,6 +523,13 @@ model, use the L0 ↔ L1 throughput histograms or
      - Counter (attr: ``device``)
      - CPU→GPU retrieve transfers completed on the device stream, +1 per
        completion.
+   * - ``lmcache_mp.num_deferred_retrieves``
+     - Counter (attr: ``outcome``)
+     - Retrieves whose lookup deferred L2 hits to the layerwise pipelined
+       fetch, by how they were served: ``pipelined``, ``fell_back``,
+       ``refused``, ``no_source``, ``loaded_whole``, ``reused``,
+       ``shared_keys_busy`` or ``failed``. Retrieves with nothing deferred
+       are not counted.
 
 **PromQL for in-flight GPU copies:**
 

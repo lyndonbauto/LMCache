@@ -39,6 +39,7 @@ from lmcache.v1.layerwise.contract import (
 from lmcache.v1.layerwise.deferral import PipelinedModel
 from lmcache.v1.layerwise.pipelined_retrieve import (
     PipelinedRetrieveRefused,
+    RetrieveCompletion,
     run_pipelined_retrieve,
 )
 from lmcache.v1.layerwise.pump import DEFAULT_LAYER_TIMEOUT_SECONDS
@@ -219,18 +220,56 @@ class DeferredLoad(Enum):
     WHOLE = "whole"
 
 
+class PipelinedOutcome(Enum):
+    """How one retrieve's deferred keys were served, for observability.
+
+    Published as ``pipelined_outcome`` on ``MP_RETRIEVE_END``. Only
+    ``PIPELINED`` means the layers were loaded as they arrived; every other
+    served outcome means the request waited for whole objects.
+    """
+
+    #: The lookup deferred nothing for this retrieve.
+    NOT_DEFERRED = "not_deferred"
+    #: Every layer was loaded from the window as it landed.
+    PIPELINED = "pipelined"
+    #: The transport failed part way; the rest came from whole objects.
+    FELL_BACK = "fell_back"
+    #: No L2 adapter could fetch layer by layer; loaded whole.
+    NO_SOURCE = "no_source"
+    #: The lease or plan was refused (window busy, too many slots, ...);
+    #: loaded whole.
+    REFUSED = "refused"
+    #: The retrieve was not layerwise, or the model has no pipelined setup;
+    #: loaded whole before the transfer.
+    LOADED_WHOLE = "loaded_whole"
+    #: Another fetch had already left every deferred key in L1.
+    REUSED = "reused"
+    #: Another request was still fetching a deferred key, and
+    #: ``--pipelined-shared-keys`` gave up; vLLM recomputes.
+    SHARED_KEYS_BUSY = "shared_keys_busy"
+    #: Serving the deferred keys raised; vLLM recomputes.
+    FAILED = "failed"
+
+
 @dataclass(frozen=True)
 class DeferredFetchResult:
     """What :func:`fetch_deferred_objects` did.
 
     Attributes:
-        load: How the objects were delivered.
+        outcome: ``PIPELINED``, ``FELL_BACK``, ``NO_SOURCE`` or ``REFUSED``.
         locked_keys: Keys this call read-locked in L1 (whole loads, in
             either path). The caller releases them after its copies.
     """
 
-    load: DeferredLoad
+    outcome: PipelinedOutcome
     locked_keys: tuple[ObjectKey, ...]
+
+    @property
+    def load(self) -> DeferredLoad:
+        """Whether the sink delivered every layer or the caller must copy."""
+        if self.outcome in (PipelinedOutcome.PIPELINED, PipelinedOutcome.FELL_BACK):
+            return DeferredLoad.PIPELINED
+        return DeferredLoad.WHOLE
 
 
 class _WindowLoader:
@@ -353,10 +392,11 @@ def fetch_deferred_objects(
             source = storage.layer_arrival_source()
         except LayerwiseContractError as exc:
             logger.warning("No pipelined fetch; loading whole objects: %s", exc)
+            outcome = PipelinedOutcome.NO_SOURCE
         else:
             try:
                 loader.place(_objects_of(model, obj_keys_per_obj_group, wanted))
-                run_pipelined_retrieve(
+                result = run_pipelined_retrieve(
                     model.fetch_model,
                     obj_keys_per_obj_group,
                     model.max_record_bytes,
@@ -366,17 +406,23 @@ def fetch_deferred_objects(
                     keys_to_fetch=wanted,
                 )
                 return DeferredFetchResult(
-                    DeferredLoad.PIPELINED, tuple(loader.locked_keys)
+                    (
+                        PipelinedOutcome.FELL_BACK
+                        if result.completion is RetrieveCompletion.FELL_BACK
+                        else PipelinedOutcome.PIPELINED
+                    ),
+                    tuple(loader.locked_keys),
                 )
             except PipelinedRetrieveRefused as exc:
                 logger.warning(
                     "Pipelined fetch refused; loading whole objects: %s", exc
                 )
+                outcome = PipelinedOutcome.REFUSED
         objects = _objects_of(model, obj_keys_per_obj_group, wanted)
         request.objects.put(
             _load_whole(storage, objects, group_layout_descs, loader.locked_keys)
         )
-        return DeferredFetchResult(DeferredLoad.WHOLE, tuple(loader.locked_keys))
+        return DeferredFetchResult(outcome, tuple(loader.locked_keys))
     except BaseException:
         if loader.locked_keys:
             loader.wait_after_failure()
