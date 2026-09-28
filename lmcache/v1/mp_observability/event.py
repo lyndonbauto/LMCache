@@ -48,6 +48,8 @@ class EventType(Enum):
     L2_PREFETCH_LOOKUP_COMPLETED = "l2.prefetch.lookup.completed"
     L2_PREFETCH_LOAD_SUBMITTED = "l2.prefetch.load.submitted"
     L2_PREFETCH_LOAD_COMPLETED = "l2.prefetch.load.completed"
+    # The L2 hits were reported without loading; the retrieve fetches them.
+    L2_PREFETCH_DEFERRED = "l2.prefetch.deferred"
     # Per-adapter load task events, for throughput correlation.  Fire once
     # per (request_id, adapter_index) pair, unlike the request-level
     # L2_PREFETCH_LOAD_* events above which aggregate across adapters.

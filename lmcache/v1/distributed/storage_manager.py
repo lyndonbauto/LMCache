@@ -21,6 +21,7 @@ from lmcache.v1.distributed.api import (
     PrefetchHandle,
     PrefetchMode,
     PrefetchRequestSpec,
+    PrefetchResult,
     Tier,
     TrimPolicy,
 )
@@ -710,13 +711,37 @@ class StorageManager:
             done, None if it's still in progress. Derive the prefix hit count
             via ``count_leading_ones``.
         """
+        outcome = self.query_prefetch_outcome(handle)
+        return outcome.retained if outcome is not None else None
+
+    def query_prefetch_outcome(
+        self,
+        handle: PrefetchHandle,
+    ) -> PrefetchResult | None:
+        """Query the result of a prefetch task, including its deferred keys.
+
+        Each result is returned once, by this method or
+        :meth:`query_prefetch_status`.
+
+        Args:
+            handle: The handle of the prefetch task.
+
+        Returns:
+            None if the prefetch is still in progress. Otherwise the found-key
+            bitmap over original positions, and the keys the lookup deferred
+            (see ``PrefetchRequestSpec.l2_deferral``). Deferred keys count as
+            found but hold no lock; the caller fetches them.
+        """
         l2_r: Bitmap | None = None
+        deferred_keys: tuple[ObjectKey, ...] = ()
         if handle.prefetch_request_id != -1:
-            l2_r = self._prefetch_controller.query_prefetch_result(
+            outcome = self._prefetch_controller.query_prefetch_outcome(
                 handle.prefetch_request_id
             )
-            if l2_r is None:
+            if outcome is None:
                 return None
+            l2_r = outcome.retained
+            deferred_keys = outcome.deferred_keys
 
         found = self._combine_found(handle, l2_r)
         # popcount (not count_leading_ones) so the log is accurate for
@@ -730,17 +755,18 @@ class StorageManager:
             l2_hits = l2_r.popcount() if l2_r is not None else 0
             logger.info(
                 "Prefetch request completed (L1+L2): "
-                "%d/%d retained keys (%d L1, %d L2) in %.1f ms "
+                "%d/%d retained keys (%d L1, %d L2, %d deferred) in %.1f ms "
                 "(external_request_id=%s, prefetch_request_id=%d)",
                 total_hits,
                 handle.total_requested_keys,
                 l1_hits,
                 l2_hits,
+                len(deferred_keys),
                 elapsed_ms,
                 handle.external_request_id,
                 handle.prefetch_request_id,
             )
-        return found
+        return PrefetchResult(found, deferred_keys)
 
     def set_kv_plane_bytes(self, plane_bytes: int) -> None:
         """Pass the K/V plane size on to every L2 adapter.

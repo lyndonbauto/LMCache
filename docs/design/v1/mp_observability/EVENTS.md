@@ -90,6 +90,7 @@ On the failure path of `L2_STORE_COMPLETED`, `key_count_per_salt` is absent
 | `L2_PREFETCH_LOOKUP_COMPLETED` | `request_id`, `prefix_hit_count` | `int`, `int` |
 | `L2_PREFETCH_LOAD_SUBMITTED` | `request_id`, `key_count`, `adapter_count`, `key_count_per_salt` | `int`, `int`, `int`, `dict[str, int]` |
 | `L2_PREFETCH_LOAD_COMPLETED` | `request_id`, `loaded_count`, `failed_count`, `key_count_per_salt` | `int`, `int`, `int`, `dict[str, int]` |
+| `L2_PREFETCH_DEFERRED` | `request_id`, `key_count`, `key_count_per_salt` | `int`, `int`, `dict[str, int]` |
 | `L2_LOAD_TASK_SUBMITTED` | `request_id`, `adapter_index`, `task_id`, `l2_name`, `key_count`, `total_bytes` | `int`, `int`, `int`, `str`, `int`, `int` |
 | `L2_LOAD_TASK_COMPLETED` | `request_id`, `adapter_index`, `task_id`, `l2_name` | `int`, `int`, `int`, `str` |
 

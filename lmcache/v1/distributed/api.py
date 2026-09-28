@@ -7,8 +7,9 @@ Could be implemented by native code in the future
 """
 
 # Standard
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, get_args
+from typing import TYPE_CHECKING, Literal, Protocol, get_args, runtime_checkable
 import enum
 
 # Third Party
@@ -19,6 +20,7 @@ from lmcache.logging import init_logger
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.lmcache_native import Bitmap
     from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
 
 logger = init_logger(__name__)
@@ -411,6 +413,67 @@ DEFAULT_ATTN_WINDOW_DESC = AttnWindowDesc(num_chunks_in_sw=[-1])
 windows are supplied."""
 
 
+@runtime_checkable
+class L2Deferral(Protocol):
+    """Decides whether a lookup leaves its L2 hits for the retrieve to fetch.
+
+    Consulted once per request, after the L2 lookup, with the keys the
+    request would otherwise load. Accepting makes the controller skip the
+    load: the keys are reported as found but are not in L1, and the caller
+    receives them as :attr:`PrefetchResult.deferred_keys` to fetch itself.
+    Called on the prefetch controller's thread, so it must not block.
+    """
+
+    def accepts(self, adapter_ids: Sequence[int], keys: Sequence[ObjectKey]) -> bool:
+        """Report whether to defer loading ``keys``.
+
+        Args:
+            adapter_ids: The L2 adapters the load would read from, ascending.
+            keys: Every key the load would read, in prefix order.
+
+        Returns:
+            ``True`` to defer all of them, ``False`` to load them as usual.
+        """
+        ...
+
+
+class _NoL2Deferral:
+    """The :class:`L2Deferral` that never defers."""
+
+    def accepts(self, adapter_ids: Sequence[int], keys: Sequence[ObjectKey]) -> bool:
+        """Never defer.
+
+        Args:
+            adapter_ids: Unused.
+            keys: Unused.
+
+        Returns:
+            ``False``.
+        """
+        return False
+
+
+#: The default deferral: every L2 hit is loaded into L1 during the lookup.
+NO_L2_DEFERRAL: L2Deferral = _NoL2Deferral()
+
+
+@dataclass(frozen=True)
+class PrefetchResult:
+    """The outcome of one prefetch request.
+
+    Attributes:
+        retained: Bitmap over the request's keys of those it serves: found in
+            L1 or L2 and inside the retained set. Every retained key that is
+            not deferred holds its read locks in L1.
+        deferred_keys: Retained keys that were found in L2 but deliberately
+            not loaded (see :class:`L2Deferral`), in prefix order. They hold
+            no L1 or L2 lock. Empty unless the request's deferral accepted.
+    """
+
+    retained: "Bitmap"
+    deferred_keys: tuple[ObjectKey, ...] = ()
+
+
 @dataclass(frozen=True)
 class PrefetchRequestSpec:
     """Immutable inputs of a single L2 prefetch request.
@@ -432,6 +495,8 @@ class PrefetchRequestSpec:
             groups must narrow it to that subset (it drives the fold
             stride).
         mode: Prefetch intent (see :class:`PrefetchMode`).
+        l2_deferral: Whether to leave the L2 hits for the caller to fetch
+            (see :class:`L2Deferral`). Only consulted in ``LOOKUP`` mode.
     """
 
     keys: list[ObjectKey]
@@ -440,6 +505,7 @@ class PrefetchRequestSpec:
     policy: TrimPolicy = TrimPolicy.PREFIX
     attn_desc: AttnWindowDesc = DEFAULT_ATTN_WINDOW_DESC
     mode: PrefetchMode = PrefetchMode.LOOKUP
+    l2_deferral: L2Deferral = NO_L2_DEFERRAL
 
     def __post_init__(self) -> None:
         if self.num_kv_readers < 1:
