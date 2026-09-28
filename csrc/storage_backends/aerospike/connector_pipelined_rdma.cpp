@@ -172,13 +172,16 @@ void AerospikePipelinedRdmaDriver::set_object_group_layouts(
         "Aerospike pipelined RDMA: cannot replace layouts during an active "
         "fetch");
   }
+  // Plans come from the caller, so the planner is built only because its
+  // constructor rejects a malformed layout.
+  const rdma::SlotPlanner validated(layouts);
   if (pool_) {
     generation_counters_ = pool_->generation_counters();
   }
   pool_.reset();
   layout_error_ = rdma::window_fit_error(layouts, registration_.window_bytes,
                                          registration_.align_bytes);
-  planner_ = std::make_unique<rdma::SlotPlanner>(std::move(layouts));
+  layouts_set_ = true;
   ensure_pool();
 }
 
@@ -307,14 +310,13 @@ void AerospikePipelinedRdmaDriver::abandon_request(uint16_t generation) {
 }
 
 void AerospikePipelinedRdmaDriver::ensure_pool() {
-  if (!planner_ || !fabric_ready_ || !layout_error_.empty()) {
+  if (!layouts_set_ || !fabric_ready_ || !layout_error_.empty()) {
     pool_.reset();
     return;
   }
   pool_ = std::make_unique<rdma::PipelinedFetchPool>(
-      *planner_, registry_, namespace_name_, max_record_bytes_,
-      max_record_bytes_, registration_.window_bytes, registration_.window_count,
-      max_notification_slots_);
+      registry_, namespace_name_, registration_.window_bytes,
+      registration_.window_count, max_notification_slots_);
   if (generation_counters_.size() == registration_.window_count) {
     pool_->restore_generation_counters(generation_counters_);
   }

@@ -17,15 +17,13 @@
 #include "layer_pipeline.h"
 #include "pipelined_fetch_issue.h"
 #include "pipelined_fetch_session.h"
-#include "shard_plan.h"
 #include "slot_planner.h"
 
 namespace {
 
-using lmcache::connector::plane_segment_bytes;
-using lmcache::connector::rdma::ChunkNodeBinding;
 using lmcache::connector::rdma::ChunkPlacement;
 using lmcache::connector::rdma::encode_immediate;
+using lmcache::connector::rdma::FetchSlot;
 using lmcache::connector::rdma::KernelGroupLayout;
 using lmcache::connector::rdma::kNoGeneration;
 using lmcache::connector::rdma::NodeRegistration;
@@ -35,7 +33,7 @@ using lmcache::connector::rdma::ObjectGroupLayout;
 using lmcache::connector::rdma::PipelinedFetchSession;
 using lmcache::connector::rdma::PlannedSlot;
 using lmcache::connector::rdma::PlanTooLargeError;
-using lmcache::connector::rdma::SlotDigest;
+using lmcache::connector::rdma::RequestPlan;
 using lmcache::connector::rdma::SlotPlanner;
 
 constexpr size_t kRecordCap = 1u << 20;
@@ -85,54 +83,37 @@ void register_node(NodeRegistry& registry, const std::string& name,
   registry.set(reg);
 }
 
-PipelinedFetchSession make_session(const SlotPlanner& planner,
-                                   const NodeRegistry& registry) {
-  return PipelinedFetchSession(planner, registry, "kv", kRecordCap, kWriteCap,
-                               kWindowBytes, kNotifyCap);
+PipelinedFetchSession make_session(const NodeRegistry& registry) {
+  return PipelinedFetchSession(registry, "kv", kWindowBytes, kNotifyCap);
 }
 
-std::vector<SlotDigest> digests_for_plan(
-    const SlotPlanner& planner,
-    const lmcache::connector::rdma::RequestPlan& plan,
-    const std::vector<ChunkPlacement>& placements, size_t max_record_bytes,
+// The slots a caller would pass for `plan`: slot i goes to the node of its
+// chunk in `chunk_nodes` and carries digest `prefix + i`.
+std::vector<PlannedSlot> slots_for_plan(
+    const RequestPlan& plan, const std::map<uint32_t, std::string>& chunk_nodes,
     const std::string& prefix) {
-  std::vector<SlotDigest> out;
-  std::map<uint32_t, std::vector<const ChunkPlacement*>> by_group;
-  for (const ChunkPlacement& placement : placements) {
-    by_group[placement.object_group_id].push_back(&placement);
-  }
-  size_t slot_index = 0;
-  for (const uint32_t layer_id : planner.layer_ids()) {
-    const uint32_t group_id = planner.object_group_of_layer(layer_id);
-    const auto group_placements = by_group.find(group_id);
-    if (group_placements == by_group.end()) {
-      continue;
-    }
-    const std::vector<lmcache::connector::rdma::ByteRange> planes =
-        planner.layer_plane_ranges(layer_id);
-    for (const ChunkPlacement* placement : group_placements->second) {
-      for (uint32_t plane = 0; plane < planes.size(); ++plane) {
-        const size_t record_bytes =
-            plane_segment_bytes(planes[plane].length, max_record_bytes);
-        const size_t pieces =
-            (planes[plane].length + record_bytes - 1) / record_bytes;
-        for (size_t piece = 0; piece < pieces; ++piece) {
-          SlotDigest entry;
-          entry.chunk_id = placement->chunk_id;
-          entry.layer_id = layer_id;
-          entry.plane = plane;
-          entry.piece = static_cast<uint32_t>(piece);
-          entry.digest_hex = prefix + std::to_string(slot_index);
-          out.push_back(entry);
-          ++slot_index;
-        }
-      }
-    }
-  }
-  if (slot_index != plan.slot_count()) {
-    throw std::runtime_error("digests_for_plan: slot count mismatch");
+  std::vector<PlannedSlot> out;
+  for (size_t i = 0; i < plan.slot_count(); ++i) {
+    const FetchSlot& slot = plan.slot(static_cast<uint16_t>(i));
+    PlannedSlot planned;
+    planned.node_name = chunk_nodes.at(slot.chunk_id);
+    planned.digest_hex = prefix + std::to_string(i);
+    planned.layer_id = slot.layer_id;
+    planned.offset = slot.offset;
+    planned.length = slot.length;
+    out.push_back(planned);
   }
   return out;
+}
+
+// Plan `placements` of one layout at `record_cap` and turn it into slots.
+std::vector<PlannedSlot> plan_slots(
+    const SlotPlanner& planner, const std::vector<ChunkPlacement>& placements,
+    const std::map<uint32_t, std::string>& chunk_nodes,
+    const std::string& prefix, size_t record_cap = kRecordCap) {
+  return slots_for_plan(
+      planner.plan_request(placements, record_cap, kWriteCap, 0), chunk_nodes,
+      prefix);
 }
 
 std::vector<uint16_t> slot_indices_in_command(const std::string& command) {
@@ -195,22 +176,14 @@ void test_multi_node_request_shares_one_slot_index_space() {
   register_node(registry, "node-a", 10);
   register_node(registry, "node-b", 20);
 
-  PipelinedFetchSession session = make_session(planner, registry);
+  PipelinedFetchSession session = make_session(registry);
 
   const std::vector<ChunkPlacement> placements = {
       ChunkPlacement{0, 0, 0},
       ChunkPlacement{1, 0, object_bytes},
   };
-  const std::vector<ChunkNodeBinding> nodes = {
-      {0, "node-a"},
-      {1, "node-b"},
-  };
-
-  const auto expected_plan =
-      planner.plan_request(placements, kRecordCap, kWriteCap, 0);
-  const uint16_t gen2 = session.begin_request(
-      placements, nodes,
-      digests_for_plan(planner, expected_plan, placements, kRecordCap, "aa"));
+  const uint16_t gen2 = session.begin_request_from_slots(
+      plan_slots(planner, placements, {{0, "node-a"}, {1, "node-b"}}, "aa"));
 
   const std::vector<std::pair<std::string, std::string>> commands =
       session.pipelined_fetch_commands();
@@ -238,17 +211,14 @@ void test_one_node_two_chunks_orders_sinks_by_slot() {
   const size_t object_bytes = object_group_bytes(layout);
   NodeRegistry registry;
   register_node(registry, "node-a", 1);
-  PipelinedFetchSession session = make_session(planner, registry);
+  PipelinedFetchSession session = make_session(registry);
 
   const std::vector<ChunkPlacement> placements = {
       ChunkPlacement{0, 0, 0},
       ChunkPlacement{5, 0, object_bytes},
   };
-  const std::vector<ChunkNodeBinding> nodes = {{0, "node-a"}, {5, "node-a"}};
-  const auto plan = planner.plan_request(placements, kRecordCap, kWriteCap, 0);
-  session.begin_request(
-      placements, nodes,
-      digests_for_plan(planner, plan, placements, kRecordCap, "bb"));
+  session.begin_request_from_slots(
+      plan_slots(planner, placements, {{0, "node-a"}, {5, "node-a"}}, "bb"));
 
   const std::vector<uint16_t> slots = slot_indices_in_command(
       commands_for_node(session.pipelined_fetch_commands(), "node-a").at(0));
@@ -266,17 +236,10 @@ void test_failed_slot_makes_one_layer_recompute() {
   NodeRegistry registry;
   register_node(registry, "node-a", 1);
 
-  PipelinedFetchSession session = make_session(planner, registry);
+  PipelinedFetchSession session = make_session(registry);
 
-  const std::vector<ChunkPlacement> placements = {
-      ChunkPlacement{0, 0, 0},
-  };
-  const std::vector<ChunkNodeBinding> nodes = {{0, "node-a"}};
-  const auto plan =
-      planner.plan_request(placements, kRecordCap, kWriteCap, 0x11);
-  const uint16_t gen = session.begin_request(
-      placements, nodes,
-      digests_for_plan(planner, plan, placements, kRecordCap, "dd"));
+  const uint16_t gen = session.begin_request_from_slots(
+      plan_slots(planner, {ChunkPlacement{0, 0, 0}}, {{0, "node-a"}}, "dd"));
 
   const std::string command =
       commands_for_node(session.pipelined_fetch_commands(), "node-a").at(0);
@@ -305,23 +268,16 @@ void test_stale_generation_notifications_are_ignored() {
   const SlotPlanner planner({layout});
   NodeRegistry registry;
   register_node(registry, "node-a", 1);
-  PipelinedFetchSession session = make_session(planner, registry);
+  PipelinedFetchSession session = make_session(registry);
 
   const std::vector<ChunkPlacement> placements = {ChunkPlacement{0, 0, 0}};
-  const std::vector<ChunkNodeBinding> nodes = {{0, "node-a"}};
-  const auto first_plan =
-      planner.plan_request(placements, kRecordCap, kWriteCap, 0);
-  const uint16_t first_gen = session.begin_request(
-      placements, nodes,
-      digests_for_plan(planner, first_plan, placements, kRecordCap, "a"));
+  const uint16_t first_gen = session.begin_request_from_slots(
+      plan_slots(planner, placements, {{0, "node-a"}}, "a"));
 
   session.finish_request();
 
-  const uint16_t second_gen = session.begin_request(
-      placements, nodes,
-      digests_for_plan(
-          planner, planner.plan_request(placements, kRecordCap, kWriteCap, 0),
-          placements, kRecordCap, "b"));
+  const uint16_t second_gen = session.begin_request_from_slots(
+      plan_slots(planner, placements, {{0, "node-a"}}, "b"));
 
   session.on_notifications({encode_immediate(first_gen, 0)});
   check(!session.is_layer_ready(0),
@@ -341,27 +297,22 @@ void test_abandon_makes_late_reply_harmless() {
   const SlotPlanner planner({layout});
   NodeRegistry registry;
   register_node(registry, "node-a", 1);
-  PipelinedFetchSession session = make_session(planner, registry);
+  PipelinedFetchSession session = make_session(registry);
 
   const std::vector<ChunkPlacement> placements = {ChunkPlacement{0, 0, 0}};
-  const std::vector<ChunkNodeBinding> nodes = {{0, "node-a"}};
-  const auto plan = planner.plan_request(placements, kRecordCap, kWriteCap, 0);
-  const uint16_t abandoned_gen = session.begin_request(
-      placements, nodes,
-      digests_for_plan(planner, plan, placements, kRecordCap, "c"));
+  const uint16_t abandoned_gen = session.begin_request_from_slots(
+      plan_slots(planner, placements, {{0, "node-a"}}, "c"));
   session.abandon_request();
 
-  const uint16_t gen = session.begin_request(
-      placements, nodes,
-      digests_for_plan(
-          planner, planner.plan_request(placements, kRecordCap, kWriteCap, 0),
-          placements, kRecordCap, "d"));
+  const uint16_t gen = session.begin_request_from_slots(
+      plan_slots(planner, placements, {{0, "node-a"}}, "d"));
   check(session.has_active_request(), "a new request can start after abandon");
 
   session.on_node_reply("node-a", "ignored", "n=1;accepted=0;failed=0;bytes=0",
                         abandoned_gen);
   check(session.unservable_layers().empty(),
-        "a late reply after the next begin_request does not poison readiness");
+        "a late reply after the next request begins does not poison "
+        "readiness");
 
   check(session.active_generation() == gen, "new generation is allocated");
   session.finish_request();
@@ -374,15 +325,12 @@ void test_allocated_generations_are_never_the_reserved_value() {
   const SlotPlanner planner({layout});
   NodeRegistry registry;
   register_node(registry, "node-a", 1);
-  PipelinedFetchSession session = make_session(planner, registry);
+  PipelinedFetchSession session = make_session(registry);
 
-  const std::vector<ChunkPlacement> placements = {ChunkPlacement{0, 0, 0}};
-  const std::vector<ChunkNodeBinding> nodes = {{0, "node-a"}};
-  const auto plan = planner.plan_request(placements, kRecordCap, kWriteCap, 0);
+  const std::vector<PlannedSlot> slots =
+      plan_slots(planner, {ChunkPlacement{0, 0, 0}}, {{0, "node-a"}}, "g");
 
-  const uint16_t first_gen = session.begin_request(
-      placements, nodes,
-      digests_for_plan(planner, plan, placements, kRecordCap, "g0"));
+  const uint16_t first_gen = session.begin_request_from_slots(slots);
   check(first_gen != kNoGeneration,
         "the first request of a fresh session does not get the reserved "
         "generation");
@@ -391,15 +339,11 @@ void test_allocated_generations_are_never_the_reserved_value() {
   // 65535 + 1 wraps to the reserved value, which is the only way a live
   // request could otherwise be handed it.
   session.restore_generation_counter(65535);
-  const uint16_t last_gen = session.begin_request(
-      placements, nodes,
-      digests_for_plan(planner, plan, placements, kRecordCap, "g1"));
+  const uint16_t last_gen = session.begin_request_from_slots(slots);
   check(last_gen == 65535, "the counter reaches the top of the 16-bit space");
   session.finish_request();
 
-  const uint16_t wrapped_gen = session.begin_request(
-      placements, nodes,
-      digests_for_plan(planner, plan, placements, kRecordCap, "g2"));
+  const uint16_t wrapped_gen = session.begin_request_from_slots(slots);
   check(wrapped_gen != kNoGeneration,
         "the generation after a wrap skips the reserved value");
   session.finish_request();
@@ -412,65 +356,30 @@ void test_kv_size_two_requires_both_planes() {
   const SlotPlanner planner({layout});
   NodeRegistry registry;
   register_node(registry, "node-a", 1);
-  PipelinedFetchSession session = make_session(planner, registry);
+  PipelinedFetchSession session = make_session(registry);
 
-  const std::vector<ChunkPlacement> placements = {ChunkPlacement{0, 0, 0}};
-  const std::vector<ChunkNodeBinding> nodes = {{0, "node-a"}};
-  const auto plan = planner.plan_request(placements, 256, kWriteCap, 0);
-  const uint16_t gen = session.begin_request(
-      placements, nodes,
-      digests_for_plan(planner, plan, placements, 256, "kv"));
-
-  check(plan.slot_count() >= 2, "small record cap splits a plane into pieces");
-
+  const std::vector<PlannedSlot> planes =
+      plan_slots(planner, {ChunkPlacement{0, 0, 0}}, {{0, "node-a"}}, "kv");
+  check(planes.size() == 2, "a large record cap gives one slot per plane");
+  uint16_t gen = session.begin_request_from_slots(planes);
   session.on_notifications({encode_immediate(gen, 0)});
   check(!session.is_layer_ready(0),
         "one plane landing does not complete the layer when kv_size is 2");
   session.on_notifications({encode_immediate(gen, 1)});
   check(session.is_layer_ready(0), "layer 0 completes once both planes land");
   session.finish_request();
-}
 
-void test_begin_request_rejects_missing_digest() {
-  std::cout << "begin_request rejects missing digest\n";
-  const ObjectGroupLayout layout = single_group_layout(1);
-  const SlotPlanner planner({layout});
-  NodeRegistry registry;
-  register_node(registry, "node-a", 1);
-  PipelinedFetchSession session = make_session(planner, registry);
-  const std::vector<ChunkPlacement> placements = {ChunkPlacement{0, 0, 0}};
-  const std::vector<ChunkNodeBinding> nodes = {{0, "node-a"}};
-  bool threw = false;
-  try {
-    session.begin_request(placements, nodes, {});
-  } catch (const std::invalid_argument&) {
-    threw = true;
-  }
-  check(threw, "missing digest throws invalid_argument");
-}
-
-void test_begin_request_rejects_second_active() {
-  std::cout << "begin_request rejects second active request\n";
-  const ObjectGroupLayout layout = single_group_layout(1);
-  const SlotPlanner planner({layout});
-  NodeRegistry registry;
-  register_node(registry, "node-a", 1);
-  PipelinedFetchSession session = make_session(planner, registry);
-  const std::vector<ChunkPlacement> placements = {ChunkPlacement{0, 0, 0}};
-  const std::vector<ChunkNodeBinding> nodes = {{0, "node-a"}};
-  const auto plan = planner.plan_request(placements, kRecordCap, kWriteCap, 0);
-  session.begin_request(
-      placements, nodes,
-      digests_for_plan(planner, plan, placements, kRecordCap, "x"));
-  bool threw = false;
-  try {
-    session.begin_request(
-        placements, nodes,
-        digests_for_plan(planner, plan, placements, kRecordCap, "y"));
-  } catch (const std::runtime_error&) {
-    threw = true;
-  }
-  check(threw, "second begin_request throws runtime_error");
+  // Each 512-byte plane is cut into two 256-byte records, K's first.
+  const std::vector<PlannedSlot> pieces = plan_slots(
+      planner, {ChunkPlacement{0, 0, 0}}, {{0, "node-a"}}, "kp", 256);
+  check(pieces.size() == 4, "a small record cap splits each plane in two");
+  gen = session.begin_request_from_slots(pieces);
+  session.on_notifications({encode_immediate(gen, 0), encode_immediate(gen, 1),
+                            encode_immediate(gen, 2)});
+  check(!session.is_layer_ready(0),
+        "the whole K plane and half of V do not complete the layer");
+  session.on_notifications({encode_immediate(gen, 3)});
+  check(session.is_layer_ready(0), "the last piece of V completes it");
   session.finish_request();
 }
 
@@ -478,18 +387,13 @@ void test_chunking_splits_at_exact_multiple_of_limit() {
   std::cout << "chunking splits at exact multiple of limit\n";
 
   constexpr uint32_t kLimit = 64;
-  const ObjectGroupLayout layout = single_group_layout(128);
-  const SlotPlanner planner({layout});
+  const SlotPlanner planner({single_group_layout(128)});
   NodeRegistry registry;
   register_node(registry, "node-a", 1, kLimit);
-  PipelinedFetchSession session = make_session(planner, registry);
+  PipelinedFetchSession session = make_session(registry);
 
-  const std::vector<ChunkPlacement> placements = {ChunkPlacement{0, 0, 0}};
-  const std::vector<ChunkNodeBinding> nodes = {{0, "node-a"}};
-  const auto plan = planner.plan_request(placements, kRecordCap, kWriteCap, 0);
-  session.begin_request(
-      placements, nodes,
-      digests_for_plan(planner, plan, placements, kRecordCap, "em"));
+  session.begin_request_from_slots(
+      plan_slots(planner, {ChunkPlacement{0, 0, 0}}, {{0, "node-a"}}, "em"));
 
   const std::vector<std::string> node_commands =
       commands_for_node(session.pipelined_fetch_commands(), "node-a");
@@ -506,18 +410,13 @@ void test_chunking_splits_with_remainder() {
   std::cout << "chunking splits with remainder\n";
 
   constexpr uint32_t kLimit = 64;
-  const ObjectGroupLayout layout = single_group_layout(100);
-  const SlotPlanner planner({layout});
+  const SlotPlanner planner({single_group_layout(100)});
   NodeRegistry registry;
   register_node(registry, "node-a", 1, kLimit);
-  PipelinedFetchSession session = make_session(planner, registry);
+  PipelinedFetchSession session = make_session(registry);
 
-  const std::vector<ChunkPlacement> placements = {ChunkPlacement{0, 0, 0}};
-  const std::vector<ChunkNodeBinding> nodes = {{0, "node-a"}};
-  const auto plan = planner.plan_request(placements, kRecordCap, kWriteCap, 0);
-  session.begin_request(
-      placements, nodes,
-      digests_for_plan(planner, plan, placements, kRecordCap, "rm"));
+  session.begin_request_from_slots(
+      plan_slots(planner, {ChunkPlacement{0, 0, 0}}, {{0, "node-a"}}, "rm"));
 
   const std::vector<std::string> node_commands =
       commands_for_node(session.pipelined_fetch_commands(), "node-a");
@@ -534,27 +433,28 @@ void test_chunking_union_covers_every_node_sink_once() {
   std::cout << "chunking union covers every node sink once\n";
 
   constexpr uint32_t kLimit = 30;
-  const ObjectGroupLayout layout = single_group_layout(95);
-  const SlotPlanner planner({layout});
+  const SlotPlanner planner({single_group_layout(95)});
   NodeRegistry registry;
   register_node(registry, "node-a", 1, kLimit);
-  PipelinedFetchSession session = make_session(planner, registry);
+  PipelinedFetchSession session = make_session(registry);
 
-  const std::vector<ChunkPlacement> placements = {ChunkPlacement{0, 0, 0}};
-  const std::vector<ChunkNodeBinding> nodes = {{0, "node-a"}};
-  const auto plan = planner.plan_request(placements, kRecordCap, kWriteCap, 0);
-  session.begin_request(
-      placements, nodes,
-      digests_for_plan(planner, plan, placements, kRecordCap, "un"));
+  const std::vector<PlannedSlot> slots =
+      plan_slots(planner, {ChunkPlacement{0, 0, 0}}, {{0, "node-a"}}, "un");
+  session.begin_request_from_slots(slots);
 
   std::set<uint16_t> expected;
-  for (const uint16_t slot : plan.slots_for_chunk(0)) {
-    expected.insert(slot);
+  for (size_t i = 0; i < slots.size(); ++i) {
+    expected.insert(static_cast<uint16_t>(i));
   }
-  const std::set<uint16_t> got = all_slots_in_commands(
-      commands_for_node(session.pipelined_fetch_commands(), "node-a"));
-  check(got == expected, "command slots equal the unchunked set");
-  check(got.size() == plan.slot_count(), "no duplicate slot indices");
+  const std::vector<std::string> node_commands =
+      commands_for_node(session.pipelined_fetch_commands(), "node-a");
+  size_t sent = 0;
+  for (const std::string& command : node_commands) {
+    sent += slot_indices_in_command(command).size();
+  }
+  check(all_slots_in_commands(node_commands) == expected,
+        "command slots equal the unchunked set");
+  check(sent == slots.size(), "no duplicate slot indices");
   session.finish_request();
 }
 
@@ -562,18 +462,13 @@ void test_chunking_preserves_ascending_slot_order_across_commands() {
   std::cout << "chunking preserves ascending slot order across commands\n";
 
   constexpr uint32_t kLimit = 40;
-  const ObjectGroupLayout layout = single_group_layout(125);
-  const SlotPlanner planner({layout});
+  const SlotPlanner planner({single_group_layout(125)});
   NodeRegistry registry;
   register_node(registry, "node-a", 1, kLimit);
-  PipelinedFetchSession session = make_session(planner, registry);
+  PipelinedFetchSession session = make_session(registry);
 
-  const std::vector<ChunkPlacement> placements = {ChunkPlacement{0, 0, 0}};
-  const std::vector<ChunkNodeBinding> nodes = {{0, "node-a"}};
-  const auto plan = planner.plan_request(placements, kRecordCap, kWriteCap, 0);
-  session.begin_request(
-      placements, nodes,
-      digests_for_plan(planner, plan, placements, kRecordCap, "ord"));
+  session.begin_request_from_slots(
+      plan_slots(planner, {ChunkPlacement{0, 0, 0}}, {{0, "node-a"}}, "ord"));
 
   std::vector<uint16_t> sequence;
   for (const std::string& command :
@@ -599,17 +494,14 @@ void test_two_nodes_chunk_with_independent_limits() {
   NodeRegistry registry;
   register_node(registry, "node-a", 10, 30);
   register_node(registry, "node-b", 20, 10);
-  PipelinedFetchSession session = make_session(planner, registry);
+  PipelinedFetchSession session = make_session(registry);
 
   const std::vector<ChunkPlacement> placements = {
       ChunkPlacement{0, 0, 0},
       ChunkPlacement{1, 0, object_bytes},
   };
-  const std::vector<ChunkNodeBinding> nodes = {{0, "node-a"}, {1, "node-b"}};
-  const auto plan = planner.plan_request(placements, kRecordCap, kWriteCap, 0);
-  session.begin_request(
-      placements, nodes,
-      digests_for_plan(planner, plan, placements, kRecordCap, "ind"));
+  session.begin_request_from_slots(
+      plan_slots(planner, placements, {{0, "node-a"}, {1, "node-b"}}, "ind"));
 
   const auto commands = session.pipelined_fetch_commands();
   check(commands_for_node(commands, "node-a").size() == 2,
@@ -623,18 +515,13 @@ void test_rejected_second_command_marks_unservable() {
   std::cout << "rejected second command marks unservable\n";
 
   constexpr uint32_t kLimit = 256;
-  const ObjectGroupLayout layout = single_group_layout(300);
-  const SlotPlanner planner({layout});
+  const SlotPlanner planner({single_group_layout(300)});
   NodeRegistry registry;
   register_node(registry, "node-a", 1, kLimit);
-  PipelinedFetchSession session = make_session(planner, registry);
+  PipelinedFetchSession session = make_session(registry);
 
-  const std::vector<ChunkPlacement> placements = {ChunkPlacement{0, 0, 0}};
-  const std::vector<ChunkNodeBinding> nodes = {{0, "node-a"}};
-  const auto plan = planner.plan_request(placements, kRecordCap, kWriteCap, 0);
-  const uint16_t gen = session.begin_request(
-      placements, nodes,
-      digests_for_plan(planner, plan, placements, kRecordCap, "rej"));
+  const uint16_t gen = session.begin_request_from_slots(
+      plan_slots(planner, {ChunkPlacement{0, 0, 0}}, {{0, "node-a"}}, "rej"));
 
   const std::vector<std::string> node_commands =
       commands_for_node(session.pipelined_fetch_commands(), "node-a");
@@ -683,11 +570,10 @@ std::vector<PlannedSlot> one_chunk_across_two_nodes() {
 void test_planned_slots_go_to_their_own_node() {
   std::cout << "planned slots go to their own node, not their chunk's\n";
 
-  const SlotPlanner planner({single_group_layout(1)});
   NodeRegistry registry;
   register_node(registry, "node-a", 10);
   register_node(registry, "node-b", 20);
-  PipelinedFetchSession session = make_session(planner, registry);
+  PipelinedFetchSession session = make_session(registry);
 
   session.begin_request_from_slots(one_chunk_across_two_nodes());
   const auto commands = session.pipelined_fetch_commands();
@@ -709,11 +595,10 @@ void test_planned_slots_go_to_their_own_node() {
 void test_planned_readiness_counts_every_slot_of_a_layer() {
   std::cout << "planned readiness counts every slot of a layer\n";
 
-  const SlotPlanner planner({single_group_layout(1)});
   NodeRegistry registry;
   register_node(registry, "node-a", 10);
   register_node(registry, "node-b", 20);
-  PipelinedFetchSession session = make_session(planner, registry);
+  PipelinedFetchSession session = make_session(registry);
 
   const uint16_t gen =
       session.begin_request_from_slots(one_chunk_across_two_nodes());
@@ -738,11 +623,10 @@ void test_planned_readiness_counts_every_slot_of_a_layer() {
 void test_planned_decline_marks_only_its_layer() {
   std::cout << "planned decline marks only its layer\n";
 
-  const SlotPlanner planner({single_group_layout(1)});
   NodeRegistry registry;
   register_node(registry, "node-a", 10);
   register_node(registry, "node-b", 20);
-  PipelinedFetchSession session = make_session(planner, registry);
+  PipelinedFetchSession session = make_session(registry);
 
   const uint16_t gen =
       session.begin_request_from_slots(one_chunk_across_two_nodes());
@@ -769,10 +653,9 @@ void test_planned_decline_marks_only_its_layer() {
 void test_planned_request_splits_to_max_sinks() {
   std::cout << "planned request splits to max_sinks\n";
 
-  const SlotPlanner planner({single_group_layout(1)});
   NodeRegistry registry;
   register_node(registry, "node-a", 10, 2);
-  PipelinedFetchSession session = make_session(planner, registry);
+  PipelinedFetchSession session = make_session(registry);
 
   std::vector<PlannedSlot> slots;
   for (uint32_t i = 0; i < 5; ++i) {
@@ -790,10 +673,9 @@ void test_planned_request_splits_to_max_sinks() {
 void test_planned_late_write_from_abandoned_request_is_ignored() {
   std::cout << "planned late write from an abandoned request is ignored\n";
 
-  const SlotPlanner planner({single_group_layout(1)});
   NodeRegistry registry;
   register_node(registry, "node-a", 10);
-  PipelinedFetchSession session = make_session(planner, registry);
+  PipelinedFetchSession session = make_session(registry);
 
   const std::vector<PlannedSlot> slots = {planned("node-a", 0, 0, "d0")};
   const uint16_t old_gen = session.begin_request_from_slots(slots);
@@ -823,10 +705,9 @@ bool throws(const std::function<void()>& action) {
 void test_planned_request_rejects_bad_input() {
   std::cout << "planned request rejects bad input\n";
 
-  const SlotPlanner planner({single_group_layout(1)});
   NodeRegistry registry;
   register_node(registry, "node-a", 10);
-  PipelinedFetchSession session = make_session(planner, registry);
+  PipelinedFetchSession session = make_session(registry);
 
   check(throws<std::invalid_argument>(
             [&] { session.begin_request_from_slots({}); }),
@@ -854,8 +735,7 @@ void test_planned_request_rejects_bad_input() {
         "a second active request is refused");
   session.finish_request();
 
-  PipelinedFetchSession small(planner, registry, "kv", kRecordCap, kWriteCap,
-                              kWindowBytes, 2);
+  PipelinedFetchSession small(registry, "kv", kWindowBytes, 2);
   check(small.max_slots_per_request() == 2, "the device slot cap is reported");
   check(throws<PlanTooLargeError>([&] {
           small.begin_request_from_slots({planned("node-a", 0, 0, "d0"),
@@ -868,11 +748,9 @@ void test_planned_request_rejects_bad_input() {
 void test_planned_request_stays_in_one_window() {
   std::cout << "planned request stays in one window\n";
 
-  const SlotPlanner planner({single_group_layout(1)});
   NodeRegistry registry;
   register_node(registry, "node-a", 10);
-  PipelinedFetchSession session(planner, registry, "kv", kRecordCap, kWriteCap,
-                                kWindowBytes, kNotifyCap, 3);
+  PipelinedFetchSession session(registry, "kv", kWindowBytes, kNotifyCap, 3);
   const size_t w1 = kWindowBytes;
   const size_t w2 = 2 * kWindowBytes;
 
@@ -905,7 +783,7 @@ void test_planned_request_stays_in_one_window() {
   check(!session.has_active_request(),
         "no rejected plan leaves a request active");
 
-  PipelinedFetchSession one_window = make_session(planner, registry);
+  PipelinedFetchSession one_window = make_session(registry);
   check(throws<std::invalid_argument>([&] {
           one_window.begin_request_from_slots({planned("node-a", 0, w1, "d0")});
         }),
@@ -923,8 +801,6 @@ int main() {
     test_abandon_makes_late_reply_harmless();
     test_allocated_generations_are_never_the_reserved_value();
     test_kv_size_two_requires_both_planes();
-    test_begin_request_rejects_missing_digest();
-    test_begin_request_rejects_second_active();
     test_chunking_splits_at_exact_multiple_of_limit();
     test_chunking_splits_with_remainder();
     test_chunking_union_covers_every_node_sink_once();

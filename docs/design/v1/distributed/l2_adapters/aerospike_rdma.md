@@ -673,7 +673,7 @@ command builder, reply parser and declined-write handling live in
 `kv_sink_client.h` and `layer_pipeline.h`. `PipelinedFetchSession` in
 `pipelined_fetch_session.{h,cpp}` is the **implemented** driver that ties
 them together: it allocates a per-request generation, builds a `RequestPlan`
-via `SlotPlanner`, fans out one or more `kv-sink-fetch-pipelined` commands per
+from the caller's slots (`begin_request_from_slots`), fans out one or more `kv-sink-fetch-pipelined` commands per
 node (each carrying at most that node's advertised `max_sinks`), feeds declined
 slots from each reply into `LayerReadiness::note_unservable`, and drains
 `RdmaContext::poll_notifications` into the same tracker. It performs no I/O
@@ -781,13 +781,16 @@ or bad data rather than an error:
    record-relative source offset — `<digest>+<src>@<dst>:<len>#<slot>` — and
    not silent splitting on either side.
 
-On the LMCache side the schedule comes from `SlotPlanner` in
-`slot_planner.h` — it walks (chunk, layer, K/V plane, record) and produces
-exactly these sinks, layer-major, with the offsets already resolved against
-the leased window. `RequestPlan::slots_for_chunk` then partitions that
-schedule by chunk, so each node receives commands naming only its own
-chunks while the slot indices stay in the request's numbering. Sinks for one
-node are sorted by slot (layer-major order from the plan) and sliced into
+On the LMCache side the schedule comes from the Python `LayerFetchPlan`
+(`lmcache/v1/layerwise/`). It walks (chunk, layer, K/V plane, record) and
+produces exactly these sinks, layer-major, with the offsets already resolved
+against the leased window. `SlotPlanner` in `slot_planner.h` does the same
+arithmetic in C++. Nothing in the fetch path uses it, but
+`test_slot_plan_parity.py` diffs the two planners and resolves each slot
+against the writer's shard plan, so a drift between them fails a test. Each
+slot names its own node, so the session sends each node only the slots whose
+records it holds, while the slot indices stay in the request's numbering.
+Sinks for one node are sorted by slot (layer-major order from the plan) and sliced into
 segments of at most `max_sinks_per_command`; the first command holds the
 earliest slots so the server still sees low layers first across the sequence.
 `build_pipelined_fetch_command` refuses a sink list with a repeated slot index,
@@ -830,8 +833,8 @@ and record cap to those limits, logs the device-reported numbers next to the
 requested and effective depths, and sizes both the completion queue and the
 receive queue to the effective value. That depth is shared by every window
 (see [Concurrent fetches](#concurrent-fetches)), so each fetch gets
-`effective / window_count` slots. `PipelinedFetchSession::begin_request`
-rejects a plan whose `slot_count()` exceeds its share with an error
+`effective / window_count` slots.
+`PipelinedFetchSession::begin_request_from_slots` rejects a plan whose `slot_count()` exceeds its share with an error
 that names both counts and tells the operator to use fewer chunks per request,
 raise the record cap so each plane needs fewer pieces, or choose hardware with a
 higher `max_recv_wr`.
@@ -844,7 +847,7 @@ rule that a layer is consumable only when every sub-request's pieces have
 landed — none of which exists in the wire contract or the vLLM integration
 today. Reporting a layer ready while part of it is still in flight on another
 sub-request is exactly the failure this design exists to prevent, so oversize
-plans fail loudly at `begin_request` instead.
+plans fail loudly at `begin_request_from_slots` instead.
 
 **Still unknown without EFA hardware:** whether SRD actually charges a receive
 work request per immediate when the unsolicited-write-receive queue-pair feature
@@ -903,7 +906,7 @@ compiles against rdma-core 50 but has not run on hardware.
 
 **Device-free verification:** `notification_depth_test` (via `make -C
 tests/v1/distributed/rdma logic-test`) injects device caps and checks clamping,
-the derived slot limit, and `begin_request` acceptance/rejection — without
+the derived slot limit, and `begin_request_from_slots` acceptance/rejection — without
 libibverbs.
 
 **Device-free verification:** `pipelined_fetch_session_test` and
@@ -966,16 +969,16 @@ late write after abandon, and carrying counters over a rebuild.
 `tests/v1/layerwise/test_aerospike_concurrent_fetches.py` runs two sources
 over one fabric-free native pool with two windows.
 
-#### Two ways to begin a request
+#### Beginning a request
 
-`begin_request(placements, chunk_nodes, slot_digests)` plans slots itself with
-`SlotPlanner` and binds each chunk to one node. That binding is wrong in
-general: Aerospike places every record by its own digest, so one chunk's
-records usually sit on several nodes.
+`begin_request_from_slots(slots)` is the only way to begin a request. It takes
+a caller-planned list: `slots[i]` is notification slot `i` and names its own
+node, digest, layer and window range. A slot names its node, rather than
+inheriting its chunk's, because Aerospike places every record by its own
+digest, so one chunk's records usually sit on several nodes. The session used
+to plan slots itself and bind each chunk to one node; that path was removed.
 
-`begin_request_from_slots(slots)` takes a caller-planned list instead.
-`slots[i]` is notification slot `i` and names its own node, digest, layer and
-window range:
+
 
 ```text
 slot 0: node-a  <digest k-0>  layer 0  offset 0    length 64
@@ -989,9 +992,9 @@ Nothing is re-ordered, so the slot numbers on the wire are the caller's. This
 is what the layerwise `LayerFetchPlan` uses (Python:
 `NativePlanIssuer` → `issue_pipelined_fetch_by_slots`). The caller learns
 each record's node from `record_node(user_key)`, which reads the client's
-partition map. Both entry points enforce the same device slot cap. They throw
+partition map. The session enforces the device slot cap and throws
 `PlanTooLargeError` (pybind: `PipelinedPlanTooLargeError`) when a plan exceeds
-the cap, so callers can tell that case apart from other failures.
+it, so callers can tell that case apart from other failures.
 
 Two things this format does **not** yet settle, both needing the server
 team's input:
@@ -1041,8 +1044,9 @@ Not proven:
   larger change.
 - **Anything about real layers *over the fabric*.** The fabric harness still
   moves synthetic pieces at fabricated offsets. The mapping from actual KV
-  layout onto slots is implemented in `slot_planner.h` and covered by
-  `test_slot_planner.py`; `PipelinedFetchSession` is covered by
+  layout onto slots is implemented in `LayerFetchPlan`, and
+  `test_slot_plan_parity.py` checks it against `slot_planner.h` and the
+  writer's shard plan; `PipelinedFetchSession` is covered by
   `pipelined_fetch_session_test` without a device. What remains **unverified
   over a fabric** is an end-to-end load that builds digests and placements from
   a real prefetch, issues commands through `AerospikeNativeConnector`, and

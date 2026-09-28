@@ -15,26 +15,21 @@
 #include "pipelined_fetch_issue.h"
 #include "pipelined_fetch_pool.h"
 #include "pipelined_fetch_session.h"
-#include "slot_planner.h"
 
 namespace {
 
 using lmcache::connector::rdma::encode_immediate;
 using lmcache::connector::rdma::issue_planned_fetch;
-using lmcache::connector::rdma::KernelGroupLayout;
 using lmcache::connector::rdma::kMaxFetchWindows;
 using lmcache::connector::rdma::kNoGeneration;
 using lmcache::connector::rdma::NodeRegistration;
 using lmcache::connector::rdma::NodeRegistry;
-using lmcache::connector::rdma::ObjectGroupLayout;
 using lmcache::connector::rdma::pipelined_command_slot_indices;
 using lmcache::connector::rdma::PipelinedFetchPool;
 using lmcache::connector::rdma::PipelinedFetchSession;
 using lmcache::connector::rdma::PlannedSlot;
 using lmcache::connector::rdma::PlanTooLargeError;
-using lmcache::connector::rdma::SlotPlanner;
 
-constexpr size_t kRecordCap = 1u << 20;
 constexpr size_t kWindowBytes = 1u << 16;
 constexpr uint32_t kWindows = 4;
 constexpr uint32_t kDepth = 64;
@@ -60,19 +55,6 @@ bool throws(Fn&& fn) {
     return false;
   }
   return false;
-}
-
-ObjectGroupLayout two_layer_layout() {
-  KernelGroupLayout group;
-  group.layer_indices = {0, 1};
-  group.kv_size = 1;
-  group.num_slots = 8;
-  group.hidden_dim = 64;
-  group.element_size = 2;
-  ObjectGroupLayout layout;
-  layout.object_group_id = 0;
-  layout.kernel_groups.push_back(group);
-  return layout;
 }
 
 NodeRegistry two_nodes() {
@@ -112,19 +94,15 @@ std::string accept_all(const std::string&, const std::string& command) {
 }
 
 struct Fixture {
-  SlotPlanner planner{{two_layer_layout()}};
   NodeRegistry registry = two_nodes();
-  PipelinedFetchPool pool{planner,    registry,     "kv",     kRecordCap,
-                          kRecordCap, kWindowBytes, kWindows, kDepth};
+  PipelinedFetchPool pool{registry, "kv", kWindowBytes, kWindows, kDepth};
 };
 
 void test_construction_limits() {
   std::cout << "the pool refuses unusable window counts and depths\n";
-  SlotPlanner planner({two_layer_layout()});
   NodeRegistry registry = two_nodes();
   auto build = [&](uint32_t windows, uint32_t depth) {
-    PipelinedFetchPool pool(planner, registry, "kv", kRecordCap, kRecordCap,
-                            kWindowBytes, windows, depth);
+    PipelinedFetchPool pool(registry, "kv", kWindowBytes, windows, depth);
     return pool.max_slots_per_request();
   };
   check(throws<std::invalid_argument>([&] { build(0, kDepth); }),
@@ -237,11 +215,9 @@ void test_finish_needs_the_active_generation() {
 
 void test_share_limits_one_request() {
   std::cout << "one request may use only its window's share\n";
-  SlotPlanner planner({two_layer_layout()});
   NodeRegistry registry = two_nodes();
   // 4 windows, depth 12: 3 slots each, and the request carries 4.
-  PipelinedFetchPool pool(planner, registry, "kv", kRecordCap, kRecordCap,
-                          kWindowBytes, kWindows, 12);
+  PipelinedFetchPool pool(registry, "kv", kWindowBytes, kWindows, 12);
   check(throws<PlanTooLargeError>(
             [&] { pool.begin_request_from_slots(request_in_window(0)); }),
         "a request over the share is refused as too large");
@@ -314,8 +290,7 @@ void test_counters_carry_to_a_replacement_pool() {
   const uint16_t a = f.pool.begin_request_from_slots(request_in_window(2));
   f.pool.finish_request(a);
   const std::vector<uint16_t> counters = f.pool.generation_counters();
-  PipelinedFetchPool next(f.planner, f.registry, "kv", kRecordCap, kRecordCap,
-                          kWindowBytes, kWindows, kDepth);
+  PipelinedFetchPool next(f.registry, "kv", kWindowBytes, kWindows, kDepth);
   next.restore_generation_counters(counters);
   const uint16_t b = next.begin_request_from_slots(request_in_window(2));
   check(b != a && next.window_of_generation(b) == 2,
@@ -328,10 +303,8 @@ void test_counters_carry_to_a_replacement_pool() {
 
 void test_session_generation_class() {
   std::cout << "a session's generation class is validated\n";
-  SlotPlanner planner({two_layer_layout()});
   NodeRegistry registry = two_nodes();
-  PipelinedFetchSession session(planner, registry, "kv", kRecordCap, kRecordCap,
-                                kWindowBytes, kDepth);
+  PipelinedFetchSession session(registry, "kv", kWindowBytes, kDepth);
   check(throws<std::invalid_argument>(
             [&] { session.set_generation_class(0, 4); }),
         "first 0 is refused");

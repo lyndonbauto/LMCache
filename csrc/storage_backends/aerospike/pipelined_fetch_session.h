@@ -4,10 +4,10 @@
 // End-to-end driver for one pipelined kv-sink fetch, with no I/O.
 //
 // layer_pipeline.h defines what a slot means and when a layer is ready.
-// slot_planner.h turns placements into that schedule. kv_sink_client.h
-// builds the per-node commands and parses acknowledgements. rdma_context.h
-// polls the immediates that actually complete each write. None of those
-// pieces issue info calls or touch a socket; this file stitches them
+// The caller plans the slots (LayerFetchPlan, on the Python side).
+// kv_sink_client.h builds the per-node commands and parses acknowledgements.
+// rdma_context.h polls the immediates that actually complete each write. None
+// of those pieces issue info calls or touch a socket; this file stitches them
 // together so the connector can stay a thin I/O shell around a fully
 // testable state machine.
 //
@@ -27,7 +27,6 @@
 
 #include "kv_sink_client.h"
 #include "layer_pipeline.h"
-#include "slot_planner.h"
 
 #include <cstdint>
 #include <map>
@@ -47,21 +46,6 @@ namespace rdma {
 // lmcache/v1/layerwise/contract.py.
 constexpr uint16_t kNoGeneration = 0;
 
-// Which cluster node holds each participating chunk.
-struct ChunkNodeBinding {
-  uint32_t chunk_id = 0;
-  std::string node_name;
-};
-
-// Aerospike record digest for one logical slot in the active plan.
-struct SlotDigest {
-  uint32_t chunk_id = 0;
-  uint32_t layer_id = 0;
-  uint32_t plane = 0;
-  uint32_t piece = 0;
-  std::string digest_hex;
-};
-
 // One slot of a plan built by the caller, issued exactly as given.
 //
 // Each slot names its own node because Aerospike places every record by its
@@ -78,9 +62,10 @@ struct PlannedSlot {
 
 // A plan with more slots than this device can post receives for.
 //
-// Distinct from other begin_request failures because the caller's response
-// differs: a smaller plan can still succeed, whereas an unready backend
-// cannot. Derives from std::runtime_error so existing handlers still see it.
+// Distinct from other begin_request_from_slots failures because the caller's
+// response differs: a smaller plan can still succeed, whereas an unready
+// backend cannot. Derives from std::runtime_error so existing handlers still
+// see it.
 class PlanTooLargeError : public std::runtime_error {
  public:
   using std::runtime_error::runtime_error;
@@ -89,20 +74,18 @@ class PlanTooLargeError : public std::runtime_error {
 // Owns one in-flight pipelined fetch at a time: plan, readiness, commands.
 //
 // Thread safety: every public method takes `mu_` and may be called from any
-// thread. `planner` and `registry` must not be mutated for this session's
-// lifetime; they are not locked here.
+// thread. `registry` must not be mutated for this session's lifetime; it is
+// not locked here.
 class PipelinedFetchSession {
  public:
-  // `planner` and `registry` must outlive this session and must not change
-  // while the session exists. `namespace_name` is embedded in fetch commands.
+  // `registry` must outlive this session and must not change while the
+  // session exists. `namespace_name` is embedded in fetch commands.
   //
   // Slot offsets are relative to the registered range, which holds
   // `window_count` windows of `window_bytes` each. Every slot of one request
   // must fall inside a single window: the one its first slot is in.
-  PipelinedFetchSession(const SlotPlanner& planner,
-                        const NodeRegistry& registry,
-                        std::string namespace_name, size_t max_record_bytes,
-                        size_t max_write_bytes, size_t window_bytes,
+  PipelinedFetchSession(const NodeRegistry& registry,
+                        std::string namespace_name, size_t window_bytes,
                         uint32_t max_notification_slots,
                         uint32_t window_count = 1);
 
@@ -115,17 +98,6 @@ class PipelinedFetchSession {
   //
   // Thread safety: takes `mu_`. Throws std::runtime_error when none is active.
   uint16_t active_generation() const;
-
-  // Build a new request plan and readiness tracker.
-  //
-  // Thread safety: takes `mu_`. Throws std::runtime_error if a request is
-  // already active, if `slot_count()` exceeds the device-derived
-  // `max_notification_slots_`, if the planned slots do not share one window,
-  // if a digest is missing, or if any exception SlotPlanner::plan_request may
-  // throw. Throws std::invalid_argument if a chunk lacks a node binding.
-  uint16_t begin_request(const std::vector<ChunkPlacement>& placements,
-                         const std::vector<ChunkNodeBinding>& chunk_nodes,
-                         const std::vector<SlotDigest>& slot_digests);
 
   // Begin a request whose slots were planned by the caller.
   //
@@ -233,11 +205,8 @@ class PipelinedFetchSession {
  private:
   uint16_t allocate_generation();
 
-  const SlotPlanner& planner_;
   const NodeRegistry& registry_;
   std::string namespace_name_;
-  size_t max_record_bytes_;
-  size_t max_write_bytes_;
   size_t window_bytes_;
   uint32_t window_count_;
   uint32_t max_notification_slots_;

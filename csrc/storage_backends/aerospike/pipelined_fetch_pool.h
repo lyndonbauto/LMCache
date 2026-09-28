@@ -43,15 +43,14 @@ constexpr uint32_t kMaxFetchWindows = 256;
 
 class PipelinedFetchPool {
  public:
-  // One session per window. `planner` and `registry` must outlive the pool
-  // and must not change while it exists.
+  // One session per window. `registry` must outlive the pool and must not
+  // change while it exists.
   //
   // Throws std::invalid_argument if `window_count` is 0 or above
   // kMaxFetchWindows, if `window_bytes` is 0, or if `notification_depth`
   // leaves a window no receive slot.
-  PipelinedFetchPool(const SlotPlanner& planner, const NodeRegistry& registry,
-                     const std::string& namespace_name, size_t max_record_bytes,
-                     size_t max_write_bytes, size_t window_bytes,
+  PipelinedFetchPool(const NodeRegistry& registry,
+                     const std::string& namespace_name, size_t window_bytes,
                      uint32_t window_count, uint32_t notification_depth);
 
   // Thread safety: immutable after construction.

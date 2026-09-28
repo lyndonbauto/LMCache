@@ -61,12 +61,13 @@ class AerospikePipelinedRdmaDriver {
   // fatal verbs failure after recording the reason for init_error_message().
   void initialize(aerospike* client);
 
-  // Replace the slot planner used for subsequent requests. If one chunk of
-  // `layouts` does not fit in a window, pipelined fetch stays unavailable
+  // Set the model's layouts; pipelined fetch is unavailable until they are.
+  // If one chunk of `layouts` does not fit in a window, it stays unavailable
   // until layouts that fit are set; init_error_message() says why.
   //
   // Thread safety: takes `mu_`. Throws std::runtime_error if any request is
-  // active.
+  // active, and std::invalid_argument if a layout is malformed (see
+  // rdma::SlotPlanner's constructor).
   void set_object_group_layouts(std::vector<rdma::ObjectGroupLayout> layouts);
 
   // Begin a fetch of caller-planned slots in the window of its first slot,
@@ -147,7 +148,7 @@ class AerospikePipelinedRdmaDriver {
 
   std::unique_ptr<rdma::RdmaContext> context_;
   rdma::NodeRegistry registry_;
-  std::unique_ptr<rdma::SlotPlanner> planner_;
+  bool layouts_set_ = false;
   std::unique_ptr<rdma::PipelinedFetchPool> pool_;
 
   uint32_t max_notification_slots_ = 0;

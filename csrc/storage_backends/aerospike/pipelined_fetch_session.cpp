@@ -12,142 +12,11 @@ namespace connector {
 namespace rdma {
 namespace {
 
-using lmcache::connector::plane_segment_bytes;
-
 void require_active_request(bool has_request) {
   if (!has_request) {
     throw std::runtime_error(
         "PipelinedFetchSession: no active pipelined fetch request");
   }
-}
-
-std::map<uint32_t, std::string> chunk_node_map(
-    const std::vector<ChunkNodeBinding>& chunk_nodes) {
-  std::map<uint32_t, std::string> out;
-  for (const ChunkNodeBinding& binding : chunk_nodes) {
-    if (binding.node_name.empty()) {
-      throw std::invalid_argument("PipelinedFetchSession: chunk " +
-                                  std::to_string(binding.chunk_id) +
-                                  " has no owning node");
-    }
-    const auto inserted =
-        out.emplace(binding.chunk_id, binding.node_name).second;
-    if (!inserted) {
-      throw std::invalid_argument("PipelinedFetchSession: chunk " +
-                                  std::to_string(binding.chunk_id) +
-                                  " is bound to multiple nodes");
-    }
-  }
-  return out;
-}
-
-struct SlotDigestKey {
-  uint32_t chunk_id = 0;
-  uint32_t layer_id = 0;
-  uint32_t plane = 0;
-  uint32_t piece = 0;
-
-  bool operator<(const SlotDigestKey& other) const {
-    if (chunk_id != other.chunk_id) {
-      return chunk_id < other.chunk_id;
-    }
-    if (layer_id != other.layer_id) {
-      return layer_id < other.layer_id;
-    }
-    if (plane != other.plane) {
-      return plane < other.plane;
-    }
-    return piece < other.piece;
-  }
-};
-
-std::vector<SlotDigestKey> digest_keys_for_plan(
-    const SlotPlanner& planner, const RequestPlan& plan,
-    const std::vector<ChunkPlacement>& placements, size_t max_record_bytes,
-    size_t max_write_bytes) {
-  std::vector<SlotDigestKey> keys;
-  keys.reserve(plan.slot_count());
-
-  std::map<uint32_t, std::vector<const ChunkPlacement*>> by_group;
-  for (const ChunkPlacement& placement : placements) {
-    by_group[placement.object_group_id].push_back(&placement);
-  }
-
-  for (const uint32_t layer_id : planner.layer_ids()) {
-    const uint32_t group_id = planner.object_group_of_layer(layer_id);
-    const auto group_placements = by_group.find(group_id);
-    if (group_placements == by_group.end()) {
-      continue;
-    }
-    const std::vector<ByteRange> planes = planner.layer_plane_ranges(layer_id);
-    for (const ChunkPlacement* placement : group_placements->second) {
-      for (uint32_t plane_index = 0; plane_index < planes.size();
-           ++plane_index) {
-        const ByteRange& plane = planes[plane_index];
-        const size_t record_bytes =
-            plane_segment_bytes(plane.length, max_record_bytes);
-        if (record_bytes > max_write_bytes) {
-          throw std::invalid_argument(
-              "PipelinedFetchSession: record size exceeds max RDMA write");
-        }
-        const size_t pieces = (plane.length + record_bytes - 1) / record_bytes;
-        for (size_t piece = 0; piece < pieces; ++piece) {
-          SlotDigestKey key;
-          key.chunk_id = placement->chunk_id;
-          key.layer_id = layer_id;
-          key.plane = plane_index;
-          key.piece = static_cast<uint32_t>(piece);
-          keys.push_back(key);
-        }
-      }
-    }
-  }
-
-  if (keys.size() != plan.slot_count()) {
-    throw std::runtime_error(
-        "PipelinedFetchSession: internal slot/digest key count mismatch");
-  }
-  return keys;
-}
-
-std::vector<std::string> digests_for_plan(
-    const RequestPlan& plan, const SlotPlanner& planner,
-    const std::vector<ChunkPlacement>& placements, size_t max_record_bytes,
-    size_t max_write_bytes, const std::vector<SlotDigest>& slot_digests) {
-  const std::vector<SlotDigestKey> keys = digest_keys_for_plan(
-      planner, plan, placements, max_record_bytes, max_write_bytes);
-
-  std::map<SlotDigestKey, std::string> digest_by_key;
-  for (const SlotDigest& entry : slot_digests) {
-    if (entry.digest_hex.empty()) {
-      throw std::invalid_argument(
-          "PipelinedFetchSession: slot digest is empty for chunk " +
-          std::to_string(entry.chunk_id) + " layer " +
-          std::to_string(entry.layer_id));
-    }
-    SlotDigestKey key{entry.chunk_id, entry.layer_id, entry.plane, entry.piece};
-    const auto inserted = digest_by_key.emplace(key, entry.digest_hex).second;
-    if (!inserted) {
-      throw std::invalid_argument(
-          "PipelinedFetchSession: duplicate digest key for chunk " +
-          std::to_string(entry.chunk_id));
-    }
-  }
-
-  std::vector<std::string> out(plan.slot_count());
-  for (size_t i = 0; i < keys.size(); ++i) {
-    const auto found = digest_by_key.find(keys[i]);
-    if (found == digest_by_key.end()) {
-      throw std::invalid_argument(
-          "PipelinedFetchSession: no digest for chunk " +
-          std::to_string(keys[i].chunk_id) + " layer " +
-          std::to_string(keys[i].layer_id) + " plane " +
-          std::to_string(keys[i].plane) + " piece " +
-          std::to_string(keys[i].piece));
-    }
-    out[i] = found->second;
-  }
-  return out;
 }
 
 // The whole window range is one registration, so the server would accept a
@@ -182,19 +51,6 @@ void validate_slots_in_one_window(const RequestPlan& plan, size_t window_bytes,
   }
 }
 
-std::vector<std::string> node_per_slot_from_chunks(
-    const RequestPlan& plan,
-    const std::map<uint32_t, std::string>& chunk_to_node) {
-  std::vector<std::string> out(plan.slot_count());
-  for (uint32_t chunk_id : plan.chunk_ids()) {
-    const std::string& node_name = chunk_to_node.at(chunk_id);
-    for (const uint16_t slot_index : plan.slots_for_chunk(chunk_id)) {
-      out[slot_index] = node_name;
-    }
-  }
-  return out;
-}
-
 std::map<std::string, std::set<uint16_t>> slots_owned_by_node(
     const std::vector<std::string>& node_per_slot) {
   std::map<std::string, std::set<uint16_t>> out;
@@ -218,15 +74,13 @@ void throw_if_plan_too_large(size_t slot_count, uint32_t max_slots) {
 
 }  // namespace
 
-PipelinedFetchSession::PipelinedFetchSession(
-    const SlotPlanner& planner, const NodeRegistry& registry,
-    std::string namespace_name, size_t max_record_bytes, size_t max_write_bytes,
-    size_t window_bytes, uint32_t max_notification_slots, uint32_t window_count)
-    : planner_(planner),
-      registry_(registry),
+PipelinedFetchSession::PipelinedFetchSession(const NodeRegistry& registry,
+                                             std::string namespace_name,
+                                             size_t window_bytes,
+                                             uint32_t max_notification_slots,
+                                             uint32_t window_count)
+    : registry_(registry),
       namespace_name_(std::move(namespace_name)),
-      max_record_bytes_(max_record_bytes),
-      max_write_bytes_(max_write_bytes),
       window_bytes_(window_bytes),
       window_count_(window_count),
       max_notification_slots_(max_notification_slots),
@@ -253,45 +107,6 @@ uint16_t PipelinedFetchSession::allocate_generation() {
   next_generation_ =
       next > 0xFFFFu ? generation_first_ : static_cast<uint16_t>(next);
   return generation;
-}
-
-uint16_t PipelinedFetchSession::begin_request(
-    const std::vector<ChunkPlacement>& placements,
-    const std::vector<ChunkNodeBinding>& chunk_nodes,
-    const std::vector<SlotDigest>& slot_digests) {
-  std::lock_guard<std::mutex> lock(mu_);
-  if (has_request_) {
-    throw std::runtime_error(
-        "PipelinedFetchSession: a pipelined fetch is already active");
-  }
-
-  const uint16_t generation = allocate_generation();
-  RequestPlan plan = planner_.plan_request(placements, max_record_bytes_,
-                                           max_write_bytes_, generation);
-  throw_if_plan_too_large(plan.slot_count(), max_notification_slots_);
-  validate_slots_in_one_window(plan, window_bytes_, window_count_);
-
-  std::map<uint32_t, std::string> nodes = chunk_node_map(chunk_nodes);
-  for (uint32_t chunk_id : plan.chunk_ids()) {
-    if (nodes.find(chunk_id) == nodes.end()) {
-      throw std::invalid_argument(
-          "PipelinedFetchSession: chunk " + std::to_string(chunk_id) +
-          " appears in the plan but has no node binding");
-    }
-  }
-
-  std::vector<std::string> digests =
-      digests_for_plan(plan, planner_, placements, max_record_bytes_,
-                       max_write_bytes_, slot_digests);
-
-  has_request_ = true;
-  active_generation_ = generation;
-  plan_ = std::move(plan);
-  readiness_ = LayerReadiness(plan_);
-  node_per_slot_ = node_per_slot_from_chunks(plan_, nodes);
-  slots_by_node_ = slots_owned_by_node(node_per_slot_);
-  digest_per_slot_ = std::move(digests);
-  return active_generation_;
 }
 
 uint16_t PipelinedFetchSession::begin_request_from_slots(
@@ -332,8 +147,7 @@ uint16_t PipelinedFetchSession::begin_request_from_slots(
   nodes.reserve(slots.size());
   digests.reserve(slots.size());
   for (const PlannedSlot& slot : slots) {
-    // chunk_id is unused on this path: nodes come from each slot, not from
-    // chunk bindings.
+    // chunk_id is unused: each slot names its own node.
     plan.add_slot(slot.layer_id, 0, slot.offset, slot.length);
     nodes.push_back(slot.node_name);
     digests.push_back(slot.digest_hex);

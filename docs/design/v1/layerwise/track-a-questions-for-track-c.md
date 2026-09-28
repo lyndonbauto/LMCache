@@ -762,26 +762,39 @@ raises exactly when it doesn't.
     - `SlotRecordKey`, the driver's `issue_pipelined_fetch`, and
       `PipelinedFetchPool::begin_request`.
 
-    Below the pool, `PipelinedFetchSession::begin_request`, the free
-    `rdma::issue_pipelined_fetch` and `SlotPlanner` stay for now. Only the
-    native logic tests use them. Removing them means porting about 20
-    session tests to planned slots, which is a separate change. Until then
-    the driver still builds a `SlotPlanner` from the layouts, because the
-    pool and session constructors take one.
-
     For Track C, these still describe the removed entry point:
     `native_fetch.py` (`chunk_fetch_arguments` and the module docstring),
     `system-design.md` (the record-digest and "stay until" paragraphs),
     `contract-changes.md` (the by-keys shape), and the chunk-level row of
     `track-c-status.md`'s "blocked on" table.
+19. The chunk path is gone from the native session too. Removed:
+    `PipelinedFetchSession::begin_request`, `ChunkNodeBinding`,
+    `SlotDigest` and the free `rdma::issue_pipelined_fetch`. The session and
+    pool constructors no longer take a `SlotPlanner` or the record and
+    write caps, which only the chunk path read. `set_object_group_layouts`
+    still builds a `SlotPlanner`, but only to reject a malformed layout,
+    and it now does so before it drops the running pool.
+    - `SlotPlanner::plan_request` stays. Nothing in the fetch path calls it,
+      but `slot_plan_dump` uses it as the C++ reference that
+      `test_slot_plan_parity.py` diffs against your `LayerFetchPlan`.
+    - The session tests now plan with `SlotPlanner` and pass the result as
+      planned slots, so they keep real layouts. Two tests that checked only
+      the chunk path's own input validation were dropped, because the
+      planned-slot tests already cover the same cases. The kv_size-2 test had
+      a latent bug: the old session planned at its own 1 MiB record cap, so
+      the test's 256-byte plan was used only for digests. It now checks both
+      caps.
+    - For Track C, `contract-changes.md` (`SlotDigest`, `ChunkNodeBinding`)
+      and `system-design.md` (`ChunkNodeBinding`) still name the removed
+      types.
 
 These were verified on the Soft-RoCE VM
 ([rdma_testing_on_windows.md](../distributed/l2_adapters/rdma_testing_on_windows.md)):
 
 - `lmcache_aerospike` builds with `BUILD_WITH_AEROSPIKE_RDMA=1` against
   C client 7.3.0;
-- device-free logic harness: 364 checks pass;
-- fabric harness over `rxe0`: 415 checks pass;
+- device-free logic harness: 365 checks pass;
+- fabric harness over `rxe0`: 416 checks pass;
 - `tests/v1/layerwise/` and `tests/v1/distributed/` pass (1294 passed, 92
   skipped, with Track C's `d4bd73c5` merged), including the conformance
   suite over both sources, concurrent fetches over the real native pool, and
@@ -805,9 +818,8 @@ That needs an Aerospike server, and for the slot path, one built from the
    `is_pipelined_layer_ready` (M4).~~ Done as item 12.
 6. ~~Later: concurrent fetches (W3).~~ Done as item 13.
 7. ~~Remove the native `issue_pipelined_fetch_by_keys`.~~ Done as item 18.
-   Next: port the session tests to planned slots, then remove
-   `PipelinedFetchSession::begin_request`, `rdma::issue_pipelined_fetch` and
-   the chunk half of `SlotPlanner`.
+   ~~Port the session tests to planned slots and remove the session's chunk
+   path.~~ Done as item 19.
 8. Expose `pipelined_max_slots_per_request()` through the storage manager,
    if Track C wants it for the lookup-time check (F4).
 9. Run A7 on an EFA instance, and A8 against a server built from the
@@ -837,6 +849,7 @@ needs the ones before it unless noted.
 | 6 | One registration covering every window (P1, item 11) | `1c33157a` | 2, 4 |
 | 7 | Concurrent fetches, one per window (W3, item 13) | `6fd5fc4d` | 3, 5, 6 |
 | 8 | Production `ChunkPlacer`, `NEVER_FETCHED`, registration check, single-node gate, node name, retention (items 15-17) | `dad66a2b`, `adaf1ced`, `8e18aabd`, after the merges of `2a3c104d` and `d4bd73c5` | 5, 7, and Track C's lease interface (`1280926c` to `d4bd73c5`) |
+| 9 | Remove the chunk-level issue path, connector and session (items 18-19) | `ba7b4e06` and the next commit | 7 |
 
 Why this order: 2 and 3 touch only the transport and the adapters, so they
 can merge while 4 waits on `l1_manager` review. PR 4 is the only one that

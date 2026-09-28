@@ -12,11 +12,11 @@ namespace lmcache {
 namespace connector {
 namespace rdma {
 
-PipelinedFetchPool::PipelinedFetchPool(
-    const SlotPlanner& planner, const NodeRegistry& registry,
-    const std::string& namespace_name, size_t max_record_bytes,
-    size_t max_write_bytes, size_t window_bytes, uint32_t window_count,
-    uint32_t notification_depth)
+PipelinedFetchPool::PipelinedFetchPool(const NodeRegistry& registry,
+                                       const std::string& namespace_name,
+                                       size_t window_bytes,
+                                       uint32_t window_count,
+                                       uint32_t notification_depth)
     : window_bytes_(window_bytes),
       max_slots_per_request_(
           window_count == 0 ? 0 : notification_depth / window_count) {
@@ -38,8 +38,8 @@ PipelinedFetchPool::PipelinedFetchPool(
   sessions_.reserve(window_count);
   for (uint32_t w = 0; w < window_count; ++w) {
     auto session = std::make_unique<PipelinedFetchSession>(
-        planner, registry, namespace_name, max_record_bytes, max_write_bytes,
-        window_bytes, max_slots_per_request_, window_count);
+        registry, namespace_name, window_bytes, max_slots_per_request_,
+        window_count);
     session->set_generation_class(static_cast<uint16_t>(w + 1),
                                   static_cast<uint16_t>(window_count));
     sessions_.push_back(std::move(session));

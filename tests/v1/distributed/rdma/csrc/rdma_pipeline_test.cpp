@@ -54,19 +54,16 @@
 #include "pipelined_fetch_issue.h"
 #include "pipelined_fetch_pool.h"
 #include "rdma_context.h"
-#include "slot_planner.h"
 
 namespace {
 
 using lmcache::connector::rdma::ArrivalStatus;
 using lmcache::connector::rdma::build_pipelined_fetch_command;
 using lmcache::connector::rdma::issue_planned_fetch;
-using lmcache::connector::rdma::KernelGroupLayout;
 using lmcache::connector::rdma::LayerReadiness;
 using lmcache::connector::rdma::LocalEndpoint;
 using lmcache::connector::rdma::NodeRegistration;
 using lmcache::connector::rdma::NodeRegistry;
-using lmcache::connector::rdma::ObjectGroupLayout;
 using lmcache::connector::rdma::parse_pipelined_fetch_reply;
 using lmcache::connector::rdma::PipelinedFetchPool;
 using lmcache::connector::rdma::PipelinedFetchReply;
@@ -74,7 +71,6 @@ using lmcache::connector::rdma::PlannedSlot;
 using lmcache::connector::rdma::RdmaContext;
 using lmcache::connector::rdma::RequestPlan;
 using lmcache::connector::rdma::SinkRequest;
-using lmcache::connector::rdma::SlotPlanner;
 using lmcache::connector::rdma::Transport;
 using lmcache::test::KvSinkMockWriter;
 using lmcache::test::MockRecord;
@@ -176,21 +172,6 @@ int drain_until_layer_ready(RdmaContext& sink, LayerReadiness& readiness,
     }
   }
   return -1;
-}
-
-// A planner is required by the pool but never consulted on the slot path;
-// one single-layer group satisfies it.
-ObjectGroupLayout unused_layout() {
-  KernelGroupLayout group;
-  group.layer_indices = {0};
-  group.kv_size = 2;
-  group.num_slots = 1;
-  group.hidden_dim = 1;
-  group.element_size = 2;
-  ObjectGroupLayout layout;
-  layout.object_group_id = 0;
-  layout.kernel_groups.push_back(group);
-  return layout;
 }
 
 // One piece per layer in window `window`: piece `window` of each layer, at
@@ -523,9 +504,7 @@ int main(int argc, char** argv) {
     std::memset(slab, 0, kSlabBytes);
     NodeRegistry registry;
     registry.set(registration);
-    const SlotPlanner planner({unused_layout()});
-    PipelinedFetchPool pool(planner, registry, "kv", kPieceBytes, kPieceBytes,
-                            kWindowBytes, kWindowCount,
+    PipelinedFetchPool pool(registry, "kv", kWindowBytes, kWindowCount,
                             sink.notification_depth());
     auto send = [&](const std::string&, const std::string& command) {
       return writer.handle_pipelined_fetch(command);

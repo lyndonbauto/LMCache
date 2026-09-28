@@ -11,13 +11,12 @@
 #include "layer_pipeline.h"
 #include "notification_depth.h"
 #include "pipelined_fetch_session.h"
-#include "shard_plan.h"
 #include "slot_planner.h"
 
 namespace {
 
-using lmcache::connector::rdma::ChunkNodeBinding;
 using lmcache::connector::rdma::ChunkPlacement;
+using lmcache::connector::rdma::FetchSlot;
 using lmcache::connector::rdma::KernelGroupLayout;
 using lmcache::connector::rdma::NodeRegistration;
 using lmcache::connector::rdma::NodeRegistry;
@@ -25,7 +24,10 @@ using lmcache::connector::rdma::notification_depth_budget;
 using lmcache::connector::rdma::NotificationDepthBudget;
 using lmcache::connector::rdma::ObjectGroupLayout;
 using lmcache::connector::rdma::PipelinedFetchSession;
+using lmcache::connector::rdma::PlannedSlot;
+using lmcache::connector::rdma::PlanTooLargeError;
 using lmcache::connector::rdma::RdmaDeviceCaps;
+using lmcache::connector::rdma::RequestPlan;
 using lmcache::connector::rdma::SlotPlanner;
 
 constexpr size_t kWindowBytes = 1u << 20;
@@ -120,66 +122,64 @@ void test_budget_splits_depth_across_windows() {
         "each of four windows gets a quarter of the clamped depth");
 }
 
+// Slots of `layout` for one chunk at offset 0, all on node-a.
+std::vector<PlannedSlot> one_chunk_slots(const ObjectGroupLayout& layout) {
+  const SlotPlanner planner({layout});
+  const RequestPlan plan =
+      planner.plan_request({ChunkPlacement{0, 0, 0}}, kRecordCap, kWriteCap, 0);
+  std::vector<PlannedSlot> slots;
+  for (size_t i = 0; i < plan.slot_count(); ++i) {
+    const FetchSlot& fetch = plan.slot(static_cast<uint16_t>(i));
+    PlannedSlot slot;
+    slot.node_name = "node-a";
+    slot.digest_hex = "d" + std::to_string(i);
+    slot.layer_id = fetch.layer_id;
+    slot.offset = fetch.offset;
+    slot.length = fetch.length;
+    slots.push_back(slot);
+  }
+  return slots;
+}
+
 void test_begin_request_rejects_plan_above_device_slot_cap() {
-  std::cout << "begin_request rejects plan above device slot cap\n";
-  const SlotPlanner planner({two_layer_layout()});
+  std::cout << "begin_request_from_slots rejects plan above device slot cap\n";
   NodeRegistry registry;
   register_node(registry);
   constexpr uint32_t kDeviceSlotCap = 2;
-  PipelinedFetchSession session(planner, registry, "kv", kRecordCap, kWriteCap,
-                                kWindowBytes, kDeviceSlotCap);
-  const std::vector<ChunkPlacement> placements = {ChunkPlacement{0, 0, 0}};
-  const std::vector<ChunkNodeBinding> nodes = {{0, "node-a"}};
-  const auto plan = planner.plan_request(placements, kRecordCap, kWriteCap, 0);
-  check(plan.slot_count() > kDeviceSlotCap,
+  PipelinedFetchSession session(registry, "kv", kWindowBytes, kDeviceSlotCap);
+  const std::vector<PlannedSlot> slots = one_chunk_slots(two_layer_layout());
+  check(slots.size() > kDeviceSlotCap,
         "fixture plan exceeds injected device slot cap");
   bool threw = false;
   std::string message;
   try {
-    session.begin_request(placements, nodes, {});
-  } catch (const std::runtime_error& e) {
+    session.begin_request_from_slots(slots);
+  } catch (const PlanTooLargeError& e) {
     threw = true;
     message = e.what();
   }
-  check(threw, "oversized plan throws runtime_error");
-  check(message.find(std::to_string(plan.slot_count())) != std::string::npos,
+  check(threw, "oversized plan throws PlanTooLargeError");
+  check(message.find(std::to_string(slots.size())) != std::string::npos,
         "error names plan slot count");
   check(message.find(std::to_string(kDeviceSlotCap)) != std::string::npos,
         "error names device slot cap");
+  check(!session.has_active_request(), "nothing was begun");
 }
 
 void test_begin_request_accepts_plan_within_device_slot_cap() {
-  std::cout << "begin_request accepts plan within device slot cap\n";
-  KernelGroupLayout group;
-  group.layer_indices = {0};
-  group.kv_size = 1;
-  group.num_slots = 4;
-  group.hidden_dim = 64;
-  group.element_size = 2;
-  ObjectGroupLayout layout;
-  layout.object_group_id = 0;
-  layout.kernel_groups.push_back(group);
-  const SlotPlanner planner({layout});
+  std::cout << "begin_request_from_slots accepts plan within device slot cap\n";
   NodeRegistry registry;
   register_node(registry);
-  const std::vector<ChunkPlacement> placements = {ChunkPlacement{0, 0, 0}};
-  const auto plan = planner.plan_request(placements, kRecordCap, kWriteCap, 0);
-  PipelinedFetchSession session(planner, registry, "kv", kRecordCap, kWriteCap,
-                                kWindowBytes,
-                                static_cast<uint32_t>(plan.slot_count()));
-  lmcache::connector::rdma::SlotDigest digest;
-  digest.chunk_id = 0;
-  digest.layer_id = 0;
-  digest.plane = 0;
-  digest.piece = 0;
-  digest.digest_hex = "abc";
+  const std::vector<PlannedSlot> slots = one_chunk_slots(two_layer_layout());
+  PipelinedFetchSession session(registry, "kv", kWindowBytes,
+                                static_cast<uint32_t>(slots.size()));
   bool threw = false;
   try {
-    session.begin_request(placements, {{0, "node-a"}}, {digest});
+    session.begin_request_from_slots(slots);
   } catch (const std::exception&) {
     threw = true;
   }
-  check(!threw, "plan within cap begins without throwing");
+  check(!threw, "plan exactly at the cap begins without throwing");
   session.finish_request();
 }
 

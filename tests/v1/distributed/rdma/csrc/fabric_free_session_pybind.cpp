@@ -29,7 +29,6 @@
 #include "layer_pipeline.h"
 #include "pipelined_fetch_issue.h"
 #include "pipelined_fetch_pool.h"
-#include "slot_planner.h"
 
 namespace py = pybind11;
 
@@ -42,24 +41,6 @@ using lmcache::connector::rdma::NodeRegistry;
 using lmcache::connector::rdma::pipelined_command_slot_indices;
 using lmcache::connector::rdma::PipelinedFetchPool;
 using lmcache::connector::rdma::PlannedSlot;
-using lmcache::connector::rdma::SlotPlanner;
-
-constexpr size_t kRecordCap = 1u << 20;
-
-// The session requires a planner, which the slot path never consults, and a
-// planner refuses an empty layout. One single-layer group satisfies it.
-std::vector<lmcache::connector::rdma::ObjectGroupLayout> unused_layout() {
-  lmcache::connector::rdma::KernelGroupLayout group;
-  group.layer_indices = {0};
-  group.kv_size = 2;
-  group.num_slots = 1;
-  group.hidden_dim = 1;
-  group.element_size = 2;
-  lmcache::connector::rdma::ObjectGroupLayout layout;
-  layout.object_group_id = 0;
-  layout.kernel_groups.push_back(group);
-  return {layout};
-}
 
 // A reply accepting every sink the command carried.
 std::string accept_all(const std::string& command) {
@@ -74,8 +55,7 @@ class FabricFreeConnector {
   // max_slots * window_count.
   FabricFreeConnector(const std::vector<std::string>& node_names,
                       size_t window_bytes, uint32_t max_slots,
-                      uint32_t max_sinks, uint32_t window_count)
-      : planner_(unused_layout()) {
+                      uint32_t max_sinks, uint32_t window_count) {
     uint64_t region = 1;
     for (const std::string& name : node_names) {
       NodeRegistration registration;
@@ -86,8 +66,7 @@ class FabricFreeConnector {
       registry_.set(registration);
     }
     pool_ = std::make_unique<PipelinedFetchPool>(
-        planner_, registry_, "kv", kRecordCap, kRecordCap, window_bytes,
-        window_count, max_slots * window_count);
+        registry_, "kv", window_bytes, window_count, max_slots * window_count);
   }
 
   bool pipelined_fetch_ready() const { return true; }
@@ -173,7 +152,6 @@ class FabricFreeConnector {
   }
 
  private:
-  SlotPlanner planner_;
   NodeRegistry registry_;
   std::unique_ptr<PipelinedFetchPool> pool_;
 };

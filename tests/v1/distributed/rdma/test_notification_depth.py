@@ -8,7 +8,7 @@ from collections.abc import Callable
 def test_notification_depth_respects_device_caps(
     logic_harness: Callable[[str], str],
 ) -> None:
-    """Clamping and begin_request enforcement without libibverbs.
+    """Clamping and begin_request_from_slots enforcement without libibverbs.
 
     Args:
         logic_harness: Fixture that builds and runs a named harness.

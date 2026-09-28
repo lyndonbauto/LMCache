@@ -20,26 +20,19 @@ using PipelinedNodeInfoSender = std::function<std::string(
 // Build a pipelined acknowledgement that declines every slot in ``command``.
 std::string declined_reply_for_command(const std::string& command);
 
-// Begin a pipelined fetch, issue every node's command through ``send_info``,
-// and feed acknowledgements back into ``session``.
+// Begin a request planned by the caller (see
+// PipelinedFetchSession::begin_request_from_slots), issue every node's
+// command through ``send_info``, and feed acknowledgements back into
+// ``session``.
 //
 // When ``send_info`` throws, every slot owned by that node is marked
 // unservable via a synthetic declined reply. When any other step throws after
-// ``begin_request``, the active request is abandoned before the exception
-// propagates.
+// the request begins, it is abandoned before the exception propagates.
 //
 // Thread safety: ``session`` must not be accessed concurrently for the
 // duration of this call; the caller holds whatever lock serializes it.
 //
 // Returns the request generation issued to the servers.
-uint16_t issue_pipelined_fetch(PipelinedFetchSession& session,
-                               const PipelinedNodeInfoSender& send_info,
-                               const std::vector<ChunkPlacement>& placements,
-                               const std::vector<ChunkNodeBinding>& chunk_nodes,
-                               const std::vector<SlotDigest>& slot_digests);
-
-// Same as issue_pipelined_fetch(), for a request planned by the caller: see
-// PipelinedFetchSession::begin_request_from_slots.
 uint16_t issue_planned_fetch(PipelinedFetchSession& session,
                              const PipelinedNodeInfoSender& send_info,
                              const std::vector<PlannedSlot>& slots);

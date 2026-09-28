@@ -65,16 +65,6 @@ std::string declined_reply_for_command(const std::string& command) {
                               owned_slots);
 }
 
-uint16_t issue_pipelined_fetch(PipelinedFetchSession& session,
-                               const PipelinedNodeInfoSender& send_info,
-                               const std::vector<ChunkPlacement>& placements,
-                               const std::vector<ChunkNodeBinding>& chunk_nodes,
-                               const std::vector<SlotDigest>& slot_digests) {
-  return send_commands(
-      session, send_info,
-      session.begin_request(placements, chunk_nodes, slot_digests));
-}
-
 uint16_t issue_planned_fetch(PipelinedFetchSession& session,
                              const PipelinedNodeInfoSender& send_info,
                              const std::vector<PlannedSlot>& slots) {
