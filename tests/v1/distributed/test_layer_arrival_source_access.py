@@ -245,6 +245,58 @@ def test_native_adapter_without_the_path_or_the_name_has_no_node(
             adapter.pipelined_fetch_node_name()
 
 
+def test_native_adapter_reports_the_slot_limit() -> None:
+    """A ready client's per-fetch slot limit is passed through."""
+    with _native_adapter(PipelinedNativeClientStub()) as adapter:
+        assert (
+            adapter.pipelined_max_slots_per_request()
+            == PipelinedNativeClientStub.MAX_SLOTS
+        )
+
+
+def test_native_adapter_without_a_ready_path_has_no_slot_limit() -> None:
+    """A client whose pipelined init failed refuses, carrying the reason."""
+    client = PipelinedNativeClientStub()
+    client.init_error = "the cluster has 3 nodes"
+    with _native_adapter(client) as adapter:
+        with pytest.raises(LayerwiseContractError, match="the cluster has 3 nodes"):
+            adapter.pipelined_max_slots_per_request()
+
+
+@pytest.mark.parametrize("client_type", [_PlainClient, _KeysOnlyClient])
+def test_native_adapter_without_the_path_has_no_slot_limit(
+    client_type: type[_PlainClient],
+) -> None:
+    """A client built without RDMA, or with only the retired entry point, refuses."""
+    with _native_adapter(client_type()) as adapter:
+        with pytest.raises(LayerwiseContractError, match="no pipelined fetch path"):
+            adapter.pipelined_max_slots_per_request()
+
+
+class _NoLimitClient(PipelinedNativeClientStub):
+    """Ready, but reports no slot limit."""
+
+    def pipelined_max_slots_per_request(self) -> int:
+        return 0
+
+
+def test_native_adapter_refuses_a_ready_client_without_a_limit() -> None:
+    """A limit of 0 is refused rather than passed on as "no limit"."""
+    with _native_adapter(_NoLimitClient()) as adapter:
+        with pytest.raises(LayerwiseContractError, match="no slot limit"):
+            adapter.pipelined_max_slots_per_request()
+
+
+def test_default_adapter_has_no_slot_limit() -> None:
+    """A backend without a pipelined path refuses."""
+    adapter = MockL2Adapter(MockL2AdapterConfig(max_size_gb=1.0, mock_bandwidth_gb=1.0))
+    try:
+        with pytest.raises(LayerwiseContractError, match="MockL2Adapter"):
+            adapter.pipelined_max_slots_per_request()
+    finally:
+        adapter.close()
+
+
 def test_default_adapter_has_no_node() -> None:
     """A backend without a pipelined path refuses."""
     adapter = MockL2Adapter(MockL2AdapterConfig(max_size_gb=1.0, mock_bandwidth_gb=1.0))
@@ -308,3 +360,35 @@ def test_storage_manager_without_a_pipelined_node_names_each_adapter() -> None:
     with _storage_manager([_mock_adapter_config()]) as sm:
         with pytest.raises(LayerwiseContractError, match="MockL2Adapter"):
             sm.pipelined_fetch_node_name()
+
+
+def test_storage_manager_reports_the_slot_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The adapter with a ready pipelined path supplies the slot limit."""
+    client = PipelinedNativeClientStub()
+    monkeypatch.setattr(
+        storage_manager_module,
+        "create_l2_adapter",
+        lambda config, l1_memory_desc: NativeConnectorL2Adapter(
+            native_client=client, type_name="stub"
+        ),
+    )
+    with _storage_manager([_mock_adapter_config()]) as sm:
+        assert (
+            sm.pipelined_max_slots_per_request() == PipelinedNativeClientStub.MAX_SLOTS
+        )
+
+
+def test_storage_manager_without_a_slot_limit_names_each_adapter() -> None:
+    """The refusal carries each adapter's reason."""
+    with _storage_manager([_mock_adapter_config()]) as sm:
+        with pytest.raises(LayerwiseContractError, match="MockL2Adapter"):
+            sm.pipelined_max_slots_per_request()
+
+
+def test_storage_manager_without_adapters_has_no_slot_limit() -> None:
+    """With no L2 adapter there is no limit to report."""
+    with _storage_manager([]) as sm:
+        with pytest.raises(LayerwiseContractError, match="no L2 adapters"):
+            sm.pipelined_max_slots_per_request()

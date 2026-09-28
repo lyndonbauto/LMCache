@@ -840,6 +840,35 @@ class StorageManager:
             + ("; ".join(reasons) or "no L2 adapters are registered")
         )
 
+    def pipelined_max_slots_per_request(self) -> int:
+        """Return the most slots one layerwise fetch may carry.
+
+        A plan with more slots is refused at ``begin_fetch`` with
+        ``PlanTooLargeError``, so a lookup-time eligibility check can compare
+        the request's slot count against this instead. Adapters are asked
+        in registration order, as by :meth:`pipelined_fetch_node_name`.
+
+        Returns:
+            The limit from the first adapter with a ready pipelined path,
+            always positive.
+
+        Raises:
+            LayerwiseContractError: If no L2 adapter has a ready pipelined
+                path, with each adapter's reason.
+        """
+        with self._adapters_lock:
+            adapters = list(self._l2_adapters.values())
+        reasons: list[str] = []
+        for adapter in adapters:
+            try:
+                return adapter.pipelined_max_slots_per_request()
+            except LayerwiseContractError as exc:
+                reasons.append(str(exc))
+        raise LayerwiseContractError(
+            "no L2 adapter has a pipelined fetch slot limit: "
+            + ("; ".join(reasons) or "no L2 adapters are registered")
+        )
+
     def touch_l1_keys(self, keys: list[ObjectKey]):
         """
         Touch the keys in L1 storage, marking the keys

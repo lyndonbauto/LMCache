@@ -444,6 +444,22 @@ class L2AdapterInterface(ABC):
             f"{type(self).__name__} has no layer-pipelined fetch path"
         )
 
+    def pipelined_max_slots_per_request(self) -> int:
+        """Return the most slots one pipelined fetch on this backend may carry.
+
+        The default raises: most backends have no layer-pipelined path.
+
+        Returns:
+            The limit, always positive.
+
+        Raises:
+            LayerwiseContractError: If this backend has no ready pipelined
+                fetch path.
+        """
+        raise LayerwiseContractError(
+            f"{type(self).__name__} has no layer-pipelined fetch path"
+        )
+
     def layer_arrival_source(self) -> LayerArrivalSource:
         """Return a source that fetches and reports layers for this backend.
 

@@ -327,19 +327,11 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                 fetch path, or pipelined fetch is not ready; the message
                 carries the reason.
         """
-        if not self._has_pipelined_path:
-            raise LayerwiseContractError(
-                f"{self._type_name}: native client has no pipelined fetch path"
-            )
+        self._require_ready_pipelined_path()
         getter = getattr(self._client, "pipelined_fetch_node_name", None)
         if getter is None:
             raise LayerwiseContractError(
                 f"{self._type_name}: native client does not report its node"
-            )
-        if not self._client.pipelined_fetch_ready():
-            raise LayerwiseContractError(
-                f"{self._type_name}: pipelined fetch is not ready: "
-                f"{self.pipelined_fetch_init_error() or 'no reason reported'}"
             )
         try:
             return str(getter())
@@ -347,6 +339,31 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
             raise LayerwiseContractError(
                 f"{self._type_name}: no pipelined fetch node: {exc}"
             ) from exc
+
+    def pipelined_max_slots_per_request(self) -> int:
+        """Return the most slots one pipelined fetch may carry.
+
+        The limit is one RDMA window's share of the device's notification
+        depth. ``begin_fetch`` refuses a plan with more slots with
+        :class:`~lmcache.v1.layerwise.contract.PlanTooLargeError`, so a
+        lookup-time eligibility check can compare a request's slot count
+        against this and skip the pipelined path up front.
+
+        Returns:
+            The limit, always positive.
+
+        Raises:
+            LayerwiseContractError: If the native client has no pipelined
+                fetch path, pipelined fetch is not ready (the message
+                carries the reason), or the client reports no limit.
+        """
+        self._require_ready_pipelined_path()
+        max_slots = int(self._client.pipelined_max_slots_per_request())
+        if max_slots <= 0:
+            raise LayerwiseContractError(
+                f"{self._type_name}: pipelined fetch reports no slot limit"
+            )
+        return max_slots
 
     def layer_arrival_source(self) -> LayerArrivalSource:
         """Return a new arrival source over the native pipelined fetch.
@@ -575,6 +592,24 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         task_id = self._next_task_id
         self._next_task_id += 1
         return task_id
+
+    def _require_ready_pipelined_path(self) -> None:
+        """Raise unless the native client has a ready pipelined fetch path.
+
+        Raises:
+            LayerwiseContractError: If the client has no pipelined fetch
+                path, or pipelined fetch is not ready; the message carries
+                the init error.
+        """
+        if not self._has_pipelined_path:
+            raise LayerwiseContractError(
+                f"{self._type_name}: native client has no pipelined fetch path"
+            )
+        if not self._client.pipelined_fetch_ready():
+            raise LayerwiseContractError(
+                f"{self._type_name}: pipelined fetch is not ready: "
+                f"{self.pipelined_fetch_init_error() or 'no reason reported'}"
+            )
 
     def _demux_loop(self) -> None:
         """Background thread that polls the native

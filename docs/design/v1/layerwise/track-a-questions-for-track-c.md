@@ -32,7 +32,7 @@ how contract changes are made.
 | L2: `ObjectToPlace` has no object key | **Done:** Track C added `key`; Track A's copy is gone | - |
 | L3: releasing a lease as `NEVER_FETCHED` | **Done:** aborts the writes without quarantine | - |
 | L4: sizing `window_bytes` from `request_bytes` | **Done:** `check_window_holds_request` | Track C: call it at registration |
-| F1-F5: review of `fetch-start-proposal.md` | **Option A agreed**; F1 (a finished lease stored its objects back to L2) fixed | Track A: F4's limit if wanted; Track C: F2, F3, F4 |
+| F1-F5: review of `fetch-start-proposal.md` | **Option A agreed**; F1 (a finished lease stored its objects back to L2) fixed; F4's slot limit exposed (item 20) | Track C: F2, F3, F4's lookup check |
 | `WindowLease.memory_obj`, `run_resumable`, R5 (Track C, up to `d4bd73c5`) | **Merged**; `WindowPlacement` already had `memory_obj` | - |
 
 ## Decisions
@@ -574,8 +574,8 @@ A plan larger than the per-fetch notification share is refused at
 `depth / window_count`, which `pipelined_max_slots_per_request()` reports.
 At retrieve that refusal means the fallback. Checking only `request_bytes`
 at lookup misses it. The slot count follows from the fetch model and
-`max_record_bytes`, so it can be checked at lookup. Track A can expose the
-limit through the storage manager if Track C wants it.
+`max_record_bytes`, so it can be checked at lookup. The limit is exposed as
+`StorageManager.pipelined_max_slots_per_request()` (done item 20).
 
 ### F5. Eligibility can use readiness for the single-node rule
 
@@ -787,6 +787,18 @@ raises exactly when it doesn't.
     - For Track C, `contract-changes.md` (`SlotDigest`, `ChunkNodeBinding`)
       and `system-design.md` (`ChunkNodeBinding`) still name the removed
       types.
+20. The slot limit for F4: `StorageManager.pipelined_max_slots_per_request()`,
+    from the native client through the adapter, like the node name (item
+    16). It returns one window's share of the notification depth, the
+    largest plan `begin_fetch` accepts. It raises `LayerwiseContractError`
+    when no adapter has a ready pipelined path, and never returns 0, which
+    the native client uses for "not ready".
+    - For Track C, at lookup, compare the request's slot count with it
+      alongside `request_bytes`, and treat `LayerwiseContractError` as "not
+      eligible". The slot count is `len(plan.slots)` for the plan the
+      request would build, which depends only on the layout,
+      `max_record_bytes` and the chunk count, so it can be computed before
+      any window is leased.
 
 These were verified on the Soft-RoCE VM
 ([rdma_testing_on_windows.md](../distributed/l2_adapters/rdma_testing_on_windows.md)):
@@ -795,7 +807,7 @@ These were verified on the Soft-RoCE VM
   C client 7.3.0;
 - device-free logic harness: 365 checks pass;
 - fabric harness over `rxe0`: 416 checks pass;
-- `tests/v1/layerwise/` and `tests/v1/distributed/` pass (1294 passed, 92
+- `tests/v1/layerwise/` and `tests/v1/distributed/` pass (1303 passed, 92
   skipped, with Track C's `d4bd73c5` merged), including the conformance
   suite over both sources, concurrent fetches over the real native pool, and
   Track C's end-to-end retrieve over the production placer;
@@ -820,8 +832,8 @@ That needs an Aerospike server, and for the slot path, one built from the
 7. ~~Remove the native `issue_pipelined_fetch_by_keys`.~~ Done as item 18.
    ~~Port the session tests to planned slots and remove the session's chunk
    path.~~ Done as item 19.
-8. Expose `pipelined_max_slots_per_request()` through the storage manager,
-   if Track C wants it for the lookup-time check (F4).
+8. ~~Expose `pipelined_max_slots_per_request()` through the storage
+   manager (F4).~~ Done as item 20.
 9. Run A7 on an EFA instance, and A8 against a server built from the
    `kv-sink` branch. A8 also checks the server's side of "a slot lands at
    its plan offset".
@@ -832,7 +844,7 @@ That needs an Aerospike server, and for the slot path, one built from the
   pump, and the fallback goes into fresh general-L1 objects;
 - at registration, build the placer (item 16) and call
   `check_window_holds_request` (L4);
-- F2 to F4 of the review.
+- F2 to F4 of the review; for F4, the slot limit is item 20.
 
 **Together:** C9 over Soft-RoCE.
 
@@ -849,7 +861,8 @@ needs the ones before it unless noted.
 | 6 | One registration covering every window (P1, item 11) | `1c33157a` | 2, 4 |
 | 7 | Concurrent fetches, one per window (W3, item 13) | `6fd5fc4d` | 3, 5, 6 |
 | 8 | Production `ChunkPlacer`, `NEVER_FETCHED`, registration check, single-node gate, node name, retention (items 15-17) | `dad66a2b`, `adaf1ced`, `8e18aabd`, after the merges of `2a3c104d` and `d4bd73c5` | 5, 7, and Track C's lease interface (`1280926c` to `d4bd73c5`) |
-| 9 | Remove the chunk-level issue path, connector and session (items 18-19) | `ba7b4e06` and the next commit | 7 |
+| 9 | Remove the chunk-level issue path, connector and session (items 18-19) | `ba7b4e06`, `fd0b16c7` | 7 |
+| 10 | Slot limit through the storage manager (F4, item 20) | the next commit | 8 (shares the node-name plumbing) |
 
 Why this order: 2 and 3 touch only the transport and the adapters, so they
 can merge while 4 waits on `l1_manager` review. PR 4 is the only one that

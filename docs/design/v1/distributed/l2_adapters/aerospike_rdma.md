@@ -376,6 +376,15 @@ lease.release(LeaseOutcome.ABANDONED)      # abort_write; window quarantined,
   `StorageManager.pipelined_fetch_node_name()` returns that one node, to
   build the placer with. It raises `LayerwiseContractError`, carrying the
   init error, when no adapter has a ready pipelined path.
+- **The slot limit is known before the fetch.**
+  `StorageManager.pipelined_max_slots_per_request()` returns one window's
+  share of the device's notification depth, the most slots `begin_fetch`
+  accepts before it raises `PlanTooLargeError`. A lookup-time eligibility
+  check compares the request's slot count against it, so an oversized
+  request skips the pipelined path instead of failing at retrieve (F4).
+  It raises `LayerwiseContractError` in the same cases as the node name,
+  and never returns 0: the native client's 0 means "not ready", not
+  "no limit".
 - **A slot lands at its plan offset and nowhere else.** The plan's
   `SlotPlacement.offset` goes to the wire unchanged as `<digest>@<offset>:<length>`
   (`kv_sink_client.cpp`), and the session refuses a plan whose slots leave
