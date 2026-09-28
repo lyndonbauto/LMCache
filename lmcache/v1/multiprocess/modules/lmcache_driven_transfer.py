@@ -24,6 +24,7 @@ from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.kv_layer_groups import ObjectGroupInfo
 from lmcache.v1.layerwise import LayerwiseContractError
 from lmcache.v1.layerwise.deferral import PipelinedModel
+from lmcache.v1.layerwise.pipelined_retrieve import resolve_shared_keys
 from lmcache.v1.layerwise.planner import ModelLayout
 from lmcache.v1.layerwise.request_fetch import (
     FetchModel,
@@ -58,6 +59,15 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     downsample_and_stage_block_ids,
     transfer_kv_layerwise_h2d,
     transfer_kv_per_object_group,
+)
+from lmcache.v1.multiprocess.pipelined_loading import (
+    NO_PIPELINED_SINK_FACTORY,
+    WHOLE_LOAD_TIMEOUT_SECONDS,
+    DeferredLoad,
+    ObjectTable,
+    PipelinedLoadRequest,
+    PipelinedSinkFactory,
+    fetch_deferred_objects,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
 from lmcache.v1.multiprocess.request_handler import request_handler
@@ -252,10 +262,18 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
 
     Args:
         ctx: The shared engine context.
+        pipelined_sink_factory: Builds the sink of a pipelined retrieve.
+            Without one, no model is registered for the pipelined fetch, so
+            lookups never defer, even with ``--pipelined-fetch`` on.
     """
 
-    def __init__(self, ctx: MPCacheServerContext) -> None:
+    def __init__(
+        self,
+        ctx: MPCacheServerContext,
+        pipelined_sink_factory: PipelinedSinkFactory = NO_PIPELINED_SINK_FACTORY,
+    ) -> None:
         self._ctx = ctx
+        self._pipelined_sink_factory = pipelined_sink_factory
         self._cache_contexts: dict[int, ContextEntry] = {}
         # Guards all reads/writes of _cache_contexts. The reaper mutates it
         # off the MQ main loop, so register/unregister/store/retrieve and
@@ -1175,16 +1193,32 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 and getattr(entry, "layer_progress", None) is not None
                 and getattr(entry, "daemon_layer_event_pool", None) is not None
             )
+            keys_to_fetch: tuple[ObjectKey, ...] = ()
+            fetched_in_window: tuple[ObjectKey, ...] = ()
             try:
+                keys_to_fetch = self._resolve_deferred_keys(
+                    key,
+                    model_name,
+                    obj_keys_per_obj_group,
+                    group_skips,
+                    skipped_groups,
+                    layerwise_active,
+                )
+                fetch_set = frozenset(keys_to_fetch)
                 for obj_group_id in range(num_object_groups):
                     if obj_group_id in skipped_groups:
                         continue
                     skip = group_skips[obj_group_id]
                     in_window_keys = obj_keys_per_obj_group[obj_group_id][skip:]
+                    l1_keys = [k for k in in_window_keys if k not in fetch_set]
                     with self._ctx.storage_manager.read_prefetched_results(
-                        in_window_keys
+                        l1_keys
                     ) as window_objs:
-                        if not window_objs or len(window_objs) != len(in_window_keys):
+                        if (
+                            window_objs is None
+                            or not in_window_keys
+                            or len(window_objs) != len(l1_keys)
+                        ):
                             logger.error("Some keys not found during retrieve!")
                             retrieve_succeeded = False
                             if layerwise_active:
@@ -1198,8 +1232,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
 
                         total_bytes += sum(mo.get_size() for mo in window_objs)
 
-                        memory_objs: list[MemoryObj | None] = [None] * skip + list(
-                            window_objs
+                        l1_objs = iter(window_objs)
+                        memory_objs: list[MemoryObj | None] = [None] * skip
+                        memory_objs.extend(
+                            None if k in fetch_set else next(l1_objs)
+                            for k in in_window_keys
                         )
                         memory_objs_by_group[obj_group_id] = memory_objs
 
@@ -1214,7 +1251,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                                 direction=lmcache_native.TransferDirection.H2D,
                                 transfer_key=transfer_key,
                             )
-                        prefetched_keys.extend(in_window_keys)
+                        prefetched_keys.extend(l1_keys)
 
                 if layerwise_active and retrieve_succeeded:
                     if retrieve_generation <= 0:
@@ -1229,17 +1266,45 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         raise RuntimeError(
                             "layerwise retrieve missing schedule or progress state"
                         )
-                    transfer_kv_layerwise_h2d(
-                        cache_context,
-                        block_ids_per_group_gpu,
-                        memory_objs_by_group,
-                        skip_first_n_tokens,
-                        schedule,
-                        progress,
-                        event_pool,
-                        retrieve_generation,
-                        transfer_key=transfer_key,
-                    )
+                    delivery = DeferredLoad.WHOLE
+                    if keys_to_fetch:
+                        table = ObjectTable(memory_objs_by_group)
+                        deferred_fetch = fetch_deferred_objects(
+                            self._ctx.storage_manager,
+                            self._ctx.pipelined_models.find(model_name, key.world_size),
+                            obj_keys_per_obj_group,
+                            keys_to_fetch,
+                            self._pipelined_sink_factory,
+                            PipelinedLoadRequest(
+                                cache_context=cache_context,
+                                block_ids_gpu=block_ids_per_group_gpu,
+                                objects=table,
+                                skip_first_n_tokens=skip_first_n_tokens,
+                                schedule=schedule,
+                                progress=progress,
+                                event_pool=event_pool,
+                                retrieve_generation=retrieve_generation,
+                                transfer_key=transfer_key,
+                            ),
+                            self._group_layout_descs(model_name, key.world_size),
+                        )
+                        prefetched_keys.extend(deferred_fetch.locked_keys)
+                        memory_objs_by_group = table.by_group()
+                        delivery = deferred_fetch.load
+                        if delivery is DeferredLoad.PIPELINED:
+                            fetched_in_window = keys_to_fetch
+                    if delivery is DeferredLoad.WHOLE:
+                        transfer_kv_layerwise_h2d(
+                            cache_context,
+                            block_ids_per_group_gpu,
+                            memory_objs_by_group,
+                            skip_first_n_tokens,
+                            schedule,
+                            progress,
+                            event_pool,
+                            retrieve_generation,
+                            transfer_key=transfer_key,
+                        )
             except Exception:
                 logger.exception("Cannot retrieve keys due to exception")
                 retrieve_succeeded = False
@@ -1255,9 +1320,10 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         "finish_read_prefetched",
                         prefetched_keys,
                     )
+                retrieved_count = len(set(prefetched_keys).union(fetched_in_window))
                 num_tokens = (
                     num_chunks * self._ctx.chunk_size
-                    if len(prefetched_keys) == expected_retained
+                    if retrieved_count == expected_retained
                     else 0
                 )
                 self._ctx.event_bus.publish_on_stream(
@@ -1266,7 +1332,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         event_type=EventType.MP_RETRIEVE_END,
                         session_id=key.request_id,
                         metadata={
-                            "retrieved_count": len(prefetched_keys),
+                            "retrieved_count": retrieved_count,
                             "device": str(cache_context.device),
                             "engine_id": instance_id,
                             "model_name": model_name,
@@ -1343,6 +1409,104 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
         )
 
+    def _resolve_deferred_keys(
+        self,
+        key: IPCCacheServerKey,
+        model_name: str,
+        obj_keys_per_obj_group: list[list[ObjectKey]],
+        group_skips: list[int],
+        skipped_groups: set[int],
+        layerwise_active: bool,
+    ) -> tuple[ObjectKey, ...]:
+        """Claim this retrieve's deferred keys and say which to fetch.
+
+        Deferred keys another fetch left readable are read-locked for reuse,
+        and busy ones are handled by ``--pipelined-shared-keys``. If this
+        retrieve cannot fetch layer by layer, the rest are loaded whole. Keys
+        locked here are read, and released, like the lookup's.
+
+        Args:
+            key: The retrieve's key.
+            model_name: The registered model.
+            obj_keys_per_obj_group: The retrieve's keys per object group.
+            group_skips: Per group, the first chunk read.
+            skipped_groups: Groups the retrieve does not read.
+            layerwise_active: Whether this retrieve loads layer by layer.
+
+        Returns:
+            The deferred keys still to fetch layer by layer, in request
+            order; empty when every key is now in L1.
+
+        Raises:
+            SharedKeysBusyError: If a busy key made the retrieve give up.
+            LayerwiseContractError: If a whole load missed a key.
+            LMCacheTimeoutError: If a whole load took too long.
+        """
+        if self._pipelined_sink_factory is NO_PIPELINED_SINK_FACTORY:
+            return ()
+        session = self._ctx.session_manager.get(key.request_id)
+        if session is None:
+            return ()
+        in_window = [
+            obj_key
+            for group_id, keys in enumerate(obj_keys_per_obj_group)
+            if group_id not in skipped_groups
+            for obj_key in keys[group_skips[group_id] :]
+        ]
+        deferred = session.claim_deferred_keys(in_window)
+        if not deferred:
+            return ()
+        storage_manager = self._ctx.storage_manager
+        config = self._ctx.pipelined_fetch
+        resolution = resolve_shared_keys(
+            storage_manager, deferred, config.shared_keys, config.shared_wait_seconds
+        )
+        to_fetch = resolution.to_fetch
+        if not to_fetch:
+            return ()
+        try:
+            self._ctx.pipelined_models.find(model_name, key.world_size)
+        except KeyError:
+            layerwise_active = False
+        if layerwise_active:
+            return to_fetch
+        try:
+            loaded = storage_manager.load_into_l1(
+                list(to_fetch),
+                self._group_layout_descs(model_name, key.world_size),
+                WHOLE_LOAD_TIMEOUT_SECONDS,
+            )
+        except Exception:
+            if resolution.reused:
+                storage_manager.finish_read_prefetched(list(resolution.reused))
+            raise
+        if len(loaded) != len(to_fetch):
+            storage_manager.finish_read_prefetched(
+                list(resolution.reused) + list(loaded)
+            )
+            raise LayerwiseContractError(
+                f"{len(to_fetch) - len(loaded)} deferred object(s) could not "
+                "be loaded whole"
+            )
+        return ()
+
+    def _group_layout_descs(
+        self, model_name: str, world_size: int
+    ) -> dict[int, MemoryLayoutDesc]:
+        """Return a registered model's per-object-group layouts.
+
+        Raises:
+            LayerwiseContractError: If the model has none registered.
+        """
+        layouts = self._ctx.layout_desc_registry.find_group_layout_descs(
+            model_name, world_size
+        )
+        if not layouts:
+            raise LayerwiseContractError(
+                f"no object group layouts registered for {model_name!r}"
+            )
+        return layouts
+
     def _register_pipelined_model(
         self,
         model_name: str,
@@ -1352,8 +1516,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
     ) -> None:
         """Make a model's lookups eligible for the pipelined retrieve.
 
-        On any reason the model cannot be served -- a world size above one,
-        no ready pipelined path, or a window too small for the chunk cap --
+        On any reason the model cannot be served -- no pipelined sink, a
+        world size above one, no ready pipelined path, or a window too small
+        for the chunk cap --
         logs it and leaves the model loading whole objects at lookup.
 
         Args:
@@ -1362,6 +1527,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             fetch_model: Its registered layout and attention windows.
             group_layout_descs: Its per-object-group layouts.
         """
+        if self._pipelined_sink_factory is NO_PIPELINED_SINK_FACTORY:
+            logger.warning(
+                "No pipelined sink is installed; %s loads whole objects at lookup",
+                model_name,
+            )
+            return
         if world_size != 1:
             logger.warning(
                 "Pipelined fetch serves world size 1 only; %s (world size %d) "

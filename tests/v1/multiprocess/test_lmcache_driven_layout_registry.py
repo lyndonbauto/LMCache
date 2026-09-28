@@ -94,7 +94,10 @@ def stub_lmcache_native() -> Any:
 
 
 def _registration_module(
-    monkeypatch: pytest.MonkeyPatch, ctx: Any, layout_desc: Any
+    monkeypatch: pytest.MonkeyPatch,
+    ctx: Any,
+    layout_desc: Any,
+    sink_factory: Any = None,
 ) -> Any:
     """Build the transfer module with CUDA-touching collaborators stubbed out.
 
@@ -102,6 +105,7 @@ def _registration_module(
         monkeypatch: Pytest monkeypatch fixture.
         ctx: Engine context the module is built with.
         layout_desc: Layout descriptor every object group reports.
+        sink_factory: The pipelined sink factory, or ``None`` for none.
 
     Returns:
         A ``LMCacheDrivenTransferModule`` ready for ``register_kv_cache``.
@@ -132,7 +136,16 @@ def _registration_module(
         lambda: None,
         raising=False,
     )
-    return lmcache_driven_transfer_mod.LMCacheDrivenTransferModule(ctx)
+    if sink_factory is None:
+        return lmcache_driven_transfer_mod.LMCacheDrivenTransferModule(ctx)
+    return lmcache_driven_transfer_mod.LMCacheDrivenTransferModule(ctx, sink_factory)
+
+
+class _SinkFactory:
+    """A pipelined sink factory registration never calls."""
+
+    def build(self, request: Any) -> Any:
+        raise AssertionError("registration builds no sink")
 
 
 def test_registration_hands_storage_the_layout_and_layer_indices(
@@ -450,7 +463,7 @@ def test_registration_sets_up_the_pipelined_fetch_until_the_worker_leaves(
 
     layout_desc = _pipelined_layout()
     ctx = _pipelined_ctx()
-    module = _registration_module(monkeypatch, ctx, layout_desc)
+    module = _registration_module(monkeypatch, ctx, layout_desc, _SinkFactory())
     module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [], [])
 
     model = ctx.pipelined_models.find("model", 1)
@@ -480,7 +493,7 @@ def test_a_pipelined_setup_storage_refuses_does_not_fail_registration(
     ctx.storage_manager.pipelined_window_placer.side_effect = LayerwiseContractError(
         "no RDMA windows"
     )
-    module = _registration_module(monkeypatch, ctx, _pipelined_layout())
+    module = _registration_module(monkeypatch, ctx, _pipelined_layout(), _SinkFactory())
     module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [], [])
 
     module.fetch_model("model", 1)
@@ -490,20 +503,23 @@ def test_a_pipelined_setup_storage_refuses_does_not_fail_registration(
 
 
 @pytest.mark.parametrize(
-    ("enabled", "world_size"), [(False, 1), (True, 2)], ids=["disabled", "tp2"]
+    ("enabled", "world_size", "sink_factory"),
+    [(False, 1, _SinkFactory()), (True, 2, _SinkFactory()), (True, 1, None)],
+    ids=["disabled", "tp2", "no-sink"],
 )
 def test_the_pipelined_setup_is_skipped_when_it_cannot_apply(
     monkeypatch: pytest.MonkeyPatch,
     stub_lmcache_native: Any,
     enabled: bool,
     world_size: int,
+    sink_factory: Any,
 ) -> None:
-    """Disabled, or above world size one: storage is not even asked."""
+    """Disabled, above world size one, or no sink: storage is not even asked."""
     # First Party
     from lmcache.utils import EngineType
 
     ctx = _pipelined_ctx(enabled=enabled)
-    module = _registration_module(monkeypatch, ctx, _pipelined_layout())
+    module = _registration_module(monkeypatch, ctx, _pipelined_layout(), sink_factory)
     module.register_kv_cache(1, [], "model", world_size, EngineType.VLLM, {}, [], [])
 
     ctx.storage_manager.pipelined_window_placer.assert_not_called()

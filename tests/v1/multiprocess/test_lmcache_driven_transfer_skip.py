@@ -101,8 +101,6 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
     and transfers per object group."""
     num_object_groups = len(num_chunks_in_sw)
 
-    module = LMCacheDrivenTransferModule.__new__(LMCacheDrivenTransferModule)
-
     kvlgm = SimpleNamespace(
         num_object_groups=num_object_groups,
         num_kernel_groups=num_object_groups,
@@ -119,8 +117,6 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
     entry = SimpleNamespace(
         cache_context=cache_context, model_name="m", event_backend=event_backend
     )
-    module.get_and_touch_context_entry = MagicMock(return_value=entry)
-
     # Object keys: one distinct key per (group, chunk).
     obj_keys = [
         [f"g{g}c{c}" for c in range(num_chunks)] for g in range(num_object_groups)
@@ -138,7 +134,9 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
         yield [MagicMock(get_size=MagicMock(return_value=10)) for _ in keys]
 
     ctx.storage_manager.read_prefetched_results = MagicMock(side_effect=fake_read)
-    module._ctx = ctx
+    monkeypatch.setattr(mod, "DeviceHostFuncDispatcher", MagicMock())
+    module = LMCacheDrivenTransferModule(ctx)
+    module.get_and_touch_context_entry = MagicMock(return_value=entry)
 
     transfer_calls: list[tuple[int, list]] = []
 

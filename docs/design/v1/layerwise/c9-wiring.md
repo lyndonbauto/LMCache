@@ -42,7 +42,7 @@ Four daemon options, all in `MPServerConfig` and on the command line:
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--pipelined-fetch` | off | Enable the deferred lookup and pipelined retrieve. Needs `--use-layerwise`; the daemon refuses to start otherwise. |
+| `--pipelined-fetch` | off | Enable the deferred lookup and pipelined retrieve. Needs `--use-layerwise`; the daemon refuses to start otherwise. With no sink factory installed (see "Retrieve"), registration logs a warning and every lookup takes today's path. |
 | `--pipelined-max-chunks` | 64 | Most chunks one request may defer. The lookup defers only up to this, and registration checks that one window holds it. |
 | `--pipelined-shared-keys` | `recompute` | What a retrieve does when another request is still fetching one of its deferred keys (see "Shared keys"). `recompute` or `wait`. |
 | `--pipelined-shared-wait-seconds` | 1.0 | Budget for `wait`. |
@@ -146,7 +146,9 @@ class PipelinedLoader(Protocol):
     def wait_for_copies(self) -> None: ...
     def reload_whole(self, objects: Sequence[ObjectToPlace]) -> None: ...
 
-run_pipelined_retrieve(model, keys, max_record_bytes, placer, source, loader)
+run_pipelined_retrieve(
+    model, keys, max_record_bytes, placer, source, loader, keys_to_fetch
+)
 ```
 
 1. **Lease and plan.** A refusal here raises `PipelinedRetrieveRefused`.
@@ -171,13 +173,49 @@ run_pipelined_retrieve(model, keys, max_record_bytes, placer, source, loader)
    sets the worker's failure flag, and vLLM recomputes (R5). Retrieve returns
    `False` as a backstop.
 
-**The sink factory is the hand-off to Track B.** `sink_for` builds Track
-B's `MultiprocessLayerLoadSink` over the table, the worker's
-`retrieve_generation`, the block ids and the registered schedule. Until it
-exists, `--pipelined-fetch` refuses to start unless a sink factory is
-registered, and tests register one that returns `RecordingLayerLoadSink`.
-The sink maps the pump's generation to the worker's, because the two are
-numbered independently.
+**What retrieve does** (`lmcache_driven_transfer.py`, with the loader in
+`lmcache/v1/multiprocess/pipelined_loading.py`):
+
+1. Claim the session's deferred keys among this retrieve's in-window keys,
+   then resolve shared keys (below). Reused keys join the L1 part.
+2. If the retrieve is not layerwise, or the model has no `PipelinedModel`,
+   load the rest whole with `StorageManager.load_into_l1` and serve them as
+   L1 keys. A missing key fails the retrieve, and vLLM recomputes.
+3. Read the L1 part with `read_prefetched_results`, leaving `None` at each
+   deferred position, and put every group's objects in an `ObjectTable`.
+4. `fetch_deferred_objects(storage, model, keys, keys_to_fetch, factory,
+   request, layouts)` runs `run_pipelined_retrieve` over the deferred keys
+   only (`keys_to_fetch`), since the L1 keys are already read-locked and
+   leasing them would be refused. It returns `DeferredFetchResult(load,
+   locked_keys)`:
+   - `PIPELINED`: the sink delivered every layer, so retrieve transfers
+     nothing more;
+   - `WHOLE`: no source, or the lease or plan was refused. The objects were
+     loaded whole into the table, and retrieve runs today's
+     `transfer_kv_layerwise_h2d` over it.
+5. `locked_keys` (whole loads, fallback reloads) are released with the L1
+   part by the end-of-retrieve `finish_read_prefetched` stream callback,
+   after the copies.
+
+**The sink factory is the hand-off to Track B.** The module takes a
+`PipelinedSinkFactory` at construction:
+
+```python
+class PipelinedSinkFactory(Protocol):
+    def build(self, request: PipelinedLoadRequest) -> PipelinedSink: ...
+
+class PipelinedSink(LayerLoadSink, Protocol):
+    def wait_for_copies(self) -> None: ...
+```
+
+`PipelinedLoadRequest` carries the cache context, the GPU block ids, the
+`ObjectTable`, `skip_first_n_tokens`, the registered schedule, the progress
+record, the event pool, the worker's `retrieve_generation` and the transfer
+key. The sink reads the table with `ObjectTable.get(group, chunk)` when it
+loads a layer, and maps the pump's generation to `retrieve_generation`,
+because the two are numbered independently. Until Track B's factory is
+wired into `_build_modules`, the default `NO_PIPELINED_SINK_FACTORY` keeps
+models unregistered, so nothing is deferred.
 
 **Per-layer staging.** Today's layerwise path stages whole objects to the
 GPU before the first layer that needs them. Window objects are incomplete
@@ -248,8 +286,8 @@ defaults, wait plus first layer stays under the worker's 5 s.
 | Leaser at init, `pipelined_window_placer`, `rdma_window_bytes`, `pipelined_max_record_bytes`, `lock_resident_keys`, whole-object load | `storage_manager.py`, adapter accessors | Track C, reviewed by Track A |
 | Eligibility, deferred keys on the session, release paths | `modules/lookup.py`, `session.py` | Track C |
 | `run_pipelined_retrieve` with the loader protocol and fallback | `layerwise/pipelined_retrieve.py` | Track C |
-| Retrieve wiring and the sink factory hook | `lmcache_driven_transfer.py` | Track C |
-| The sink behind `sink_for`, staging per layer | `multiprocess/layerwise_sink.py` | Track B |
+| Retrieve wiring and the sink factory hook | `lmcache_driven_transfer.py`, `multiprocess/pipelined_loading.py` | Track C |
+| The `PipelinedSinkFactory` and its sink, staging per layer; installed in `_build_modules` | `multiprocess/layerwise_sink.py`, `server.py` | Track B |
 | Generation timeout reported as failed blocks | `lmcache_mp_connector.py` | Track B |
 
 Built in this order, each step committed with its tests: deferred mode;

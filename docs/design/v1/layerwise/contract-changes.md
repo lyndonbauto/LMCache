@@ -11,6 +11,39 @@ defect coming back.
 
 ---
 
+## Retrieve takes a sink factory; `run_pipelined_retrieve` takes a loader
+
+**Who is affected:** Track B (you implement the factory); anyone calling
+`run_pipelined_retrieve`, whose signature changed.
+
+**What changed** (design: [c9-wiring.md](c9-wiring.md), "Retrieve"):
+
+- **Sink factory.** `LMCacheDrivenTransferModule(ctx,
+  pipelined_sink_factory=...)` takes a `PipelinedSinkFactory` from
+  `lmcache/v1/multiprocess/pipelined_loading.py`. Its
+  `build(PipelinedLoadRequest) -> PipelinedSink` returns a `LayerLoadSink`
+  that also has `wait_for_copies()`. The sink reads objects from
+  `request.objects` (an `ObjectTable`) with `get(group, chunk)` when it loads
+  a layer, because the fallback swaps objects in part way through. With the
+  default `NO_PIPELINED_SINK_FACTORY`, models are not registered for
+  pipelined fetch and nothing is deferred.
+- **`run_pipelined_retrieve(model, keys, max_record_bytes, placer, source,
+  loader, keys_to_fetch=None, ...)`** now takes a `PipelinedLoader`
+  (`sink_for(lease)`, `wait_for_copies()`, `reload_whole(objects)`) instead
+  of a sink, and returns `PipelinedRetrieveResult(fetch, completion)`. It
+  raises `PipelinedRetrieveRefused` when nothing began. `keys_to_fetch`
+  limits the lease and plan to a subset of the request's keys (the deferred
+  ones), and `objects_to_place` and `build_request_fetch` take the same
+  argument.
+
+**Why.** The sink cannot be built before the lease exists, since its
+destination memory is the lease's; and releasing the lease must wait for
+the sink's copies (F2), which only the loader can wait for. The subset is
+needed because the L1 part is already read-locked by the lookup, so leasing
+its keys would be refused.
+
+---
+
 ## The lookup can defer L2 hits; storage builds the placer
 
 **Who is affected:** Track A (new `StorageManager` and adapter accessors to
