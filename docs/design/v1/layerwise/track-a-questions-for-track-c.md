@@ -807,6 +807,24 @@ raises exactly when it doesn't.
       `TEST_NODE_NAMES[0]`, so its placer gets the name the same way the
       registration wiring will (item 16). That is the only change to your
       file.
+22. The storage manager builds the placer:
+    `StorageManager.rdma_window_placer(layouts, select_retentions) ->
+    ChunkPlacer`. It supersedes the manual construction in item 16, which
+    needed the storage manager's private L1. It uses the node and the RDMA
+    config of the first adapter, in registration order, with a ready
+    pipelined path and RDMA reception enabled, and otherwise raises
+    `LayerwiseContractError` with each adapter's reason. Every placer from
+    one storage manager shares one leaser, so the windows can't be leased
+    twice and a quarantine holds across placers.
+    - The fabric-free harness now has `event_fd`, `drain_completions` and
+      `close`, so a real `NativeConnectorL2Adapter` wraps it. The new
+      `test_storage_manager_placer.py` runs a whole retrieve with the placer
+      and the source from one `StorageManager`: a clean fetch, two placers
+      sharing the window, and a declined slot quarantining the window for
+      the next placer.
+    - For Track C, the registration wiring is
+      `storage_manager.rdma_window_placer(layouts,
+      policy.select_l1_retentions)`, then `check_window_holds_request` (L4).
 
 These were verified on the Soft-RoCE VM
 ([rdma_testing_on_windows.md](../distributed/l2_adapters/rdma_testing_on_windows.md)):
@@ -815,10 +833,11 @@ These were verified on the Soft-RoCE VM
   C client 7.3.0;
 - device-free logic harness: 365 checks pass;
 - fabric harness over `rxe0`: 416 checks pass;
-- `tests/v1/layerwise/` and `tests/v1/distributed/` pass (1305 passed, 92
+- `tests/v1/layerwise/` and `tests/v1/distributed/` pass (1312 passed, 92
   skipped, with Track C's `d4bd73c5` merged), including the conformance
-  suite over both sources, concurrent fetches over the real native pool, and
-  Track C's end-to-end retrieve over the production placer;
+  suite over both sources, concurrent fetches over the real native pool,
+  Track C's end-to-end retrieve over the production placer, and a retrieve
+  whose placer and source both come from one `StorageManager`;
 - the pytest wrappers in `tests/v1/distributed/rdma/` pass.
 
 `record_node` and `issue_pipelined_fetch_by_slots` have not run end to end.
@@ -850,8 +869,8 @@ That needs an Aerospike server, and for the slot path, one built from the
 
 - retrieve wiring per M4 and W4: one handler covers the placer and the
   pump, and the fallback goes into fresh general-L1 objects;
-- at registration, build the placer (item 16) and call
-  `check_window_holds_request` (L4);
+- at registration, get the placer from `rdma_window_placer` (item 22) and
+  call `check_window_holds_request` (L4);
 - F2 to F4 of the review; for F4, the slot limit is item 20.
 
 **Together:** C9 over Soft-RoCE.
@@ -870,7 +889,7 @@ needs the ones before it unless noted.
 | 7 | Concurrent fetches, one per window (W3, item 13) | `6fd5fc4d` | 3, 5, 6 |
 | 8 | Production `ChunkPlacer`, `NEVER_FETCHED`, registration check, single-node gate, node name, retention (items 15-17) | `dad66a2b`, `adaf1ced`, `8e18aabd`, after the merges of `2a3c104d` and `d4bd73c5` | 5, 7, and Track C's lease interface (`1280926c` to `d4bd73c5`) |
 | 9 | Remove the chunk-level issue path, connector and session (items 18-19) | `ba7b4e06`, `fd0b16c7` | 7 |
-| 10 | Slot limit through the storage manager (F4, item 20); the harness's node name (item 21) | `c295d527` and the next commit | 8 (shares the node-name plumbing) |
+| 10 | Slot limit through the storage manager (F4, item 20); the harness's node name (item 21); the storage manager builds the placer (item 22) | `c295d527`, `89d0e28e`, and the commit after `8dc08e0a` (the CI fix) | 8 (shares the node-name plumbing) |
 
 Why this order: 2 and 3 touch only the transport and the adapters, so they
 can merge while 4 waits on `l1_manager` review. PR 4 is the only one that

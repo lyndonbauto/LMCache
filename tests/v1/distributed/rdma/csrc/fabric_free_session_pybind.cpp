@@ -12,13 +12,22 @@
 // accounting decision -- stale generations, per-layer counts, which node owns
 // a slot -- is the production session's, not this file's.
 //
+// It also has event_fd, drain_completions and close, so
+// NativeConnectorL2Adapter can wrap it. It runs no batch operations, so the
+// eventfd never fires and drain_completions is always empty.
+//
 // Built by `make -C tests/v1/distributed/rdma pyharness`; never shipped.
 
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
+#include <sys/eventfd.h>
+#include <unistd.h>
 
+#include <cerrno>
 #include <cstdint>
+#include <cstring>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -49,13 +58,23 @@ std::string accept_all(const std::string& command) {
          ";bytes=0";
 }
 
+// (future_id, ok, error, per-key results), as the production client's
+// drain_completions returns them.
+using Completion =
+    std::tuple<uint64_t, bool, std::string, std::optional<std::vector<bool>>>;
+
 class FabricFreeConnector {
  public:
   // `max_slots` is one window's share, so the pool's depth is
   // max_slots * window_count.
   FabricFreeConnector(const std::vector<std::string>& node_names,
                       size_t window_bytes, uint32_t max_slots,
-                      uint32_t max_sinks, uint32_t window_count) {
+                      uint32_t max_sinks, uint32_t window_count)
+      : event_fd_(eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK)) {
+    if (event_fd_ < 0) {
+      throw std::runtime_error(std::string("eventfd failed: ") +
+                               std::strerror(errno));
+    }
     uint64_t region = 1;
     for (const std::string& name : node_names) {
       NodeRegistration registration;
@@ -67,6 +86,22 @@ class FabricFreeConnector {
     }
     pool_ = std::make_unique<PipelinedFetchPool>(
         registry_, "kv", window_bytes, window_count, max_slots * window_count);
+  }
+
+  FabricFreeConnector(const FabricFreeConnector&) = delete;
+  FabricFreeConnector& operator=(const FabricFreeConnector&) = delete;
+
+  ~FabricFreeConnector() { close(); }
+
+  int event_fd() const { return event_fd_; }
+
+  std::vector<Completion> drain_completions() const { return {}; }
+
+  void close() {
+    if (event_fd_ >= 0) {
+      ::close(event_fd_);
+      event_fd_ = -1;
+    }
   }
 
   bool pipelined_fetch_ready() const { return true; }
@@ -164,6 +199,7 @@ class FabricFreeConnector {
   }
 
  private:
+  int event_fd_;
   NodeRegistry registry_;
   std::unique_ptr<PipelinedFetchPool> pool_;
 };
@@ -179,6 +215,9 @@ PYBIND11_MODULE(fabric_free_session, m) {
                     uint32_t>(),
            py::arg("node_names"), py::arg("window_bytes"), py::arg("max_slots"),
            py::arg("max_sinks") = 256, py::arg("window_count") = 1)
+      .def("event_fd", &FabricFreeConnector::event_fd)
+      .def("drain_completions", &FabricFreeConnector::drain_completions)
+      .def("close", &FabricFreeConnector::close)
       .def("pipelined_fetch_ready", &FabricFreeConnector::pipelined_fetch_ready)
       .def("pipelined_fetch_init_error",
            &FabricFreeConnector::pipelined_fetch_init_error)

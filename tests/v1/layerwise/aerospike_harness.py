@@ -86,7 +86,24 @@ def _load_module() -> ModuleType:
 class FabricFreeClient(
     PipelinedFetchConnector, PlannedFetchConnector, ArrivalDriver, Protocol
 ):
-    """A native client that also lands and declines its own slots."""
+    """A native client that also lands and declines its own slots.
+
+    It has the batch-completion surface ``NativeConnectorL2Adapter`` polls,
+    so a real adapter and storage manager can wrap it. It runs no batch
+    operations, so nothing ever completes.
+    """
+
+    def event_fd(self) -> int:
+        """Return an eventfd that never fires."""
+        ...
+
+    def drain_completions(self) -> list[tuple[int, bool, str, list[bool] | None]]:
+        """Return no completions."""
+        ...
+
+    def close(self) -> None:
+        """Close the eventfd."""
+        ...
 
     def pipelined_fetch_node_name(self) -> str:
         """Return the one registered node, which the placer is built with.
