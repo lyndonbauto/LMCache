@@ -13,7 +13,7 @@ the per-object-group transfer plan the copy kernels run.
 from dataclasses import dataclass
 from enum import Enum
 from itertools import islice
-from typing import Any, Generator, Sequence
+from typing import Any, Generator, Protocol, Sequence
 
 # Third Party
 import torch
@@ -571,6 +571,51 @@ def _kernel_group_to_object_group(
     return mapping
 
 
+class MemoryObjectLookup(Protocol):
+    """Where a layerwise retrieve reads its memory objects from.
+
+    Positions are fixed for the retrieve's lifetime; the object at a position
+    may be replaced between layers (a fallback swapping in whole objects), so
+    :class:`LayerwiseH2DRetrieve` reads it again at each layer's launch.
+    ``lmcache.v1.multiprocess.pipelined_loading.ObjectTable`` implements it.
+    """
+
+    def get(self, object_group_id: int, chunk_id: int) -> MemoryObj | None:
+        """Return the object at one position, or ``None`` if there is none.
+
+        Args:
+            object_group_id: The object group.
+            chunk_id: The chunk's index in the retrieve, counting skipped
+                prefix chunks.
+        """
+        ...
+
+    def by_group(self) -> list[list[MemoryObj | None]]:
+        """Return every position's current object, one list per object group."""
+        ...
+
+
+class FixedMemoryObjects:
+    """A :class:`MemoryObjectLookup` over objects that never change."""
+
+    def __init__(self, memory_objs_by_group: Sequence[Sequence[MemoryObj | None]]):
+        """Wrap the objects.
+
+        Args:
+            memory_objs_by_group: Memory objects per object group, with
+                ``None`` padding for skipped prefix chunks.
+        """
+        self._objects = [list(group) for group in memory_objs_by_group]
+
+    def get(self, object_group_id: int, chunk_id: int) -> MemoryObj | None:
+        """Return the object at one position; see :class:`MemoryObjectLookup`."""
+        return self._objects[object_group_id][chunk_id]
+
+    def by_group(self) -> list[list[MemoryObj | None]]:
+        """Return a copy of every group's objects."""
+        return [list(group) for group in self._objects]
+
+
 @dataclass(frozen=True)
 class _LayerwiseKernelLaunchParams:
     """Per-kernel-group launch inputs for one staged batch."""
@@ -582,10 +627,14 @@ class _LayerwiseKernelLaunchParams:
 
 @dataclass(frozen=True)
 class _LayerwiseBatchDescriptor:
-    """Layer-independent H2D batch state reused for every scheduled layer."""
+    """Layer-independent H2D batch state reused for every scheduled layer.
+
+    Holds positions, not objects: the batch's objects are the chunks
+    ``start_object_idx`` onwards, one per staging buffer, read from the
+    retrieve's :class:`MemoryObjectLookup` when a layer is staged.
+    """
 
     start_object_idx: int
-    memory_object_batch: tuple[MemoryObj, ...]
     object_group_buffers: tuple[torch.Tensor, ...]
     launch_params_by_kernel_group: dict[int, _LayerwiseKernelLaunchParams]
 
@@ -631,7 +680,6 @@ def _build_layerwise_batch_descriptors(
                 continue
 
             skip_tokens_in_chunk = effective_start - batch_start_token
-            memory_batch_tuple = tuple(memory_object_batch)
             object_group_buffers = tuple(
                 cache_context.get_temp_object_group_buffer(slot, object_group_id)
                 for slot in range(batch_len)
@@ -679,7 +727,6 @@ def _build_layerwise_batch_descriptors(
             batch_descriptors.append(
                 _LayerwiseBatchDescriptor(
                     start_object_idx=start_object_idx,
-                    memory_object_batch=memory_batch_tuple,
                     object_group_buffers=object_group_buffers,
                     launch_params_by_kernel_group=launch_params_by_kernel_group,
                 )
@@ -735,7 +782,7 @@ def transfer_kv_layerwise_h2d(
     retrieve = LayerwiseH2DRetrieve(
         cache_context,
         block_ids_gpu,
-        memory_objs_by_group,
+        FixedMemoryObjects(memory_objs_by_group),
         skip_first_n_tokens,
         schedule,
         progress,
@@ -890,7 +937,9 @@ class LayerwiseH2DRetrieve:
     With :attr:`LayerStaging.PER_LAYER` (the default), ``launch_layer(N)``
     copies only layer ``N``'s bytes from the host objects, at that moment, so
     the caller may launch layer ``N`` as soon as it has landed even while later
-    layers of the same objects are still being written.
+    layers of the same objects are still being written. The objects are read
+    from ``objects`` at each launch, so one swapped in between layers is the
+    one the next layer copies from.
 
     Not thread-safe: all calls must come from one thread.
     """
@@ -899,7 +948,7 @@ class LayerwiseH2DRetrieve:
         self,
         cache_context: BaseCacheContext,
         block_ids_gpu: list[torch.Tensor],
-        memory_objs_by_group: Sequence[Sequence[MemoryObj | None]],
+        objects: MemoryObjectLookup,
         skip_first_n_tokens: int,
         schedule: LayerwiseSchedule,
         progress: LayerProgressRecord,
@@ -913,8 +962,9 @@ class LayerwiseH2DRetrieve:
         Args:
             cache_context: Registered worker cache context on the daemon.
             block_ids_gpu: Staged GPU block-id tensors per kernel group.
-            memory_objs_by_group: Memory objects per object group (with None
-                padding for skipped prefix chunks).
+            objects: The retrieve's memory objects by object group and chunk,
+                ``None`` for skipped prefix chunks. Every other position must
+                hold an object by :meth:`begin`, and at every launch.
             skip_first_n_tokens: Tokens to skip at the start of the retrieve
                 range.
             schedule: Global per-layer launch order for this layout.
@@ -937,7 +987,7 @@ class LayerwiseH2DRetrieve:
             )
         self._cache_context = cache_context
         self._block_ids_gpu = block_ids_gpu
-        self._memory_objs_by_group = memory_objs_by_group
+        self._objects = objects
         self._skip_first_n_tokens = skip_first_n_tokens
         self._schedule = schedule
         self._progress = progress
@@ -982,11 +1032,12 @@ class LayerwiseH2DRetrieve:
                 f"retrieve generation {self._retrieve_generation} already began"
             )
         cache_context = self._cache_context
+        memory_objs_by_group = self._objects.by_group()
         self._kernel_to_object_group = _kernel_group_to_object_group(cache_context)
         self._batch_descriptors_by_object_group = _build_layerwise_batch_descriptors(
             cache_context,
             self._block_ids_gpu,
-            self._memory_objs_by_group,
+            memory_objs_by_group,
             self._skip_first_n_tokens,
         )
         kernel_groups = {
@@ -1004,16 +1055,23 @@ class LayerwiseH2DRetrieve:
             for kernel_group_id in kernel_groups
         }
         if self._staging is LayerStaging.PER_LAYER:
-            for descriptors in self._batch_descriptors_by_object_group.values():
-                for descriptor in descriptors:
-                    if any(
-                        isinstance(memory_obj, GDSMemoryObject)
-                        for memory_obj in descriptor.memory_object_batch
-                    ):
-                        raise ValueError(
-                            "per-layer staging cannot read GDS memory objects; "
-                            "use LayerStaging.WHOLE_OBJECT for complete objects"
-                        )
+            if any(
+                isinstance(
+                    memory_objs_by_group[object_group_id][
+                        descriptor.start_object_idx + chunk_idx
+                    ],
+                    GDSMemoryObject,
+                )
+                for object_group_id, descriptors in (
+                    self._batch_descriptors_by_object_group.items()
+                )
+                for descriptor in descriptors
+                for chunk_idx in range(len(descriptor.object_group_buffers))
+            ):
+                raise ValueError(
+                    "per-layer staging cannot read GDS memory objects; "
+                    "use LayerStaging.WHOLE_OBJECT for complete objects"
+                )
             self._plane_geometry = {
                 kernel_group_id: _layer_plane_geometry(
                     cache_context.get_temp_kernel_group_buffer(0, kernel_group_id)
@@ -1099,6 +1157,16 @@ class LayerwiseH2DRetrieve:
             self._progress.begin_retrieve(self._retrieve_generation)
         self._progress.mark_retrieve_failed()
 
+    def wait_for_copies(self) -> None:
+        """Block until every copy this retrieve has queued has finished.
+
+        After it returns, no copy of this retrieve still reads its host
+        memory objects, so the caller may release them. Safe in any state;
+        a retrieve that never began has nothing to wait for.
+        """
+        if self._state is not _RetrieveState.NOT_BEGUN:
+            self._cache_context.stream.synchronize()
+
     def _launch_scheduled(self, launch: LayerLaunch) -> None:
         """Stage ``launch``'s bytes to GPU staging and run its layer kernel.
 
@@ -1116,6 +1184,7 @@ class LayerwiseH2DRetrieve:
             ]
             if self._staging is LayerStaging.PER_LAYER:
                 self._stage_layer(
+                    object_group_id,
                     batch_descriptor,
                     launch_params,
                     self._plane_geometry[kernel_group_id],
@@ -1139,6 +1208,7 @@ class LayerwiseH2DRetrieve:
 
     def _stage_layer(
         self,
+        object_group_id: int,
         batch_descriptor: _LayerwiseBatchDescriptor,
         launch_params: _LayerwiseKernelLaunchParams,
         geometry: _LayerPlaneGeometry,
@@ -1151,13 +1221,15 @@ class LayerwiseH2DRetrieve:
         byte-for-byte like that buffer, so the same offsets address both.
 
         Args:
+            object_group_id: The object group the batch belongs to.
             batch_descriptor: The batch whose objects are staged.
             launch_params: The kernel group's launch inputs for this batch.
             geometry: Where one layer sits inside the kernel group's region.
             position_in_group: The layer's index along its group's layer axis.
         """
         ranges = geometry.byte_ranges(position_in_group)
-        for chunk_idx, memory_obj in enumerate(batch_descriptor.memory_object_batch):
+        memory_objs = self._batch_objects(object_group_id, batch_descriptor)
+        for chunk_idx, memory_obj in enumerate(memory_objs):
             object_group_buffer = batch_descriptor.object_group_buffers[chunk_idx]
             region_offset = (
                 launch_params.tmp_gpu_buffer_data_ptrs[chunk_idx]
@@ -1182,8 +1254,38 @@ class LayerwiseH2DRetrieve:
         batch_key = (object_group_id, batch_descriptor.start_object_idx)
         if batch_key in self._staged_batches:
             return
-        for chunk_idx, memory_obj in enumerate(batch_descriptor.memory_object_batch):
+        memory_objs = self._batch_objects(object_group_id, batch_descriptor)
+        for chunk_idx, memory_obj in enumerate(memory_objs):
             lmcache_memcpy_async_h2d(
                 memory_obj, batch_descriptor.object_group_buffers[chunk_idx]
             )
         self._staged_batches.add(batch_key)
+
+    def _batch_objects(
+        self, object_group_id: int, batch_descriptor: _LayerwiseBatchDescriptor
+    ) -> list[MemoryObj]:
+        """Read a batch's objects from the lookup, as they are now.
+
+        Args:
+            object_group_id: The object group the batch belongs to.
+            batch_descriptor: The batch whose objects to read.
+
+        Returns:
+            One object per staging buffer, in chunk order.
+
+        Raises:
+            ValueError: If a position the batch stages has no object.
+        """
+        start = batch_descriptor.start_object_idx
+        memory_objs: list[MemoryObj] = []
+        for chunk_id in range(
+            start, start + len(batch_descriptor.object_group_buffers)
+        ):
+            memory_obj = self._objects.get(object_group_id, chunk_id)
+            if memory_obj is None:
+                raise ValueError(
+                    f"no memory object for chunk {chunk_id} of object group "
+                    f"{object_group_id} at launch; cannot perform H2D copy"
+                )
+            memory_objs.append(memory_obj)
+        return memory_objs
