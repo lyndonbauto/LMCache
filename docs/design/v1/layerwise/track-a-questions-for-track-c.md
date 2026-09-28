@@ -441,9 +441,9 @@ done:
 - the production `ChunkPlacer` / `WindowLease` and what it needed: the
   allocator reservation (pending `l1_manager` review), publishing every
   window (P1), and the `request_bytes` check (L4, done items 15 to 17);
-- `StorageManager.begin_pipelined_fetch`, removed in M4. The native
-  `issue_pipelined_fetch_by_keys` is still there, and Track A removes it once
-  `chunk_fetch_arguments` goes.
+- `StorageManager.begin_pipelined_fetch`, removed in M4, and the native
+  `issue_pipelined_fetch_by_keys`, removed as done item 18. Only Track C's
+  `chunk_fetch_arguments` is left of that row.
 
 Its Track B answers also still ask Track A to confirm that a slot lands
 exactly at its plan offset. That is confirmed in the replies section below.
@@ -688,8 +688,9 @@ raises exactly when it doesn't.
     native ones.
     - For Track C: nothing in production calls `chunk_fetch_arguments` in
       `native_fetch.py` any more. The source issues slot for slot through
-      `issue_pipelined_fetch_by_slots`. `chunk_fetch_arguments` and the
-      native `issue_pipelined_fetch_by_keys` can go when you're ready.
+      `issue_pipelined_fetch_by_slots`. The native
+      `issue_pipelined_fetch_by_keys` is gone (item 18), so
+      `chunk_fetch_arguments` can go too.
     - Retrieve should wrap the accessor call in the same
       `LayerwiseContractError` handler as the placer and the pump.
 13. Concurrent fetches, one per window (W3). See
@@ -751,6 +752,28 @@ raises exactly when it doesn't.
     aren't retained are freed at once. A test listener checks that no
     write-finished notification, the store controller's trigger, is sent
     under either retention.
+18. The chunk-level issue path is gone from everything Python can reach.
+    `issue_pipelined_fetch_by_slots` is the connector's only issue entry
+    point. Removed:
+    - the connector's `issue_pipelined_fetch` and
+      `issue_pipelined_fetch_by_keys`, with their pybind bindings and the
+      three classes bound only for them (`PipelinedChunkPlacement`,
+      `PipelinedChunkNodeBinding`, `PipelinedSlotDigest`);
+    - `SlotRecordKey`, the driver's `issue_pipelined_fetch`, and
+      `PipelinedFetchPool::begin_request`.
+
+    Below the pool, `PipelinedFetchSession::begin_request`, the free
+    `rdma::issue_pipelined_fetch` and `SlotPlanner` stay for now. Only the
+    native logic tests use them. Removing them means porting about 20
+    session tests to planned slots, which is a separate change. Until then
+    the driver still builds a `SlotPlanner` from the layouts, because the
+    pool and session constructors take one.
+
+    For Track C, these still describe the removed entry point:
+    `native_fetch.py` (`chunk_fetch_arguments` and the module docstring),
+    `system-design.md` (the record-digest and "stay until" paragraphs),
+    `contract-changes.md` (the by-keys shape), and the chunk-level row of
+    `track-c-status.md`'s "blocked on" table.
 
 These were verified on the Soft-RoCE VM
 ([rdma_testing_on_windows.md](../distributed/l2_adapters/rdma_testing_on_windows.md)):
@@ -781,8 +804,10 @@ That needs an Aerospike server, and for the slot path, one built from the
 5. ~~Retire or internalize `begin_pipelined_fetch` /
    `is_pipelined_layer_ready` (M4).~~ Done as item 12.
 6. ~~Later: concurrent fetches (W3).~~ Done as item 13.
-7. Remove the native `issue_pipelined_fetch_by_keys` once Track C removes
-   `chunk_fetch_arguments`.
+7. ~~Remove the native `issue_pipelined_fetch_by_keys`.~~ Done as item 18.
+   Next: port the session tests to planned slots, then remove
+   `PipelinedFetchSession::begin_request`, `rdma::issue_pipelined_fetch` and
+   the chunk half of `SlotPlanner`.
 8. Expose `pipelined_max_slots_per_request()` through the storage manager,
    if Track C wants it for the lookup-time check (F4).
 9. Run A7 on an EFA instance, and A8 against a server built from the

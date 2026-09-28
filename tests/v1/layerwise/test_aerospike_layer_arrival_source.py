@@ -72,7 +72,7 @@ class FakeNativeConnector:
         self.issued: list[tuple[tuple[str, ...], list[FlatSlot]]] = []
 
     def begin(self, generation: int) -> None:
-        """Start a native request, as issue_pipelined_fetch would."""
+        """Start a native request, as issue_pipelined_fetch_by_slots would."""
         self.active_generation = generation
         self.landed = set()
         self.unservable = set()

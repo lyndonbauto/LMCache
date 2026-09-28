@@ -80,16 +80,6 @@ class PipelinedFetchPool {
   // Thread safety: takes `mu_`.
   bool is_active(uint16_t generation) const;
 
-  // Begin a request planned from chunk placements in the window of the
-  // lowest placement offset. See PipelinedFetchSession::begin_request.
-  //
-  // Thread safety: takes `mu_`. Throws std::invalid_argument if `placements`
-  // is empty or starts past the last window, std::runtime_error if that
-  // window already has an active request, and whatever the session throws.
-  uint16_t begin_request(const std::vector<ChunkPlacement>& placements,
-                         const std::vector<ChunkNodeBinding>& chunk_nodes,
-                         const std::vector<SlotDigest>& slot_digests);
-
   // Begin a caller-planned request in the window of its first slot. See
   // PipelinedFetchSession::begin_request_from_slots.
   //

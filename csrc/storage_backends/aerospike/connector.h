@@ -25,16 +25,6 @@
 namespace lmcache {
 namespace connector {
 
-// User key of the stored record behind one slot of a pipelined fetch,
-// identified the same way as rdma::SlotDigest.
-struct SlotRecordKey {
-  uint32_t chunk_id = 0;
-  uint32_t layer_id = 0;
-  uint32_t plane = 0;
-  uint32_t piece = 0;
-  std::string record_key;
-};
-
 // One slot of a caller-planned pipelined fetch; see
 // AerospikeNativeConnector::issue_pipelined_fetch_by_slots.
 struct PlannedSlotKey {
@@ -173,29 +163,6 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
   void set_object_group_layouts(
       const std::map<uint32_t, rdma::ObjectGroupLayoutInput>& layouts);
 
-  // Begin a pipelined fetch, issue per-node info commands, and return the
-  // request generation for readiness queries.
-  //
-  // Thread safety: info round trips run without the driver lock; see
-  // AerospikePipelinedRdmaDriver::issue_pipelined_fetch.
-  uint16_t issue_pipelined_fetch(
-      const std::vector<rdma::ChunkPlacement>& placements,
-      const std::vector<rdma::ChunkNodeBinding>& chunk_nodes,
-      const std::vector<rdma::SlotDigest>& slot_digests);
-
-  // Same as issue_pipelined_fetch(), but each slot names its record by user
-  // key. Keys are turned into digests with record_digest_hex(), so the
-  // session sees exactly what it would have been given by digest.
-  //
-  // Thread safety: as issue_pipelined_fetch().
-  //
-  // Throws std::invalid_argument if any record key is empty, and whatever
-  // issue_pipelined_fetch() throws.
-  uint16_t issue_pipelined_fetch_by_keys(
-      const std::vector<rdma::ChunkPlacement>& placements,
-      const std::vector<rdma::ChunkNodeBinding>& chunk_nodes,
-      const std::vector<SlotRecordKey>& slot_record_keys);
-
   // Begin a pipelined fetch whose slots the caller has already planned, and
   // return its generation.
   //
@@ -204,7 +171,8 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
   // to `dest_offset` in the registered window, and it counts toward
   // `layer_id`'s readiness. Nothing is re-planned or re-ordered here.
   //
-  // Thread safety: as issue_pipelined_fetch().
+  // Thread safety: info round trips run without the driver lock; see
+  // AerospikePipelinedRdmaDriver::issue_planned_fetch.
   //
   // Throws std::invalid_argument if a node index is out of range, a key is
   // empty, a node has no kv-sink registration, or a slot leaves the window;

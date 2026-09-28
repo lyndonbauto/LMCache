@@ -64,25 +64,6 @@ bool PipelinedFetchPool::is_active(uint16_t generation) const {
   return active_session(generation) != nullptr;
 }
 
-uint16_t PipelinedFetchPool::begin_request(
-    const std::vector<ChunkPlacement>& placements,
-    const std::vector<ChunkNodeBinding>& chunk_nodes,
-    const std::vector<SlotDigest>& slot_digests) {
-  if (placements.empty()) {
-    throw std::invalid_argument(
-        "PipelinedFetchPool: a request needs at least one placement");
-  }
-  const size_t lowest =
-      std::min_element(placements.begin(), placements.end(),
-                       [](const ChunkPlacement& a, const ChunkPlacement& b) {
-                         return a.dest_offset < b.dest_offset;
-                       })
-          ->dest_offset;
-  std::lock_guard<std::mutex> lock(mu_);
-  return idle_session(lowest / window_bytes_)
-      .begin_request(placements, chunk_nodes, slot_digests);
-}
-
 uint16_t PipelinedFetchPool::begin_request_from_slots(
     const std::vector<PlannedSlot>& slots) {
   if (slots.empty()) {

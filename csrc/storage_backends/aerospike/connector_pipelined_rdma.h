@@ -69,25 +69,16 @@ class AerospikePipelinedRdmaDriver {
   // active.
   void set_object_group_layouts(std::vector<rdma::ObjectGroupLayout> layouts);
 
-  // Begin a pipelined fetch in the window its placements are in, issue each
-  // node's info command through ``send_info``, and feed acknowledgements into
-  // the pool. Up to one fetch per window runs at a time.
+  // Begin a fetch of caller-planned slots in the window of its first slot,
+  // issue each node's info command through ``send_info``, and feed
+  // acknowledgements into the pool. Up to one fetch per window runs at a
+  // time. See rdma::PipelinedFetchSession::begin_request_from_slots.
   //
   // Thread safety: ``send_info`` runs without holding ``mu_``, so fetches in
   // other windows proceed meanwhile. When it throws for a node, that node's
   // slots are marked unservable. Any other failure after the request began
   // abandons that request before propagating. Throws std::runtime_error when
-  // pipelined fetch is not ready or the window is busy.
-  uint16_t issue_pipelined_fetch(
-      const rdma::PipelinedNodeInfoSender& send_info,
-      const std::vector<rdma::ChunkPlacement>& placements,
-      const std::vector<rdma::ChunkNodeBinding>& chunk_nodes,
-      const std::vector<rdma::SlotDigest>& slot_digests);
-
-  // Same as issue_pipelined_fetch(), for slots planned by the caller; see
-  // rdma::PipelinedFetchSession::begin_request_from_slots.
-  //
-  // Thread safety: as issue_pipelined_fetch(). Throws
+  // pipelined fetch is not ready or the window is busy, and
   // rdma::PlanTooLargeError when the plan exceeds max_slots_per_request().
   uint16_t issue_planned_fetch(const rdma::PipelinedNodeInfoSender& send_info,
                                const std::vector<rdma::PlannedSlot>& slots);

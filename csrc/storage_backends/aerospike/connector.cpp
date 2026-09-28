@@ -605,34 +605,6 @@ void AerospikeNativeConnector::set_object_group_layouts(
   pipelined_rdma_->set_object_group_layouts(converted);
 }
 
-uint16_t AerospikeNativeConnector::issue_pipelined_fetch(
-    const std::vector<rdma::ChunkPlacement>& placements,
-    const std::vector<rdma::ChunkNodeBinding>& chunk_nodes,
-    const std::vector<rdma::SlotDigest>& slot_digests) {
-  if (!pipelined_rdma_) {
-    throw std::runtime_error(
-        "Aerospike pipelined fetch: RDMA path is not enabled");
-  }
-  return pipelined_rdma_->issue_pipelined_fetch(
-      [this](const std::string& node_name, const std::string& command) {
-        return send_pipelined_info_command(&as_, node_name, command);
-      },
-      placements, chunk_nodes, slot_digests);
-}
-
-uint16_t AerospikeNativeConnector::issue_pipelined_fetch_by_keys(
-    const std::vector<rdma::ChunkPlacement>& placements,
-    const std::vector<rdma::ChunkNodeBinding>& chunk_nodes,
-    const std::vector<SlotRecordKey>& slot_record_keys) {
-  std::vector<rdma::SlotDigest> slot_digests;
-  slot_digests.reserve(slot_record_keys.size());
-  for (const SlotRecordKey& slot : slot_record_keys) {
-    slot_digests.push_back({slot.chunk_id, slot.layer_id, slot.plane,
-                            slot.piece, record_digest_hex(slot.record_key)});
-  }
-  return issue_pipelined_fetch(placements, chunk_nodes, slot_digests);
-}
-
 uint16_t AerospikeNativeConnector::issue_pipelined_fetch_by_slots(
     const std::vector<std::string>& node_names,
     const std::vector<PlannedSlotKey>& slots) {

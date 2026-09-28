@@ -182,16 +182,6 @@ void AerospikePipelinedRdmaDriver::set_object_group_layouts(
   ensure_pool();
 }
 
-uint16_t AerospikePipelinedRdmaDriver::issue_pipelined_fetch(
-    const rdma::PipelinedNodeInfoSender& send_info,
-    const std::vector<rdma::ChunkPlacement>& placements,
-    const std::vector<rdma::ChunkNodeBinding>& chunk_nodes,
-    const std::vector<rdma::SlotDigest>& slot_digests) {
-  return begin_and_send(send_info, [&](rdma::PipelinedFetchPool& pool) {
-    return pool.begin_request(placements, chunk_nodes, slot_digests);
-  });
-}
-
 uint16_t AerospikePipelinedRdmaDriver::issue_planned_fetch(
     const rdma::PipelinedNodeInfoSender& send_info,
     const std::vector<rdma::PlannedSlot>& slots) {
