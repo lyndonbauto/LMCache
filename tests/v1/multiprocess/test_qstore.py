@@ -21,6 +21,7 @@ from lmcache.v1.multiprocess.modules.experimental import TRANSFER_QUERY
 from lmcache.v1.multiprocess.modules.experimental import qstore as qstore_mod
 from lmcache.v1.multiprocess.modules.experimental.qstore import QStoreModule
 from lmcache.v1.multiprocess.modules.lmcache_driven_transfer import ContextEntry
+from lmcache.v1.multiprocess.pipelined_sink import MultiprocessPipelinedSinkFactory
 
 REGISTER_ARGS = ("model##query", 2)
 
@@ -254,8 +255,9 @@ def test_store_q_block_id_underflow_fails_closed(stub_device) -> None:
 
 
 class _FakeLMCacheDriven:
-    def __init__(self, ctx) -> None:
+    def __init__(self, ctx, pipelined_sink_factory=None) -> None:
         self.ctx = ctx
+        self.pipelined_sink_factory = pipelined_sink_factory
 
 
 class _FakeEngineDriven:
@@ -320,6 +322,17 @@ def test_server_builds_q_store_module(stub_server_modules) -> None:
     kwargs = stub_server_modules.call_args.kwargs
     assert kwargs["experimental_transfer"] == [TRANSFER_QUERY]
     assert any(isinstance(t, _FakeQStore) for t in kwargs["liveness_targets"])
+
+
+def test_the_lmcache_driven_module_gets_the_pipelined_sink_factory(
+    stub_server_modules,
+) -> None:
+    """Without it, no model is registered for the pipelined fetch."""
+    (module,) = [
+        m for m in _build(stub_server_modules) if isinstance(m, _FakeLMCacheDriven)
+    ]
+
+    assert isinstance(module.pipelined_sink_factory, MultiprocessPipelinedSinkFactory)
 
 
 def test_server_builds_nothing_when_no_feature_is_enabled(
