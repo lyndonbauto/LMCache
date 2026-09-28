@@ -11,6 +11,22 @@ defect coming back.
 
 ---
 
+## `chunk_fetch_arguments` removed
+
+**Who is affected:** nobody. Its only caller, the native
+`issue_pipelined_fetch_by_keys`, was removed by Track A (their item 18).
+
+**What changed.** `chunk_fetch_arguments` and `ChunkFetchArguments` are gone
+from `native_fetch.py` and the package exports. `pipelined_fetch_arguments`
+is the only flattener, feeding `issue_pipelined_fetch_by_slots`.
+
+**Why.** The chunk-level call had a native planner re-expand chunk
+placements, and it bound a whole chunk to one node. The slot-level call
+takes the plan as given, so a second flattener only kept a dead shape
+alive.
+
+---
+
 ## A resumable pump; the lease hands out each object's memory
 
 **Who is affected:** Track A (the production lease must implement

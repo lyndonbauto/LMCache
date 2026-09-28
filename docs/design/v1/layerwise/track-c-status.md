@@ -17,8 +17,8 @@ items are in [system-design.md](system-design.md) section 11 and
 | C5 slot space | Done |
 | C6 out-of-order pump | Done |
 | C7 failure paths abandon both sides | Done |
-| C8 conformance suite | Done for the scripted source; Aerospike source pending (see blocked) |
-| C9 end to end | Blocked (see below) |
+| C8 conformance suite | Done: the scripted and Aerospike sources, over the real native session (fabric-free) |
+| C9 end to end | In progress: retrieve wiring (see below); over Soft-RoCE needs all three tracks |
 | C10 no hardware in tests | Holds |
 
 ## Doable now
@@ -45,22 +45,17 @@ All done (2026-09-25):
    recording sink. Track B registers its loader there (see
    [contract-changes.md](contract-changes.md)).
 6. **Fetch-start proposal.** Written:
-   [fetch-start-proposal.md](fetch-start-proposal.md). Waiting on review.
+   [fetch-start-proposal.md](fetch-start-proposal.md). Track A agreed with
+   option A on 2026-09-28 (their review, F1 to F5, is in
+   [track-a-questions-for-track-c.md](track-a-questions-for-track-c.md)).
 
 ## Needs a decision
 
-- **Where a pipelined fetch starts (new, found 2026-09-25).** Today the
-  lookup's prefetch (`StorageManager.submit_prefetch_task`) loads L2 hits into
-  L1, and `retrieve` only copies L1 to the GPU
-  (`read_prefetched_results`). Layer-by-layer delivery only helps if the
-  lookup reports an L2 hit *without* loading it and the fetch starts at
-  retrieve. That changes the lookup/prefetch protocol and `storage_manager`,
-  which neither track owns, so it needs agreement with Track A and the
-  storage-manager maintainers before the orchestration is hooked into
-  `retrieve`. Until then the orchestration is complete and tested but not
-  called from production code. **Proposal written:**
-  [fetch-start-proposal.md](fetch-start-proposal.md) (report the remote hit
-  at lookup, fetch at retrieve, fall back inside the daemon).
+- ~~**Where a pipelined fetch starts.**~~ Decided 2026-09-28: option A of
+  [fetch-start-proposal.md](fetch-start-proposal.md). The lookup reports an
+  L2 hit without loading it, and retrieve leases and fetches. Track A agreed;
+  we build it now rather than wait for the storage-manager maintainers,
+  whose review comes with the upstream PR.
 - ~~**One flattener or two.**~~ Decided with Track A: keep
   `pipelined_fetch_arguments`. `NativePlanIssuer` will call it and keep only
   its slot-count pre-check (Track A's change).
@@ -97,8 +92,8 @@ All done (2026-09-25):
     (added), which retrieve passes to the sink; not through L1 reads, which
     refuse write-reserved objects.
   - *Layout:* confirmed on the planner side and written into
-    `LayerArrivalStatus.RESIDENT`. Track A should confirm the transport
-    side (a slot lands exactly at its plan offset).
+    `LayerArrivalStatus.RESIDENT`. Track A confirmed the client side and the
+    mock server; the real server's side waits on their A8.
   - *Timeout order (R6):* the pump's default is now 2.5 s, below the
     worker's 5 s. A startup check needs the worker's value in the
     registration, which lands with C9.
@@ -145,12 +140,10 @@ is the part that would change.
 
 | Item | Waiting on | Owner |
 |---|---|---|
-| Aerospike source in the conformance suite | Fabric-free `ArrivalDriver`, which needs a test-only binding feeding the real native session | Track A |
-| Production `ChunkPlacer` / `WindowLease` | Allocator reservation PR (with all-or-nothing delete), publishing every window, checking `window_bytes` with `request_bytes` at registration | Track A |
 | Pipelined retrieve enabled for real | A working `LayerLoadSink`; Track B's branch has only the stub (`layerwise_sink.py`, 2026-09-22) | Track B |
-| Hooking orchestration into `retrieve` | The fetch-start decision above | Us + Track A + storage-manager maintainers |
-| Removing the chunk-level path (`chunk_fetch_arguments`, `issue_pipelined_fetch_by_keys`, `StorageManager.begin_pipelined_fetch`) | Track A on the slot-level path and rebased onto this branch | Track A |
-| C9 over Soft-RoCE | All of the above, plus a server built from the `kv-sink` branch | All three |
+| A failed retrieve that does not kill vLLM | The connector reporting failed blocks instead of raising ([vllm-load-failure.md](vllm-load-failure.md)) | Track B |
+| The real server writes exactly at the plan offset | A8 against a server built from the `kv-sink` branch | Track A |
+| C9 over Soft-RoCE | All of the above | All three |
 
 ## PR split for upstream
 

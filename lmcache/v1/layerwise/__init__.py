@@ -41,9 +41,7 @@ from .fakes import (
     UnservableLayerArrivalSource,
 )
 from .native_fetch import (
-    ChunkFetchArguments,
     PipelinedFetchArguments,
-    chunk_fetch_arguments,
     pipelined_fetch_arguments,
 )
 from .planner import (
@@ -66,7 +64,6 @@ __all__ = [
     "NO_GENERATION",
     "ArrivalDriver",
     "ByteRange",
-    "ChunkFetchArguments",
     "ChunkPlacement",
     "FetchPlanner",
     "KernelGroupGeometry",
@@ -95,7 +92,6 @@ __all__ = [
     "SlotPlacement",
     "StaleGenerationError",
     "UnservableLayerArrivalSource",
-    "chunk_fetch_arguments",
     "pipelined_fetch_arguments",
     "plane_segment_bytes",
     "record_plane_runs",
