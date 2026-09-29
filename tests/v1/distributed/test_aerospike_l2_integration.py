@@ -8,6 +8,7 @@ Requires Aerospike CE and BUILD_AEROSPIKE=1 extension. Skipped otherwise.
 # Standard
 import os
 import select
+import uuid
 
 # Third Party
 import pytest
@@ -104,7 +105,7 @@ def _object_key(suffix: int) -> ObjectKey:
     )
 
 
-def _adapter_config():
+def _adapter_config(num_workers: int = 2):
     # First Party
     from lmcache.v1.distributed.l2_adapters.aerospike_l2_adapter import (
         AerospikeL2AdapterConfig,
@@ -114,7 +115,7 @@ def _adapter_config():
         hosts=f"{AEROSPIKE_HOST}:{AEROSPIKE_PORT}",
         namespace=AEROSPIKE_NAMESPACE,
         set_name="kv_chunks_aerospike_it",
-        num_workers=2,
+        num_workers=num_workers,
     )
 
 
@@ -147,5 +148,44 @@ class TestAerospikeL2Integration:
             assert torch.all(load_obj.tensor == 42.0)
 
             adapter.submit_unlock([key])
+        finally:
+            adapter.close()
+
+    def test_lookup_of_many_keys_reports_each_key_in_request_order(self):
+        """T-LKP-01/02: a 10,000-key lookup, with one worker so the single
+        tile exceeds one batch call, reports exactly the stored keys."""
+        adapter = create_l2_adapter_from_registry(_adapter_config(num_workers=1))
+        run = uuid.uuid4().hex
+        keys = [
+            ObjectKey(
+                chunk_hash=ObjectKey.IntHash2Bytes(i),
+                model_name=f"aerospike-it-lookup-{run}",
+                kv_rank=0,
+            )
+            for i in range(10_000)
+        ]
+        stored_indices = list(range(0, len(keys), 3))
+        # Past the 1 MiB record cap, so it is a meta record plus segments.
+        sharded_index = 1
+        try:
+            stored = [keys[i] for i in stored_indices]
+            objs = [_make_tensor_obj(64, 1.0) for _ in stored]
+            stored.append(keys[sharded_index])
+            objs.append(_make_tensor_obj(768 * 1024, 2.0))
+            tid = adapter.submit_store_task(stored, objs)
+            _wait_fd(adapter.get_store_event_fd(), timeout=120.0)
+            done = adapter.pop_completed_store_tasks()
+            assert done[tid].is_successful()
+
+            lookup_tid = adapter.submit_lookup_and_lock_task(keys, {0: _EMPTY_LAYOUT})
+            _wait_fd(adapter.get_lookup_and_lock_event_fd())
+            found = adapter.query_lookup_and_lock_result(lookup_tid)
+            assert found is not None
+
+            expected = set(stored_indices) | {sharded_index}
+            wrong = [i for i in range(len(keys)) if found.test(i) != (i in expected)]
+            assert wrong == [], f"{len(wrong)} keys misreported, first {wrong[:5]}"
+
+            adapter.submit_unlock(stored)
         finally:
             adapter.close()

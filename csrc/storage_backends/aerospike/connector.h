@@ -42,6 +42,7 @@ struct WorkerAerospikeConn {
   as_policy_read read_policy;
   as_policy_write write_policy;
   as_policy_remove remove_policy;
+  as_policy_batch batch_policy;
 };
 
 // Native Aerospike storage backend.
@@ -237,12 +238,25 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
                      const void* buf, size_t len, size_t chunk_size) override;
   bool do_single_exists(WorkerAerospikeConn& conn,
                         const std::string& key) override;
+  // Look up a tile of keys with Aerospike batch reads of the meta records'
+  // headers: one request per node per sub-batch of at most
+  // kMaxBatchExistsKeys keys, instead of one round trip per key.
+  //
+  // A key exists exactly when do_single_exists() would say so. Throws
+  // std::runtime_error if the batch or any key fails with anything other
+  // than "record not found", as the per-key path does.
+  void do_batch_exists(WorkerAerospikeConn& conn, const Request& req) override;
   bool do_single_delete(WorkerAerospikeConn& conn,
                         const std::string& key) override;
   void shutdown_connections() override;
   void on_workers_stopped() override;
 
  private:
+  // Largest batch sent in one aerospike_batch_read(). The server refuses a
+  // batch above its batch-max-requests (unlimited by default, historically
+  // 5000), so larger tiles are split.
+  static constexpr size_t kMaxBatchExistsKeys = 5000;
+
   static std::vector<std::pair<std::string, int>> parse_hosts(
       const std::string& hosts);
   static std::string meta_user_key(const std::string& cache_key);
