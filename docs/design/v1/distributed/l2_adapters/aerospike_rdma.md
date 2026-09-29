@@ -1383,7 +1383,8 @@ RDMA_TRANSPORT=SRD RDMA_DEVICE=rdmap47s0 RDMA_GID_INDEX=0 \
 ```
 
 The clean fetch lands 28 writes (48 KiB) and the missing-record fetch 27. The
-run found one client bug and two server bugs:
+run found one client bug and two server bugs (all server issues are tracked in
+[`aerospike_server_issues.md`](aerospike_server_issues.md)):
 
 - **Client: a receive with no scatter entry.** Notification receives were
   posted with `num_sge = 0`, since a write-with-immediate scatters nothing into
@@ -1525,6 +1526,9 @@ Aerospike**; no policy has been invented here.
 
 ## Related
 
+- [`aerospike_server_issues.md`](aerospike_server_issues.md) — server-side
+  defects and contract gaps found while running this client against
+  `feat/kv-sink-fetch-pipelined`, for hand-off to the server team.
 - [`layerwise_transfer_data_model.md`](layerwise_transfer_data_model.md) — how
   real KV layout maps onto the slots this document signals about, with an
   interactive walkthrough in
