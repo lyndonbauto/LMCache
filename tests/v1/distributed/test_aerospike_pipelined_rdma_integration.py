@@ -19,6 +19,9 @@ Docker server does not run these. On the Soft-RoCE VM::
     AEROSPIKE_TEST_PORT=3000 AEROSPIKE_TEST_NAMESPACE=lmcache \\
     RDMA_DEVICE=rxe0 RDMA_GID_INDEX=1 \\
     pytest tests/v1/distributed/test_aerospike_pipelined_rdma_integration.py
+
+On AWS EFA, build with ``BUILD_WITH_AEROSPIKE_EFA=1`` and run with
+``RDMA_TRANSPORT=SRD RDMA_DEVICE=<efa device> RDMA_GID_INDEX=0``.
 """
 
 # Standard
@@ -93,6 +96,8 @@ AEROSPIKE_NAMESPACE = os.environ.get("AEROSPIKE_TEST_NAMESPACE", "lmcache")
 RUN_AEROSPIKE_IT = os.environ.get("RUN_AEROSPIKE_INTEGRATION") == "1"
 RDMA_DEVICE = os.environ.get("RDMA_DEVICE", "")
 RDMA_GID_INDEX = int(os.environ.get("RDMA_GID_INDEX", "0"))
+#: ``RC`` (Soft-RoCE, the default) or ``SRD`` (AWS EFA).
+RDMA_TRANSPORT = RdmaTransport[os.environ.get("RDMA_TRANSPORT", "RC").upper()]
 
 #: One window holds the request's five full-attention chunks and two
 #: sliding-window chunks, page-aligned.
@@ -297,7 +302,7 @@ def _build_manager(set_name: str) -> StorageManager:
     test can read back what a fetch landed.
     """
     rdma = L1RdmaConfig(
-        transport=RdmaTransport.RC,
+        transport=RDMA_TRANSPORT,
         device_name=RDMA_DEVICE,
         gid_index=RDMA_GID_INDEX,
         window_plan=RdmaWindowPlan(window_count=1, window_bytes=WINDOW_BYTES),

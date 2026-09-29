@@ -36,6 +36,10 @@ constexpr uint32_t kSrdQKey = 0x11111111;
 
 constexpr char kDefaultPeerKey[] = "";
 
+// Bytes behind each notification receive. A write-with-immediate scatters
+// nothing into it, so every receive shares one buffer.
+constexpr uint32_t kNotificationScratchBytes = 64;
+
 }  // namespace
 
 struct RdmaContext::PeerQueue {
@@ -125,6 +129,8 @@ struct RdmaContext::Impl {
   ibv_cq* cq = nullptr;
   std::map<std::string, PeerQueue> peers;
   std::vector<ibv_mr*> mrs;
+  std::vector<uint8_t> notification_scratch;
+  ibv_mr* notification_scratch_mr = nullptr;
   ibv_gid local_gid{};
 
   ~Impl() {
@@ -223,6 +229,22 @@ RdmaContext::RdmaContext(const std::string& device_name, uint8_t gid_index,
       static_cast<uint32_t>(device_attr.max_qp_wr);
   // max_cq counts completion queues; max_cqe is the entries one may hold.
   device_caps_.max_cq_entries = static_cast<uint32_t>(device_attr.max_cqe);
+#ifdef LMCACHE_AEROSPIKE_EFA
+  // EFA reports its receive-queue limit separately, through efadv; ibv's
+  // max_qp_wr covers both queues. The receive queue gets the smaller.
+  if (transport_ == Transport::kSrd) {
+    efadv_device_attr efa_attr{};
+    if (efadv_query_device(impl_->ctx, &efa_attr, sizeof(efa_attr)) != 0) {
+      throw std::runtime_error("efadv_query_device failed on device '" +
+                               device_name_ + "'; SRD needs an EFA device");
+    }
+    if (efa_attr.max_rq_wr > 0) {
+      device_caps_.max_recv_wr_per_qp =
+          std::min(device_caps_.max_recv_wr_per_qp,
+                   static_cast<uint32_t>(efa_attr.max_rq_wr));
+    }
+  }
+#endif
 
   impl_->pd = ibv_alloc_pd(impl_->ctx);
   if (impl_->pd == nullptr) {
@@ -523,6 +545,17 @@ void RdmaContext::arm_notifications() {
     throw std::runtime_error("arm_notifications() requires a connected peer");
   }
 
+  if (impl_->notification_scratch_mr == nullptr) {
+    impl_->notification_scratch.assign(kNotificationScratchBytes, 0);
+    impl_->notification_scratch_mr =
+        ibv_reg_mr(impl_->pd, impl_->notification_scratch.data(),
+                   impl_->notification_scratch.size(), IBV_ACCESS_LOCAL_WRITE);
+    if (impl_->notification_scratch_mr == nullptr) {
+      throw_verbs("ibv_reg_mr(notification scratch)");
+    }
+    impl_->mrs.push_back(impl_->notification_scratch_mr);
+  }
+
   for (const auto& entry : impl_->peers) {
     for (uint32_t i = 0; i < notification_depth_; ++i) {
       post_notification_receive_for_node(entry.first);
@@ -587,12 +620,17 @@ void RdmaContext::post_notification_receive_for_node(
     const std::string& node_name) {
   PeerQueue& peer = require_peer_queue(node_name);
   // A write-with-immediate consumes a receive work request but scatters no
-  // payload into it -- the data went to the RDMA address. So the request
-  // needs no buffer, and num_sge stays zero.
+  // payload into it -- the data went to the RDMA address. EFA still needs one
+  // scatter entry: on SRD it never matches a zero-entry receive, so the data
+  // lands but neither side completes and the writer retries until it fails.
+  ibv_sge sge{};
+  sge.addr = reinterpret_cast<uint64_t>(impl_->notification_scratch.data());
+  sge.length = static_cast<uint32_t>(impl_->notification_scratch.size());
+  sge.lkey = impl_->notification_scratch_mr->lkey;
   ibv_recv_wr wr{};
   wr.wr_id = 0;
-  wr.sg_list = nullptr;
-  wr.num_sge = 0;
+  wr.sg_list = &sge;
+  wr.num_sge = 1;
   wr.next = nullptr;
 
   ibv_recv_wr* bad = nullptr;

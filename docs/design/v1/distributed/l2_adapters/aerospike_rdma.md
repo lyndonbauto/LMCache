@@ -6,8 +6,9 @@ writer, and the byte-equivalence and layer-pipelining harnesses are implemented
 and passing over Soft-RoCE (`rxe0` on `lo`, GID index 1). Real RDMA writes land
 in L1 byte-identically, and a layer is provably consumable while later layers
 are still absent. A fetch from a real Aerospike server has run over Soft-RoCE
-(A8), and A7's receive question is answered on EFA. What remains unproven is
-the client's fetch path over EFA/SRD; see
+and over EFA/SRD (A8), and A7's receive question is answered on EFA. What
+remains unproven is overlap against a server that replies before its writes
+finish, and any multi-node fetch; see
 [What is not proven yet](#what-is-not-proven-yet).
 
 This document covers the `kv-sink` wire protocol, the handshake ordering, the
@@ -560,8 +561,10 @@ throws.
 ## Pipelined fetch: signaling and chunking
 
 The baseline protocol above is all-or-nothing. This section covers the
-pipelined variant, which is **prototyped and passing over Soft-RoCE** but has
-no server-side counterpart yet.
+pipelined variant, which is **prototyped and passing over Soft-RoCE**. The
+aerospike-server branch `feat/kv-sink-fetch-pipelined` implements the command,
+but it still reaps its send completions before replying; see
+[What the prototype proves](#what-the-prototype-proves-and-what-it-does-not).
 
 ### EFA actually supports the primitive we need
 
@@ -697,7 +700,9 @@ chunks at `kv_size = 2` and one piece per plane is 16,000 — comfortable, but a
 
 ### Wire format for a pipelined fetch
 
-**Status: the client side is implemented; the server side is proposed.** The
+**Status: the client side is implemented; the server side is implemented on
+`feat/kv-sink-fetch-pipelined` except requirement 3 (it fences before
+replying).** The
 command builder, reply parser and declined-write handling live in
 `kv_sink_client.h` and `layer_pipeline.h`. `PipelinedFetchSession` in
 `pipelined_fetch_session.{h,cpp}` is the **implemented** driver that ties
@@ -776,7 +781,9 @@ or bad data rather than an error:
    there.
 3. **Do not fence.** The point of the command is to reply before the writes
    complete. A server that polls its send queue to completion first has
-   implemented the old command with extra steps.
+   implemented the old command with extra steps. `feat/kv-sink-fetch-pipelined`
+   currently does this: `imm_finish` drains every write of the command before
+   the reply is built.
 4. **Serve in the order given, best effort.** The schedule is layer-major, so
    the sinks arrive ordered layer 0 first. This is a hint and not a
    correctness requirement — SRD reorders in flight and independent nodes
@@ -1109,15 +1116,24 @@ Passing (`make -C tests/v1/distributed/rdma test`):
 
 Not proven:
 
-- **Any of it on EFA/SRD.** Soft-RoCE is RC-only and ordered, so the very
-  hazard this design guards against cannot be reproduced locally. The extended
-  verbs port and the unsolicited-receive negotiation are both untested.
-- **A server that can do this.** The `handle_pipelined_fetch` above is the
-  test mock, which is a demonstration that the contract is implementable and
-  not evidence that Aerospike implements it: the real server fences and replies
-  once. Per-slot signaling needs it to issue write-with-immediate per piece and
-  *not* fence, plus release its record lock per piece rather than holding it
-  across the whole transfer.
+- **Out-of-order arrival on EFA/SRD.** A8 passes over SRD on EFA (see
+  [A8 on EFA](#a8-on-efa-srd)), but the server drains its writes before it
+  replies, so SRD's reordering never reaches a layer the client is already
+  consuming. The unsolicited-receive negotiation is still untested.
+- **A server that replies before its writes complete.** The mock's
+  `handle_pipelined_fetch` pushes without fencing; the real server does not.
+  `as_kv_sink_fetch_pipelined_cmd` on `feat/kv-sink-fetch-pipelined` issues
+  one signaled write-with-immediate per sink and releases each record after
+  posting its write, so per-slot signaling works (A8, [below](#running-a8-against-a-real-server)).
+  But it then calls `imm_finish`, which polls its send CQ until every write of
+  the command completes (bounded by `FENCE_DEADLINE_NS`, 30 s), and only then
+  replies once. That is a fence under another name, and it violates
+  requirement 3. Correctness survives, because readiness still comes from the
+  immediates, but the overlap does not: the client sends its commands one at
+  a time and `begin_fetch` returns only after the last reply, so every write
+  has landed before `LayerArrivalPump` waits on the first layer. Against this
+  server a "pipelined" retrieve is an all-or-nothing fetch with per-slot
+  failure reporting.
 - **That storage-level pipelining is possible at all.** Slicing an
   already-read record into signaled pieces buys compute overlap. Overlapping
   the *disk read* of layer 1 with the network send of layer 0 needs
@@ -1288,6 +1304,11 @@ immediate and the completions are all production code. It checks that:
    retrieve falls back, and a real whole reload returns every other object
    byte-exact.
 
+It proves that the wire format, immediates and failure reporting are correct.
+It does not show layers being consumed while bytes are still landing: this
+server drains each command's writes before it replies (see
+[What the prototype proves](#what-the-prototype-proves-and-what-it-does-not)).
+
 Stock CE has no `kv-sink-*` commands, so it also needs `RDMA_DEVICE` and
 skips without it; CI's Docker server does not run it.
 
@@ -1347,6 +1368,46 @@ The first runs found three client bugs that the mock writer could not show:
   `max_cqe`** (entries per queue), so a deep queue failed `ibv_create_cq`
   with `EINVAL`. The fanout error now also names each node's reason.
 
+#### A8 on EFA (SRD)
+
+On a `g6.8xlarge` (EFA v2, device `rdmap47s0`), with LMCache built with
+`BUILD_WITH_AEROSPIKE_EFA=1` and the same server branch, the three A8 tests and
+the two other Aerospike integration suites pass (15 tests), both on a freshly
+started server and on a warm one:
+
+```bash
+RUN_AEROSPIKE_INTEGRATION=1 AEROSPIKE_TEST_HOST=127.0.0.1 \
+AEROSPIKE_TEST_PORT=3000 AEROSPIKE_TEST_NAMESPACE=lmcache \
+RDMA_TRANSPORT=SRD RDMA_DEVICE=rdmap47s0 RDMA_GID_INDEX=0 \
+  pytest tests/v1/distributed/test_aerospike_*integration*.py
+```
+
+The clean fetch lands 28 writes (48 KiB) and the missing-record fetch 27. The
+run found one client bug and two server bugs:
+
+- **Client: a receive with no scatter entry.** Notification receives were
+  posted with `num_sge = 0`, since a write-with-immediate scatters nothing into
+  them. Soft-RoCE accepts that; EFA does not. On SRD the data landed but no
+  receive completed, the server's writes were retried until the client
+  destroyed its queue pair, and then failed `remote invalid RD request
+  (vendor 0x9)`, EFA's bad-destination-QPN status. The probe reproduces it
+  when its receives are made zero-entry. Each receive now carries one entry
+  over a shared 64-byte registered scratch buffer.
+- **Server: EFA write support is never detected.** `kv_sink_verbs.c` guards
+  `EFADV_DEVICE_ATTR_CAPS_RDMA_WRITE` with `#ifndef ... #define ... 0`, but it
+  is an enum constant, not a macro, so the guard always redefines it to 0 and
+  every EFA device reports `rdma write no`. Deleting the three lines fixes it.
+- **Server: a crash after that refusal.** `dev_get()` leaves `g_dev.ctx` set
+  with a NULL protection domain, and the next `kv-sink-register` crashes in
+  `efadv_create_qp_ex` (`make_qp`).
+
+One timing risk remains. The client sends `kv-sink-fetch-pipelined` with the
+Aerospike C client's default info timeout, 1000 ms, and the server only
+replies after all of the command's writes complete. On a cold server, the
+first fetch also registers every data stripe it touches: eight 256 MiB stripes
+took about a second on EFA. That run passed, but with little margin. A timeout
+declines every slot of the command, and the retrieve falls back.
+
 ## What is not proven yet
 
 Being precise about this, because the gap matters:
@@ -1354,7 +1415,7 @@ Being precise about this, because the gap matters:
 | Piece | State |
 |---|---|
 | Build profile, default-off | **Verified.** Default native build compiles and links with no libibverbs. |
-| `rdma_context.{h,cpp}` | **Verified on RC.** QP reaches RTS and the data path executes over Soft-RoCE. The EFA/SRD path compiles but has never run. |
+| `rdma_context.{h,cpp}` | **Verified on RC and SRD.** The data path executes over Soft-RoCE (RC) and over EFA v2 (SRD) against a real server. |
 | `kv_sink_client.{h,cpp}` codec | **Verified.** Register and fetch commands round-trip against the mock writer. |
 | Per-node `kv-sink-register` / `kv-sink-deregister` fanout | **Verified against one real node** (A8), including 17 client lifetimes in a row against the server's 16 region slots. Never run against a multi-node cluster, which pipelined fetches refuse anyway. |
 | `PipelinedFetchSession` driver | **Implemented** and covered by `pipelined_fetch_session_test` (no device). |
@@ -1367,20 +1428,17 @@ Being precise about this, because the gap matters:
 | Real RDMA write landing in L1 | **Verified** over Soft-RoCE (`rxe0` on `lo`, GID index 1). |
 | Byte-equivalence assertion | **Verified.** Both chunks byte-identical, nothing outside the requested offsets, out-of-window write refused. |
 | A7: does an SRD immediate consume a receive? | **Answered on EFA v2** (`g6.8xlarge`): yes, as on RC; unsolicited write-receive works when both queue pairs set it. See [the SRD result](#a7-result-on-efa-srd). |
-| Same fetch path over EFA/SRD | **Not achieved.** The client's SRD queue pair has not run on EFA. |
-| Against a real Aerospike server | **Verified over Soft-RoCE (A8)** with a server built from `feat/kv-sink-fetch-pipelined`: a clean pipelined fetch and a missing-record fallback, both byte-exact. |
+| Same fetch path over EFA/SRD | **Verified on EFA v2 (A8)** against a real server with two local fixes (see [A8 on EFA](#a8-on-efa-srd)). Like the RC run, it proves no overlap. |
+| Against a real Aerospike server | **Verified over Soft-RoCE (A8)** with a server built from `feat/kv-sink-fetch-pipelined`: a clean pipelined fetch and a missing-record fallback, both byte-exact. The server fences before replying, so this proves no overlap. |
 
-The client's fetch path over EFA/SRD is the remaining gap, and it is not a
-local environment problem.
+The remaining gaps are overlap, which needs a server that replies before its
+writes finish, and a multi-node fetch.
 
-**EFA/SRD is a genuine gap, not a formality.** A7 ran the probe's own SRD
-queue pairs on EFA, not the client's. Soft-RoCE only supports RC, so the
-client's SRD path (`efadv_create_qp_ex`, the qkey at INIT, and the
-`ibv_create_ah` for the server, without which its write fails
-`UNKNOWN_PEER`) is still untested. The GID index divergence documented above is a concrete instance of
-the same hazard: the correct value differs between the two fabrics, and the
-failure surfaces several calls later as `ENETUNREACH`. Re-verify the handshake
-on a real EFA instance before treating the M2 gate as passable.
+**EFA/SRD needed a real device, not a formality.** Soft-RoCE passed a client
+whose receives EFA silently never matches, and the GID index differs between
+the two fabrics (1 on Soft-RoCE, 0 on EFA), with a wrong value surfacing
+several calls later as `ENETUNREACH`. Re-run A8 on EFA after any change to
+queue-pair setup or receive posting.
 
 **The mock writer is a mock of a protocol, not of an implementation.** It
 implements the `kv-sink-*` command strings as specified, so it proves our side
@@ -1448,9 +1506,10 @@ Aerospike**; no policy has been invented here.
   makes a fetch all-or-nothing. Layer-by-layer pipelining needs per-layer
   completion, which this protocol cannot express. The LMCache side of the fix
   is now prototyped and passing — see
-  [Pipelined fetch](#pipelined-fetch-signaling-and-chunking) — so the blocker
-  is entirely server-side: the server must signal each piece with
-  write-with-immediate and stop fencing.
+  [Pipelined fetch](#pipelined-fetch-signaling-and-chunking). On the server,
+  `feat/kv-sink-fetch-pipelined` already signals each piece with
+  write-with-immediate; what remains is to stop reaping send completions
+  before the reply.
 - **Synchronous completion vs. an async adapter.** The fetch blocks a thread
   for the entire round trip including the DMA. LMCache's MP request path is
   future-based and expects to poll, so the blocking info call has to be run on

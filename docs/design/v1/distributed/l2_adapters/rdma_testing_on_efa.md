@@ -15,8 +15,10 @@ except SRD, because Soft-RoCE supports only RC queue pairs.
    yes, as on RC, and no handshake is needed.** See
    [the SRD result](aerospike_rdma.md#a7-result-on-efa-srd).
 2. **SRD end to end** (optional, A8 over EFA): the client's SRD queue pair
-   setup (`efadv_create_qp_ex`, the qkey at INIT, the address handle) has
-   compiled but never run. Not done yet.
+   setup (`efadv_create_qp_ex`, the qkey at INIT, the address handle) against
+   a real server. **Done on 2026-09-29: all 15 Aerospike integration tests
+   pass over SRD**, after one client fix and a local server patch. See
+   [A8 on EFA](aerospike_rdma.md#a8-on-efa-srd).
 
 ## What is needed
 
@@ -96,13 +98,14 @@ Use **GID index 0** on EFA, not 1 as on the Soft-RoCE VM; see
 ### From the repository
 
 - Branch `track/a-transport`, with the A8 and deregistration commits.
-- For the end-to-end step only: `test_aerospike_pipelined_rdma_integration.py`
-  hardcodes `RdmaTransport.RC`. It needs an `RDMA_TRANSPORT` environment
-  variable before it can run over SRD. This is a small change, not made yet.
 - For the end-to-end step only: the Aerospike server source,
   `feat/kv-sink-fetch-pipelined` (`512b0c20`). The server needs `efadv.h`
   from rdma-core 46 or later at build time, and detects EFA at runtime; its
-  log shows `kv-sink: EFA - rdma read yes, rdma write yes`.
+  log must show `kv-sink: EFA - rdma read yes, rdma write yes`. At `512b0c20`
+  it shows `rdma write no` on every device, and the next register crashes
+  the server. Delete the `#ifndef EFADV_DEVICE_ATTR_CAPS_RDMA_WRITE` block
+  near the top of `as/src/base/kv_sink_verbs.c` before building; see
+  [A8 on EFA](aerospike_rdma.md#a8-on-efa-srd).
 
 ## What to run
 
@@ -137,16 +140,29 @@ The probe now sets it on both, and runs the receiver-only case as
 
 ### 2. SRD end to end (optional)
 
-Once the transport variable exists, follow
+Follow
 [Running A8 against a real server](aerospike_rdma.md#running-a8-against-a-real-server),
 with these differences:
 
 - build LMCache with `BUILD_WITH_AEROSPIKE=1 BUILD_WITH_AEROSPIKE_EFA=1`;
 - run with `RDMA_TRANSPORT=SRD RDMA_DEVICE=$DEV RDMA_GID_INDEX=0`;
 - raise the server's locked-memory limit with `prlimit` as on the VM;
-- note the depth the client logs (`reports max_recv_wr=... effective=...`)
-  and compare it with the probe's `max_rq_wr`. `RdmaContext` clamps to
-  `ibv_query_device`'s `max_qp_wr` only, not to EFA's `max_rq_wr`.
+- install the Python `aerospike` package (`uv pip install aerospike`). It is
+  not in `requirements/test.txt`, and without it the integration tests skip
+  rather than fail.
+
+The client logs its receive depth, for example `device 'rdmap47s0' reports
+max_recv_wr=4096 ... effective=4096`. On EFA v2, ibv's `max_qp_wr` was 4096
+and efadv's `max_rq_wr` 32768; `RdmaContext` clamps to the smaller.
+
+Pitfalls when the source is copied rather than cloned:
+
+- A tree without `.git` fails the LMCache build in setuptools-scm. Set
+  `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE=0.0.0`.
+- A server tree already built elsewhere keeps that host's absolute paths in
+  its CMake caches, and excluding `*.a` from the copy drops the prebuilt
+  `libbacktrace.a` and `libjansson.a`. Copy the source only and build it on
+  the instance.
 
 ## What to bring back
 
