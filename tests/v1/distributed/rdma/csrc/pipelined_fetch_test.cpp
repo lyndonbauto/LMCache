@@ -38,6 +38,7 @@
 namespace {
 
 using lmcache::connector::rdma::ArrivalStatus;
+using lmcache::connector::rdma::build_deregister_command;
 using lmcache::connector::rdma::build_pipelined_fetch_command;
 using lmcache::connector::rdma::encode_immediate;
 using lmcache::connector::rdma::kDefaultMaxSinksPerPipelinedCommand;
@@ -305,6 +306,32 @@ void test_the_server_reply_is_parsed_verbatim() {
         "max_sinks is read when it terminates the reply");
 }
 
+void test_the_deregister_command_names_the_region() {
+  std::cout << "deregister command names the region\n";
+  check(build_deregister_command(7) == "kv-sink-deregister:region=7",
+        "the command is kv-sink-deregister with the node's region id");
+}
+
+void test_the_echoed_register_command_is_not_read_as_the_reply() {
+  std::cout << "register reply with the request echoed before a tab\n";
+
+  // aerospike_info_node() returns "<command>\t<response>\n", and the command
+  // carries our own qpn, psn and gid. Reading those would connect our queue
+  // pair to itself, and every server write would arrive out of sequence.
+  const NodeRegistration echoed = parse_register_reply(
+      "n1",
+      "kv-sink-register:transport=verbs;gid=0011;qpn=173;psn=1377651;"
+      "rkey=5;addr=4096;size=65536\t"
+      "region=4;max_sinks=256;transport=verbs;qp=rc;qpn=174;psn=8070134;"
+      "gid=0022\n");
+  check(echoed.region == 4u, "region comes from the response");
+  check(echoed.peer.qpn == 174u, "qpn is the server's, not the echoed ours");
+  check(echoed.peer.psn == 8070134u,
+        "psn is the server's, not the echoed ours");
+  check(echoed.peer.gid_hex == "0022",
+        "gid is the server's, not the echoed ours");
+}
+
 }  // namespace
 
 int main() {
@@ -318,6 +345,8 @@ int main() {
     test_a_plan_becomes_sinks_for_one_node();
     test_register_reply_default_max_sinks_when_omitted();
     test_the_server_reply_is_parsed_verbatim();
+    test_the_echoed_register_command_is_not_read_as_the_reply();
+    test_the_deregister_command_names_the_region();
   } catch (const std::exception& e) {
     std::cerr << "EXCEPTION: " << e.what() << "\n";
     return 1;

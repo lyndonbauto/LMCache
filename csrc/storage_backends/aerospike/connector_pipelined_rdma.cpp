@@ -9,6 +9,8 @@
 
   #include <aerospike/as_cluster.h>
 
+  #include <cstdio>
+  #include <exception>
   #include <stdexcept>
   #include <utility>
 
@@ -37,11 +39,9 @@ uint32_t cluster_node_count(aerospike* client) {
 }  // namespace
 
 AerospikePipelinedRdmaDriver::AerospikePipelinedRdmaDriver(
-    L1RdmaRegistration registration, std::string namespace_name,
-    size_t max_record_bytes)
+    L1RdmaRegistration registration, std::string namespace_name)
     : registration_(std::move(registration)),
-      namespace_name_(std::move(namespace_name)),
-      max_record_bytes_(max_record_bytes) {}
+      namespace_name_(std::move(namespace_name)) {}
 
 bool AerospikePipelinedRdmaDriver::is_ready() const {
   std::lock_guard<std::mutex> lock(mu_);
@@ -66,7 +66,6 @@ std::string AerospikePipelinedRdmaDriver::node_name() const {
 
 uint32_t AerospikePipelinedRdmaDriver::desired_notification_depth() const {
   return rdma::desired_notification_depth(registration_.window_bytes,
-                                          max_record_bytes_,
                                           registration_.window_count);
 }
 
@@ -132,9 +131,15 @@ void AerospikePipelinedRdmaDriver::initialize(aerospike* client) {
     const rdma::ClusterRegistrationResult result =
         rdma::register_all_nodes(client, nullptr, context_.get(), &registry_);
     if (result.registered == 0) {
+      std::string reasons;
+      for (const rdma::NodeRegistrationFailure& failure : result.failures) {
+        reasons += (reasons.empty() ? "" : "; ") + failure.node_name + ": " +
+                   failure.reason;
+      }
       throw std::runtime_error(
           "Aerospike pipelined RDMA: kv-sink-register fanout registered no "
-          "nodes");
+          "nodes" +
+          (reasons.empty() ? std::string() : " (" + reasons + ")"));
     }
 
     for (const std::string& node_name : registry_.node_names()) {
@@ -307,6 +312,33 @@ void AerospikePipelinedRdmaDriver::abandon_request(uint16_t generation) {
   if (pool_) {
     pool_->abandon_request(generation);
   }
+}
+
+void AerospikePipelinedRdmaDriver::shutdown(aerospike* client) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (!fabric_ready_) {
+    return;
+  }
+  try {
+    const rdma::ClusterDeregistrationResult result =
+        rdma::deregister_all_nodes(client, nullptr, registry_);
+    for (const rdma::NodeRegistrationFailure& failure : result.failures) {
+      std::fprintf(stderr,
+                   "LMCache Aerospike RDMA: node %s keeps its region: %s\n",
+                   failure.node_name.c_str(), failure.reason.c_str());
+    }
+  } catch (const std::exception& e) {
+    std::fprintf(stderr,
+                 "LMCache Aerospike RDMA: kv-sink-deregister failed: %s\n",
+                 e.what());
+  } catch (...) {
+    std::fprintf(stderr, "LMCache Aerospike RDMA: kv-sink-deregister failed\n");
+  }
+  pool_.reset();
+  registry_.invalidate_all();
+  fabric_ready_ = false;
+  max_notification_slots_ = 0;
+  init_error_ = "Aerospike pipelined RDMA: the connector is closed";
 }
 
 void AerospikePipelinedRdmaDriver::ensure_pool() {

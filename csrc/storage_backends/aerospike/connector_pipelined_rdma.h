@@ -32,8 +32,7 @@ namespace connector {
 class AerospikePipelinedRdmaDriver {
  public:
   AerospikePipelinedRdmaDriver(L1RdmaRegistration registration,
-                               std::string namespace_name,
-                               size_t max_record_bytes);
+                               std::string namespace_name);
 
   // Thread safety: takes `mu_`.
   //
@@ -122,6 +121,17 @@ class AerospikePipelinedRdmaDriver {
   // Thread safety: takes `mu_`.
   void abandon_request(uint16_t generation);
 
+  // Release every node's region with kv-sink-deregister, then drop the pool
+  // and the registrations, so pipelined fetch is no longer ready. The verbs
+  // context stays until the driver is destroyed: pollers use it outside
+  // `mu_`, and the server may still write into it until its fetches drain.
+  // No-op if initialization never succeeded or it already ran.
+  //
+  // Thread safety: takes `mu_`, including across the info calls. Call while
+  // `client` is still connected. Never throws; a node that could not be
+  // deregistered is reported on stderr.
+  void shutdown(aerospike* client);
+
  private:
   // Begin a request with `begin` under `mu_`, then send its commands without
   // the lock and feed replies back; abandons the request if anything throws.
@@ -134,7 +144,6 @@ class AerospikePipelinedRdmaDriver {
 
   L1RdmaRegistration registration_;
   std::string namespace_name_;
-  size_t max_record_bytes_;
 
   mutable std::mutex mu_;
   bool initialized_ = false;

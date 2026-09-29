@@ -102,6 +102,15 @@ struct NodeRegistration {
 // Throws std::invalid_argument if `local` has no registered range.
 std::string build_register_command(const LocalEndpoint& local);
 
+// Build the "kv-sink-deregister" info command for one node's region.
+//
+//   kv-sink-deregister:region=<id>
+//
+// Without it the server keeps the region, its queue pair and its completion
+// queue after we exit, and it holds only a few regions (16 in kv_sink.c), so
+// later clients are refused registration until the server restarts.
+std::string build_deregister_command(uint64_t region);
+
 // Build the "kv-sink-fetch" info command.
 //
 // Throws std::invalid_argument if `sinks` is empty.
@@ -134,6 +143,12 @@ std::string build_pipelined_fetch_command(
     const std::vector<SinkRequest>& sinks);
 
 // Look up one key in a key=value; delimited info reply.
+//
+// A reply from aerospike_info_node() echoes the request before a tab
+// ("<command>\t<response>"), and kv-sink-register's command carries our own
+// qpn, psn and gid. Only the text after the first tab is searched, so those
+// are never mistaken for the server's. Text with no tab, such as a bare
+// command or response, is searched whole.
 //
 // Returns an empty string when the key is absent, which callers must
 // distinguish from a present-but-empty value themselves.

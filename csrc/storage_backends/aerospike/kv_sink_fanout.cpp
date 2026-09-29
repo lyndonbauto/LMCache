@@ -4,7 +4,9 @@
 #include <aerospike/aerospike_info.h>
 #include <aerospike/as_node.h>
 
+#include <cstdlib>
 #include <exception>
+#include <set>
 #include <stdexcept>
 
 #include "rdma_context.h"
@@ -213,6 +215,97 @@ ClusterRegistrationResult register_all_nodes(aerospike* as,
                              err.message);
   }
 
+  return result;
+}
+
+namespace {
+
+struct PerNodeDeregisterState {
+  aerospike* as = nullptr;
+  const as_policy_info* policy = nullptr;
+  const NodeRegistry* registry = nullptr;
+  std::set<std::string> pending;
+  ClusterDeregistrationResult* result = nullptr;
+};
+
+bool deregister_one_node_callback(const as_error* err, const as_node* node,
+                                  const char* /*req*/, char* /*res*/,
+                                  void* udata) {
+  auto* state = static_cast<PerNodeDeregisterState*>(udata);
+  if (node == nullptr || (err != nullptr && err->code != AEROSPIKE_OK)) {
+    return true;
+  }
+  const std::string node_name(node->name);
+  if (state->pending.erase(node_name) == 0) {
+    return true;
+  }
+
+  try {
+    const std::string command =
+        build_deregister_command(state->registry->region_for(node_name));
+    as_error node_err;
+    char* response = nullptr;
+    // See register_one_node_callback for the const_cast.
+    const as_status status = aerospike_info_node(
+        state->as, &node_err, state->policy, const_cast<as_node*>(node),
+        command.c_str(), &response);
+    const std::string reply = response != nullptr ? response : "";
+    if (response != nullptr) {
+      free(response);
+    }
+    if (status != AEROSPIKE_OK) {
+      state->result->failures.push_back(NodeRegistrationFailure{
+          node_name,
+          std::string("kv-sink-deregister failed: ") + node_err.message});
+    } else if (find_info_field(reply, "writes").empty()) {
+      state->result->failures.push_back(NodeRegistrationFailure{
+          node_name, "kv-sink-deregister refused: " + reply});
+    } else {
+      ++state->result->deregistered;
+    }
+  } catch (const std::exception& e) {
+    state->result->failures.push_back(
+        NodeRegistrationFailure{node_name, e.what()});
+  } catch (...) {
+    state->result->failures.push_back(
+        NodeRegistrationFailure{node_name, "unknown error during deregister"});
+  }
+  return true;
+}
+
+}  // namespace
+
+ClusterDeregistrationResult deregister_all_nodes(aerospike* as,
+                                                 const as_policy_info* policy,
+                                                 const NodeRegistry& registry) {
+  if (as == nullptr) {
+    throw std::runtime_error("deregister_all_nodes: null aerospike client");
+  }
+
+  ClusterDeregistrationResult result;
+  const std::vector<std::string> names = registry.node_names();
+  if (names.empty()) {
+    return result;
+  }
+  PerNodeDeregisterState state;
+  state.as = as;
+  state.policy = policy;
+  state.registry = &registry;
+  state.pending.insert(names.begin(), names.end());
+  state.result = &result;
+
+  as_error err;
+  const as_status status = aerospike_info_foreach(
+      as, &err, policy, "services", deregister_one_node_callback, &state);
+  if (status != AEROSPIKE_OK && result.deregistered == 0 &&
+      result.failures.empty()) {
+    throw std::runtime_error(std::string("kv-sink-deregister fanout failed: ") +
+                             err.message);
+  }
+  for (const std::string& node_name : state.pending) {
+    result.failures.push_back(
+        NodeRegistrationFailure{node_name, "node is no longer in the cluster"});
+  }
   return result;
 }
 

@@ -215,13 +215,14 @@ RdmaContext::RdmaContext(const std::string& device_name, uint8_t gid_index,
   if (ibv_query_device(impl_->ctx, &device_attr) != 0) {
     throw_verbs("ibv_query_device");
   }
-  if (device_attr.max_qp_wr <= 0 || device_attr.max_cq <= 0) {
+  if (device_attr.max_qp_wr <= 0 || device_attr.max_cqe <= 0) {
     throw std::runtime_error(
-        "ibv_query_device returned non-positive max_qp_wr or max_cq");
+        "ibv_query_device returned non-positive max_qp_wr or max_cqe");
   }
   device_caps_.max_recv_wr_per_qp =
       static_cast<uint32_t>(device_attr.max_qp_wr);
-  device_caps_.max_cq_entries = static_cast<uint32_t>(device_attr.max_cq);
+  // max_cq counts completion queues; max_cqe is the entries one may hold.
+  device_caps_.max_cq_entries = static_cast<uint32_t>(device_attr.max_cqe);
 
   impl_->pd = ibv_alloc_pd(impl_->ctx);
   if (impl_->pd == nullptr) {
@@ -506,7 +507,7 @@ void RdmaContext::enable_layer_notifications(uint32_t depth) {
   }
   std::fprintf(stderr,
                "LMCache Aerospike RDMA: device '%s' reports max_recv_wr=%u "
-               "max_cq=%u; notification depth requested=%u effective=%u\n",
+               "max_cqe=%u; notification depth requested=%u effective=%u\n",
                device_name_.c_str(), device_caps_.max_recv_wr_per_qp,
                device_caps_.max_cq_entries, notification_depth_requested_,
                notification_depth_);

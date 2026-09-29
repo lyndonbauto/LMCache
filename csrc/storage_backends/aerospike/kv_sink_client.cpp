@@ -74,6 +74,10 @@ std::string build_register_command(const LocalEndpoint& local) {
   return os.str();
 }
 
+std::string build_deregister_command(uint64_t region) {
+  return "kv-sink-deregister:region=" + std::to_string(region);
+}
+
 std::string build_fetch_command(const std::string& ns, uint64_t region,
                                 const std::vector<SinkRequest>& sinks) {
   if (sinks.empty()) {
@@ -95,7 +99,8 @@ std::string find_info_field(const std::string& reply, const std::string& key) {
   // Match only at a field boundary so that "qpn=" does not match inside
   // "peer-qpn=".
   const std::string needle = key + "=";
-  size_t pos = 0;
+  const size_t tab = reply.find('\t');
+  size_t pos = tab == std::string::npos ? 0 : tab + 1;
   while ((pos = reply.find(needle, pos)) != std::string::npos) {
     const bool at_boundary = pos == 0 || reply[pos - 1] == ';' ||
                              reply[pos - 1] == ':' || reply[pos - 1] == '\t';
