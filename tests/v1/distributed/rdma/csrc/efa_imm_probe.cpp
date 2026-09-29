@@ -26,7 +26,11 @@
 //   fits              posted == writes                  sanity check
 //   starved           posted <  writes, infinite retry  the A7 question
 //   starved_no_retry  posted == 0, rnr_retry 0          what the writer sees
-//   unsolicited       posted == 0, EFA QP flag set      only with --unsolicited
+//   unsolicited       posted == 0, EFA QP flag on both queue pairs
+//                                                       only with --unsolicited
+//   unsolicited_receiver_only
+//                     posted == 0, flag on the receiver only: a mismatch
+//                                                       only with --unsolicited
 //
 // Output is one RESULT line per scenario and a VERDICT line; paste them into
 // aerospike_rdma.md. Expected on RC: consumes_recv_wr=yes, with the starved
@@ -79,6 +83,10 @@ constexpr uint32_t kEfaCapUnsolicitedWriteRecv = 1u << 4;
 
 enum class Transport { kRc, kSrd };
 
+// Which queue pairs carry EFADV_QP_FLAGS_UNSOLICITED_WRITE_RECV. SRD needs the
+// writer and the receiver to agree; a mismatch fails the writer.
+enum class Unsolicited { kOff, kBothQueuePairs, kReceiverOnly };
+
 struct Options {
   std::string device;
   uint8_t gid_index = 0;
@@ -93,7 +101,7 @@ struct Scenario {
   uint32_t posted;
   uint32_t writes;
   uint8_t rnr_retry;
-  bool unsolicited;
+  Unsolicited unsolicited;
 };
 
 struct Outcome {
@@ -332,7 +340,7 @@ class Loopback {
     const int depth = static_cast<int>(scenario_.writes) + 1;
     send_cq_ = ibv_create_cq(ctx_, depth, nullptr, nullptr, 0);
     if (send_cq_ == nullptr) fail_verbs("ibv_create_cq(send)");
-    if (scenario_.unsolicited) {
+    if (scenario_.unsolicited != Unsolicited::kOff) {
       create_unsolicited_receive_cq(depth);
       return;
     }
@@ -361,9 +369,11 @@ class Loopback {
   void create_queue_pairs() {
     const uint32_t depth = scenario_.writes;
     if (options_.transport == Transport::kSrd) {
-      sender_ = create_srd_qp(depth, 1, /*with_write_imm=*/true, false);
+      sender_ = create_srd_qp(
+          depth, 1, /*with_write_imm=*/true,
+          scenario_.unsolicited == Unsolicited::kBothQueuePairs);
       receiver_ = create_srd_qp(1, depth, /*with_write_imm=*/false,
-                                scenario_.unsolicited);
+                                scenario_.unsolicited != Unsolicited::kOff);
       return;
     }
     ibv_qp_init_attr init{};
@@ -656,11 +666,13 @@ Outcome run(const Options& options, const Scenario& scenario) {
   Outcome out;
   loop.post_receives(scenario.posted);
   loop.post_writes();
+  const bool needs_no_receives =
+      scenario.unsolicited == Unsolicited::kBothQueuePairs;
   const uint32_t first_target =
-      scenario.unsolicited ? scenario.writes : scenario.posted;
+      needs_no_receives ? scenario.writes : scenario.posted;
   loop.poll(first_target, out.recv_before_repost, out);
   out.landed_before_repost = loop.landed();
-  if (scenario.writes > scenario.posted && !scenario.unsolicited) {
+  if (scenario.writes > scenario.posted && !needs_no_receives) {
     loop.post_receives(scenario.writes - scenario.posted);
     loop.poll(scenario.writes - scenario.posted, out.recv_after_repost, out);
   }
@@ -696,6 +708,14 @@ std::string verdict(const Scenario& starved, const Outcome& out) {
     return "yes";
   }
   return "unclear";
+}
+
+// Every write delivered its bytes and an unsolicited notification, with no
+// receive posted and no writer error.
+bool unsolicited_is_clean(const Scenario& unsolicited, const Outcome& out) {
+  return out.recv_unsolicited == unsolicited.writes &&
+         out.send_ok == unsolicited.writes && out.send_error == 0 &&
+         out.landed_final == unsolicited.writes && !out.bad_immediate;
 }
 
 bool fits_is_clean(const Scenario& fits, const Outcome& out) {
@@ -761,10 +781,14 @@ int main(int argc, char** argv) {
     return kSkipExitCode;
   }
 
-  const Scenario fits{"fits", 8, 8, kInfiniteRnrRetry, false};
-  const Scenario starved{"starved", 4, 8, kInfiniteRnrRetry, false};
-  const Scenario starved_no_retry{"starved_no_retry", 0, 1, 0, false};
-  const Scenario unsolicited{"unsolicited", 0, 8, kInfiniteRnrRetry, true};
+  const Scenario fits{"fits", 8, 8, kInfiniteRnrRetry, Unsolicited::kOff};
+  const Scenario starved{"starved", 4, 8, kInfiniteRnrRetry, Unsolicited::kOff};
+  const Scenario starved_no_retry{"starved_no_retry", 0, 1, 0,
+                                  Unsolicited::kOff};
+  const Scenario unsolicited{"unsolicited", 0, 8, kInfiniteRnrRetry,
+                             Unsolicited::kBothQueuePairs};
+  const Scenario receiver_only{"unsolicited_receiver_only", 0, 8,
+                               kInfiniteRnrRetry, Unsolicited::kReceiverOnly};
 
   try {
     if (options.transport == Transport::kSrd && !report_srd_device(options)) {
@@ -776,8 +800,13 @@ int main(int argc, char** argv) {
     print_result(options, starved, starved_out);
     const Outcome no_retry_out = run(options, starved_no_retry);
     print_result(options, starved_no_retry, no_retry_out);
+    std::string unsolicited_works = "untested";
     if (options.unsolicited) {
-      print_result(options, unsolicited, run(options, unsolicited));
+      const Outcome unsolicited_out = run(options, unsolicited);
+      print_result(options, unsolicited, unsolicited_out);
+      print_result(options, receiver_only, run(options, receiver_only));
+      unsolicited_works =
+          unsolicited_is_clean(unsolicited, unsolicited_out) ? "yes" : "no";
     }
 
     const std::string consumes = verdict(starved, starved_out);
@@ -786,6 +815,7 @@ int main(int argc, char** argv) {
     std::cout << "VERDICT transport=" << transport_name(options.transport)
               << " consumes_recv_wr=" << consumes
               << " data_without_notification=" << (silent_data ? "yes" : "no")
+              << " unsolicited_works=" << unsolicited_works
               << " fits_clean=" << (fits_is_clean(fits, fits_out) ? 1 : 0)
               << "\n";
     if (!fits_is_clean(fits, fits_out)) return 1;

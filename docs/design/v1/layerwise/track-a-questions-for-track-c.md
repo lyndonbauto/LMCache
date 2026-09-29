@@ -791,9 +791,8 @@ still land. Either build the leaser from the config of the adapter
       `make test` pins this.
     - SRD: the probe builds with `EFA=1` against rdma-core 50, and also
       checks the unsolicited write-receive mode when `efadv.h` declares it.
-      **Not run yet: it needs an EFA instance with RDMA write.** If
-      it reports `data_without_notification=yes`, the wire contract may need
-      a handshake, which would change the plan format.
+      Run on EFA as item 24: no handshake is needed, and the plan format
+      does not change.
 15. The production `ChunkPlacer` (L1 to L4). `RdmaWindowPlacer.lease(objects)
     -> WindowPlacement` implements Track C's `ChunkPlacer` and
     `WindowLease`. It releases as `FINISHED`, `NEVER_FETCHED` (no
@@ -918,6 +917,39 @@ still land. Either build the leaser from the config of the adapter
     For Track C, `pipelined_max_slots_per_request()` (item 20) now returns
     32767 on Soft-RoCE instead of a record-cap-derived count, so the F4
     eligibility check rarely refuses on slot count.
+24. A7: answered on real EFA hardware. `efa_imm_probe` ran on a
+    `g6.8xlarge` (EFA v2, the generation `p5` uses). **An SRD
+    write-with-immediate consumes one posted receive, as on RC, so the wire
+    contract needs no handshake and Track C's plan format does not change.**
+    Two differences from RC matter only if the receive queue runs short,
+    which the client prevents by rejecting plans above its share:
+    - SRD lands the bytes before a receive exists. The notification waits for
+      the receive, and with the server's finite RNR retry it never arrives,
+      so the slot falls back after the fetch timeout.
+    - Unsolicited write-receive, which would remove receive sizing, works
+      only when the writer's and the receiver's queue pairs both set it. A
+      mismatch fails every write with `remote invalid request error`.
+      Adopting it is a joint change with the server and `kv-sink-register`.
+
+    The first run showed that the probe's `--unsolicited` mode flagged only
+    the receiver; it now flags both and also records the mismatch. Results
+    are in
+    [aerospike_rdma.md](../distributed/l2_adapters/aerospike_rdma.md#a7-result-on-efa-srd).
+25. A8 over SRD on EFA: the three A8 tests and the two other Aerospike
+    integration suites pass (15 tests) on the same `g6.8xlarge`, with
+    `RDMA_TRANSPORT=SRD` now read by the A8 test. It needed one client fix:
+    notification receives were posted with no scatter entry, which
+    Soft-RoCE accepts but EFA never matches, so every write stalled and
+    then failed. Each receive now carries one entry over a small shared
+    scratch buffer; Soft-RoCE still passes. `RdmaContext` now also clamps
+    the receive depth to efadv's `max_rq_wr` (it did not bind: ibv reports
+    4096, efadv 32768). The server needed a local patch, and two bugs for
+    the server team are in
+    [A8 on EFA](../distributed/l2_adapters/aerospike_rdma.md#a8-on-efa-srd).
+    For Track C: nothing in the plan or the arrival contract changes. The
+    fetch command runs under the C client's default 1000 ms info timeout,
+    and a cold server's first fetch came close to it while registering its
+    data stripes. A timeout shows up as a fallback, not as an error.
 
 These were verified on the Soft-RoCE VM
 ([rdma_testing_on_windows.md](../distributed/l2_adapters/rdma_testing_on_windows.md)):
@@ -951,7 +983,9 @@ These were verified on the Soft-RoCE VM
    path.~~ Done as item 19.
 8. ~~Expose `pipelined_max_slots_per_request()` through the storage
    manager (F4).~~ Done as item 20.
-9. Run A7 on an EFA instance. ~~A8 against a server built from the
+9. ~~Run A7 on an EFA instance.~~ Done as item 24. ~~The client's SRD
+   fetch path end to end.~~ Done as item 25.
+   ~~A8 against a server built from the
    `kv-sink` branch.~~ Done as item 23.
 10. ~~Send `kv-sink-deregister` when the client closes.~~ Done in item 23.
 
