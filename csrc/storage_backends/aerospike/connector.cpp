@@ -175,6 +175,13 @@ WorkerAerospikeConn AerospikeNativeConnector::create_connection() {
   conn.read_policy.base.max_retries = 2;
   conn.read_policy.key = AS_POLICY_KEY_DIGEST;
   conn.read_policy.replica = AS_POLICY_REPLICA_SEQUENCE;
+  // 0: the namespace's default-read-touch-ttl-pct decides. A load reads the
+  // meta record and every segment, so all of an object's records are
+  // extended together.
+  conn.read_policy.read_touch_ttl_percent = 0;
+
+  conn.lookup_policy = conn.read_policy;
+  conn.lookup_policy.read_touch_ttl_percent = -1;
 
   as_policy_write_init(&conn.write_policy);
   conn.write_policy.base.total_timeout = write_timeout_ms_;
@@ -199,6 +206,7 @@ WorkerAerospikeConn AerospikeNativeConnector::create_connection() {
   conn.batch_policy.replica = AS_POLICY_REPLICA_SEQUENCE;
   // Send each node's share of a batch in parallel rather than node by node.
   conn.batch_policy.concurrent = true;
+  conn.batch_policy.read_touch_ttl_percent = -1;
 
   return conn;
 }
@@ -327,8 +335,8 @@ bool AerospikeNativeConnector::do_single_exists(WorkerAerospikeConn& conn,
 
   as_error err;
   as_record* rec = nullptr;
-  as_status status = aerospike_key_exists(conn.client, &err, &conn.read_policy,
-                                          &as_meta_key, &rec);
+  as_status status = aerospike_key_exists(
+      conn.client, &err, &conn.lookup_policy, &as_meta_key, &rec);
   if (rec != nullptr) {
     as_record_destroy(rec);
   }
@@ -404,7 +412,7 @@ bool AerospikeNativeConnector::do_single_delete(WorkerAerospikeConn& conn,
 
   as_error err;
   as_record* rec = nullptr;
-  as_status status = aerospike_key_get(conn.client, &err, &conn.read_policy,
+  as_status status = aerospike_key_get(conn.client, &err, &conn.lookup_policy,
                                        &as_meta_key, &rec);
   if (status == AEROSPIKE_ERR_RECORD_NOT_FOUND) {
     return false;

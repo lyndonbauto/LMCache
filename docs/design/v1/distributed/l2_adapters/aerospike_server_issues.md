@@ -23,6 +23,7 @@ they are fixed in LMCache and described in `aerospike_rdma.md`.
 | 8 | [One failed write disables the region for good](#8-one-failed-write-disables-the-region-for-good) | Silent permanent fallback | Code reading | Open |
 | 9 | [A dead client's region is never reclaimed](#9-a-dead-clients-region-is-never-reclaimed) | Registration refused | Code reading | Open |
 | 10 | [The reap loop busy-spins an info thread](#10-the-reap-loop-busy-spins-an-info-thread) | CPU and info-thread starvation | Code reading | Open |
+| 11 | [kv-sink fetches never apply read-touch](#11-kv-sink-fetches-never-apply-read-touch) | Hot entries expire | Code reading | Open |
 
 Two smaller items are under [Minor](#minor).
 
@@ -271,6 +272,28 @@ commands, including the C client's cluster-tend requests.
 
 **Expected fix:** fixing issue 4 removes the wait from the info thread. Until
 then, back off between empty polls or wait on a completion channel.
+
+## 11. kv-sink fetches never apply read-touch
+
+**Where:** `fetch_one_common` in `as/src/base/kv_sink.c`; compare
+`as_read_touch_check` in `as/src/transaction/read_touch.c`, whose only caller
+is the client read path in `as/src/transaction/read.c`.
+
+With `default-read-touch-ttl-pct` set, a client read near a record's end of
+life resets its TTL. A `kv-sink-fetch` or `kv-sink-fetch-pipelined` reads the
+record through its own path and never makes that check, so a record served
+only by RDMA is never extended.
+
+**What LMCache sees:** the entries served most often, which are the ones
+fetched layer by layer, expire on their write TTL while whole-object loads
+keep colder entries alive. After expiry the lookup misses and the prefix is
+recomputed and stored again. Nothing is served wrong. LMCache's lookups
+deliberately never touch (see *Keeping frequently used entries* in the
+Aerospike L2 page), so they cannot make up for it.
+
+**Expected fix:** apply the namespace's read-touch rule to each record a
+fetch sends, the same way a client read does, with the command able to opt
+out.
 
 ## Minor
 

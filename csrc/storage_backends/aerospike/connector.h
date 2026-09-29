@@ -39,9 +39,15 @@ struct WorkerAerospikeConn {
   aerospike* client = nullptr;
   std::string ns;
   std::string set_name;
+  // Loads: TTL follows the namespace's default-read-touch-ttl-pct.
   as_policy_read read_policy;
+  // Existence checks and delete's meta read: never extend a TTL. A lookup
+  // reads only the meta record, so touching it would let the meta outlive
+  // its segments.
+  as_policy_read lookup_policy;
   as_policy_write write_policy;
   as_policy_remove remove_policy;
+  // Batched existence checks; never extend a TTL, as lookup_policy.
   as_policy_batch batch_policy;
 };
 
