@@ -50,11 +50,14 @@ pytest -q tests/v1/platform/test_event_ipc.py \
   tests/v1/multiprocess/test_object_group_layerwise_transfer.py
 ```
 
-On ROCm this is the first run of that path, and it has no
-LMCache-specific backend (`lmcache/v1/platform/rocm/` is empty): it relies on
-PyTorch's HIP events standing in for CUDA's. If the ordering test fails or
-skips, stop. Every layerwise stage after this one would read KV blocks
-before they are written, which shows up as wrong output, not an error.
+This is the first run of the layerwise path across two processes on any
+GPU. Track B's GPU runs were single-process under WSL2, which cannot share
+GPU events between processes. ROCm reuses the CUDA backend (PyTorch
+interprocess events, which become HIP IPC events) and compiles the native
+range copy as `hipMemcpyAsync`; none of that has run either. If the ordering
+test fails or skips, stop. Every layerwise stage after this one would read
+KV blocks before they are written, which shows up as wrong output, not an
+error.
 
 ## Stage 1: Soft-RoCE
 
