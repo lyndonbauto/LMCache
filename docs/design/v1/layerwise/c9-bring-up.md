@@ -8,6 +8,21 @@ with output identical to a run without LMCache. TTFT on EFA comes later.
 
 Each stage adds one moving part, so a failure points at that part.
 
+## Build
+
+```bash
+# CUDA
+BUILD_WITH_AEROSPIKE=1 BUILD_WITH_AEROSPIKE_RDMA=1 \
+  pip install -e . --no-build-isolation
+# ROCm (for example the MI300X functional test box)
+BUILD_WITH_HIP=1 CXX=hipcc BUILD_WITH_AEROSPIKE=1 BUILD_WITH_AEROSPIKE_RDMA=1 \
+  pip install -e . --no-build-isolation
+```
+
+`BUILD_WITH_AEROSPIKE_RDMA` needs `rdma-core` (`libibverbs`). On ROCm, the
+HIP build together with the Aerospike RDMA flags has not been tried before,
+so a build failure here is a finding, not a setup mistake.
+
 ## Stage 0: CPU checks on the box
 
 Run these before touching the GPU. They cover all three tracks without a
@@ -25,6 +40,22 @@ source over the fabric-free client, Track C's `fetch_deferred_objects`, and
 Track B's sink staging real bytes. It skips if the fabric-free module cannot
 be built (it needs `make`, a C++ compiler and `pybind11`).
 
+Then, with the GPU visible, check that a layer event recorded in one process
+orders reads in another. The worker's per-layer wait depends on it, and
+nothing else orders the daemon's copies against vLLM's attention:
+
+```bash
+pytest -q tests/v1/platform/test_event_ipc.py \
+  tests/v1/platform/test_event_ipc_ordering.py \
+  tests/v1/multiprocess/test_object_group_layerwise_transfer.py
+```
+
+On ROCm this is the first run of that path, and it has no
+LMCache-specific backend (`lmcache/v1/platform/rocm/` is empty): it relies on
+PyTorch's HIP events standing in for CUDA's. If the ordering test fails or
+skips, stop. Every layerwise stage after this one would read KV blocks
+before they are written, which shows up as wrong output, not an error.
+
 ## Stage 1: Soft-RoCE
 
 ```bash
@@ -35,9 +66,24 @@ export RDMA_DEVICE=rxe0 RDMA_GID_INDEX=1
 pytest -q tests/v1/distributed/rdma/
 ```
 
-The RDMA suite runs Track A's native pipeline against `rxe0`. Bring up the
-`kv-sink` server following Track A's setup, and confirm it registers the
-daemon's windows before going on.
+The RDMA suite runs Track A's native pipeline against `rxe0`, against its
+own mock writer.
+
+Then build and start the Aerospike server from the aerospike-server branch
+`feat/kv-sink-fetch-pipelined`, following
+["Running A8 against a real server"](../distributed/l2_adapters/aerospike_rdma.md#running-a8-against-a-real-server)
+(stock CE has no `kv-sink-*` commands). Run A8 against it:
+
+```bash
+RUN_AEROSPIKE_INTEGRATION=1 AEROSPIKE_TEST_HOST=127.0.0.1 \
+  AEROSPIKE_TEST_PORT=3000 AEROSPIKE_TEST_NAMESPACE=lmcache \
+  RDMA_DEVICE=rxe0 RDMA_GID_INDEX=1 \
+  pytest -q tests/v1/distributed/test_aerospike_pipelined_rdma_integration.py
+```
+
+A8 registers the windows with the real server, runs a clean pipelined fetch
+and a missing-record fallback, and checks the bytes of both. It must pass,
+not skip, before Stage 3. Record the server commit.
 
 ## Stage 2: GPU, layerwise, no RDMA
 
