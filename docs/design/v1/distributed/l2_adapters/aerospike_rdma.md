@@ -5,8 +5,10 @@ profile, the adapter plumbing, the per-node registration fanout, the mock RDMA
 writer, and the byte-equivalence and layer-pipelining harnesses are implemented
 and passing over Soft-RoCE (`rxe0` on `lo`, GID index 1). Real RDMA writes land
 in L1 byte-identically, and a layer is provably consumable while later layers
-are still absent. What remains unproven is EFA/SRD and a real Aerospike server;
-see [What is not proven yet](#what-is-not-proven-yet).
+are still absent. A fetch from a real Aerospike server has run over Soft-RoCE
+(A8), and A7's receive question is answered on EFA. What remains unproven is
+the client's fetch path over EFA/SRD; see
+[What is not proven yet](#what-is-not-proven-yet).
 
 This document covers the `kv-sink` wire protocol, the handshake ordering, the
 opt-in build profile, the registration-scope decision, and how to reproduce a
@@ -582,8 +584,10 @@ pre-post one per expected notification. EFA can create a queue pair with
 `EFA_CREATE_QP_WITH_UNSOLICITED_WRITE_RECV`, where notifications consume no
 receive work request and the completion is flagged unsolicited. That removes
 the need to size a receive queue against the fetch's slot count. It requires
-an extended CQ, and **peers must negotiate the same QP feature set**, so it is
-a joint decision with the server.
+an extended CQ, and **peers must set the same QP feature**: A7 measured that
+a mismatch fails every write with `remote invalid request error` after its
+bytes land (see [the SRD result](#a7-result-on-efa-srd)). So it is a joint
+decision with the server.
 
 **EFA exposes write-with-immediate only through the extended verbs API**
 (`ibv_qp_ex` / `ibv_wr_rdma_write_imm`), not through `ibv_post_send` with
@@ -847,7 +851,9 @@ will perform.
 
 #### Receive queue depth and device limits
 
-**Status: implemented in the client; not verified on EFA/SRD fabric.**
+**Status: implemented in the client. On EFA/SRD, A7 measured that immediates
+consume receives as on RC (see [the SRD result](#a7-result-on-efa-srd)); the
+client's queue pair has not run on EFA yet.**
 
 On the RC path each `RDMA_WRITE_WITH_IMM` consumes one posted receive work
 request, so the queue pair's `max_recv_wr` must be at least the slot count of
@@ -882,17 +888,10 @@ today. Reporting a layer ready while part of it is still in flight on another
 sub-request is exactly the failure this design exists to prevent, so oversize
 plans fail loudly at `begin_request_from_slots` instead.
 
-**Still unknown without EFA hardware:** whether SRD actually charges a receive
-work request per immediate when the unsolicited-write-receive queue-pair feature
-is negotiated. The `efadv.h` available in this tree exposes no runtime knob to
-enable that feature on the client side; if EFA turns out not to consume receive
-work requests on that path, the `max_recv_wr` clamp documented here becomes a
-conservative no-op rather than a binding limit. That has not been measured on a
-real EFA instance.
-
 **How to measure it (A7):** `tests/v1/distributed/rdma/csrc/efa_imm_probe.cpp`
-is a standalone probe that needs only libibverbs. A sender and a receiver
-queue pair on one device run three scenarios:
+is a standalone probe that needs only libibverbs. What an EFA instance needs
+before it can run is in [rdma_testing_on_efa.md](rdma_testing_on_efa.md). A sender and a receiver
+queue pair on one device run these scenarios:
 
 - `fits`: 8 receives posted for 8 write-with-immediates, as a sanity check.
 - `starved`: 4 receives posted for 8 writes, with infinite RNR retry. After
@@ -900,6 +899,9 @@ queue pair on one device run three scenarios:
   watches again. This is the A7 question.
 - `starved_no_retry`: 0 receives, 1 write, `rnr_retry 0`. It shows what the
   writer sees.
+- With `--unsolicited` only: `unsolicited`, 0 receives and 8 writes with the
+  unsolicited-write-receive flag on both queue pairs; and
+  `unsolicited_receiver_only`, the same with the flag on the receiver only.
 
 For each scenario it reports receive completions before and after the
 repost, sender errors, and which slots' bytes landed. On an EFA instance
@@ -918,7 +920,7 @@ The RC baseline over Soft-RoCE, which `make test` also runs with
 ```text
 RESULT transport=rc scenario=starved posted=4 writes=8 rnr_retry=7 recv_before_repost=4 recv_after_repost=4 ... send_error=0 ... landed_before_repost=4 landed_final=8
 RESULT transport=rc scenario=starved_no_retry posted=0 writes=1 rnr_retry=0 ... send_error=1 first_send_error="RNR retry counter exceeded" ... landed_final=0
-VERDICT transport=rc consumes_recv_wr=yes data_without_notification=no fits_clean=1
+VERDICT transport=rc consumes_recv_wr=yes data_without_notification=no unsolicited_works=untested fits_clean=1
 ```
 
 So on RC each immediate consumes a receive. A write with no receive posted
@@ -931,11 +933,57 @@ retry count it fails the writer. Reading the SRD run:
 | `consumes_recv_wr=no` | Immediates need no posted receive. The clamp becomes a conservative no-op. |
 | `data_without_notification=yes` | Bytes landed with no completion. A starved slot would never report and its layer would wait for the fetch timeout. The receive queue must never run short, or the wire contract needs a handshake. |
 | `consumes_recv_wr=unclear` | Read the RESULT lines. For example, an out-of-range or repeated immediate sets `bad_immediate=1`. |
+| `unsolicited_works=yes` | With the flag on both queue pairs, every immediate completed with no receive posted. |
 
 The probe exits 2 when the device can't run it: not an EFA device, no RDMA
 write capability, or `--unsolicited` on a build whose `efadv.h` lacks that
-API. rdma-core 50, as shipped with Ubuntu 24.04, lacks it. The SRD path
-compiles against rdma-core 50 but has not run on hardware.
+API. rdma-core 50, as shipped with Ubuntu 24.04, lacks it.
+
+##### A7 result on EFA (SRD)
+
+Measured on 2026-09-29 on a `g6.8xlarge` in `us-west-2b`. The device is EFA
+v2 (PCI ID `1d0f:efa1`, the generation `p5` uses), with EFA driver 3.3.0,
+rdma-core 64 from the AWS EFA installer, and kernel 7.0.0-1013-aws. The
+device reports `device_caps=0x3f rdma_write=1 rnr_retry=1
+unsolicited_write_recv=1 max_rq_wr=32768`. Two runs gave identical output:
+
+```text
+RESULT transport=srd scenario=starved posted=4 writes=8 rnr_retry=7 recv_before_repost=4 recv_after_repost=4 ... send_ok=8 send_error=0 ... landed_before_repost=8 landed_final=8
+RESULT transport=srd scenario=starved_no_retry posted=0 writes=1 rnr_retry=0 ... send_error=1 first_send_error="RNR retry counter exceeded" ... landed_final=1
+RESULT transport=srd scenario=unsolicited posted=0 writes=8 rnr_retry=7 recv_before_repost=8 ... recv_unsolicited=8 send_ok=8 send_error=0 ... landed_final=8
+RESULT transport=srd scenario=unsolicited_receiver_only posted=0 writes=8 rnr_retry=7 recv_before_repost=0 recv_after_repost=0 ... send_error=8 first_send_error="remote invalid request error" ... landed_final=8
+VERDICT transport=srd consumes_recv_wr=yes data_without_notification=yes unsolicited_works=yes fits_clean=1
+```
+
+What it means:
+
+- **Each immediate consumes one posted receive, as on RC.** The depth sizing
+  and the per-fetch slot share above stay binding on SRD, and no wire change
+  is needed.
+- **SRD lands the bytes before a receive exists; RC does not.** With
+  infinite retry, the notification waits for a receive and then arrives, so
+  nothing is lost. With a finite retry count, the bytes stay in the window,
+  the writer fails, and no notification ever arrives. The server uses
+  `rnr_retry 6`, so a client that ran short of receives would see that slot
+  never arrive and fall back after the fetch timeout. The client never lets
+  its receive queue run short (the plan is rejected above its share), and
+  bytes that land late go into a quarantined window, so this needs no new
+  mechanism. It is why the receive queue must never run short.
+- **Unsolicited write-receive works, but only when both ends set it.** With
+  the flag on both queue pairs, 8 immediates complete with no receive
+  posted. With the flag on one side only, the bytes land and every write
+  fails with `remote invalid request error`. Neither the client nor the
+  server sets it today, so they agree. Adopting it would remove receive
+  sizing, but it needs a coordinated change: the server's queue pair, the
+  client's queue pair and completion queue, and a field in
+  `kv-sink-register` so both sides agree.
+
+Not yet covered: the client's own SRD queue pair (`efadv_create_qp_ex`, the
+qkey, the address handle) has not run on EFA. `RdmaContext` clamps the depth
+to `ibv_query_device`'s `max_qp_wr` and does not read EFA's
+`max_rq_wr` (32768 here). Whether the two differ on EFA was not captured.
+Both need the end-to-end step in
+[rdma_testing_on_efa.md](rdma_testing_on_efa.md).
 
 **Device-free verification:** `notification_depth_test` (via `make -C
 tests/v1/distributed/rdma logic-test`) injects device caps and checks clamping,
@@ -1318,15 +1366,18 @@ Being precise about this, because the gap matters:
 | Mock RDMA writer | **Verified.** Posts real `ibv_post_send` writes and fences on its own send CQ. |
 | Real RDMA write landing in L1 | **Verified** over Soft-RoCE (`rxe0` on `lo`, GID index 1). |
 | Byte-equivalence assertion | **Verified.** Both chunks byte-identical, nothing outside the requested offsets, out-of-window write refused. |
-| Same over EFA/SRD | **Not achieved — needs an EFA instance.** |
+| A7: does an SRD immediate consume a receive? | **Answered on EFA v2** (`g6.8xlarge`): yes, as on RC; unsolicited write-receive works when both queue pairs set it. See [the SRD result](#a7-result-on-efa-srd). |
+| Same fetch path over EFA/SRD | **Not achieved.** The client's SRD queue pair has not run on EFA. |
 | Against a real Aerospike server | **Verified over Soft-RoCE (A8)** with a server built from `feat/kv-sink-fetch-pipelined`: a clean pipelined fetch and a missing-record fallback, both byte-exact. |
 
-EFA/SRD is the remaining gap, and it is not a local environment problem.
+The client's fetch path over EFA/SRD is the remaining gap, and it is not a
+local environment problem.
 
-**EFA/SRD is a genuine gap, not a formality.** Soft-RoCE only supports RC, so
-the SRD path — `efadv_create_qp_ex`, the qkey at INIT, and the `ibv_create_ah`
-for the server without which its write fails `UNKNOWN_PEER` — is still
-untested. The GID index divergence documented above is a concrete instance of
+**EFA/SRD is a genuine gap, not a formality.** A7 ran the probe's own SRD
+queue pairs on EFA, not the client's. Soft-RoCE only supports RC, so the
+client's SRD path (`efadv_create_qp_ex`, the qkey at INIT, and the
+`ibv_create_ah` for the server, without which its write fails
+`UNKNOWN_PEER`) is still untested. The GID index divergence documented above is a concrete instance of
 the same hazard: the correct value differs between the two fabrics, and the
 failure surfaces several calls later as `ENETUNREACH`. Re-verify the handshake
 on a real EFA instance before treating the M2 gate as passable.

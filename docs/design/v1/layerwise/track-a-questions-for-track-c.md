@@ -918,6 +918,26 @@ still land. Either build the leaser from the config of the adapter
     For Track C, `pipelined_max_slots_per_request()` (item 20) now returns
     32767 on Soft-RoCE instead of a record-cap-derived count, so the F4
     eligibility check rarely refuses on slot count.
+24. A7: answered on real EFA hardware. `efa_imm_probe` ran on a
+    `g6.8xlarge` (EFA v2, the generation `p5` uses). **An SRD
+    write-with-immediate consumes one posted receive, as on RC, so the wire
+    contract needs no handshake and Track C's plan format does not change.**
+    Two differences from RC matter only if the receive queue runs short,
+    which the client prevents by rejecting plans above its share:
+    - SRD lands the bytes before a receive exists. The notification waits for
+      the receive, and with the server's finite RNR retry it never arrives,
+      so the slot falls back after the fetch timeout.
+    - Unsolicited write-receive, which would remove receive sizing, works
+      only when the writer's and the receiver's queue pairs both set it. A
+      mismatch fails every write with `remote invalid request error`.
+      Adopting it is a joint change with the server and `kv-sink-register`.
+
+    The first run showed that the probe's `--unsolicited` mode flagged only
+    the receiver; it now flags both and also records the mismatch. Results
+    are in
+    [aerospike_rdma.md](../distributed/l2_adapters/aerospike_rdma.md#a7-result-on-efa-srd).
+    Still open: the client's own SRD queue pair has not run on EFA, and
+    `RdmaContext` does not clamp to EFA's `max_rq_wr` (32768).
 
 These were verified on the Soft-RoCE VM
 ([rdma_testing_on_windows.md](../distributed/l2_adapters/rdma_testing_on_windows.md)):
@@ -951,7 +971,10 @@ These were verified on the Soft-RoCE VM
    path.~~ Done as item 19.
 8. ~~Expose `pipelined_max_slots_per_request()` through the storage
    manager (F4).~~ Done as item 20.
-9. Run A7 on an EFA instance. ~~A8 against a server built from the
+9. ~~Run A7 on an EFA instance.~~ Done as item 24. Next on EFA: the
+   client's SRD fetch path end to end, per
+   [rdma_testing_on_efa.md](../distributed/l2_adapters/rdma_testing_on_efa.md).
+   ~~A8 against a server built from the
    `kv-sink` branch.~~ Done as item 23.
 10. ~~Send `kv-sink-deregister` when the client closes.~~ Done in item 23.
 
