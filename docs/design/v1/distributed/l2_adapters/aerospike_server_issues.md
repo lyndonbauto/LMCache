@@ -1,307 +1,299 @@
 # Aerospike server issues found from the LMCache side
 
 Defects and contract gaps in the aerospike-server branch
-`feat/kv-sink-fetch-pipelined` (checked at `512b0c20`), found while running
-the LMCache RDMA client against it. The protocol they are measured against is
-in [`aerospike_rdma.md`](aerospike_rdma.md); the test setups are in
+`sriram/kv-sink-batch-prio` (checked at `24357d20d`) and the matching C client
+branch `sriram/kv-sink-batch-prio` of `aerospike-client-c` (checked at
+`769304f7`, based on 7.5.0), found by reading both against the LMCache
+Aerospike connector. The code was reviewed, not yet run: none of these have
+been reproduced on Soft-RoCE or EFA. The earlier test setups are in
 [`rdma_testing_on_windows.md`](rdma_testing_on_windows.md) and
 [`rdma_testing_on_efa.md`](rdma_testing_on_efa.md).
 
-This is a hand-off list for the server team. Each entry says what is wrong,
-what LMCache sees, and what fix we expect. Client bugs are not listed here;
-they are fixed in LMCache and described in `aerospike_rdma.md`.
+This is a hand-off list for the Aerospike server and client teams. Each entry
+says what is wrong, what LMCache sees, and what fix we expect. Bugs in
+LMCache's own code are fixed in LMCache and not listed here.
 
-| # | Issue | Severity | Seen on | Status |
+**What changed since the last list.** The branch replaces the info-command
+data path (`kv-sink-fetch-pipelined`, write-with-immediate) with a sink field
+on ordinary reads: `as_batch_read_record.sink` and `aerospike_key_get_into()`
+send field 46 with `(region, offset, length, priority)`, the server queues the
+placement per region by priority, shares the link across regions by deficit
+round robin, and replies to the row once its RDMA write has completed. The
+issues on the previous list (record released during the send, EFA write
+detection, the crash after a refused device, fenced replies, lazy stripe
+registration, fixed device and GID, concurrent fetches on one region, leaked
+regions, missing read-touch) are fixed on this branch. Issues 3 and 9 below
+are what remains of the old "failed write disables the region" and "busy-spin"
+entries.
+
+**This is a protocol change for LMCache.** `kv-sink-fetch-pipelined` no longer
+exists and writes carry no immediate, so LMCache's current pipelined path
+fails the command and falls back to whole-object loads against this server.
+Using the branch means moving LMCache to batch reads with sink rows through
+the patched client.
+
+| # | Issue | Severity | Where | Status |
 |---|---|---|---|---|
-| 1 | [Record released while its bytes are still being sent](#1-record-released-while-its-bytes-are-still-being-sent) | Data corruption | Code reading | Open |
-| 2 | [EFA write support is never detected](#2-efa-write-support-is-never-detected) | EFA unusable | EFA v2 | Local patch only |
-| 3 | [Crash on the register after a refused device](#3-crash-on-the-register-after-a-refused-device) | Server crash | EFA v2 | Open |
-| 4 | [Pipelined fetch replies only after every write completes](#4-pipelined-fetch-replies-only-after-every-write-completes) | No overlap | Soft-RoCE, EFA v2 | Open |
-| 5 | [Stripes are registered lazily, on the fetch path](#5-stripes-are-registered-lazily-on-the-fetch-path) | Spurious fallback | Soft-RoCE, EFA v2 | Open |
-| 6 | [Device and GID index are not configurable](#6-device-and-gid-index-are-not-configurable) | Wrong fabric | EFA setup | Open |
-| 7 | [Concurrent fetches on one region corrupt each other](#7-concurrent-fetches-on-one-region-corrupt-each-other) | Use-after-free | Code reading | Open |
-| 8 | [One failed write disables the region for good](#8-one-failed-write-disables-the-region-for-good) | Silent permanent fallback | Code reading | Open |
-| 9 | [A dead client's region is never reclaimed](#9-a-dead-clients-region-is-never-reclaimed) | Registration refused | Code reading | Open |
-| 10 | [The reap loop busy-spins an info thread](#10-the-reap-loop-busy-spins-an-info-thread) | CPU and info-thread starvation | Code reading | Open |
-| 11 | [kv-sink fetches never apply read-touch](#11-kv-sink-fetches-never-apply-read-touch) | Hot entries expire | Code reading | Open |
+| 1 | [The local transport writes into any process on the server host](#1-the-local-transport-writes-into-any-process-on-the-server-host) | Security: remote memory write | Server and client | Open |
+| 2 | [Queued writes have no deadline](#2-queued-writes-have-no-deadline) | Data corruption | Server | Open |
+| 3 | [A failed RC write breaks the region with the wrong error](#3-a-failed-rc-write-breaks-the-region-with-the-wrong-error) | Silent permanent fallback | Server | Open |
+| 4 | [Region ownership is self-declared](#4-region-ownership-is-self-declared) | Security: silent wrong data | Server | Open |
+| 5 | [Only single-blob-bin records up to 2 MiB can be sink-read](#5-only-single-blob-bin-records-up-to-2-mib-can-be-sink-read) | Contract gap | Server | Open |
+| 6 | [Placement runs on the completion poller](#6-placement-runs-on-the-completion-poller) | Throughput ceiling | Server | Open |
+| 7 | [Sink reads skip duplicate resolution, ping and filters](#7-sink-reads-skip-duplicate-resolution-ping-and-filters) | Stale reads under strong consistency | Server | Open |
+| 8 | [RoCE hop limit is 1](#8-roce-hop-limit-is-1) | No routed RoCEv2 | Server and client | Open |
+| 9 | [The poller never sleeps when idle](#9-the-poller-never-sleeps-when-idle) | CPU | Server | Open |
+| 10 | [One registration failure fails the whole sink](#10-one-registration-failure-fails-the-whole-sink) | Availability | Client | Open |
 
-Two smaller items are under [Minor](#minor).
+Smaller items are under [Minor](#minor).
 
-## 1. Record released while its bytes are still being sent
+## 1. The local transport writes into any process on the server host
 
-**Where:** `fetch_one_common` in `as/src/base/kv_sink.c`, with
-`verbs_write_imm` and `verbs_write` in `as/src/base/kv_sink_verbs.c`.
+**Where:** `local_reg` and `write_to_peer` in `as/src/base/kv_sink_local.c`;
+`choose_transport` in the client's `src/main/aerospike/as_sink.c`; the
+client `Makefile`.
 
-`fetch_one_common` opens the record, calls the transport to post the write,
-and then releases the record, the storage handle and the partition
-(`as_storage_record_close`, `as_record_done`, `as_partition_release`). The
-write is zero-copy: its scatter entry points at the record's value inside the
-namespace stripe. So the NIC is still reading those bytes after the server
-has stopped protecting them:
-
-```text
-fetch_one_common
-  as_record_get                  record held
-  deliver -> ibv_post_send       NIC starts reading the value in place
-  as_record_done                 record released
-                                 ... NIC still reading ...
-imm_finish / fence               send completion reaped
-```
-
-If the record is overwritten or deleted in that window, `drv_mem.c` frees
-its old blocks (`block_free`), defrag can recycle the write block, and a new
-write can land there. The NIC then sends whatever those bytes hold by then.
-
-**What LMCache sees:** nothing. The immediate arrives and the byte count
-matches, so the slot is counted as landed with the wrong contents. The client
-cannot detect this without checksumming every landed piece.
-
-**Why it is rare today:** LMCache keys chunks by content hash, so an
-overwrite normally carries identical bytes; corruption needs a delete or
-eviction, defrag, and a new write into the same block during one transfer.
-EFA widens the window, because a stalled write is retried by the NIC for
-seconds.
-
-The drain in `imm_finish` (issue 4) does not protect against this: every
-record has already been released by then. The non-pipelined `kv-sink-fetch`
-has the same hole, since `fetch_one` also releases before `fence()`.
-
-**Expected fix:** keep the source bytes alive until *that write's* send
-completion, either by holding the record reference in the work-request token
-and releasing it when the completion is reaped, or by copying each piece into
-a registered staging buffer before posting. Requirement 5 in
-`aerospike_rdma.md` ("release the record lock per piece") means release at
-the piece's completion, not at its post.
-
-## 2. EFA write support is never detected
-
-**Where:** `kv_sink_verbs.c`, lines 81 to 92, and the capability check in
-`dev_get`.
+The `local` transport is always compiled in and always accepted by
+`kv-sink-register`. The client supplies `pid` and `addr`, and the server later
+calls `process_vm_writev(pid, ...)` with record bytes at that address. The
+only check is that the process exists:
 
 ```c
-#ifndef EFADV_DEVICE_ATTR_CAPS_RDMA_WRITE
-#define EFADV_DEVICE_ATTR_CAPS_RDMA_WRITE 0
-#endif
+if (kill((pid_t)pid, 0) != 0) {
+	as_info_respond_error(db, AS_ERR_PARAMETER, "no such peer process");
+	return NULL;
+}
 ```
 
-The guard is meant for rdma-core older than v46. But
-`EFADV_DEVICE_ATTR_CAPS_RDMA_WRITE` is an enum constant in `efadv.h`, not a
-macro, so `#ifndef` is always true and the bit is always 0. Every EFA device
-logs `rdma write no` and `dev_get` refuses it with `device has no RDMA write -
-pull direction not implemented`.
+So any client allowed to run `kv-sink-register` (`PERM_RECORD_INFO`) can name
+`asd`'s own PID, or any process the server's user can ptrace, and write
+chosen bytes - it controls the record contents too - at a chosen address.
+`asd` usually runs as root. The region's "peer" is the declared PID, which
+proves nothing.
 
-**What LMCache sees:** `kv-sink-register` fails on every EFA node, so every
-retrieve loads whole objects. On the next register the server crashes
-(issue 3).
+The client makes this reachable by accident:
 
-**Expected fix:** detect the header version at build time (for example, a
-configure check that compiles a use of the enum) instead of `#ifndef`.
-Deleting the three lines fixes it on rdma-core 46 and later, which is the
-local patch used for A8 on EFA.
+- `choose_transport` falls back to `local` silently when no RDMA device is
+  found. A client on another host then registers its own PID and address, and
+  the server writes into whatever process on *its* host has that PID.
+- The client `Makefile` defines `AS_SINK_VERBS` only when
+  `infiniband/efadv.h` exists, so a RoCE host without the libefa headers
+  builds with `local` as its only transport, and RC is never available there.
 
-## 3. Crash on the register after a refused device
+**What LMCache sees:** on a host without an RDMA device, or built without
+`efadv.h`, reads report OK while nothing lands in L1, or land in another
+process on the server host.
 
-**Where:** `dev_get` in `kv_sink_verbs.c`.
+**Expected fix:**
 
-`dev_get` sets `g_dev.tried = true` and `g_dev.ctx` before it checks the
-device. Two exits return an error while leaving `ctx` set:
+- Server: accept `transport=local` only when explicitly enabled (build flag
+  or config item, off by default), and when enabled, only from a loopback
+  connection whose peer credentials match the PID.
+- Client: no silent fallback. With no RDMA device, `aerospike_sink_create`
+  fails unless the caller asked for `local`.
+- Client: define the verbs transport when `infiniband/verbs.h` is present, and
+  gate only the SRD code on `efadv.h`.
 
-- the RDMA-write refusal (issue 2), which returns before `ibv_alloc_pd`, so
-  `g_dev.pd` is NULL;
-- the `ibv_alloc_pd`, `ibv_query_port` or `ibv_query_gid` failure path.
+## 2. Queued writes have no deadline
 
-The next call sees `tried && ctx != NULL` and returns `&g_dev` as a usable
-device. The following `kv-sink-register` then creates a queue pair on a NULL
-protection domain and crashes in `efadv_create_qp_ex` (`make_qp`).
+**Where:** `kv_sink_op` in `as/include/base/kv_sink.h`; `sched_pick`, `drain`
+and `place` in `as/src/base/kv_sink.c`; `read_sink` in
+`as/src/transaction/read.c`.
 
-**What LMCache sees:** the first register fails, the second kills the node.
+A sink read is queued on its region and placed when the scheduler reaches it.
+Nothing in the op records the transaction's deadline, and neither the
+scheduler nor `place` checks `end_time`. A write waiting behind other regions
+(the scheduler shares the link by bytes), or behind a stalled write, is
+performed however late it is.
 
-**Expected fix:** on any failure after `ibv_open_device`, release what was
-acquired (`ibv_dealloc_pd`, `ibv_close_device`) and leave `g_dev.ctx` NULL,
-so later calls report `no RDMA device`. Or record the failure in a separate
-field and check it on the fast path.
+```text
+client: batch row times out ──▶ LMCache marks the slot failed, reuses the L1 memory
+server: op reaches the head ──▶ RDMA write into that memory ──▶ reply nobody reads
+```
 
-## 4. Pipelined fetch replies only after every write completes
+**What LMCache sees:** silent corruption of whatever now occupies the slot.
+The only thing that stops a queued write today is deregistering or replacing
+the region.
 
-**Where:** `as_kv_sink_fetch_pipelined_cmd` in `kv_sink.c` and
-`verbs_imm_finish` in `kv_sink_verbs.c`.
+**Expected fix:** carry the transaction deadline in `kv_sink_op`, and fail an
+op with `AS_ERR_TIMEOUT` instead of placing it once the deadline has passed.
+Document that a row's destination may still be written until the server-side
+timeout, so clients can keep their own timeout longer than it.
 
-The command posts one signaled write-with-immediate per sink, which is
-correct. It then calls `imm_finish`, which polls the send completion queue
-until every write of the command completes (bounded by `FENCE_DEADLINE_NS`,
-30 s), and only then builds the reply. That breaks requirement 3 ("do not
-fence") in `aerospike_rdma.md`.
+## 3. A failed RC write breaks the region with the wrong error
 
-**What LMCache sees:** correct data, but no overlap. The client sends a
-node's commands one at a time and `begin_fetch` returns after the last reply,
-so every byte has landed before the first layer is loaded. A pipelined
-retrieve behaves like an all-or-nothing fetch with per-slot failure
-reporting. It also makes issue 5 worse, because the info call now lasts as
-long as the whole transfer.
+**Where:** `run_poller` and `verbs_post` in `as/src/base/kv_sink_verbs.c`;
+`drain` in `as/src/base/kv_sink.c`.
 
-**Expected fix:** reply once every sink has been posted or declined. Reap
-send completions afterwards, on the region's completion queue, and report a
-write that fails after the reply only through the missing immediate, which
-the client already treats as a timeout.
+On RC, one failed write (retry exhaustion, a remote access error) moves the
+region's queue pair to the error state. The poller reports the op as failed
+and nothing else happens: the region stays registered, every later write on
+it is flushed or refused, and every later read fails with the generic
+`AS_ERR_UNKNOWN`.
 
-## 5. Stripes are registered lazily, on the fetch path
+The client cannot recover:
 
-**Where:** `stripe_mr_get` in `kv_sink_verbs.c`.
+- the error is not `AEROSPIKE_ERR_SINK_UNKNOWN_REGION` (220), so the documented
+  "refresh and retry" path is not taken;
+- `aerospike_sink_refresh()` probes with `kv-sink-touch`, which still
+  succeeds on the broken region;
+- the idle reaper never reclaims it, because the failing reads count as use.
 
-The first write from each namespace stripe registers the whole stripe with
-`ibv_reg_mr`, inside the fetch, while holding `g_dev_lock`. Two problems
-follow:
+**What LMCache sees:** after one bad write, every sink read on that node fails
+until the client process restarts, and every retrieve falls back to
+whole-object loads with no error telling it to register again.
 
-- **Latency on a cold server.** Eight 256 MiB stripes took about a second on
-  EFA. The client sends `kv-sink-fetch-pipelined` with the C client's default
-  info timeout, 1000 ms, and (issue 4) the reply waits for the writes, so the
-  first fetch after a restart can time out. A timeout declines every slot of
-  the command, and the retrieve falls back.
-- **No retry.** A freshly started server on Soft-RoCE can fail the first
-  registration with `cannot register {lmcache} stripe N ... Cannot allocate
-  memory` even with `memlock` raised, then succeed on the next fetch. The
-  failed stripe's records are declined for that fetch.
+**Expected fix:** when a completion fails or a post fails on an RC region,
+take the region out of the registry (`region_remove`). Queued ops then fail
+with 220, the next read gets 220, and the client's refresh re-registers it.
+`kv-sink-touch` should also fail on a region whose queue pair is not in RTS.
 
-**What LMCache sees:** the first fetch after a restart falls back
-(`test_a_pipelined_fetch_lands_every_stored_byte_in_l1` fails with
-`FELL_BACK` only on that run).
+## 4. Region ownership is self-declared
 
-**Expected fix:** register every stripe of the namespace at
-`kv-sink-register` time (or at startup when kv-sink is enabled), and fail the
-register if that fails, so the fetch path never calls `ibv_reg_mr`. On the
-LMCache side, a longer info timeout for pipelined commands is a mitigation,
-not a fix.
+**Where:** `as_kv_sink_register_cmd` in `as/src/base/kv_sink.c`; `verbs_reg`
+in `as/src/base/kv_sink_verbs.c`.
 
-## 6. Device and GID index are not configurable
+Re-registering an existing region ID replaces it, and the check that only its
+owner may do so compares the stored "peer" with the new one. For verbs the
+peer is the GID the client puts in the register command. The server does not
+verify it, and every process on a host shares that host's GID.
 
-**Where:** `dev_get` in `kv_sink_verbs.c`.
+Anyone who learns a region ID - it is sent in clear text in every read unless
+TLS is on - can register again with the victim's GID and their own
+`addr`/`rkey`. The victim's regions are marked dead and replaced; its next
+reads succeed and land in the attacker's buffer.
 
-`dev_get` opens `list[0]`, the first RDMA device, and uses GID index
-`is_srd ? 0 : 1`. Both are right for the test setups and wrong in general:
+**What LMCache sees:** reads report OK, L1 holds whatever was there before,
+and the engine uses it as a cache hit.
 
-- a host with a Soft-RoCE device alongside EFA may pick `rxe0`;
-- on RoCE, GID index 1 is the IPv4-mapped entry only on `lo`; on a real NIC
-  the right index depends on the interface and RoCE version. A wrong GID
-  fails later as `ENETUNREACH` at the RTR transition, as the client saw on
-  Soft-RoCE (see *The GID index trap* in `aerospike_rdma.md`).
+**Expected fix:** bind a region to the authenticated connection or user that
+registered it, not to a declared address. At minimum, return a registration
+secret in the register reply and require it to replace or deregister the
+region.
 
-**Expected fix:** config items for the device name and GID index, with the
-current values as defaults, and the chosen device and GID logged at startup.
+## 5. Only single-blob-bin records up to 2 MiB can be sink-read
 
-## 7. Concurrent fetches on one region corrupt each other
+**Where:** `place` and `as_kv_sink_prepare` in `as/src/base/kv_sink.c`.
 
-**Where:** `verbs_imm_finish`, `verbs_wr_complete` and `verbs_write_imm` in
-`kv_sink_verbs.c`.
+`place` refuses any record that does not have exactly one bin of blob type
+(`AS_ERR_INCOMPATIBLE_TYPE`), and `as_kv_sink_prepare` refuses any length over
+`KV_SINK_MAX_VALUE_SZ`, 2 MiB, the size of a staging slot.
 
-Nothing serializes two `kv-sink-fetch-pipelined` commands on the same region,
-and three pieces of per-region state assume one command at a time:
+LMCache's segment records fit (one bin, `b`). Small objects do not: when an
+object fits one record, LMCache stores the payload inline in the meta record,
+next to eight or nine metadata bins (`put_meta_record` in
+`csrc/storage_backends/aerospike/connector.cpp`).
 
-- **`vr->imm_reap_closed` is per region, not per command.** Each command's
-  `imm_finish` clears it on entry and sets it on exit. If command A finishes
-  while command B is still in flight, B's completions are treated as late:
-  `verbs_wr_complete` frees B's tokens while B's `tracked` array still points
-  at them, and sets `xfer_failed` (issue 8).
-- **The completion queue and queue pair have no lock.** Both commands'
-  info threads poll `vr->cq` and build work requests on `vr->qpx`
-  (`ibv_wr_start` to `ibv_wr_complete`) concurrently.
-- **The send queue is shared and exactly one command deep.** `max_send_wr`
-  is `CQ_DEPTH` (256), and the register reply advertises `max_sinks=256`
-  (`MAX_PIPELINED_SINKS`). Two full commands cannot both be posted, so the
-  second one's posts fail and its slots are declined.
+**What LMCache sees:** every small object fails its sink read with
+`AS_ERR_INCOMPATIBLE_TYPE` and has to be loaded over the socket; any segment
+larger than 2 MiB fails with `AS_ERR_PARAMETER`.
 
-**What LMCache sees:** the client's concurrent fetches (W3) send several
-generations to one node's region, one per window. Expect declined slots, a
-disabled region, or a server crash. The A8 tests run one fetch at a time, so
-none of this has been observed yet.
+**Expected fix:** let the sink field name the bin to place (for example, an
+optional bin-name field next to field 46), so a multi-bin record can be
+sink-read. Advertise the maximum value size in the register reply instead of
+leaving it as a compile-time constant the client must know.
 
-**Expected fix:** track reap state per command (in the command's own token
-list), take a per-region lock around posting and polling, and size the send
-queue for the number of concurrent fetches the region accepts. Advertise that
-number in the register reply, or refuse a second concurrent command
-explicitly.
+## 6. Placement runs on the completion poller
 
-## 8. One failed write disables the region for good
+**Where:** `drain`, `place` in `as/src/base/kv_sink.c`; `run_poller`,
+`verbs_post` in `as/src/base/kv_sink_verbs.c`.
 
-**Where:** `verbs_wr_complete`, `verbs_imm_finish` and `verbs_region_ready`
-in `kv_sink_verbs.c`.
+`drain` starts the next ops on whichever thread calls it. When a write
+completes, that is the single poller thread, which then looks up the next
+record, loads its bins (device I/O on an SSD namespace) and copies up to
+2 MiB into a staging slot under the record lock, before it polls again. Every
+completion on the node waits behind that work. All of it also runs under one
+global scheduler mutex (`g_sched_lock`), which every sink read on every
+service thread takes.
 
-A late completion, or a slot still in flight when the reap deadline passes,
-sets `vr->xfer_failed`. Nothing clears it, and `verbs_region_ready` then
-refuses every write on that region with `region N in error state`.
+**What LMCache sees:** a per-node ceiling of roughly one core's memcpy rate,
+and completions delayed behind storage reads. Not yet measured.
 
-**What LMCache sees:** after one slow or failed transfer, every later fetch
-on that registration declines all its slots, and the retrieve falls back
-whole, with no error that tells the client to register again. It lasts until
-the client process restarts.
+**Expected fix:** have the poller only retire completions and hand placement
+to a worker pool (or the service threads), and split the scheduler lock per
+region, with a separate lock for the global budget and the active ring.
 
-**Expected fix:** report the state, either in the fetch reply or by failing
-the command with an error the client can act on by re-registering. If the
-queue pair itself is still usable, reset the flag once the region's
-outstanding writes have drained.
+## 7. Sink reads skip duplicate resolution, ping and filters
 
-## 9. A dead client's region is never reclaimed
+**Where:** `read_sink` in `as/src/transaction/read.c`.
 
-**Where:** `g_regions` and `MAX_REGIONS` in `kv_sink.c`.
+`read_sink` is taken before `read_must_duplicate_resolve` and `read_must_ping`,
+and it never applies the request's filter expression. The comment marks it as
+a proof of concept.
 
-A node holds at most 16 regions (`MAX_REGIONS`). A region is freed only by
-`kv-sink-deregister`; there is no idle timeout and no dead-peer detection.
+**What LMCache sees:** nothing today: LMCache keys chunks by content hash and
+does not send filters. On a strong-consistency namespace, though, a sink read
+can return a value that a linearizable read would not.
 
-**What LMCache sees:** a client killed without deregistering (OOM, `kill
--9`, a host crash) keeps its slot until the server restarts. After 16 such
-exits, every `kv-sink-register` on that node fails, and every client falls
-back to whole-object loads. Even without leaks, 16 is tight: each client
-process registers one region per node, so two vLLM instances with 8-way
-tensor parallelism use all of them.
+**Expected fix:** refuse sink reads on strong-consistency namespaces with a
+clear error until the full read path is supported, and refuse or apply filter
+expressions rather than ignoring them.
 
-**Expected fix:** expire regions that see no command for a configurable
-period (the client can send a cheap keepalive), or detect a dead peer
-through the queue pair. Make `MAX_REGIONS` configurable.
+## 8. RoCE hop limit is 1
 
-## 10. The reap loop busy-spins an info thread
+**Where:** `to_rts` and `peer_ah_get` in `as/src/base/kv_sink_verbs.c`;
+`rc_node_connect` and `srd_node_connect` in the client's
+`src/main/aerospike/as_sink_verbs.c`.
 
-**Where:** `verbs_imm_finish` in `kv_sink_verbs.c`.
+Both sides build their address vectors with `grh.hop_limit = 1`. RoCEv2
+packets are IP packets, and a hop limit of 1 is dropped at the first router.
 
-When `ibv_poll_cq` returns nothing, the loop checks the deadline and polls
-again, with no sleep and no completion channel. A fetch whose writes stall
-spins one core for up to `FENCE_DEADLINE_NS` (30 s).
+**What LMCache sees:** registration succeeds, then every write fails with a
+retry-exceeded completion (and issue 3 follows) whenever client and server are
+in different L3 subnets.
 
-**What LMCache sees:** during the EFA run, where the client's receives never
-matched, each fetch held an info thread for about 4 s. Info threads are a
-fixed pool, so a few stalled fetches can starve the node's other info
-commands, including the C client's cluster-tend requests.
+**Expected fix:** use 64 (the usual value), or make it configurable next to
+the device and GID index.
 
-**Expected fix:** fixing issue 4 removes the wait from the info thread. Until
-then, back off between empty polls or wait on a completion channel.
+## 9. The poller never sleeps when idle
 
-## 11. kv-sink fetches never apply read-touch
+**Where:** `run_poller` in `as/src/base/kv_sink_verbs.c`.
 
-**Where:** `fetch_one_common` in `as/src/base/kv_sink.c`; compare
-`as_read_touch_check` in `as/src/transaction/read_touch.c`, whose only caller
-is the client read path in `as/src/transaction/read.c`.
+After 10,000 empty polls the loop sleeps `usleep(10)` and polls again, and
+`n_idle` never falls back below the threshold until a completion arrives. An
+idle server therefore wakes the poller tens of thousands of times a second
+(100,000 at most, less by the timer slack), forever.
+It no longer holds an info thread, as the old reap loop did, but it still
+costs a core's worth of scheduler work on a node that is not serving sinks.
 
-With `default-read-touch-ttl-pct` set, a client read near a record's end of
-life resets its TTL. A `kv-sink-fetch` or `kv-sink-fetch-pipelined` reads the
-record through its own path and never makes that check, so a record served
-only by RDMA is never extended.
+**Expected fix:** after a short busy-poll, arm a completion channel
+(`ibv_req_notify_cq`) and block in `ibv_get_cq_event`.
 
-**What LMCache sees:** the entries served most often, which are the ones
-fetched layer by layer, expire on their write TTL while whole-object loads
-keep colder entries alive. After expiry the lookup misses and the prefix is
-recomputed and stored again. Nothing is served wrong. LMCache's lookups
-deliberately never touch (see *Keeping frequently used entries* in the
-Aerospike L2 page), so they cannot make up for it.
+## 10. One registration failure fails the whole sink
 
-**Expected fix:** apply the namespace's read-touch rule to each record a
-fetch sends, the same way a client read does, with the command able to opt
-out.
+**Where:** `register_missing`, `register_node` and `aerospike_sink_create` in
+the client's `src/main/aerospike/as_sink.c`.
+
+`register_missing` returns an error if any node fails, and
+`aerospike_sink_create` then destroys the sink, even if every other node
+registered. When the register command succeeds but the client's RC connect
+fails, `register_node` releases its own queue pair but never sends
+`kv-sink-deregister`, so the server keeps that region until the idle timeout.
+
+**What LMCache sees:** one unreachable or misconfigured node disables RDMA for
+the whole cluster, and repeated attempts leave server-side regions behind.
+
+**Expected fix:** let `aerospike_sink_create` succeed with a per-node result
+(rows sent to an unregistered node already fail with 220, which the caller
+handles), and deregister on the server when the client-side connect fails.
 
 ## Minor
 
-- **SRD does not set an RNR retry count.** `to_rts` sets the finite
-  `rnr_retry` of 6 only on the RC path, so SRD uses the device default. On
-  EFA a write to a queue pair with no matching receive took about 4 s to
-  fail, which also widens the window in issue 1. Set it explicitly and
-  document the value.
-- **Failed writes flood the log.** Each failed completion logs `kv-sink:
-  write failed - ...` with no region ID, which came to 28 identical lines per
-  failed fetch on EFA. Log once per command with the region ID and a count.
+- **Stale header comment.** The top of `kv_sink_verbs.c` still says "the
+  payload is never copied ... registered once as a memory region", which
+  contradicts the staging-slot copy below it. `as_storage_stripe_region()` in
+  `storage.c` is now unused.
+- **Unseeded PSNs.** Both sides pick the PSN with `rand()` without seeding it,
+  so every process starts from the same sequence.
+- **Failed writes still log once each.** The poller logs every failed
+  completion; the region ID is there now, but a failed batch still floods the
+  log. Log once per region per interval with a count.
+- **The server links `-libverbs -lefa` unconditionally**, so it cannot build
+  or start on a host without libefa, even with RDMA unused.
+- **Client:**
+  - `aerospike_key_get_into` dereferences `sink` without a NULL check.
+  - `rc_init` registers the buffer with `IBV_ACCESS_REMOTE_READ`, which the
+    protocol never uses.
+  - `as_sink` is not thread-safe: `aerospike_sink_refresh` and
+    `aerospike_sink_reregister` rewrite `nodes[]` and destroy queue pairs, so
+    the header should say callers must serialize them.
