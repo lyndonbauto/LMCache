@@ -2,6 +2,7 @@
 
 #include "connector.h"
 
+#include <aerospike/aerospike_batch.h>
 #include <aerospike/aerospike_info.h>
 #include <aerospike/aerospike_key.h>
 #include <aerospike/as_cluster.h>
@@ -174,6 +175,13 @@ WorkerAerospikeConn AerospikeNativeConnector::create_connection() {
   conn.read_policy.base.max_retries = 2;
   conn.read_policy.key = AS_POLICY_KEY_DIGEST;
   conn.read_policy.replica = AS_POLICY_REPLICA_SEQUENCE;
+  // 0: the namespace's default-read-touch-ttl-pct decides. A load reads the
+  // meta record and every segment, so all of an object's records are
+  // extended together.
+  conn.read_policy.read_touch_ttl_percent = 0;
+
+  conn.lookup_policy = conn.read_policy;
+  conn.lookup_policy.read_touch_ttl_percent = -1;
 
   as_policy_write_init(&conn.write_policy);
   conn.write_policy.base.total_timeout = write_timeout_ms_;
@@ -190,6 +198,15 @@ WorkerAerospikeConn AerospikeNativeConnector::create_connection() {
   conn.remove_policy.base.socket_timeout = write_timeout_ms_;
   conn.remove_policy.base.max_retries = 0;
   conn.remove_policy.key = AS_POLICY_KEY_DIGEST;
+
+  as_policy_batch_init(&conn.batch_policy);
+  conn.batch_policy.base.total_timeout = read_timeout_ms_;
+  conn.batch_policy.base.socket_timeout = read_timeout_ms_;
+  conn.batch_policy.base.max_retries = 2;
+  conn.batch_policy.replica = AS_POLICY_REPLICA_SEQUENCE;
+  // Send each node's share of a batch in parallel rather than node by node.
+  conn.batch_policy.concurrent = true;
+  conn.batch_policy.read_touch_ttl_percent = -1;
 
   return conn;
 }
@@ -318,8 +335,8 @@ bool AerospikeNativeConnector::do_single_exists(WorkerAerospikeConn& conn,
 
   as_error err;
   as_record* rec = nullptr;
-  as_status status = aerospike_key_exists(conn.client, &err, &conn.read_policy,
-                                          &as_meta_key, &rec);
+  as_status status = aerospike_key_exists(
+      conn.client, &err, &conn.lookup_policy, &as_meta_key, &rec);
   if (rec != nullptr) {
     as_record_destroy(rec);
   }
@@ -333,6 +350,57 @@ bool AerospikeNativeConnector::do_single_exists(WorkerAerospikeConn& conn,
   return false;
 }
 
+void AerospikeNativeConnector::do_batch_exists(WorkerAerospikeConn& conn,
+                                               const Request& req) {
+  for (size_t begin = 0; begin < req.keys.size();
+       begin += kMaxBatchExistsKeys) {
+    const size_t end = std::min(begin + kMaxBatchExistsKeys, req.keys.size());
+    const uint32_t count = static_cast<uint32_t>(end - begin);
+
+    // as_key_init_str keeps a pointer to the user key, so the strings must
+    // outlive the batch call.
+    std::vector<std::string> user_keys;
+    user_keys.reserve(count);
+    for (size_t i = begin; i < end; ++i) {
+      user_keys.push_back(meta_user_key(req.keys[i]));
+    }
+
+    std::unique_ptr<as_batch_records, void (*)(as_batch_records*)> records(
+        as_batch_records_create(count), &as_batch_records_destroy);
+    for (const std::string& user_key : user_keys) {
+      as_batch_read_record* record = as_batch_read_reserve(records.get());
+      as_key_init_str(&record->key, conn.ns.c_str(), conn.set_name.c_str(),
+                      user_key.c_str());
+      // No bins and read_all_bins false: the server returns the header only.
+      record->read_all_bins = false;
+    }
+
+    as_error err;
+    const as_status status = aerospike_batch_read(
+        conn.client, &err, &conn.batch_policy, records.get());
+    // BATCH_FAILED means some keys failed; their own results say how.
+    if (status != AEROSPIKE_OK && status != AEROSPIKE_BATCH_FAILED) {
+      throw_status("batch-exists", status, err);
+    }
+
+    for (uint32_t i = 0; i < count; ++i) {
+      const as_batch_read_record* record =
+          static_cast<const as_batch_read_record*>(
+              as_vector_get(&records->list, i));
+      const size_t slot = req.start_idx + begin + i;
+      if (record->result == AEROSPIKE_OK) {
+        req.batch->per_key_results[slot] = 1;
+      } else if (record->result == AEROSPIKE_ERR_RECORD_NOT_FOUND) {
+        req.batch->per_key_results[slot] = 0;
+      } else {
+        as_error key_err;
+        as_error_init(&key_err);
+        throw_status("batch-exists", record->result, key_err);
+      }
+    }
+  }
+}
+
 bool AerospikeNativeConnector::do_single_delete(WorkerAerospikeConn& conn,
                                                 const std::string& key) {
   std::string user_key = meta_user_key(key);
@@ -344,7 +412,7 @@ bool AerospikeNativeConnector::do_single_delete(WorkerAerospikeConn& conn,
 
   as_error err;
   as_record* rec = nullptr;
-  as_status status = aerospike_key_get(conn.client, &err, &conn.read_policy,
+  as_status status = aerospike_key_get(conn.client, &err, &conn.lookup_policy,
                                        &as_meta_key, &rec);
   if (status == AEROSPIKE_ERR_RECORD_NOT_FOUND) {
     return false;
