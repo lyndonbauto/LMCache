@@ -77,6 +77,26 @@ def _worker_connector(
     return connector, adapter
 
 
+@pytest.mark.parametrize("lazy_offload", [False, True])
+@pytest.mark.parametrize("use_layerwise", [True, False])
+def test_layerwise_loads_are_never_reported_as_finished_receiving(
+    use_layerwise: bool, lazy_offload: bool
+) -> None:
+    """A synchronous load's request is running; vLLM asserts on a recv report."""
+    pytest.importorskip("vllm")
+
+    connector, adapter = _worker_connector(RuntimeError("unused"))
+    connector.use_layerwise = use_layerwise
+    connector.lazy_offload = lazy_offload
+    adapter.get_finished.return_value = ({"stored"}, {"loaded"})
+    adapter.get_finished_with_lazy_offload.return_value = (None, {"loaded"})
+
+    finished_sending, finished_recving = connector.get_finished({"stored"})
+
+    assert finished_sending == (None if lazy_offload else {"stored"})
+    assert finished_recving == (None if use_layerwise else {"loaded"})
+
+
 def test_failed_retrieve_is_reported_for_recompute() -> None:
     """A reported failure reaches vLLM as load errors, not an engine crash."""
     pytest.importorskip("vllm")

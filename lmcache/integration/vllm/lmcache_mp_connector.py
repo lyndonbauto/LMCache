@@ -954,14 +954,27 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             (requests that previously returned True from request_finished()),
             tuple of (sending/saving ids, recving/loading ids).
             The finished saves/sends req ids must belong to a set provided in a
-            call to this method (this call or a prior one).
+            call to this method (this call or a prior one). With layerwise
+            load on, the recving ids are always ``None``: those loads are
+            synchronous.
         """
         if self.lazy_offload:
-            val = self.worker_adapter.get_finished_with_lazy_offload()
+            finished_sending, finished_recving = (
+                self.worker_adapter.get_finished_with_lazy_offload()
+            )
         else:
-            val = self.worker_adapter.get_finished(finished_req_ids)
-        # logger.error("Finished req ids: %s, %s", val[0], val[1])
-        return val
+            finished_sending, finished_recving = self.worker_adapter.get_finished(
+                finished_req_ids
+            )
+        if self.use_layerwise:
+            # Layerwise loads are synchronous (get_num_new_matched_tokens reports
+            # load_async=False), so the request is running, not parked in
+            # WAITING_FOR_REMOTE_KVS, when its retrieve completes. vLLM's
+            # scheduler asserts on a finished-receiving report for a running
+            # request. Failed loads reach it through
+            # get_block_ids_with_load_errors instead.
+            finished_recving = None
+        return finished_sending, finished_recving
 
     def build_connector_worker_meta(self):
         if not self.lazy_offload:

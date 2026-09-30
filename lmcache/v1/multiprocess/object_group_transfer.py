@@ -763,12 +763,14 @@ def transfer_kv_layerwise_h2d(
 ) -> None:
     """Retrieve KV with one H2D kernel launch per scheduled layer.
 
-    Staging still copies whole memory objects to GPU temp buffers before the
-    first launch that needs a batch; per-layer launches then reuse those
-    buffers. Overlap is therefore between attention on layer *L* and the
-    transfer stream work for layer *L+1* (kernel, and any staging for later
-    batches not yet copied), not between staging and the first layer of the
-    same object.
+    When every object group fits in one staging batch, staging copies whole
+    memory objects once, before the first launch that needs them, and later
+    layers reuse them. Otherwise the batches of a group share the staging
+    slots, so each layer stages only its own bytes (per-layer staging), which
+    copies each byte once instead of restaging whole objects for every layer.
+    GDS objects only transfer whole and always use whole-object staging.
+    Overlap is between attention on layer *L* and the transfer stream work
+    for layer *L+1*.
 
     Args:
         cache_context: Registered worker cache context on the daemon.
@@ -789,8 +791,16 @@ def transfer_kv_layerwise_h2d(
     """
     del transfer_key
 
-    # Every object is complete before this retrieve starts, so one copy per
-    # object is both correct and cheaper than one copy per layer plane.
+    present = [mo for group in memory_objs_by_group for mo in group if mo is not None]
+    one_batch_per_group = all(
+        sum(mo is not None for mo in group) <= cache_context.max_batch_size
+        for group in memory_objs_by_group
+    )
+    staging = (
+        LayerStaging.WHOLE_OBJECT
+        if one_batch_per_group or any(isinstance(mo, GDSMemoryObject) for mo in present)
+        else LayerStaging.PER_LAYER
+    )
     retrieve = LayerwiseH2DRetrieve(
         cache_context,
         block_ids_gpu,
@@ -800,7 +810,7 @@ def transfer_kv_layerwise_h2d(
         progress,
         event_pool,
         retrieve_generation,
-        staging=LayerStaging.WHOLE_OBJECT,
+        staging=staging,
     )
     retrieve.begin()
     for launch in schedule.launches:
@@ -819,9 +829,11 @@ class LayerStaging(Enum):
     #: later layers may still be arriving in host memory (arrival-driven
     #: loading), because a whole-object copy would snapshot them early.
     PER_LAYER = "per_layer"
-    #: Copy each object in full the first time any of its layers launches, then
-    #: reuse it. Only correct when every object is complete before the retrieve
-    #: begins. Fewer, larger copies, and the only mode GDS objects support.
+    #: Copy each object in full when a layer launches and its batch is not the
+    #: one in the staging slots, then reuse it. Only correct when every object
+    #: is complete before the retrieve begins, and the only mode GDS objects
+    #: support. Cheap only when each object group fits in one batch: batches of
+    #: a group share the staging slots, so each layer restages every batch.
     WHOLE_OBJECT = "whole_object"
 
 
@@ -1021,8 +1033,9 @@ class LayerwiseH2DRetrieve:
         #: for :attr:`LayerStaging.PER_LAYER`.
         self._plane_geometry: dict[int, _LayerPlaneGeometry] = {}
         #: (object group, batch start) pairs staged whole; only used for
-        #: :attr:`LayerStaging.WHOLE_OBJECT`.
-        self._staged_batches: set[tuple[int, int]] = set()
+        #: :attr:`LayerStaging.WHOLE_OBJECT`: per object group, the start index
+        #: of the batch whose objects its staging slots hold now.
+        self._resident_batch: dict[int, int] = {}
 
     def begin(self) -> None:
         """Do the once-per-retrieve setup and publish the retrieve generation.
@@ -1201,7 +1214,7 @@ class LayerwiseH2DRetrieve:
                     object_group_id, batch_descriptor, launch_params, layer_ranges
                 )
             else:
-                self._stage_whole_batch_once(object_group_id, batch_descriptor)
+                self._stage_whole_batch(object_group_id, batch_descriptor)
             device_ops.multi_layer_block_kv_transfer(
                 constants.kv_pointers,
                 list(launch_params.tmp_gpu_buffer_data_ptrs),
@@ -1245,26 +1258,30 @@ class LayerwiseH2DRetrieve:
                     memory_obj, object_group_buffer, region_offset + offset, length
                 )
 
-    def _stage_whole_batch_once(
+    def _stage_whole_batch(
         self,
         object_group_id: int,
         batch_descriptor: _LayerwiseBatchDescriptor,
     ) -> None:
-        """Copy every object of a batch to GPU staging, the first time only.
+        """Copy every object of a batch to GPU staging unless already there.
+
+        All batches of an object group share its staging slots, so a batch
+        staged for an earlier layer is overwritten once a later batch of the
+        same group is staged, and must be staged again.
 
         Args:
             object_group_id: The object group the batch belongs to.
             batch_descriptor: The batch whose objects are staged.
         """
-        batch_key = (object_group_id, batch_descriptor.start_object_idx)
-        if batch_key in self._staged_batches:
+        start = batch_descriptor.start_object_idx
+        if self._resident_batch.get(object_group_id) == start:
             return
         memory_objs = self._batch_objects(object_group_id, batch_descriptor)
         for chunk_idx, memory_obj in enumerate(memory_objs):
             lmcache_memcpy_async_h2d(
                 memory_obj, batch_descriptor.object_group_buffers[chunk_idx]
             )
-        self._staged_batches.add(batch_key)
+        self._resident_batch[object_group_id] = start
 
     def _batch_objects(
         self, object_group_id: int, batch_descriptor: _LayerwiseBatchDescriptor

@@ -253,6 +253,88 @@ class _RealStaging:
         )
 
 
+#: Multi-batch geometry: three chunks in staging batches of two, so the second
+#: batch reuses the first batch's staging slots, as with the CUDA context's
+#: fixed ``max_batch_size`` slots.
+_CHUNKS = 3
+_BATCH = 2
+
+
+class _MultiBatchStaging:
+    """Real CPU bytes for several chunks whose batches share staging slots.
+
+    Every layer of every chunk holds a distinct value, and the kernel is
+    replaced by a checker that verifies, at each launch, that every staging
+    slot it reads holds that launch's own chunk and layer.
+    """
+
+    def __init__(self) -> None:
+        self.kernel_group_shape = (_KV_SIZE, _LAYERS_PER_GROUP, _SLOTS, _HIDDEN)
+        self.kernel_group_bytes = _KV_SIZE * _LAYERS_PER_GROUP * _SLOTS * _HIDDEN * 4
+        self.staging = [
+            torch.zeros(2 * self.kernel_group_bytes, dtype=torch.uint8)
+            for _ in range(_BATCH)
+        ]
+        self.objects = [self._chunk_object(chunk) for chunk in range(_CHUNKS)]
+        self.launches = 0
+        self.mismatches: list[str] = []
+
+    @staticmethod
+    def expected(chunk: int, kernel_group_id: int, position: int) -> float:
+        return 100.0 * chunk + 10.0 * kernel_group_id + position
+
+    def kernel_group(self, flat: torch.Tensor, kernel_group_id: int) -> torch.Tensor:
+        start = kernel_group_id * self.kernel_group_bytes
+        region = flat[start : start + self.kernel_group_bytes]
+        return region.view(torch.float32).view(self.kernel_group_shape)
+
+    def cache_context(self) -> MagicMock:
+        cache_context = _make_cache_context()
+        cache_context.max_batch_size = _BATCH
+        cache_context.calculate_num_blocks = lambda tokens, _gid: 1 if tokens else 0
+        cache_context.get_temp_object_group_buffer = lambda slot, _og: self.staging[
+            slot
+        ]
+        cache_context.get_temp_kernel_group_buffer = lambda slot, kernel_group_id: (
+            self.kernel_group(self.staging[slot], kernel_group_id)
+        )
+        return cache_context
+
+    def block_ids(self) -> list[torch.Tensor]:
+        """One engine block per chunk, numbered by chunk, for each kernel group."""
+        return [torch.arange(_CHUNKS), torch.arange(_CHUNKS)]
+
+    def check_kernel(self, *args: object) -> None:
+        """Stand-in for ``multi_layer_block_kv_transfer``: check what it reads."""
+        tmp_ptrs, block_ids, layer_offset = args[1], args[2], args[9]
+        self.launches += 1
+        for slot, chunk in enumerate(block_ids.tolist()):  # type: ignore[attr-defined]
+            for kernel_group_id in (0, 1):
+                view = self.kernel_group(self.staging[slot], kernel_group_id)
+                if view.data_ptr() != tmp_ptrs[slot]:  # type: ignore[index]
+                    continue
+                want = self.expected(chunk, kernel_group_id, layer_offset)  # type: ignore[arg-type]
+                got = _layer_view(view, layer_offset)  # type: ignore[arg-type]
+                if not torch.all(got == want):
+                    self.mismatches.append(
+                        f"layer position {layer_offset} of kernel group "
+                        f"{kernel_group_id}, slot {slot}: wanted chunk {chunk}"
+                    )
+
+    def _chunk_object(self, chunk: int) -> MagicMock:
+        host = torch.zeros(2 * self.kernel_group_bytes, dtype=torch.uint8)
+        for kernel_group_id in (0, 1):
+            view = self.kernel_group(host, kernel_group_id)
+            for position in range(_LAYERS_PER_GROUP):
+                _layer_view(view, position).fill_(
+                    self.expected(chunk, kernel_group_id, position)
+                )
+        memory_obj = MagicMock()
+        memory_obj.raw_tensor = host
+        memory_obj.get_size = lambda: host.nbytes
+        return memory_obj
+
+
 @pytest.fixture
 def kernel_calls(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     """Stub the device copies and return the layer position of each kernel."""
@@ -909,6 +991,65 @@ def test_a_non_positive_generation_is_rejected() -> None:
 
     with pytest.raises(ValueError, match="must be positive"):
         _make_retrieve(schedule, progress, retrieve_generation=0)
+
+
+@pytest.mark.parametrize(
+    "path", ["whole-object", "per-layer", "transfer_kv_layerwise_h2d"]
+)
+def test_every_batch_is_staged_from_its_own_chunks(
+    monkeypatch: pytest.MonkeyPatch, path: str
+) -> None:
+    """Batches of an object group share staging slots; none may read another's.
+
+    Three chunks in batches of two: staging the second batch overwrites the
+    first batch's slots, so a later layer of the first batch must not reuse
+    what it staged earlier. Found on the MI300X, where a nine-chunk cached
+    prompt produced wrong tokens with layerwise on.
+    """
+    real = _MultiBatchStaging()
+    monkeypatch.setattr(
+        object_group_transfer.device_ops,
+        "multi_layer_block_kv_transfer",
+        real.check_kernel,
+    )
+    schedule = LayerwiseSchedule([[0, 2], [1, 3]])
+    progress = LayerProgressRecord(bytearray(LayerProgressRecord.RECORD_SIZE))
+    pool = _RecordingEventPool(schedule.launch_count())
+
+    if path == "transfer_kv_layerwise_h2d":
+        object_group_transfer.transfer_kv_layerwise_h2d(
+            real.cache_context(),
+            real.block_ids(),
+            [real.objects],
+            0,
+            schedule,
+            progress,
+            pool,
+            1,
+            transfer_key="retrieve-key",
+        )
+    else:
+        retrieve = object_group_transfer.LayerwiseH2DRetrieve(
+            real.cache_context(),
+            real.block_ids(),
+            object_group_transfer.FixedMemoryObjects([real.objects]),
+            0,
+            schedule,
+            progress,
+            pool,
+            1,
+            staging=(
+                object_group_transfer.LayerStaging.WHOLE_OBJECT
+                if path == "whole-object"
+                else object_group_transfer.LayerStaging.PER_LAYER
+            ),
+        )
+        retrieve.begin()
+        for launch in schedule.launches:
+            retrieve.launch_layer(launch.layer_id)
+
+    assert real.launches == schedule.launch_count() * 2  # two batches per layer
+    assert real.mismatches == []
 
 
 def _check_objects_read_at_each_launch(device: str) -> None:
