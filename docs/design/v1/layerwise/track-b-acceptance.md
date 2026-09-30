@@ -1224,3 +1224,173 @@ staging loop would have been roughly 2x CPU-bound there.
   skip and qstore suites: 506 passed, 30 skipped. vLLM 0.30.0 venv, connector
   and adapter: 60 passed.
 - Ruff, isort, codespell and mypy clean on the changed sources.
+
+### Step 15 -- First end-to-end runs, on an AMD MI300X (2026-09-29)
+
+The first time the layerwise path ran with vLLM and the LMCache server as two
+processes. Machine: one DigitalOcean MI300X (ROCm 10.0 host, kernel
+6.8.0-138), container `rocm/vllm:rocm10.0.0_ubuntu24.04_py3.14_pytorch_2.12.0_vllm_0.27.0`
+(PyTorch 2.12, vLLM 0.27.1), `track/c-planning` at `af519fa`. Model
+`Qwen/Qwen2.5-0.5B-Instruct` (24 layers), prompts of about 2,300 tokens
+(9 chunks of 256), greedy sampling.
+
+**Setup notes:**
+
+- LMCache built with HIP (`BUILD_WITH_HIP=1 PYTORCH_ROCM_ARCH=gfx942`,
+  `ROCM_PATH` pointed at the image's pip ROCm SDK) in 58 s, installed with
+  `--no-deps --ignore-requires-python`. Without `--no-deps` pip would have
+  downgraded the image's numpy under vLLM. LMCache declares Python `<3.14`;
+  this image is 3.14.7 and nothing failed on it.
+- The image ships NVIDIA's `cupy-cuda12x`. The LMCache server needs CuPy
+  for ROCm, or registration fails with `cudaErrorInsufficientDriver`.
+  `cupy-rocm-7-0` 14.2.0 works against this image's ROCm 10 HIP runtime.
+- vLLM needs LMCache's connector by path
+  (`kv_connector_module_path=lmcache.integration.vllm.lmcache_mp_connector`),
+  `kv_load_failure_policy=recompute` and `lmcache.mp.use_layerwise=true`.
+
+**Proven:**
+
+- **ROCm event IPC** (the `plan.md` gate): the ordering test passes 10/10;
+  a negative control with a local, finished event fails as it must (the
+  consumer read all 4,194,304 elements early). A separate check showed
+  re-recorded interprocess events keep ordering the importer.
+- **Native code on HIP:** the range copy byte check, per-layer staging, the
+  object swap and the overlap harness pass on the MI300X (7 GPU tests); 555
+  CPU tests pass, including Track C's three-track test.
+- **B5:** vLLM loads LMCache's connector and logs "Overriding cudagraph_mode
+  from FULL_AND_PIECEWISE to PIECEWISE"; with layerwise off it keeps
+  `FULL_AND_PIECEWISE`. Registration across processes (KV cache IPC) works.
+- **B2 across processes, correctness:** after two fixes (below), cached
+  outputs equal computed outputs for 8/8 prompts with layerwise on, and are
+  identical to the layerwise-off cached outputs for 8/8.
+
+**Two bugs found and fixed** (neither ROCm-specific; both would have shown
+on NVIDIA; the layerwise path had simply never run end to end):
+
+1. **The engine died on the first cached request.** The connector reported
+   a layerwise retrieve in `finished_recving`. Layerwise loads are
+   synchronous (`load_async=False`), so the request is running, and vLLM
+   (0.27 and 0.30) asserts `RequestStatus.is_finished` for a running request
+   in that list. `LMCacheMPConnector.get_finished` now returns no recving ids
+   in layerwise mode; failures still reach vLLM through
+   `get_block_ids_with_load_errors`.
+2. **Cached requests produced garbage tokens** ("200.200.200..."). Whole-
+   object staging (used by `transfer_kv_layerwise_h2d`) staged each batch of
+   objects once and reused it for every later layer, but all batches of an
+   object group share the same staging slots (`max_batch_size` = 4). With 9
+   chunks, three batches overwrote one another, and every layer after the
+   first was copied from the wrong chunks. `LayerwiseH2DRetrieve` now tracks
+   which batch occupies the slots and restages when needed, and
+   `transfer_kv_layerwise_h2d` uses per-layer staging whenever an object
+   group needs more than one batch (whole-object staging would otherwise
+   restage every batch for every layer). A new test with three chunks in
+   batches of two reproduces the bug on the old code.
+
+**Not proven, and why:**
+
+- **R8 and any multi-request step on ROCm.** Eight concurrent cached
+  requests stopped the engine with `LayerProgressRetrieveGenerationTimeoutError`.
+  Cause: on ROCm an interprocess event handle can be imported **once per
+  process**; a second import fails with `hipErrorInvalidValue` (reproduced
+  in isolation). LMCache's worker shares one event per step across all of
+  that step's requests, and the server imports it once per request. So one
+  retrieve dies, never publishes its generation, and the worker times out.
+  With layerwise off the same error makes 2 of 8 requests fail. This is in
+  the shared MP transfer path, not Track B code. Fixed in Step 16.
+- **Stage 1 (Soft-RoCE):** `rdma_rxe` will not load: the host's `ib_core` is
+  AMD's DKMS RDMA stack for its `ionic` NICs, which `amdgpu` also depends
+  on, and the kernel's `rdma_rxe` disagrees with its symbol versions.
+  Replacing that stack on a shared remote GPU host was not attempted.
+- **A TTFT that shows layerwise's value.** On L1 hits there is no remote
+  fetch to hide, so layerwise only adds per-layer waits. Median TTFT over 6
+  prompts: layerwise on, 29.8 ms computed and 22.4 ms cached; layerwise off,
+  24.2 ms and 20.6 ms. The computed-path gap is mostly piecewise instead of
+  full CUDA graphs. The saving layerwise exists for needs a slow fetch
+  (Stage 3, RDMA from Aerospike).
+
+**Tested (locally):** the connector change with 4 new cases against vLLM
+0.30 (64 connector and adapter tests pass); the staging fix with the new
+multi-batch test (3 paths) and the Track B, layerwise, pipelined-loading and
+deferred-retrieve suites (481 passed). On the MI300X: the transfer and
+connector files (47 passed) and the end-to-end runs above.
+
+### Step 16 -- ROCm event IPC: import each handle once, never destroy exports (2026-09-29)
+
+Fixes the multi-request failure from Step 15 (R8) in the shared platform
+layer, since it breaks any step with more than one request on ROCm and is not
+specific to layerwise loading.
+
+**What ROCm actually does.** I read the ROCm 10 HIP runtime source
+(`hipamd/src/hip_event_ipc.cpp`) and checked each point with two processes on
+the MI300X:
+
+- An interprocess event is a ROCr IPC signal, and its handle is roughly
+  `type | creator pid | signal address`. Destroying an event only queues the
+  signal for deferred cleanup.
+- A process can open a given handle once. The second open fails with
+  `hipErrorInvalidValue`, even after the first import is dropped.
+- Handle bytes repeat once the exporter frees a signal address (2 distinct
+  handles over 6 create/destroy cycles).
+- After a peer has imported an event, the exporter can fail to export a new
+  event that lands on the freed address.
+
+So caching imports alone is not safe: a cached import could be of a dead
+event whose bytes a new event reused.
+
+**Why not the timeline-semaphore backend.** HIP has the stream memory
+operations it needs, and a probe showed cross-process ordering through
+`hipStreamWriteValue64` and `hipStreamWaitValue64` works. But that backend
+snapshots the sequence number at export, whereas the layerwise path exports
+each per-layer event once at registration and re-records it on every
+retrieve. The watermark means "copy enqueued and event recorded", so the
+worker's GPU wait on that re-recorded event is what orders attention behind
+the copy. Under snapshot semantics that wait would do nothing, silently.
+
+**The fix: `RocmEventIPCBackend`** (`lmcache/v1/platform/rocm/event_ipc.py`,
+returned by `RocmDeviceSpec` unless isolated IPC is on; design in
+`docs/design/v1/platform/rocm/event_ipc.md`):
+
+1. **Exporter.** `create_event` lends a pooled native event. When the lease
+   is garbage-collected, the event goes back to the pool and is never
+   destroyed, so a handle always names one live event. Idle events are
+   reused first, because ROCm makes a re-record wait for the previous one.
+2. **Importer.** `import_event` opens each exported handle once, under a
+   lock, and returns the cached event after that.
+3. **Nonce.** Exports carry a random per-process nonce, so a restarted peer
+   that reuses a pid and signal address is a cache miss, not a stale hit.
+
+Native events keep the CUDA-style re-record semantics that the layerwise path
+needs. A recycled event can make a late peer wait for a newer record; that is
+safe because the record is enqueued before the handle leaves, and it only
+follows work that was already enqueued.
+
+**Retest on the MI300X** (same container and model as Step 15):
+
+- **Tests:** 86 passed, among them 14 new backend tests. One is a two-process
+  HIP test: 4 imports of one handle, then a recycled event whose re-record the
+  importer waits on. The rest are the event IPC, handle-path, layerwise
+  transfer and connector suites.
+- **Concurrent requests (R8):** 8 and 16 concurrent cached requests, with
+  layerwise on and off, give no HIP errors and 50 retrieves per run. Before
+  the fix, 8 concurrent requests stopped the engine.
+- **Correctness under concurrency.** Greedy text is not a usable check for
+  concurrent requests: a batch of 8 takes different bf16 paths from a batch
+  of 1. With no LMCache at all, two runs of the same 8 prompts agree on only
+  6 to 8 of them. So I compared first-token top-5 log-probabilities of each
+  prompt, computed against cached:
+
+  | Run | Largest per-request difference |
+  | --- | --- |
+  | Layerwise on, 8 and 16 concurrent | 0.02 to 0.13 |
+  | Layerwise off | 0.03 to 0.12 |
+  | No LMCache, same batch twice | 0.00 to 0.12 |
+
+  Wrong KV would move log-probabilities by whole units, not hundredths. The
+  remaining text mismatches are coherent near-tie variants (for example,
+  `**Item Number:**` against `**Item Number**:`), at the same rate as with
+  no LMCache.
+- **TTFT with the fix,** median of 6: layerwise on, 30.1 ms computed and
+  22.4 ms cached, unchanged from Step 15. Pooling costs nothing measurable.
+
+**Tested (locally):** the new backend tests plus the event IPC, device-plugin
+and IPC-policy suites (53 passed, 1 skipped: the ROCm GPU test).
