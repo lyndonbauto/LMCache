@@ -26,7 +26,7 @@ stop_server() {
   SERVER_PID=0
 }
 start_server() {
-  lmcache server --port 6555 --http-port 8080 --l1-size-gb 40 --eviction-policy LRU \
+  lmcache server --port 6555 --http-host 127.0.0.1 --http-port 8080 --l1-size-gb 40 --eviction-policy LRU \
     --chunk-size 256 $SFLAG ${LMCACHE_SERVER_EXTRA:-} >> "$OUT/lmcache_$TAG.log" 2>&1 &
   SERVER_PID=$!
   for _ in $(seq 120); do
@@ -53,7 +53,7 @@ KV="{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\
 \"kv_load_failure_policy\":\"$POLICY\",\"kv_connector_extra_config\":{\
 \"lmcache.mp.host\":\"tcp://localhost\",\"lmcache.mp.port\":6555,\
 \"lmcache.mp.use_layerwise\":$LW}}"
-vllm serve "$MODEL" --port 8000 --seed 0 --no-enable-prefix-caching \
+vllm serve "$MODEL" --host 127.0.0.1 --port 8000 --seed 0 --no-enable-prefix-caching \
   --max-model-len 17408 --gpu-memory-utilization 0.6 ${VLLM_EXTRA:-} \
   --kv-transfer-config "$KV" > "$OUT/vllm_$TAG.log" 2>&1 &
 VLLM_PID=$!
@@ -72,7 +72,18 @@ if [ "${RESTART_SERVER_BEFORE_WARM:-0}" = 1 ]; then
   python "$HERE/wait_l2_settle.py" --namespace "${L2_NAMESPACE:-lmcache}" \
     || echo "warning: L2 writes had not settled"
   echo "=== $TAG restarting the LMCache server (L1 is lost) $(date -u +%T)"
+  registrations=$(grep -c "Registered KV cache" "$OUT/lmcache_$TAG.log")
   stop_server; start_server || exit 1
+  # vLLM re-registers its KV cache on its next heartbeat; until then every
+  # lookup misses, which would make the warm send a recompute.
+  for _ in $(seq 120); do
+    [ "$(grep -c "Registered KV cache" "$OUT/lmcache_$TAG.log")" -gt "$registrations" ] && break
+    sleep 1
+  done
+  [ "$(grep -c "Registered KV cache" "$OUT/lmcache_$TAG.log")" -gt "$registrations" ] \
+    || { echo "vLLM did not re-register with the restarted server"; exit 1; }
+  echo "=== $TAG vLLM re-registered $(date -u +%T)"
+  sleep 5
 fi
 python "$HERE/client.py" --corpus "$CORPUS" --out "$OUT/${TAG}_warm.json" --tag "${TAG}_warm" $SET_ARG \
   || { echo "warm send failed"; exit 1; }

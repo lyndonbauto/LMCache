@@ -21,7 +21,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "=== $TAG start $(date -u +%T) model=$MODEL extra='${VLLM_EXTRA:-}' batch_invariant=${VLLM_BATCH_INVARIANT:-0}"
-vllm serve "$MODEL" --port 8000 --seed 0 --no-enable-prefix-caching \
+vllm serve "$MODEL" --host 127.0.0.1 --port 8000 --seed 0 --no-enable-prefix-caching \
   --max-model-len 17408 --gpu-memory-utilization 0.6 ${VLLM_EXTRA:-} \
   > "$OUT/vllm_$TAG.log" 2>&1 &
 VLLM_PID=$!
