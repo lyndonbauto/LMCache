@@ -71,6 +71,7 @@ try:
         LMCacheMPSchedulerAdapter,
         LMCacheMPWorkerAdapter,
         ParallelStrategy,
+        is_layerwise_enabled,
     )
 
     try:
@@ -95,6 +96,11 @@ except ImportError:
     from lmcache.v1.multiprocess.custom_types import (
         BlockAllocationRecord as RequestAllocationRecord,
     )
+
+    def is_layerwise_enabled(extra_config: dict[str, Any] | None) -> bool:
+        """Return False: vLLM's vendored adapter has no layerwise load."""
+        return False
+
 
 if TYPE_CHECKING:
     # Third Party
@@ -593,10 +599,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "lmcache.mp.lazy_offload requires vLLM prefix caching "
                 "(enable_prefix_caching=True)"
             )
-        self.use_layerwise = bool(
-            vllm_config.kv_transfer_config.get_from_extra_config(
-                "lmcache.mp.use_layerwise", False
-            )
+        self.use_layerwise = is_layerwise_enabled(
+            vllm_config.kv_transfer_config.kv_connector_extra_config
         )
 
         if self.role == KVConnectorRole.SCHEDULER:
@@ -1455,7 +1459,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         Returns:
             True when ``lmcache.mp.use_layerwise`` is enabled in extra_config.
         """
-        return bool(extra_config.get("lmcache.mp.use_layerwise", False))
+        return is_layerwise_enabled(extra_config)
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:

@@ -136,6 +136,28 @@ def _coerce_extra_config_value(default: Any, raw: Any) -> Any:
     return type(default)(raw)
 
 
+def is_layerwise_enabled(extra_config: dict[str, Any] | None) -> bool:
+    """Return whether ``lmcache.mp.use_layerwise`` is on in ``extra_config``.
+
+    Parsed exactly as the worker adapter parses it, so the connector's
+    scheduler and worker sides always agree with the adapter. A CLI
+    passthrough delivers strings, and ``"false"`` must mean off.
+
+    Args:
+        extra_config: vLLM ``kv_connector_extra_config`` (may be ``None``).
+
+    Returns:
+        True when layerwise load is enabled.
+    """
+    default = ExtraConfigDefault.use_layerwise.default
+    raw = (extra_config or {}).get(
+        _EXTRA_CONFIG_KEY_PREFIX + ExtraConfigDefault.use_layerwise.name
+    )
+    if raw is None:
+        return default
+    return bool(_coerce_extra_config_value(default, raw))
+
+
 def _resolve_extra_config(
     extra_config: dict[str, Any] | None,
 ) -> dict[str, Any]:

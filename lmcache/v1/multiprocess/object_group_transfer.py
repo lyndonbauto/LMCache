@@ -109,6 +109,10 @@ def downsample_and_stage_block_ids(
     Returns:
         The cut block id lists, indexed by LMCache KV group index.
 
+    Raises:
+        ValueError: If a kernel group's block id list is not a whole number of
+            chunks.
+
     Note:
         This function has some coupled logic with transfer_kv_per_object_group below.
         The caller need to make sure that the block ids seen by
@@ -150,11 +154,12 @@ def downsample_and_stage_block_ids(
 
         new_block_ids = []
         old_block_ids = block_ids[kernel_group_id]
-        assert len(old_block_ids) % total_blocks_per_chunk == 0, (
-            f"len(block_ids[{kernel_group_id}]) should be a multiple "
-            f"of total_blocks_per_chunk ({total_blocks_per_chunk}), but got "
-            f"{len(old_block_ids)}"
-        )
+        if len(old_block_ids) % total_blocks_per_chunk != 0:
+            raise ValueError(
+                f"len(block_ids[{kernel_group_id}]) should be a multiple "
+                f"of total_blocks_per_chunk ({total_blocks_per_chunk}), but got "
+                f"{len(old_block_ids)}"
+            )
 
         for i in range(0, len(old_block_ids), total_blocks_per_chunk):
             chunk_block_ids = old_block_ids[i : i + total_blocks_per_chunk]

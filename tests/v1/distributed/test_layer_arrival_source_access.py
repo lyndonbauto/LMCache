@@ -339,6 +339,54 @@ def test_storage_manager_returns_the_pipelined_adapters_source(
         assert sm.layer_arrival_source() is not source
 
 
+def test_storage_manager_takes_every_pipelined_part_from_the_ready_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With two pipelined adapters where the first is not ready, the source,
+    the node and the adapter id all come from the ready one, so a plan and
+    its fetch never come from different adapters."""
+    unready = PipelinedNativeClientStub(generation=100)
+    unready.init_error = "pipelined init failed"
+    ready = PipelinedNativeClientStub(generation=7)
+    clients = iter([unready, ready])
+    monkeypatch.setattr(
+        storage_manager_module,
+        "create_l2_adapter",
+        lambda config, l1_memory_desc: NativeConnectorL2Adapter(
+            native_client=next(clients), type_name="stub"
+        ),
+    )
+    with _storage_manager([_mock_adapter_config(), _mock_adapter_config()]) as sm:
+        second_id = sm.l2_adapters()[1][0].index
+        assert sm.pipelined_adapter_id() == second_id
+        assert sm.pipelined_fetch_node_name() == PipelinedNativeClientStub.NODE_NAME
+        source = sm.layer_arrival_source()
+        generation = source.begin_fetch(_two_layer_plan())
+        assert generation == 7
+        assert ready.issued and not unready.issued
+        source.abandon_fetch(generation)
+
+
+def test_storage_manager_uses_an_unready_path_only_when_none_is_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With no ready adapter, the one with a path still supplies a source,
+    whose fetch refuses with the reason (so the retrieve records why)."""
+    client = PipelinedNativeClientStub()
+    client.init_error = "pipelined init failed"
+    monkeypatch.setattr(
+        storage_manager_module,
+        "create_l2_adapter",
+        lambda config, l1_memory_desc: NativeConnectorL2Adapter(
+            native_client=client, type_name="stub"
+        ),
+    )
+    with _storage_manager([_mock_adapter_config()]) as sm:
+        source = sm.layer_arrival_source()
+        with pytest.raises(LayerwiseContractError, match="pipelined init failed"):
+            source.begin_fetch(_two_layer_plan())
+
+
 def test_storage_manager_reports_the_pipelined_node(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

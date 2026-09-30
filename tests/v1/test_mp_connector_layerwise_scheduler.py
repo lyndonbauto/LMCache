@@ -153,3 +153,35 @@ def test_mp_connector_requires_piecewise_when_layerwise_enabled() -> None:
     assert LMCacheMPConnector.requires_piecewise_for_cudagraph(
         {"lmcache.mp.use_layerwise": True}
     )
+
+
+@pytest.mark.parametrize(
+    ("raw", "enabled"),
+    [
+        (True, True),
+        ("true", True),
+        ("1", True),
+        ("on", True),
+        (False, False),
+        ("false", False),
+        ("0", False),
+        ("off", False),
+    ],
+)
+def test_connector_and_adapter_parse_use_layerwise_alike(
+    raw: object, enabled: bool
+) -> None:
+    """A CLI passthrough delivers strings; ``"false"`` must mean off on the
+    connector exactly as on the worker adapter, or the connector would run
+    synchronous loads while the worker never waits for a layer."""
+    pytest.importorskip("vllm")
+
+    # First Party
+    from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
+    from lmcache.integration.vllm.vllm_multi_process_adapter import (
+        is_layerwise_enabled,
+    )
+
+    extra_config = {"lmcache.mp.use_layerwise": raw}
+    assert is_layerwise_enabled(extra_config) is enabled
+    assert LMCacheMPConnector.requires_piecewise_for_cudagraph(extra_config) is enabled

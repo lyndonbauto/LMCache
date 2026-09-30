@@ -919,18 +919,26 @@ class StorageManager:
 
         Retrieve runs ``LayerArrivalPump(source, sink).run(plan)``; the pump
         begins, polls and releases the fetch, so nothing else here does.
-        Adapters are asked in registration order and the first one with a
-        layer-pipelined path wins. Call once per retrieve: a source holds
-        one fetch, and concurrent retrieves each need their own.
+        The source comes from the same adapter the placer and the other
+        ``pipelined_*`` accessors use: the first, in registration order, with
+        a ready pipelined path. When none is ready, the first adapter that
+        has a pipelined path at all is used, and its ``begin_fetch`` refuses
+        with the reason. Call once per retrieve: a source holds one fetch,
+        and concurrent retrieves each need their own.
 
         Returns:
-            A new layer arrival source from the first adapter that has one.
+            A new layer arrival source.
 
         Raises:
             LayerwiseContractError: If no L2 adapter can fetch layer by
                 layer, with each adapter's reason. Retrieve falls back to a
                 whole-object load, the same as for a failed fetch.
         """
+        try:
+            _, ready = self._first_ready_pipelined_adapter("a pipelined fetch path")
+            return ready.layer_arrival_source()
+        except LayerwiseContractError:
+            pass
         with self._adapters_lock:
             adapters = list(self._l2_adapters.values())
         reasons: list[str] = []
@@ -958,18 +966,8 @@ class StorageManager:
             LayerwiseContractError: If no L2 adapter has a ready pipelined
                 path, with each adapter's reason.
         """
-        with self._adapters_lock:
-            adapters = list(self._l2_adapters.values())
-        reasons: list[str] = []
-        for adapter in adapters:
-            try:
-                return adapter.pipelined_fetch_node_name()
-            except LayerwiseContractError as exc:
-                reasons.append(str(exc))
-        raise LayerwiseContractError(
-            "no L2 adapter has a pipelined fetch node: "
-            + ("; ".join(reasons) or "no L2 adapters are registered")
-        )
+        _, adapter = self._first_ready_pipelined_adapter("a pipelined fetch node")
+        return adapter.pipelined_fetch_node_name()
 
     def pipelined_max_slots_per_request(self) -> int:
         """Return the most slots one layerwise fetch may carry.
@@ -987,18 +985,10 @@ class StorageManager:
             LayerwiseContractError: If no L2 adapter has a ready pipelined
                 path, with each adapter's reason.
         """
-        with self._adapters_lock:
-            adapters = list(self._l2_adapters.values())
-        reasons: list[str] = []
-        for adapter in adapters:
-            try:
-                return adapter.pipelined_max_slots_per_request()
-            except LayerwiseContractError as exc:
-                reasons.append(str(exc))
-        raise LayerwiseContractError(
-            "no L2 adapter has a pipelined fetch slot limit: "
-            + ("; ".join(reasons) or "no L2 adapters are registered")
+        _, adapter = self._first_ready_pipelined_adapter(
+            "a pipelined fetch slot limit"
         )
+        return adapter.pipelined_max_slots_per_request()
 
     def pipelined_adapter_id(self) -> int:
         """Return the id of the adapter pipelined fetches read from.
@@ -1015,20 +1005,8 @@ class StorageManager:
             LayerwiseContractError: If no L2 adapter has a ready pipelined
                 path, with each adapter's reason.
         """
-        with self._adapters_lock:
-            adapters = list(self._l2_adapters.items())
-        reasons: list[str] = []
-        for adapter_id, adapter in adapters:
-            try:
-                adapter.pipelined_fetch_node_name()
-            except LayerwiseContractError as exc:
-                reasons.append(str(exc))
-                continue
-            return adapter_id
-        raise LayerwiseContractError(
-            "no L2 adapter has a pipelined fetch path: "
-            + ("; ".join(reasons) or "no L2 adapters are registered")
-        )
+        adapter_id, _ = self._first_ready_pipelined_adapter("a pipelined fetch path")
+        return adapter_id
 
     def pipelined_max_record_bytes(self) -> int:
         """Return the record cap the pipelined adapter writes objects under.
@@ -1045,18 +1023,8 @@ class StorageManager:
             LayerwiseContractError: If no L2 adapter has a ready pipelined
                 path, with each adapter's reason.
         """
-        with self._adapters_lock:
-            adapters = list(self._l2_adapters.values())
-        reasons: list[str] = []
-        for adapter in adapters:
-            try:
-                return adapter.pipelined_max_record_bytes()
-            except LayerwiseContractError as exc:
-                reasons.append(str(exc))
-        raise LayerwiseContractError(
-            "no L2 adapter has a pipelined record cap: "
-            + ("; ".join(reasons) or "no L2 adapters are registered")
-        )
+        _, adapter = self._first_ready_pipelined_adapter("a pipelined record cap")
+        return adapter.pipelined_max_record_bytes()
 
     def pipelined_window_placer(
         self,
@@ -1697,3 +1665,39 @@ class StorageManager:
         if adapter_index < 0 or adapter_index >= len(adapters):
             raise L2ReconfigureError(404, "L2 adapter not reconfigurable")
         return adapters[adapter_index][1]
+
+    def _first_ready_pipelined_adapter(
+        self, what: str
+    ) -> tuple[int, L2AdapterInterface]:
+        """Return the adapter every pipelined fetch reads from.
+
+        That is the first adapter, in registration order, with a ready
+        pipelined path. Every ``pipelined_*`` accessor, the placer and the
+        arrival source use it, so a plan and its fetch always come from the
+        same adapter.
+
+        Args:
+            what: What the caller needs, for the error message (for example
+                ``"a pipelined record cap"``).
+
+        Returns:
+            ``(adapter_id, adapter)``.
+
+        Raises:
+            LayerwiseContractError: If no adapter has a ready pipelined path,
+                with each adapter's reason.
+        """
+        with self._adapters_lock:
+            adapters = list(self._l2_adapters.items())
+        reasons: list[str] = []
+        for adapter_id, adapter in adapters:
+            try:
+                adapter.pipelined_fetch_node_name()
+            except LayerwiseContractError as exc:
+                reasons.append(str(exc))
+                continue
+            return adapter_id, adapter
+        raise LayerwiseContractError(
+            f"no L2 adapter has {what}: "
+            + ("; ".join(reasons) or "no L2 adapters are registered")
+        )
