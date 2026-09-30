@@ -28,10 +28,13 @@ class RocmDeviceSpec(CudaDeviceSpec):
     def event_ipc_backend(self) -> "EventIPCBackend":
         """Return the ROCm event IPC backend.
 
-        HIP interprocess event handles can be opened only once per process, so
-        ROCm uses :class:`~lmcache.v1.platform.rocm.event_ipc.RocmEventIPCBackend`
-        rather than the CUDA default. Isolated IPC keeps the CUDA selection.
-        Like the CUDA spec, the choice is made on first read and cached.
+        Native HIP interprocess events do not keep CUDA's wait semantics (a
+        queued wait follows later re-records) and can be opened only once per
+        process, so ROCm uses
+        :class:`~lmcache.v1.platform.rocm.event_ipc.RocmEventIPCBackend`, which
+        implements events as shared-memory semaphores. Isolated IPC keeps the
+        CUDA selection. Like the CUDA spec, the choice is made on first read
+        and cached.
         """
         backend = self._event_backend_cache
         if backend is not None:

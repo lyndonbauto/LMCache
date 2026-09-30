@@ -1394,3 +1394,131 @@ follows work that was already enqueued.
 
 **Tested (locally):** the new backend tests plus the event IPC, device-plugin
 and IPC-policy suites (53 passed, 1 skipped: the ROCm GPU test).
+
+This backend is replaced in Step 17: pooling does not stop a later record
+from retargeting a queued wait.
+
+### Step 17 -- The async-scheduling deadlock is a ROCm event bug; a HIP runtime fix (2026-09-30)
+
+Lyndon's output-equality run on the MI300X (Llama-3.1-8B-Instruct, 739 to
+11,940-token prompts) found that layerwise on plus vLLM's default async
+scheduling deadlocked with 4 or more concurrent cached requests, while
+`--no-async-scheduling` worked. The functional plan listed it as a known
+defect. This step finds the cause, fixes it, and fixes the HIP runtime lookup
+in `torch_ops` found along the way.
+
+**Cause: ROCm retargets queued waits.** A two-process probe on the MI300X:
+
+1. The producer records an event behind a 1 s spin.
+2. The consumer, whose stream is busy for 3 s, queues a wait on the imported
+   event and then a marker.
+3. As soon as the first record lands, the producer re-records behind an 8 s
+   spin.
+
+The consumer's marker landed at 8.6 s, twice. CUDA would land it at about 3 s,
+because a stream wait targets the record the event held when the wait was
+queued. On ROCm the queued wait watches the event's live signal, and a
+re-record retargets it. The ROCm runtime source says the same:
+`IPCEvent::streamWait` enqueues a barrier on the IPC signal, and a record
+re-arms that signal.
+
+That explains both of Lyndon's hangs. With async scheduling, vLLM's worker
+queues all of step N's per-layer waits and then submits step N+1's retrieves.
+The daemon re-records each layer's event for step N+1 before the GPU has
+reached step N's waits. Step N's forward pass then waits for step N+1's copy,
+and that copy waits for step N+1's producer event, which is queued behind
+step N's forward pass. The saved stacks show the second half of that cycle:
+the daemon's retrieve thread stuck re-recording a layer event, since ROCm
+makes a re-record wait for the previous record. Without async scheduling,
+step N's forward pass finishes before step N+1's retrieves exist, so nothing
+is retargeted. On CUDA the waits latch their record and the same design is
+safe. The layerwise design was never the problem, so it is unchanged.
+
+The Step 16 pooled backend had the same race: a recycled event re-recorded
+while a peer's wait on it was still queued. The layerwise per-layer events
+were exposed to it as well.
+
+**Fix 1: ROCm events are shared-memory semaphores**
+(`lmcache/v1/platform/rocm/event_ipc.py`, design in
+`docs/design/v1/platform/rocm/event_ipc.md`).
+
+- Each process owns a POSIX shared-memory region registered with
+  `hipHostRegister`. An event is a slot in it.
+- A record makes the GPU write the next sequence number
+  (`hipStreamWriteValue64`).
+- A wait reads the event's latest number on the host at wait time and has the
+  GPU wait until the counter reaches it (`hipStreamWaitValue64`, greater or
+  equal).
+
+A later record only raises the counter, so it can release a wait but never
+hold one back: CUDA's semantics. Slots are reused only after their last
+record lands, with an epoch bump, so an old handle never waits on a new
+event. Imports just attach a region once per process, which also removes the
+single-import and freed-address problems from Step 16. Both processes must
+share `/dev/shm`, which the layerwise progress record already requires.
+
+**Fix 2: `torch_ops` uses the GPU runtime PyTorch loaded.** `_get_copy_lib`
+searched with `ctypes.util.find_library` and on this image found an older
+system `libamdhip64.so.5`, a second HIP runtime next to the pip SDK's `.so.7`
+that PyTorch uses. It then called `cudaMemcpy`, which HIP does not export, so
+on ROCm the pointer-mode `lmcache_memcpy_async` fell back to a CPU byte copy of
+device pointers, and `_tensor_from_ptr`'s fallback raised.
+`lmcache/v1/platform/runtime_libs.py` now finds the library already mapped
+into the process (`/proc/self/maps`) before trying names, and `torch_ops`
+binds `hipMemcpy` on ROCm builds and `cudaMemcpy` on CUDA builds (same
+arguments and copy-kind values). The ROCm event backend uses the same loader.
+
+A first droplet run also caught two bugs in the new backend. A region was
+unmapped without `hipHostUnregister`, so the next region mapped at that
+address failed to register ("already mapped"). Its memory views also blocked
+`SharedMemory.close()`. Regions now unregister, release their views, close,
+and (for the owner) unlink when they are collected. A new test fails without
+this.
+
+**Tests on the MI300X** (`lmc-b`, ROCm 10, torch 2.12, vLLM 0.27.1):
+
+| Group | Result |
+| --- | --- |
+| Event IPC: the new backend (18), runtime libraries (9), `test_event_ipc`, cross-process `test_event_ipc_ordering` | 49 passed |
+| Layerwise, layerwise transfer, connector, deferred retrieve, pipelined loading, event handle path | 478 passed |
+| All of `tests/v1/platform` | 265 passed, 58 skipped (other accelerators) |
+| `tests/v1/test_torch_ops.py` | 95 passed, 1 failed |
+| All of `tests/v1/multiprocess` | 921 passed, 3 failed, 12 errors |
+
+The `torch_ops` failure (`cpu_py_ops` / `multi_layer_block_kv_transfer`: the
+native kernel called with a CPU device) fails identically on the original
+file. The multiprocess failures are all in `test_cache_server.py` and
+`test_mq.py`, which assert that registration returns `None`; it now returns a
+`RegisterKvCacheResponse`. Swapping the original platform files back in gives
+the identical 3 failed and 12 errors, so none come from this change.
+
+The two real-HIP tests:
+- the probe above as a test, where the marker must land in under 6 s (native
+  events take about 9 s);
+- 20 rounds of producer writes, each followed by a record, with the consumer
+  checking the data after each wait, including recycled slots.
+
+**End to end on the MI300X**, with Lyndon's harness: Llama-3.1-8B-Instruct, L1
+only, `kv_load_failure_policy=fail`, and prompts that ask for a fact near
+their start, so misplaced KV gives a wrong answer. Async scheduling is vLLM's
+default. The log shows none of the warnings vLLM prints when it turns it off.
+
+| Session | Before (Lyndon, old backend) | After |
+| --- | --- | --- |
+| Layerwise on, async on, 15 sequential then 2/4/8/16 concurrent | Engine died at 4 (`LayerProgressRetrieveProgressTimeoutError`), daemon wedged | All answers correct: 15/15, 2/2, 4/4, 8/8, 16/16 |
+| Layerwise on, async on, short prompts, 2/4/8/16 concurrent | Silent hang at 4 | All correct: 2/2, 4/4, 8/8, 16/16 |
+| Layerwise on, async on, 12 and 24 concurrent | not run | All correct: 12/12, 24/24 |
+| Layerwise off, async on, 15 sequential then 2/4/8/16 concurrent | worked | All correct (regression check on the non-layerwise path) |
+| Layerwise on, `--no-async-scheduling`, 4/8/16 concurrent | worked | All correct |
+
+Across the five sessions there are no layer-progress errors, HIP errors or
+tracebacks, with 28 to 45 retrieves per session. Exact 48-token equality
+varies (for example 13 of 16) with divergence late in the text; that is the
+run-to-run noise Lyndon measured, where computed-vs-computed matches only 11
+of 15. Results: `/root/lmc-work/async-fix-2026-09-30/` on the droplet.
+
+**Tested (locally):** the new backend's fake-HIP tests (16) and the runtime
+library tests (8), with `--noconftest`; ruff, isort and codespell on the
+changed files; mypy on `lmcache/v1/platform/rocm/`, `runtime_libs.py` and
+`torch_ops.py`, where only 8 errors remain, all in `torch_ops` code this
+change does not touch.
