@@ -38,6 +38,7 @@ FILLER_WORDS = [
     " old", " new", " red", " blue", " green", " small", " large", " quiet",
 ]  # fmt: skip
 MAX_TARGET_INDEX = 8  # keeps the asked-about record inside the first chunk
+REGISTRY_HEADER = "Below is a registry of records. Read it carefully.\n\n"
 
 
 class _Encoder:
@@ -93,8 +94,7 @@ def _registry_prompt(
     with single-token filler words, so the length is exact.
     """
     rng = random.Random(f"corpus-v1-{tag}")
-    header = enc.encode("Registry:\n" if compact else
-                        "Below is a registry of records. Read it carefully.\n\n")
+    header = enc.encode("Registry:\n" if compact else REGISTRY_HEADER)
     records: list[list[int]] = []
     codes: list[str] = []
     probe_question = enc.encode(_question(tag, MAX_TARGET_INDEX, compact))
@@ -132,7 +132,7 @@ def _shared_prompts(enc: _Encoder, spec: dict[str, Any], chunk: int) -> list[dic
     """P-shared: one exact-length shared registry, then per-prompt tails."""
     prefix_tokens = spec["shared_prefix_chunks"] * chunk
     rng = random.Random("corpus-v1-shared-prefix")
-    body = enc.bos + enc.encode("Below is a registry of records. Read it carefully.\n\n")
+    body = enc.bos + enc.encode(REGISTRY_HEADER)
     codes: list[str] = []
     while True:
         sentence, code = _record("S", len(codes), rng)
@@ -152,13 +152,15 @@ def _shared_prompts(enc: _Encoder, spec: dict[str, Any], chunk: int) -> list[dic
         if gap < 0:
             raise ValueError(f"P-shared tail {i}: {tail_tokens} tokens is too short")
         token_ids = body + head + enc.filler(gap, tail_rng) + question
-        prompts.append({
-            "n_tokens": len(token_ids),
-            "token_ids": token_ids,
-            "expected": codes[target],
-            "target_record": f"S-{target}",
-            "shared_prefix_tokens": prefix_tokens,
-        })
+        prompts.append(
+            {
+                "n_tokens": len(token_ids),
+                "token_ids": token_ids,
+                "expected": codes[target],
+                "target_record": f"S-{target}",
+                "shared_prefix_tokens": prefix_tokens,
+            }
+        )
     return prompts
 
 
@@ -171,7 +173,7 @@ def _multi_turn_prompts(enc: _Encoder, spec: dict[str, Any]) -> list[dict]:
     prompts = []
     for c in range(spec["conversations"]):
         rng = random.Random(f"corpus-v1-multi-{c}")
-        history = enc.bos + enc.encode("Below is a registry of records. Read it carefully.\n\n")
+        history = enc.bos + enc.encode(REGISTRY_HEADER)
         first_turn_codes: list[str] = []
         for turn in range(1, spec["turns"] + 1):
             user = enc.encode(f"\nUser (turn {turn}): here are more records.\n")
@@ -187,14 +189,16 @@ def _multi_turn_prompts(enc: _Encoder, spec: dict[str, Any]) -> list[dict]:
             question = enc.encode(_question(f"C{c}-T1", target, compact=False))
             token_ids = history + user + question
             expected = first_turn_codes[target]
-            prompts.append({
-                "n_tokens": len(token_ids),
-                "token_ids": token_ids,
-                "expected": expected,
-                "target_record": f"C{c}-T1-{target}",
-                "conversation": c,
-                "turn": turn,
-            })
+            prompts.append(
+                {
+                    "n_tokens": len(token_ids),
+                    "token_ids": token_ids,
+                    "expected": expected,
+                    "target_record": f"C{c}-T1-{target}",
+                    "conversation": c,
+                    "turn": turn,
+                }
+            )
             history = token_ids + enc.encode(f" {expected}.\n")
     return prompts
 

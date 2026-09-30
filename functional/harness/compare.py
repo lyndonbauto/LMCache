@@ -22,7 +22,9 @@ import json
 def compare_prompt(a: dict[str, Any], b: dict[str, Any]) -> dict[str, Any]:
     """Return the comparison of one prompt's two results."""
     ta, tb = a["token_ids"], b["token_ids"]
-    divergence = next((i for i, (x, y) in enumerate(zip(ta, tb)) if x != y), None)
+    divergence = next(
+        (i for i, (x, y) in enumerate(zip(ta, tb, strict=False)) if x != y), None
+    )
     if divergence is None and len(ta) != len(tb):
         divergence = min(len(ta), len(tb))
     first_a, first_b = a["top_logprobs"][0], b["top_logprobs"][0]
@@ -59,8 +61,10 @@ def main() -> None:
         if pid in b["results"]
     }
     print(f"A = {a['meta']['tag']}, B = {b['meta']['tag']}\n")
-    print("| Set | Prompts | Exact match | Top-1 first token | Divergence position "
-          "(min / median) | Max first-token dlogprob | Correct A / B |")
+    print(
+        "| Set | Prompts | Exact match | Top-1 first token | Divergence position "
+        "(min / median) | Max first-token dlogprob | Correct A / B |"
+    )
     print("| --- | --- | --- | --- | --- | --- | --- |")
     by_set: dict[str, list[dict[str, Any]]] = {}
     for pid, row in rows.items():
@@ -72,16 +76,23 @@ def main() -> None:
         top1 = sum(r["top1_first_token_agrees"] for r in set_rows)
         divs = sorted(r["first_divergence"] for r in set_rows if not r["exact"])
         div_text = f"{divs[0]} / {divs[len(divs) // 2]}" if divs else "-"
-        dlp = [r["first_token_max_abs_dlogprob"] for r in set_rows
-               if r["first_token_max_abs_dlogprob"] is not None]
-        print(f"| {name} | {n} | {exact}/{n} | {top1}/{n} | {div_text} | "
-              f"{max(dlp) if dlp else '-'} | {sum(r['a_correct'] for r in set_rows)}/"
-              f"{sum(r['b_correct'] for r in set_rows)} |")
+        dlp = [
+            r["first_token_max_abs_dlogprob"]
+            for r in set_rows
+            if r["first_token_max_abs_dlogprob"] is not None
+        ]
+        print(
+            f"| {name} | {n} | {exact}/{n} | {top1}/{n} | {div_text} | "
+            f"{max(dlp) if dlp else '-'} | {sum(r['a_correct'] for r in set_rows)}/"
+            f"{sum(r['b_correct'] for r in set_rows)} |"
+        )
         total["n"] += n
         total["exact"] += exact
         total["top1"] += top1
-    print(f"\nTotal: exact {total['exact']}/{total['n']}, "
-          f"top-1 first token {total['top1']}/{total['n']}")
+    print(
+        f"\nTotal: exact {total['exact']}/{total['n']}, "
+        f"top-1 first token {total['top1']}/{total['n']}"
+    )
     if args.out:
         with open(args.out, "w") as f:
             json.dump(rows, f, indent=1)

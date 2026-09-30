@@ -106,8 +106,11 @@ def main() -> None:
             result["correct"] = prompt["expected"] in result["text"]
             results[prompt["id"]] = result
         correct = sum(results[p["id"]]["correct"] for p in corpus["sets"][name])
-        print(f"{name}: {len(corpus['sets'][name])} prompts, answers correct "
-              f"{correct}/{len(corpus['sets'][name])}", flush=True)
+        print(
+            f"{name}: {len(corpus['sets'][name])} prompts, answers correct "
+            f"{correct}/{len(corpus['sets'][name])}",
+            flush=True,
+        )
     meta = {
         "tag": args.tag,
         "model": model,
