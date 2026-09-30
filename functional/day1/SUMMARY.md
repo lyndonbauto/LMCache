@@ -15,7 +15,7 @@ config under `functional/configs/`.
 | 1 | T-CFG-02: Aerospike + RDMA build | Pass. Builds in 68 s; links `libibverbs`, imports, and the RDMA-only symbols are present | `step1/build_B_rdma.log`, `step1/check_B.txt` |
 | 1 | T-ROC-01: HIP build with the Aerospike and RDMA flags | Pass (the T-CFG-02 build, with `BUILD_WITH_HIP=1`) | `step1/build_B_rdma.log` |
 | 1 | Unit suites from the plan | Pass. Event IPC 40 passed; layerwise, deferred retrieve and pipelined loading 475 passed. No skips | `step1/suite_1_events.txt`, `step1/suite_2_layerwise.txt` |
-| 2 | T-RDMA-01 to 04 (Soft-RoCE) | **Blocked.** `rdma_rxe` does not load; see "Blockers" | `CHANGES.md` |
+| 2 | T-RDMA-01 to 04 (Soft-RoCE) | Pass, after the fix in "Soft-RoCE on this host". The RDMA suite on `rxe0` passes 17/17 with no skips, and the harnesses ran on the device: byte-identical landing (01), nothing outside the requested offsets (02), a write past the window refused (03), a region handle per node (04). The E1-level pipeline checks pass too | `step2/rdma_suite.txt`, `step2/rdma_harness_direct.txt`, `step2/verbs_checks.txt` |
 | 3 | T-STO-01, T-STO-06, T-LKP-01, T-LKP-02 | Pass. 14/14 integration tests against Aerospike CE 8.2.0, no skips, including the 10,000-key batch exists and read-touch TTL tests | `step3/integration.txt` |
 | 4 | Corpus and Llama-3.1-8B baselines | Done. 130 prompts, built in token space so lengths are exact. The baseline is deterministic: 130/130 exact across two fresh servers, both with and without batch invariance | `step4/compare_base.md`, `step4b/bi_base_summary.txt` |
 | 5 | gpt-oss-120b check | Pass. Registers (36 layers) and serves with LMCache, layerwise off and on. P-exact cached hits 20/20 identical to the baseline; P-shared prefix hits 10/10 identical to vLLM's own prefix cache (see "gpt-oss-120b") | `step5_bi/` |
@@ -123,17 +123,41 @@ Listed for their owners, not fixed today:
    - the test fakes imported by `lmcache.v1.layerwise`;
    - the duplicated shared-memory attach helper.
 
+## Soft-RoCE on this host
+
+`modprobe rdma_rxe` fails with "Invalid argument". The in-tree module does not
+match this host's `ib_core`, which comes from MLNX OFED 24.10 via DKMS and which
+`amdgpu` and `ionic` depend on. MLNX OFED ships only a dummy `rxe`.
+
+The fix, approved by Lyndon Bauto and Simon Zhao and logged in `CHANGES.md`:
+
+1. The upstream Linux v6.11 `drivers/infiniband/sw/rxe` is built out of tree
+   against OFED's headers and `Module.symvers` (`/root/r_build.sh`; output in
+   `/root/rxe-build/v6.11/`). It depends on OFED's `ib_core`, `ib_uverbs` and
+   `mlx_compat`.
+2. It is loaded with `insmod`, installing nothing into `/lib/modules`, and
+   `rxe0` is created on `lo`.
+3. The port is ACTIVE, GID index 1 is `::ffff:127.0.0.1` (RoCE v2), and
+   `ibv_rc_pingpong` passes over GID 1 at 4 KiB and 64 KiB.
+
+Notes:
+
+- **Where the verbs tools run.** The host's user-space verbs library is
+  OFED's, with only the `ionic` and `mlx5` providers, so it cannot see `rxe0`.
+  The verbs tools and tests run in `lmc-c`, which has Ubuntu's `rdma-core` 50
+  with the `rxe` provider. `lmc-c` was saved as `lmcache-rocm:day1` and
+  recreated with `--device /dev/infiniband/uverbs0`.
+- **It does not survive a reboot.** After one, run:
+  `modprobe udp_tunnel ip6_udp_tunnel && insmod /root/rxe-build/v6.11/rdma_rxe.ko && rdma link add rxe0 type rxe netdev lo`
+- **A test-build bug** kept two RDMA tests from running. Their C++ harnesses
+  were never built, because the Makefile's first target was `pyharness`, not
+  `all`. Fixed in `bb833c9c` (a test-build change, not product code).
+
 ## Blockers
 
-- **Soft-RoCE (step 2).** `modprobe rdma_rxe` fails with "Invalid argument". The
-  in-tree module does not match this host's `ib_core`, which comes from MLNX
-  OFED 24.10 via DKMS and which `amdgpu` and `ionic` depend on. Mitigation,
-  which needs approval because it is a host change outside the allowed list:
-  build only `rdma_rxe.ko` from the OFED source on the box (`--with-rxe-mod`),
-  load it with `insmod` without installing it, and undo with `rmmod`.
 - **Day 3.** The RDMA pipelined path needs the Aerospike `kv-sink` server
   build, which signals each piece with write-with-immediate, doesn't fence,
-  and works over RC on Soft-RoCE. It also needs Soft-RoCE, which is blocked.
+  and works over RC on Soft-RoCE. Soft-RoCE is now available.
 
 ## GPU time
 
