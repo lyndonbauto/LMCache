@@ -7,6 +7,7 @@ package -- consumers go through :class:`DeviceOps`, never this module directly.
 """
 
 # Standard
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import shared_memory
 from typing import TYPE_CHECKING, Optional, Tuple
@@ -36,6 +37,7 @@ from lmcache.v1.platform._device_detect import (
     get_torch_device,
 )
 from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+from lmcache.v1.platform.runtime_libs import load_runtime_library
 
 if TYPE_CHECKING:
     # First Party
@@ -48,34 +50,107 @@ _shm_registry: dict[int, shared_memory.SharedMemory] = {}
 _buf_registry: dict[int, ctypes.Array] = {}
 _pinned_ptr_registry: dict[int, int] = {}  # ptr -> size, for cudaHostUnregister
 
-# Cached copy library for lmcache_memcpy_async (lazy-initialized)
-_copy_lib_NOT_LOADED = object()
-_copy_lib: Optional[ctypes.CDLL] = _copy_lib_NOT_LOADED  # type: ignore
+#: ``cudaMemcpyKind`` / ``hipMemcpyKind`` values; both runtimes share them.
+_MEMCPY_DEVICE_TO_DEVICE = 3
+_MEMCPY_DEFAULT = 4
 
 
-def _get_copy_lib() -> Optional[ctypes.CDLL]:
-    """Lazily load and cache the CUDA/ROCm runtime library, or None for CPU fallback."""
-    global _copy_lib
-    if _copy_lib is _copy_lib_NOT_LOADED:
-        # Try to load GPU runtime libraries in priority order: CUDA first, then ROCm
-        # TODO: ROCm path to be validated on real device
-        for name, fallback in [
-            ("cudart", "libcudart.so"),  # NVIDIA CUDA Runtime
-            ("amdhip64", "libamdhip64.so"),  # AMD ROCm HIP Runtime
-        ]:
-            try:
-                path = ctypes.util.find_library(name)
-                if path:
-                    _copy_lib = ctypes.CDLL(path)
-                else:
-                    _copy_lib = ctypes.CDLL(fallback)
-                break  # Successfully loaded, stop trying
-            except OSError:
-                continue  # Current library not available, try next
-        else:
-            # All GPU libraries failed to load, fall back to CPU
-            _copy_lib = None
-    return _copy_lib
+class _GpuMemcpy:
+    """The synchronous memcpy of the GPU runtime PyTorch runs on.
+
+    ``cudaMemcpy`` on CUDA builds and ``hipMemcpy`` on ROCm builds. They take
+    the same arguments and copy-kind values.
+
+    Args:
+        name: Symbol name, used in error messages.
+        function: The ctypes function for ``name``, with its ``argtypes`` set
+            to ``(void*, const void*, size_t, int)``.
+    """
+
+    def __init__(self, name: str, function: Callable[..., int]) -> None:
+        self.name = name
+        self._function = function
+
+    def __call__(self, dst: int, src: int, nbytes: int, kind: int) -> None:
+        """Copy ``nbytes`` from ``src`` to ``dst`` and wait for the copy.
+
+        Args:
+            dst: Destination address.
+            src: Source address.
+            nbytes: Number of bytes to copy.
+            kind: A ``cudaMemcpyKind`` value, for example
+                :data:`_MEMCPY_DEFAULT`.
+
+        Raises:
+            RuntimeError: If the runtime reports an error.
+        """
+        err = self._function(
+            ctypes.c_void_p(dst),
+            ctypes.c_void_p(src),
+            ctypes.c_size_t(nbytes),
+            ctypes.c_int(kind),
+        )
+        if err != 0:
+            raise RuntimeError(f"{self.name} failed with error code {err}")
+
+
+def _load_gpu_memcpy(
+    hip_version: str | None,
+    cuda_version: str | None,
+    load_library: Callable[[str, Sequence[str]], ctypes.CDLL | None],
+) -> _GpuMemcpy | None:
+    """Bind the memcpy of the runtime this PyTorch build uses.
+
+    Args:
+        hip_version: ``torch.version.hip``.
+        cuda_version: ``torch.version.cuda``.
+        load_library: :func:`runtime_libs.load_runtime_library`, injectable
+            for tests.
+
+    Returns:
+        ``hipMemcpy`` for ROCm builds, ``cudaMemcpy`` for CUDA builds, or
+        ``None`` for CPU-only builds or when the runtime cannot be loaded.
+    """
+    fallbacks: list[str]
+    if hip_version:
+        stem, symbol = "libamdhip64", "hipMemcpy"
+        fallbacks = ["libamdhip64.so"]
+    elif cuda_version:
+        stem, symbol = "libcudart", "cudaMemcpy"
+        found = ctypes.util.find_library("cudart")
+        fallbacks = [found, "libcudart.so"] if found else ["libcudart.so"]
+    else:
+        return None
+    library = load_library(stem, fallbacks)
+    if library is None:
+        return None
+    function = getattr(library, symbol, None)
+    if function is None:
+        return None
+    function.restype = ctypes.c_int
+    function.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_size_t,
+        ctypes.c_int,
+    ]
+    return _GpuMemcpy(symbol, function)
+
+
+_gpu_memcpy_NOT_LOADED = object()
+_gpu_memcpy: _GpuMemcpy | None | object = _gpu_memcpy_NOT_LOADED
+
+
+def _get_gpu_memcpy() -> _GpuMemcpy | None:
+    """Return the cached GPU runtime memcpy, or ``None`` for the CPU fallback."""
+    global _gpu_memcpy
+    if _gpu_memcpy is _gpu_memcpy_NOT_LOADED:
+        _gpu_memcpy = _load_gpu_memcpy(
+            getattr(torch.version, "hip", None),
+            getattr(torch.version, "cuda", None),
+            load_runtime_library,
+        )
+    return _gpu_memcpy  # type: ignore[return-value]
 
 
 def _tensor_from_ptr(
@@ -104,7 +179,7 @@ def _tensor_from_ptr(
         For CPU: always zero-copy via ctypes + torch.frombuffer.
         For CUDA: zero-copy via torch._C._construct_storage_from_data_pointer
                   (PyTorch >= 2.0) or __cuda_array_interface__, with a
-                  cudaMemcpy D2D fallback.
+                  device-to-device runtime memcpy fallback.
         For MUSA: a non-owning view created from external device storage.
 
     Raises:
@@ -228,32 +303,13 @@ def _tensor_from_cuda_ptr(
     except Exception:
         pass
 
-    # Strategy 2: cudaMemcpy Device-to-Device (Fallback)
-    libcudart = _get_copy_lib()
-    if libcudart is None:
-        raise RuntimeError("Failed to load libcudart/libamdhip")
-
-    cudaMemcpy = libcudart.cudaMemcpy
-    cudaMemcpy.restype = ctypes.c_int
-    cudaMemcpy.argtypes = [
-        ctypes.c_void_p,
-        ctypes.c_void_p,
-        ctypes.c_size_t,
-        ctypes.c_int,
-    ]
-    _MEMCPY_D2D = 3
+    # Strategy 2: device-to-device copy with the runtime's memcpy (fallback)
+    gpu_memcpy = _get_gpu_memcpy()
+    if gpu_memcpy is None:
+        raise RuntimeError("Failed to load the CUDA/HIP runtime used by PyTorch")
 
     dst = torch.empty(numel, dtype=dtype, device=device)
-
-    err = cudaMemcpy(
-        ctypes.c_void_p(dst.data_ptr()),
-        ctypes.c_void_p(ptr),
-        ctypes.c_size_t(total_bytes),
-        ctypes.c_int(_MEMCPY_D2D),
-    )
-    if err != 0:
-        raise RuntimeError(f"cudaMemcpy D2D failed with error code {err}.")
-
+    gpu_memcpy(dst.data_ptr(), ptr, total_bytes, _MEMCPY_DEVICE_TO_DEVICE)
     return dst.view(*shape)
 
 
@@ -2268,13 +2324,14 @@ def lmcache_memcpy_async(
     Python fallback for lmcache_memcpy_async.
 
     - Tensor mode (non-CUDA devices like HPU): uses .to(device) + copy_()
-    - Pointer mode with libcudart: uses synchronous cudaMemcpy (cudaMemcpyDefault)
-    - Pointer mode without libcudart: uses CPU tensor copy
+    - Pointer mode on a CUDA or ROCm build: the synchronous memcpy of the
+      runtime PyTorch uses (``cudaMemcpy`` or ``hipMemcpy``, kind Default)
+    - Pointer mode on a CPU-only build: uses CPU tensor copy
 
     Unlike the C++ version (which uses cudaMemcpyAsync and must split copies
     at cudaHostRegister boundaries), this Python fallback does NOT need
     alignment-based chunking because:
-    - cudaMemcpy (synchronous) handles cross-cudaHostRegister boundaries
+    - a synchronous runtime memcpy handles cross-host-register boundaries
       internally via staging buffers
     - CPU tensor copy has no alignment constraints
     - Tensor mode bypasses raw pointers entirely
@@ -2328,21 +2385,11 @@ def lmcache_memcpy_async(
             "or both torch.Tensor (tensor mode)"
         )
 
-    libcudart = _get_copy_lib()
-    if libcudart is not None and hasattr(libcudart, "cudaMemcpy"):
-        try:
-            # Synchronous cudaMemcpy handles cross-cudaHostRegister boundaries
-            # internally — no manual alignment splitting needed.
-            ret = libcudart.cudaMemcpy(
-                ctypes.c_void_p(dest),
-                ctypes.c_void_p(src),
-                ctypes.c_size_t(nbytes),
-                ctypes.c_int(4),  # cudaMemcpyDefault
-            )
-            if ret != 0:
-                raise RuntimeError(f"cudaMemcpy failed with error code {ret}")
-        except AttributeError:
-            raise
+    gpu_memcpy = _get_gpu_memcpy()
+    if gpu_memcpy is not None:
+        # A synchronous runtime memcpy handles host-register boundaries
+        # internally, so no manual alignment splitting is needed.
+        gpu_memcpy(dest, src, nbytes, _MEMCPY_DEFAULT)
     else:
         # Pure CPU copy — no alignment constraints.
         _copy_bytes_with_tensor(dest, src, nbytes)

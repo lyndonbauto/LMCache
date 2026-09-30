@@ -77,7 +77,7 @@ def _build_backend_params() -> list:
         except ImportError:
             pass
 
-        if _py_ops._get_copy_lib() is not None:
+        if _py_ops._get_gpu_memcpy() is not None:
             params.append(
                 pytest.param(("cuda_py_ops", _py_ops, "cuda"), id="cuda_cuda_py_ops")
             )
