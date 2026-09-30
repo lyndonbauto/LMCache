@@ -8,7 +8,8 @@
 # (default "fail", so a bad load errors instead of silently recomputing),
 # RESTART_SERVER_BEFORE_WARM=1 (wait for L2 writes to settle, then restart
 # the LMCache server between the two sends, so the warm hit must come from
-# L2; L2_NAMESPACE names the Aerospike namespace, default lmcache).
+# L2; L2_NAMESPACE names the Aerospike namespace, default lmcache;
+# RESTART_DOWNTIME_SECONDS keeps the server down that long, default 0).
 set -u
 MODEL=$1; CORPUS=$2; OUT=$3; TAG=$4; LW=$5; SETS=${6:-}
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -73,7 +74,11 @@ if [ "${RESTART_SERVER_BEFORE_WARM:-0}" = 1 ]; then
     || echo "warning: L2 writes had not settled"
   echo "=== $TAG restarting the LMCache server (L1 is lost) $(date -u +%T)"
   registrations=$(grep -c "Registered KV cache" "$OUT/lmcache_$TAG.log")
-  stop_server; start_server || exit 1
+  stop_server
+  # vLLM notices a restart only if a heartbeat fails while the server is
+  # down; a restart shorter than the heartbeat interval goes unnoticed.
+  sleep "${RESTART_DOWNTIME_SECONDS:-0}"
+  start_server || exit 1
   # vLLM re-registers its KV cache on its next heartbeat; until then every
   # lookup misses, which would make the warm send a recompute.
   for _ in $(seq 120); do
