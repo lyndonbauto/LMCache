@@ -157,6 +157,9 @@ PYHARNESS_SOURCES := \
 
 .PHONY: all test logic logic-test pyharness efa-probe clean
 
+# conftest.py runs a bare `make`, which builds the first target in the file.
+.DEFAULT_GOAL := all
+
 pyharness: $(PYHARNESS_SOURCES) | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -shared -fPIC $(INCLUDES) \
 		$$($(PYTHON) -m pybind11 --includes) $(PYHARNESS_SOURCES) \
