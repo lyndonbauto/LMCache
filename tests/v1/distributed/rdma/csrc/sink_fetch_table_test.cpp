@@ -179,16 +179,13 @@ void test_malformed_plans_are_refused() {
       [&] { table.begin({{"k", 0, kWindowBytes - 8, 16}}); },
       "a slot crossing the window's end");
   check_throws<std::invalid_argument>(
-      [&] {
-        table.begin({{"a", 0, 0, 8}, {"b", 0, kWindowBytes, 8}});
-      },
+      [&] { table.begin({{"a", 0, 0, 8}, {"b", 0, kWindowBytes, 8}}); },
       "a slot in a different window from the first");
   check_throws<std::invalid_argument>(
       [&] { table.begin({{"k", 0, 2 * kWindowBytes, 8}}); },
       "a slot past the last window");
-  check_throws<PlanTooLargeError>(
-      [&] { table.begin(plan({0, 0, 0, 0, 0})); },
-      "more slots than one fetch carries");
+  check_throws<PlanTooLargeError>([&] { table.begin(plan({0, 0, 0, 0, 0})); },
+                                  "more slots than one fetch carries");
   check(!table.has_active_request(), "a refused plan leaves nothing active");
   table.begin({{"k", 0, kWindowBytes - 16, 16}});
 }
@@ -242,8 +239,7 @@ void test_stale_batch_after_generation_wraps() {
   table.on_slot_result(reused.generation, 0, true, old_token);
   check(!table.is_layer_ready(0, reused.generation),
         "the old batch's result is dropped");
-  table.on_slot_result(reused.generation, 0, true,
-                       reused.batches[0].token);
+  table.on_slot_result(reused.generation, 0, true, reused.batches[0].token);
   check(table.is_layer_ready(0, reused.generation),
         "the new batch's result counts");
 }

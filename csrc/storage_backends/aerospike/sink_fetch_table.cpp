@@ -32,10 +32,9 @@ BegunFetch SinkFetchTable::begin(const std::vector<SinkSlot>& slots) {
     throw std::invalid_argument("sink fetch: a plan needs at least one slot");
   }
   if (slots.size() > max_slots_) {
-    throw PlanTooLargeError("sink fetch: plan has " +
-                            std::to_string(slots.size()) +
-                            " slots but one fetch carries at most " +
-                            std::to_string(max_slots_));
+    throw PlanTooLargeError(
+        "sink fetch: plan has " + std::to_string(slots.size()) +
+        " slots but one fetch carries at most " + std::to_string(max_slots_));
   }
 
   const size_t window = slots.front().offset / window_bytes_;
@@ -66,12 +65,12 @@ BegunFetch SinkFetchTable::begin(const std::vector<SinkSlot>& slots) {
     }
     if (slot.offset < window_begin || slot.offset > window_end ||
         slot.length > window_end - slot.offset) {
-      throw std::invalid_argument(
-          "sink fetch: slot " + std::to_string(i) + " [" +
-          std::to_string(slot.offset) + ", +" + std::to_string(slot.length) +
-          ") leaves window " + std::to_string(window) + " [" +
-          std::to_string(window_begin) + ", " + std::to_string(window_end) +
-          ")");
+      throw std::invalid_argument("sink fetch: slot " + std::to_string(i) +
+                                  " [" + std::to_string(slot.offset) + ", +" +
+                                  std::to_string(slot.length) +
+                                  ") leaves window " + std::to_string(window) +
+                                  " [" + std::to_string(window_begin) + ", " +
+                                  std::to_string(window_end) + ")");
     }
     auto [it, inserted] = slots_per_layer.try_emplace(slot.layer_id);
     if (inserted) {
@@ -84,10 +83,9 @@ BegunFetch SinkFetchTable::begin(const std::vector<SinkSlot>& slots) {
 
   std::lock_guard<std::mutex> lock(mu_);
   if (windows_[window].generation != kNoGeneration) {
-    throw std::runtime_error(
-        "sink fetch: window " + std::to_string(window) +
-        " already has fetch generation " +
-        std::to_string(windows_[window].generation));
+    throw std::runtime_error("sink fetch: window " + std::to_string(window) +
+                             " already has fetch generation " +
+                             std::to_string(windows_[window].generation));
   }
 
   BegunFetch begun;
@@ -116,8 +114,7 @@ void SinkFetchTable::on_slot_result(uint16_t generation, uint32_t slot_index,
   if (fetch == nullptr || slot_index >= fetch->slots.size()) {
     return;
   }
-  if (token != 0 &&
-      (token < fetch->first_token || token > fetch->last_token)) {
+  if (token != 0 && (token < fetch->first_token || token > fetch->last_token)) {
     return;
   }
   SlotState& state = fetch->slots[slot_index];

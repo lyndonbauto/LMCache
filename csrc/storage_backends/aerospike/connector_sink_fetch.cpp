@@ -73,9 +73,8 @@ void AerospikeSinkFetchDriver::initialize(aerospike* client) {
                                std::to_string(registration_.window_count) +
                                " is above " + std::to_string(kMaxWindows));
     }
-    const size_t range_bytes =
-        static_cast<size_t>(registration_.window_count) *
-        registration_.window_bytes;
+    const size_t range_bytes = static_cast<size_t>(registration_.window_count) *
+                               registration_.window_bytes;
     if (range_bytes > registration_.size) {
       throw std::runtime_error(
           "Aerospike sink fetch: " +
@@ -119,8 +118,8 @@ void AerospikeSinkFetchDriver::initialize(aerospike* client) {
     // would let the meta record expire under still-live segments.
     batch_policy_.read_touch_ttl_percent = -1;
 
-    table_ = std::make_unique<sink::SinkFetchTable>(
-        registration_.window_bytes, registration_.window_count);
+    table_ = std::make_unique<sink::SinkFetchTable>(registration_.window_bytes,
+                                                    registration_.window_count);
     client_ = client;
     sink_ = created;
     init_error_.clear();
@@ -184,10 +183,9 @@ void AerospikeSinkFetchDriver::set_object_group_layouts(
 uint16_t AerospikeSinkFetchDriver::issue(std::vector<sink::SinkSlot> slots) {
   for (size_t i = 0; i < slots.size(); ++i) {
     if (slots[i].length > std::numeric_limits<uint32_t>::max()) {
-      throw std::invalid_argument("Aerospike sink fetch: slot " +
-                                  std::to_string(i) + " length " +
-                                  std::to_string(slots[i].length) +
-                                  " does not fit a sink row");
+      throw std::invalid_argument(
+          "Aerospike sink fetch: slot " + std::to_string(i) + " length " +
+          std::to_string(slots[i].length) + " does not fit a sink row");
     }
   }
   if (!is_ready()) {
@@ -357,8 +355,8 @@ std::vector<as_status> AerospikeSinkFetchDriver::read_rows(
   std::vector<as_status> results;
   results.reserve(slot_indices.size());
   for (uint32_t i = 0; i < records->list.size; ++i) {
-    const auto* row =
-        static_cast<const as_batch_read_record*>(as_vector_get(&records->list, i));
+    const auto* row = static_cast<const as_batch_read_record*>(
+        as_vector_get(&records->list, i));
     results.push_back(row->result);
   }
   as_batch_records_destroy(records);

@@ -46,8 +46,7 @@ class AerospikeSinkFetchDriver {
   ~AerospikeSinkFetchDriver();
 
   AerospikeSinkFetchDriver(const AerospikeSinkFetchDriver&) = delete;
-  AerospikeSinkFetchDriver& operator=(const AerospikeSinkFetchDriver&) =
-      delete;
+  AerospikeSinkFetchDriver& operator=(const AerospikeSinkFetchDriver&) = delete;
 
   // Create the sink over the window range, registering it with every node,
   // and start the batch workers.

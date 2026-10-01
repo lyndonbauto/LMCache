@@ -985,9 +985,7 @@ class StorageManager:
             LayerwiseContractError: If no L2 adapter has a ready pipelined
                 path, with each adapter's reason.
         """
-        _, adapter = self._first_ready_pipelined_adapter(
-            "a pipelined fetch slot limit"
-        )
+        _, adapter = self._first_ready_pipelined_adapter("a pipelined fetch slot limit")
         return adapter.pipelined_max_slots_per_request()
 
     def pipelined_adapter_id(self) -> int:
