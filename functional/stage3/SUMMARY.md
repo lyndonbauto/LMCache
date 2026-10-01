@@ -41,6 +41,14 @@ the one S1 diagnostic.
 
 ### D-17 (S1): wrong output after a failed layerwise load under recompute
 
+> **Narrowed (gpu-d17-narrow, 2026-10-01): the cause is a vLLM bug, not
+> LMCache.** It is upstream [vllm#49250](https://github.com/vllm-project/vllm/issues/49250).
+> The V2 runner does not rewind its GPU `num_computed_tokens` for a recompute, and
+> async scheduling does not roll back output placeholders. With vLLM fixed (V1
+> runner, or V2 with a one-change scratch patch, async off), the same fault gives
+> exact output. The hypothesis below about late copies is ruled out. See
+> [D17-NARROWING.md](D17-NARROWING.md).
+
 - **Trigger.** Any pipelined retrieve that fails after the forward pass has
   started waiting on layers. In pipe05 a segment record was deleted, so layer
   2 never arrives and the whole-object fallback raises "1 deferred object(s)
