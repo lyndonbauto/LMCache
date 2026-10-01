@@ -336,8 +336,12 @@ published, and only layer-at-a-time fetch is lost.
 
 A plan names records by **user key**. `RecordKeys` resolves a slot to a
 record index via `record_index_for` and forms the key the way `connector.cpp`
-does (`<cache key>|m` for a one-record object, `<cache key>|s|<index>`
-otherwise). Turning a key into a digest is the client's job:
+does (`<cache key>|m` for a one-record object, `<cache key>|s|<wid>|<index>`
+otherwise, where `<wid>` is the write ID the object's meta record names and
+`build_request_fetch` reads it with `read_write_ids` before planning; `wid`
+is empty for objects stored before the D-14 fix, giving `<cache key>|s|<index>`; see
+[aerospike_concurrent_writes.md](../distributed/l2_adapters/aerospike_concurrent_writes.md)).
+Turning a key into a digest is the client's job:
 `issue_pipelined_fetch_by_slots` calls `record_digest_hex` for each slot and
 hands the session the digests it has always taken. Python never hashes --
 most OpenSSL builds disable RIPEMD-160 -- and when the transport stops using

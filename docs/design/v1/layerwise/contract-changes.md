@@ -11,6 +11,44 @@ defect coming back.
 
 ---
 
+## Sources read write IDs; records are named by the write that stored them (D-14)
+
+**Who is affected:** every `LayerArrivalSource` implementation (new method);
+callers of `build_request_fetch` (new keyword argument) and of `RecordKeys`
+(new positional argument); anything that names segment records itself.
+
+**What changed.**
+
+- `LayerArrivalSource.read_write_ids(cache_keys) -> Mapping[str, str]`
+  returns the write ID each object's meta record names: 16 hex digits for a
+  sharded object, `""` for an inline object or one written before write IDs
+  existed, and no entry when there is no meta record. It raises
+  `LayerwiseContractError` when the backend cannot read. `RecordWriteIdReader`
+  is the one-method protocol for it. `AerospikeLayerArrivalSource` calls the
+  native `read_write_ids` (one batch read of the meta records' `state` and
+  `wid` bins). The fakes return `""` for every key.
+- `build_request_fetch(..., keys_to_fetch=None, *, write_ids)` reads every
+  planned object's write ID once, before planning. `run_pipelined_retrieve`
+  passes its `source`. A failed read, or an object without a meta record,
+  refuses the retrieve (`PipelinedRetrieveRefused`, window released
+  `NEVER_FETCHED`), so it loads whole objects.
+- `RecordKeys(layout, max_record_bytes, cache_keys, write_ids)` names a
+  sharded object's records `<key>|s|<wid>|<i>`, or `<key>|s|<i>` when `wid` is
+  `""`. A cache key missing from `write_ids` raises `KeyError`.
+
+**What breaks.** Sources without `read_write_ids` (the protocol is
+`runtime_checkable`); `RecordKeys(...)` with three arguments;
+`build_request_fetch` without `write_ids`; tests that build `<key>|s|<i>`
+for objects stored after this change.
+
+**Why.** Two concurrent stores of one key used to overwrite each other's
+fixed-key segments, so a reader could get a mix (D-14, T-FLT-10: 141 and 145
+of 1,000 rounds). Each store now writes its own segment keys and a
+create-only meta record names them. The planner never read the meta record,
+so it cannot name the segments without this read. It costs one batch round
+trip per pipelined fetch. Design record:
+[aerospike_concurrent_writes.md](../distributed/l2_adapters/aerospike_concurrent_writes.md).
+
 ## The slot ceiling raises `PlanTooLargeError`; the timeouts are one budget
 
 **Who is affected:** anyone catching the slot-ceiling error as `ValueError`;
