@@ -22,14 +22,18 @@ no kv-sink, so CI's Docker server does not run these. On the Soft-RoCE VM::
     pytest tests/v1/distributed/test_aerospike_pipelined_rdma_integration.py
 
 On AWS EFA, run with ``RDMA_TRANSPORT=SRD RDMA_DEVICE=<efa device>``.
+``RUN_AEROSPIKE_SLOW_INTEGRATION=1`` also runs the region-release test, which
+opens more client lifetimes than the server has region slots (about 17
+minutes on EFA).
 """
 
 # Standard
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
-from multiprocessing import shared_memory
+from multiprocessing import resource_tracker, shared_memory
 import os
 import select
+import sys
 import time
 import uuid
 
@@ -96,6 +100,7 @@ AEROSPIKE_HOST = os.environ.get("AEROSPIKE_TEST_HOST", "127.0.0.1")
 AEROSPIKE_PORT = int(os.environ.get("AEROSPIKE_TEST_PORT", "3000"))
 AEROSPIKE_NAMESPACE = os.environ.get("AEROSPIKE_TEST_NAMESPACE", "lmcache")
 RUN_AEROSPIKE_IT = os.environ.get("RUN_AEROSPIKE_INTEGRATION") == "1"
+RUN_SLOW_IT = os.environ.get("RUN_AEROSPIKE_SLOW_INTEGRATION") == "1"
 RDMA_DEVICE = os.environ.get("RDMA_DEVICE", "")
 RDMA_GID_INDEX = int(os.environ.get("RDMA_GID_INDEX", "0"))
 #: ``RC`` (Soft-RoCE, the default) or ``SRD`` (AWS EFA).
@@ -114,6 +119,27 @@ REOPEN_LIFETIMES = 3
 LATE_WRITE_WATCH_SECONDS = 5.0
 #: ``MAX_REGIONS`` in the server's ``as/src/base/kv_sink.c``.
 SERVER_MAX_REGIONS = 1024
+
+
+def _attach_shared_memory(name: str) -> shared_memory.SharedMemory:
+    """Map an existing shared-memory segment without taking ownership of it.
+
+    Args:
+        name: The segment's name, without the leading slash.
+
+    Returns:
+        A mapping that this process will not unlink when it exits.
+
+    Note:
+        Before Python 3.13 an attached segment is registered with the
+        resource tracker, which unlinks it at exit and warns; unregistering
+        it leaves the segment to its creator, as ``track=False`` does on 3.13.
+    """
+    if sys.version_info >= (3, 13):
+        return shared_memory.SharedMemory(name=name, track=False)
+    segment = shared_memory.SharedMemory(name=name)
+    resource_tracker.unregister(f"/{name}", "shared_memory")
+    return segment
 
 
 def _aerospike_available() -> bool:
@@ -443,14 +469,17 @@ def test_no_server_write_reaches_l1_after_close(
     """
     shm_name = f"lmcache_l1_pool_it_{uuid.uuid4().hex[:12]}"
     built = _build_manager(set_name, shm_name=shm_name)
-    l1_pages = shared_memory.SharedMemory(name=shm_name, track=False)
+    l1_pages = _attach_shared_memory(shm_name)
     try:
         try:
             retrieved = _retrieve(built)
         finally:
             built.close()
         if retrieved.completion is RetrieveCompletion.PIPELINED:
-            pytest.skip("the fetch did not fall back; needs a cold kv-sink server")
+            pytest.skip(
+                "the fetch did not fall back, so no server write was left "
+                "outstanding at close()"
+            )
         window = l1_pages.buf[:WINDOW_BYTES]
         window[:] = b"\xab" * WINDOW_BYTES
         time.sleep(LATE_WRITE_WATCH_SECONDS)
@@ -463,6 +492,11 @@ def test_no_server_write_reaches_l1_after_close(
         l1_pages.close()
 
 
+@pytest.mark.skipif(
+    not RUN_SLOW_IT,
+    reason="opens SERVER_MAX_REGIONS + 1 client lifetimes "
+    "(set RUN_AEROSPIKE_SLOW_INTEGRATION=1)",
+)
 def test_closing_releases_the_servers_region(set_name: str) -> None:
     """More client lifetimes than the server has region slots all register.
 
