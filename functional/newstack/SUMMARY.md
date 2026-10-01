@@ -4,7 +4,7 @@
 fetch) is merged into `prototype-stage1` with D-14 intact, and the merged
 tree passes every CPU suite against the new server `046e8558d` and client
 `523d51ea` over RC on `rxe0`, with no failures. Worker `cpu-newstack`,
-2026-10-01 22:14-23:10 UTC, containers `lmc-newstack` and `aero-kvsink-bp`
+2026-10-01 22:14-22:55 UTC, containers `lmc-newstack` and `aero-kvsink-bp`
 (no GPU). Versions in [`VERSIONS.md`](VERSIONS.md), host changes in
 [`CHANGES.md`](CHANGES.md), scripts in [`scripts/`](scripts/).
 
@@ -41,7 +41,8 @@ D-14's planner/request-fetch unit tests. A follow-up docs commit fixes
 | `it1` | `tests/v1/layerwise`, `tests/v1/distributed/rdma`, every `test_aerospike_*.py`, integration on | **478 passed, 14 skipped, 0 failed** |
 | `wide1` | `tests/v1/layerwise` + all of `tests/v1/distributed`, integration on | **1,447 passed, 92 skipped, 0 failed** |
 | `pipe1` | `test_aerospike_pipelined_rdma_integration.py` on a just-started server | 3 passed, 2 skipped; no warm-up needed |
-| `slow1` | `test_closing_releases_the_servers_region` (`RUN_AEROSPIKE_SLOW_INTEGRATION=1`, server max regions + 1 lifetimes) | see the result line below |
+| `slow1` | `test_closing_releases_the_servers_region` (`RUN_AEROSPIKE_SLOW_INTEGRATION=1`, 1,025 client lifetimes against the server's 1,024 regions) | **1 passed** in 17 min 25 s (upstream on EFA: about 17 min); every lifetime registered, deregistered and freed its region |
+| `pipe2` | Pipelined RDMA IT after a `kvsink_restart` through `host_actions.sh` with `kvsink_bp_env.sh` (`scripts/harness_check.sh`) | 3 passed, 2 skipped |
 
 Upstream reported 620 passed / 12 skipped on Soft-RoCE RC without naming
 the file set, so the counts are not directly comparable; there are no
