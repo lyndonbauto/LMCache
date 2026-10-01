@@ -6,10 +6,15 @@ says. Requests are sequential (batch size 1). For every prompt the result
 holds the completion text, its token IDs, the top-5 logprobs at every
 position and the prompt token count vLLM reports.
 
+With ``--metrics-urls``, each result also holds ``metrics_delta``: how much
+each counter in ``TRACKED_COUNTERS`` (summed over its labels) grew while that
+one request ran, so per-request cache hits can be read without parsing logs.
+
 Usage::
 
     python client.py --corpus corpus_llama.json --out baseline_run1.json \
-        [--sets P-exact,P-shared] [--salt tenant-a] [--url http://localhost:8000]
+        [--sets P-exact,P-shared] [--salt tenant-a] [--url http://localhost:8000] \
+        [--metrics-urls http://localhost:8000/metrics,http://localhost:8080/metrics]
 """
 
 # Standard
@@ -21,10 +26,48 @@ import urllib.request
 
 SEED = 0
 
+TRACKED_COUNTERS = (
+    "vllm:external_prefix_cache_queries_total",
+    "vllm:external_prefix_cache_hits_total",
+    "vllm:prompt_tokens_total",
+    "lmcache_mp_lookup_requested_tokens_total",
+    "lmcache_mp_lookup_hit_tokens_total",
+    "lmcache_mp_lookup_hit_l1_tokens_total",
+    "lmcache_mp_lookup_hit_l2_tokens_total",
+    "lmcache_mp_num_submitted_retrieves_total",
+    "lmcache_mp_num_finished_retrieves_total",
+    "lmcache_mp_num_deferred_retrieves_total",
+    "lmcache_mp_l2_prefetch_lookup_requests_total",
+    "lmcache_mp_l2_prefetch_hit_chunks_total",
+)
+
 
 def _token_id(token: str) -> int:
     """Parse vLLM's ``token_id:<n>`` token representation."""
     return int(token.split(":", 1)[1])
+
+
+def scrape_counters(urls: list[str]) -> dict[str, float]:
+    """Return every tracked counter, summed over its labels, from all URLs.
+
+    Args:
+        urls: Prometheus text endpoints to read.
+
+    Returns:
+        ``{counter_name: value}`` for each name in ``TRACKED_COUNTERS``; a
+        counter no endpoint exposes yet reads 0.
+    """
+    totals = dict.fromkeys(TRACKED_COUNTERS, 0.0)
+    for url in urls:
+        with urllib.request.urlopen(url, timeout=30) as response:
+            text = response.read().decode()
+        for line in text.splitlines():
+            if not line or line.startswith("#"):
+                continue
+            name = line.split("{", 1)[0].split(" ", 1)[0]
+            if name in totals:
+                totals[name] += float(line.rsplit(" ", 1)[1])
+    return totals
 
 
 def complete(
@@ -41,7 +84,9 @@ def complete(
 
     Returns:
         ``text``, ``token_ids``, ``top_logprobs`` (one ``{token_id: logprob}``
-        dict per position), ``prompt_tokens``, ``finish_reason``, ``latency_s``.
+        dict per position), ``prompt_tokens``, ``finish_reason``, ``latency_s``
+        and ``request_id`` (vLLM's ``cmpl-...`` id, the prefix of the
+        session id in LMCache's logs).
     """
     body: dict[str, Any] = {
         "model": model,
@@ -75,6 +120,7 @@ def complete(
         "prompt_tokens": reply["usage"]["prompt_tokens"],
         "finish_reason": choice["finish_reason"],
         "latency_s": round(latency, 4),
+        "request_id": reply["id"],
     }
 
 
@@ -86,7 +132,13 @@ def main() -> None:
     parser.add_argument("--sets", default="", help="comma-separated; default all")
     parser.add_argument("--salt", default="")
     parser.add_argument("--tag", default="")
+    parser.add_argument(
+        "--metrics-urls",
+        default="",
+        help="comma-separated Prometheus endpoints; record per-request deltas",
+    )
     args = parser.parse_args()
+    metrics_urls = [u for u in args.metrics_urls.split(",") if u]
     with open(args.corpus) as f:
         corpus = json.load(f)
     with urllib.request.urlopen(f"{args.url}/v1/models", timeout=30) as response:
@@ -95,9 +147,13 @@ def main() -> None:
     results: dict[str, Any] = {}
     for name in wanted:
         for prompt in corpus["sets"][name]:
+            before = scrape_counters(metrics_urls) if metrics_urls else {}
             result = complete(
                 args.url, model, prompt["token_ids"], corpus["max_tokens"], args.salt
             )
+            if metrics_urls:
+                after = scrape_counters(metrics_urls)
+                result["metrics_delta"] = {k: after[k] - before[k] for k in after}
             if result["prompt_tokens"] != prompt["n_tokens"]:
                 raise RuntimeError(
                     f"{prompt['id']}: server saw {result['prompt_tokens']} prompt "

@@ -13,6 +13,10 @@
 # L2; L2_NAMESPACE names the Aerospike namespace, default lmcache;
 # RESTART_DOWNTIME_SECONDS keeps the server down that long, default 0;
 # RESTART_AFTER_PING=1 restarts right after a worker heartbeat).
+# Every send records per-request vLLM and LMCache counter deltas
+# (client.py --metrics-urls). L2_STATS=1 also dumps the Aerospike namespace
+# statistics before and after each send (l2_stats.py) to
+# $OUT/l2stats_<tag>_<cold|warm>_<before|after>.json.
 set -u
 MODEL=$1; CORPUS=$2; OUT=$3; TAG=$4; LW=$5; SETS=${6:-}
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -69,8 +73,17 @@ done
 curl -sf http://localhost:8000/health >/dev/null || { echo "vLLM did not come up"; exit 1; }
 echo "=== $TAG serving $(date -u +%T)"
 SET_ARG=""; [ -n "$SETS" ] && SET_ARG="--sets $SETS"
+METRICS_URLS=http://localhost:8000/metrics,http://localhost:8080/metrics
+l2_dump() {
+  [ "${L2_STATS:-0}" = 1 ] || return 0
+  python "$HERE/l2_stats.py" dump --namespace "${L2_NAMESPACE:-lmcache}" \
+    --out "$OUT/l2stats_${TAG}_$1_$2.json"
+}
+l2_dump cold before
 python "$HERE/client.py" --corpus "$CORPUS" --out "$OUT/${TAG}_cold.json" --tag "${TAG}_cold" $SET_ARG \
+  --metrics-urls "$METRICS_URLS" \
   || { echo "cold send failed"; exit 1; }
+l2_dump cold after
 sleep 3
 if [ "${RESTART_SERVER_BEFORE_WARM:-0}" = 1 ]; then
   python "$HERE/wait_l2_settle.py" --namespace "${L2_NAMESPACE:-lmcache}" \
@@ -103,7 +116,10 @@ if [ "${RESTART_SERVER_BEFORE_WARM:-0}" = 1 ]; then
   echo "=== $TAG vLLM re-registered $(date -u +%T), $(( $(date +%s) - restarted_at )) s after the server came back"
   sleep 5
 fi
+l2_dump warm before
 python "$HERE/client.py" --corpus "$CORPUS" --out "$OUT/${TAG}_warm.json" --tag "${TAG}_warm" $SET_ARG \
+  --metrics-urls "$METRICS_URLS" \
   || { echo "warm send failed"; exit 1; }
+l2_dump warm after
 curl -sf http://localhost:8080/metrics > "$OUT/metrics_$TAG.txt"
 echo "=== $TAG done $(date -u +%T)"
