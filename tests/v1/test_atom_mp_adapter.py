@@ -305,11 +305,15 @@ def test_atom_heartbeat_runs_recovery_before_publishing_health(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A successful ping only restores health after re-registration succeeds."""
-    ping_results = iter([False, True])
+    ping_results = iter([ConnectionError("server down"), True])
 
     def ping(_instance_id: int) -> MessagingFuture[Any]:
         future: MessagingFuture[Any] = MessagingFuture()
-        future.set_result(next(ping_results))
+        result = next(ping_results)
+        if isinstance(result, BaseException):
+            future.set_exception(result)
+        else:
+            future.set_result(result)
         return future
 
     client = MagicMock()
@@ -334,6 +338,42 @@ def test_atom_heartbeat_runs_recovery_before_publishing_health(
     heartbeat._execute()
     assert health_event.is_set() is True
     recover.assert_called_once_with()
+
+
+@pytest.mark.parametrize("recovered", [True, False])
+def test_atom_heartbeat_reregisters_when_the_server_forgot_the_worker(
+    recovered: bool,
+) -> None:
+    """A server that restarted between two pings answers, but without this
+    worker's registration. The worker re-registers in that same cycle; until
+    it has, it is unhealthy, since every request would miss."""
+    client = MagicMock()
+    unregistered: MessagingFuture[Any] = MessagingFuture()
+    unregistered.set_result(False)
+    client.ping.return_value = unregistered
+    health_event = threading.Event()
+    health_event.set()
+    health_during_recovery: list[bool] = []
+
+    def recover() -> bool:
+        health_during_recovery.append(health_event.is_set())
+        return recovered
+
+    unhealthy = MagicMock()
+    heartbeat = atom_adapter._HeartbeatThread(
+        client,
+        health_event,
+        instance_id=7,
+        interval=1.0,
+    )
+    heartbeat.register_recover_callback(recover)
+    heartbeat.register_unhealthy_callback(unhealthy)
+
+    heartbeat._execute()
+
+    assert health_during_recovery == [False]
+    unhealthy.assert_called_once_with()
+    assert health_event.is_set() is recovered
 
 
 @pytest.mark.parametrize("adapter_kind", ["scheduler", "worker"])

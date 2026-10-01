@@ -363,20 +363,38 @@ class L2StoreResult(int):
 
     Encodes both the success flag and bytes transferred in the int
     value: ``>= 0`` means success (value = bytes transferred);
-    ``-1`` means failure.
+    ``-1`` means failure. A failure may also carry the adapter's reason,
+    which does not take part in the int value or comparisons.
 
     Args:
         success: Whether the store task succeeded.
         bytes_transferred: Bytes actually written to L2. Must be >= 0.
+        failure_reason: Why the store failed, as the backend reported it.
+            Ignored on success.
 
     Raises:
         ValueError: If ``bytes_transferred`` is negative.
     """
 
-    def __new__(cls, success: bool, bytes_transferred: int) -> "L2StoreResult":
+    _failure_reason: str
+
+    def __new__(
+        cls, success: bool, bytes_transferred: int, failure_reason: str = ""
+    ) -> "L2StoreResult":
         if bytes_transferred < 0:
             raise ValueError(f"bytes_transferred must be >= 0, got {bytes_transferred}")
-        return super().__new__(cls, bytes_transferred if success else -1)
+        result = super().__new__(cls, bytes_transferred if success else -1)
+        result._failure_reason = "" if success else failure_reason
+        return result
+
+    def failure_reason(self) -> str:
+        """Return why the store failed.
+
+        Returns:
+            The backend's reason, or ``""`` on success or when the adapter
+            gave none.
+        """
+        return self._failure_reason
 
     def is_successful(self) -> bool:
         """Return ``True`` when the store task succeeded."""

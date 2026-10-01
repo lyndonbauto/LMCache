@@ -151,6 +151,33 @@ def _adapter_config(num_workers: int = 2):
 @requires_aerospike
 @requires_native
 class TestAerospikeL2Integration:
+    def test_a_failed_store_reports_the_servers_reason(self):
+        """The store controller logs this reason; Day 1 logged none."""
+        # First Party
+        from lmcache.v1.distributed.l2_adapters.aerospike_l2_adapter import (
+            AerospikeL2AdapterConfig,
+        )
+
+        config = AerospikeL2AdapterConfig(
+            hosts=f"{AEROSPIKE_HOST}:{AEROSPIKE_PORT}",
+            namespace=f"missing_{uuid.uuid4().hex[:8]}",
+            set_name="kv_chunks_aerospike_it",
+            num_workers=1,
+        )
+        adapter = create_l2_adapter_from_registry(config)
+        try:
+            tid = adapter.submit_store_task(
+                [_object_key(9100)], [_make_tensor_obj(64, 1.0)]
+            )
+            _wait_fd(adapter.get_store_event_fd())
+            result = adapter.pop_completed_store_tasks()[tid]
+
+            assert not result.is_successful()
+            assert result.failure_reason(), "the server's error was dropped"
+            print(f"failure reason: {result.failure_reason()}")
+        finally:
+            adapter.close()
+
     def test_store_lookup_load_roundtrip(self):
         adapter = create_l2_adapter_from_registry(_adapter_config())
         try:

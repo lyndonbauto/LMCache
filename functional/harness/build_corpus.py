@@ -222,6 +222,15 @@ def build(model: str, spec: dict[str, Any]) -> dict[str, Any]:
         _registry_prompt(enc, f"H{i}", n, compact=True)
         for i, n in enumerate(sets["P-short"]["lengths"])
     ]
+    if "P-short-v2" in sets:
+        lengths = sets["P-short-v2"]["lengths"]
+        too_long = [n for n in lengths if n + spec["max_tokens"] > chunk]
+        if too_long:
+            raise ValueError(f"P-short-v2 lengths {too_long} + max_tokens > a chunk")
+        out["P-short-v2"] = [
+            _registry_prompt(enc, f"H2-{i}", n, compact=True)
+            for i, n in enumerate(lengths)
+        ]
     out["P-exact"] = [
         _registry_prompt(enc, f"E{i}", c * chunk)
         for i, c in enumerate(sets["P-exact"]["chunks"])

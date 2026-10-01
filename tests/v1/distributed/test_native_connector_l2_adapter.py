@@ -733,6 +733,54 @@ class TestEndToEndWorkflow:
             assert bitmap.test(i) is True
             assert torch.all(load_objs[i].tensor == float(i * 10))
 
+    def test_keys_differing_only_in_object_group_are_stored_apart(self, adapter):
+        """T-LKP-06: a hybrid model stores one object per group for the same
+        chunk. Each is its own entry: looked up, loaded and deleted alone."""
+        full = ObjectKey(
+            chunk_hash=ObjectKey.IntHash2Bytes(7),
+            model_name="hybrid",
+            kv_rank=0,
+            object_group_id=0,
+        )
+        sliding = ObjectKey(
+            chunk_hash=ObjectKey.IntHash2Bytes(7),
+            model_name="hybrid",
+            kv_rank=0,
+            object_group_id=1,
+        )
+        lookup_fd = adapter.get_lookup_and_lock_event_fd()
+        load_fd = adapter.get_load_event_fd()
+
+        def present() -> list[bool]:
+            tid = adapter.submit_lookup_and_lock_task(
+                [full, sliding], {0: _EMPTY_LAYOUT, 1: _EMPTY_LAYOUT}
+            )
+            assert wait_for_event_fd(lookup_fd, timeout=5.0)
+            bitmap = adapter.query_lookup_and_lock_result(tid)
+            return [bitmap.test(0), bitmap.test(1)]
+
+        tid = adapter.submit_store_task([full], [create_memory_obj(64, 1.0)])
+        assert wait_for_event_fd(adapter.get_store_event_fd(), timeout=5.0)
+        assert adapter.pop_completed_store_tasks()[tid].is_successful()
+        assert present() == [True, False]
+
+        tid = adapter.submit_store_task([sliding], [create_memory_obj(64, 2.0)])
+        assert wait_for_event_fd(adapter.get_store_event_fd(), timeout=5.0)
+        assert adapter.pop_completed_store_tasks()[tid].is_successful()
+        assert present() == [True, True]
+
+        loads = [create_memory_obj(64, 0.0), create_memory_obj(64, 0.0)]
+        tid = adapter.submit_load_task([full, sliding], loads)
+        assert wait_for_event_fd(load_fd, timeout=5.0)
+        bitmap = adapter.query_load_result(tid)
+        assert bitmap.test(0) and bitmap.test(1)
+        assert torch.all(loads[0].tensor == 1.0)
+        assert torch.all(loads[1].tensor == 2.0)
+
+        adapter.submit_unlock([full, full, sliding])
+        adapter.delete([full])
+        assert present() == [False, True]
+
 
 # =============================================================================
 # Close Tests

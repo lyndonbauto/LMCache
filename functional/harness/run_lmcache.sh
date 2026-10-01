@@ -4,11 +4,19 @@
 # adapter), vLLM with the MP connector, then the corpus twice at batch size 1:
 # "cold" (computed and stored) and "warm" (served from the cache).
 # Usage: run_lmcache.sh <model> <corpus.json> <out_dir> <tag> <layerwise true|false> [sets]
-# Environment: LMCACHE_SERVER_EXTRA, VLLM_EXTRA, KV_LOAD_FAILURE_POLICY
+# Environment: LMCACHE_SERVER_EXTRA, VLLM_EXTRA, KV_EXTRA (more
+# kv_connector_extra_config entries, e.g. '"lmcache.mp.heartbeat_interval":5'),
+# KV_LOAD_FAILURE_POLICY
 # (default "fail", so a bad load errors instead of silently recomputing),
 # RESTART_SERVER_BEFORE_WARM=1 (wait for L2 writes to settle, then restart
 # the LMCache server between the two sends, so the warm hit must come from
-# L2; L2_NAMESPACE names the Aerospike namespace, default lmcache).
+# L2; L2_NAMESPACE names the Aerospike namespace, default lmcache;
+# RESTART_DOWNTIME_SECONDS keeps the server down that long, default 0;
+# RESTART_AFTER_PING=1 restarts right after a worker heartbeat).
+# Every send records per-request vLLM and LMCache counter deltas
+# (client.py --metrics-urls). L2_STATS=1 also dumps the Aerospike namespace
+# statistics before and after each send (l2_stats.py) to
+# $OUT/l2stats_<tag>_<cold|warm>_<before|after>.json.
 set -u
 MODEL=$1; CORPUS=$2; OUT=$3; TAG=$4; LW=$5; SETS=${6:-}
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -52,7 +60,7 @@ KV="{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\
 \"kv_connector_module_path\":\"lmcache.integration.vllm.lmcache_mp_connector\",\
 \"kv_load_failure_policy\":\"$POLICY\",\"kv_connector_extra_config\":{\
 \"lmcache.mp.host\":\"tcp://localhost\",\"lmcache.mp.port\":6555,\
-\"lmcache.mp.use_layerwise\":$LW}}"
+\"lmcache.mp.use_layerwise\":$LW${KV_EXTRA:+,$KV_EXTRA}}}"
 vllm serve "$MODEL" --host 127.0.0.1 --port 8000 --seed 0 --no-enable-prefix-caching \
   --max-model-len 17408 --gpu-memory-utilization 0.6 ${VLLM_EXTRA:-} \
   --kv-transfer-config "$KV" > "$OUT/vllm_$TAG.log" 2>&1 &
@@ -65,27 +73,53 @@ done
 curl -sf http://localhost:8000/health >/dev/null || { echo "vLLM did not come up"; exit 1; }
 echo "=== $TAG serving $(date -u +%T)"
 SET_ARG=""; [ -n "$SETS" ] && SET_ARG="--sets $SETS"
+METRICS_URLS=http://localhost:8000/metrics,http://localhost:8080/metrics
+l2_dump() {
+  [ "${L2_STATS:-0}" = 1 ] || return 0
+  python "$HERE/l2_stats.py" dump --namespace "${L2_NAMESPACE:-lmcache}" \
+    --out "$OUT/l2stats_${TAG}_$1_$2.json"
+}
+l2_dump cold before
 python "$HERE/client.py" --corpus "$CORPUS" --out "$OUT/${TAG}_cold.json" --tag "${TAG}_cold" $SET_ARG \
+  --metrics-urls "$METRICS_URLS" \
   || { echo "cold send failed"; exit 1; }
+l2_dump cold after
 sleep 3
 if [ "${RESTART_SERVER_BEFORE_WARM:-0}" = 1 ]; then
   python "$HERE/wait_l2_settle.py" --namespace "${L2_NAMESPACE:-lmcache}" \
     || echo "warning: L2 writes had not settled"
   echo "=== $TAG restarting the LMCache server (L1 is lost) $(date -u +%T)"
   registrations=$(grep -c "Registered KV cache" "$OUT/lmcache_$TAG.log")
-  stop_server; start_server || exit 1
-  # vLLM re-registers its KV cache on its next heartbeat; until then every
-  # lookup misses, which would make the warm send a recompute.
+  if [ "${RESTART_AFTER_PING:-0}" = 1 ]; then
+    # Restart right after a worker heartbeat, so a restart shorter than the
+    # heartbeat interval falls between two pings and no ping fails.
+    pings=$(grep -c "PING from instance" "$OUT/lmcache_$TAG.log")
+    for _ in $(seq 1200); do
+      [ "$(grep -c "PING from instance" "$OUT/lmcache_$TAG.log")" -gt "$pings" ] && break
+      sleep 0.1
+    done
+    echo "=== $TAG restarting right after a heartbeat $(date -u +%T)"
+  fi
+  stop_server
+  sleep "${RESTART_DOWNTIME_SECONDS:-0}"
+  start_server || exit 1
+  restarted_at=$(date +%s)
+  # vLLM re-registers its KV cache on its next heartbeat, whether or not a
+  # ping failed while the server was down; until then every lookup misses,
+  # which would make the warm send a recompute.
   for _ in $(seq 120); do
     [ "$(grep -c "Registered KV cache" "$OUT/lmcache_$TAG.log")" -gt "$registrations" ] && break
     sleep 1
   done
   [ "$(grep -c "Registered KV cache" "$OUT/lmcache_$TAG.log")" -gt "$registrations" ] \
     || { echo "vLLM did not re-register with the restarted server"; exit 1; }
-  echo "=== $TAG vLLM re-registered $(date -u +%T)"
+  echo "=== $TAG vLLM re-registered $(date -u +%T), $(( $(date +%s) - restarted_at )) s after the server came back"
   sleep 5
 fi
+l2_dump warm before
 python "$HERE/client.py" --corpus "$CORPUS" --out "$OUT/${TAG}_warm.json" --tag "${TAG}_warm" $SET_ARG \
+  --metrics-urls "$METRICS_URLS" \
   || { echo "warm send failed"; exit 1; }
+l2_dump warm after
 curl -sf http://localhost:8080/metrics > "$OUT/metrics_$TAG.txt"
 echo "=== $TAG done $(date -u +%T)"

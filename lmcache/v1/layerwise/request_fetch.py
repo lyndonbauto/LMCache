@@ -490,6 +490,8 @@ def build_request_fetch(
         by chunk, then object group; node indices follow first appearance.
 
     Raises:
+        PlanTooLargeError: If the fetch needs more slots than one plan can
+            number; fewer chunks per request would fit.
         ValueError: If the keys do not match the model (see
             :func:`request_cache_keys`), the request reads no objects, the
             lease places an object outside its window or over another one,

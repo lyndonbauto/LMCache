@@ -26,6 +26,7 @@ from lmcache.v1.layerwise import (
     RecordingLayerLoadSink,
     ScriptedLayerArrivalSource,
     UnservableLayerArrivalSource,
+    contract,
     pipelined_retrieve,
 )
 from lmcache.v1.layerwise.pipelined_retrieve import (
@@ -249,6 +250,28 @@ def test_a_request_too_large_for_any_window_is_refused() -> None:
 
     assert isinstance(caught.value.__cause__, PlanTooLargeError)
     assert placer.leases == []
+    assert loader.steps() == []
+    assert source.finished_generations() == source.abandoned_generations() == ()
+
+
+def test_a_plan_past_the_slot_ceiling_is_refused_and_released_never_fetched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The window fits, but the plan has more slots than an immediate can number.
+
+    Nothing was issued, so the window is released ``NEVER_FETCHED`` rather
+    than quarantined, and the cause says splitting would help.
+    """
+    monkeypatch.setattr(contract, "MAX_SLOTS_PER_REQUEST", 3)
+    placer = PackingPlacer()
+    source = LandingSource()
+    loader = FakeLoader()
+
+    with pytest.raises(PipelinedRetrieveRefused) as caught:
+        _run(placer, source, loader)
+
+    assert isinstance(caught.value.__cause__, PlanTooLargeError)
+    assert _only_outcome(placer) is LeaseOutcome.NEVER_FETCHED
     assert loader.steps() == []
     assert source.finished_generations() == source.abandoned_generations() == ()
 

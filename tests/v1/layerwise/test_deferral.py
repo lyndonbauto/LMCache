@@ -106,9 +106,10 @@ def test_the_chunk_cap_must_be_positive(max_chunks: int) -> None:
         PipelinedFetchConfig(max_chunks=max_chunks)
 
 
-@pytest.mark.parametrize("seconds", [-0.1, DEFAULT_LAYER_TIMEOUT_SECONDS])
-def test_the_shared_key_wait_must_be_below_the_layer_timeout(seconds: float) -> None:
+def test_the_shared_key_wait_must_not_be_negative() -> None:
     with pytest.raises(ValueError, match="shared_wait_seconds"):
-        PipelinedFetchConfig(
-            shared_keys=SharedKeyPolicy.WAIT, shared_wait_seconds=seconds
-        )
+        PipelinedFetchConfig(shared_keys=SharedKeyPolicy.WAIT, shared_wait_seconds=-0.1)
+
+
+def test_the_pump_waits_for_a_layer_as_long_as_its_default() -> None:
+    assert PipelinedFetchConfig().layer_timeout_seconds == DEFAULT_LAYER_TIMEOUT_SECONDS

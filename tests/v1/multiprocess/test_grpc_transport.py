@@ -526,6 +526,7 @@ def test_register_kv_cache_layerwise_response_survives_grpc_round_trip() -> None
     expected = RegisterKvCacheResponse(
         server_use_layerwise=True,
         layer_event_ipc_handles=[b"event-a", b"event-b"],
+        layer_publish_budget_seconds=3.25,
     )
 
     class _RegisterModule:

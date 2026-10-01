@@ -31,6 +31,7 @@ from lmcache.v1.multiprocess.group_view import (
     expand_engine_block_ids,
 )
 from lmcache.v1.multiprocess.mq import MessagingFuture
+from lmcache.v1.multiprocess.ping import PingOutcome, probe_server
 from lmcache.v1.multiprocess.transfer_context import (
     TransferContext,
     create_transfer_context,
@@ -93,7 +94,9 @@ class ExtraConfigDefault(enum.Enum):
     # ``--use-layerwise``).
     use_layerwise = False
     # Max seconds the worker waits per layer for daemon progress when layerwise
-    # load is enabled (must be positive).
+    # load is enabled. Registration fails unless it exceeds the server's layer
+    # publish budget by 0.5 s: 3.0 s with the pipelined fetch's defaults, 4.0 s
+    # under ``--pipelined-shared-keys wait``, 0 without the pipelined fetch.
     layerwise_wait_timeout_seconds = 5.0
     # Whether the engine allocates its KV cache through the CUDA VMM API
     # (vLLM's ``--enable-cumem-allocator``), so KV registration must use
@@ -305,32 +308,6 @@ def _raise_server_unreachable(server_url: str, timeout: float) -> NoReturn:
     raise ConnectionError(hint) from None
 
 
-def send_ping(
-    req_client: RequestClient,
-    timeout: float,
-    instance_id: int | None = None,
-) -> bool:
-    """Send a PING request and return the result.
-
-    Args:
-        req_client: The request client.
-        timeout: Seconds to wait for the server's response.
-        instance_id: The worker's instance ID so the server can refresh its
-            liveness, or None for an untracked prober (scheduler adapter).
-
-    Returns:
-        True if server is healthy, False on timeout or error.
-    """
-    try:
-        future = req_client.ping(instance_id)
-        return future.result(timeout=timeout)
-    except TimeoutError:
-        return False
-    except Exception:
-        logger.debug("Ping failed with exception", exc_info=True)
-        return False
-
-
 @dataclass
 class ParallelStrategy:
     mla_only: bool
@@ -473,6 +450,11 @@ class HeartbeatThread(PeriodicThread):
     Manages a threading.Event that adapters use to gate operations.
     When unhealthy, the adapter enters degraded mode; if the server
     recovers, the adapter automatically resumes normal operation.
+
+    A server that answers but no longer holds this worker's registration
+    (it restarted between two pings, or reaped the worker) is treated like
+    one that recovered: the recover callback runs, so the worker
+    re-registers instead of every lookup silently missing.
     """
 
     def __init__(
@@ -510,14 +492,20 @@ class HeartbeatThread(PeriodicThread):
             return True
 
         self._recover_callback: Callable[[], bool] = noop
+        self._can_recover_registration = False
+        # Whether the last answered PING said this worker was unregistered,
+        # so a worker that cannot re-register warns once, not every cycle.
+        self._reported_unregistered = False
 
     def register_recover_callback(self, callback: Callable[[], bool]) -> None:
-        """Register a callback fired on the unhealthy->healthy transition.
+        """Register a callback fired when the worker must set up again.
 
-        The callback runs **before** the health event is set. It must
+        That is on the unhealthy->healthy transition, and on every PING the
+        server answers without holding this worker's registration. The
+        callback runs **before** the health event is set. It must
         return ``True`` on success (event will be set) or ``False`` on
         failure (event will stay cleared, and the next heartbeat will
-        invoke the callback again on the next successful PING).
+        invoke the callback again on the next answered PING).
 
         The callback function should NEVER raise exceptions.
 
@@ -532,6 +520,7 @@ class HeartbeatThread(PeriodicThread):
             callback: Zero-arg callable returning a success bool.
         """
         self._recover_callback = callback
+        self._can_recover_registration = True
 
     def _execute(self) -> ThreadRunSummary:
         """Run one heartbeat cycle: ping, recover callback, event update.
@@ -541,7 +530,7 @@ class HeartbeatThread(PeriodicThread):
         UNREGISTER must not re-register a ghost context.
         """
         was_healthy = self._health_event.is_set()
-        healthy = send_ping(
+        outcome = probe_server(
             self._req_client, timeout=self._interval, instance_id=self._instance_id
         )
 
@@ -551,17 +540,35 @@ class HeartbeatThread(PeriodicThread):
                 message="stop requested; skipping health update",
             )
 
-        need_trigger_recover = (
-            healthy and not was_healthy and self._recover_callback is not None
-        )
-
-        # Try to call recover callback
-        if need_trigger_recover:
+        healthy = outcome is not PingOutcome.UNREACHABLE
+        unregistered = outcome is PingOutcome.UNREGISTERED
+        if unregistered and not self._can_recover_registration:
+            if not self._reported_unregistered:
+                logger.warning(
+                    "LMCache server holds no registration for this worker (it "
+                    "restarted or reaped it), and this adapter cannot "
+                    "re-register; its requests will fail until it restarts"
+                )
+        elif unregistered:
+            logger.warning(
+                "LMCache server answered but holds no registration for this "
+                "worker (it restarted or reaped it); triggering recovery callback"
+            )
+            if was_healthy:
+                # Requests would fail against the missing registration.
+                self._health_event.clear()
+                was_healthy = False
+                logger.warning("LMCache server is unhealthy — entering degraded mode")
+            # If the callback fails, it should not become healthy
+            healthy = self._recover_callback()
+        elif healthy and not was_healthy:
             logger.warning(
                 "LMCache server is healthy again, triggering recovery callback"
             )
             # If the callback fails, it should not become healthy
             healthy = self._recover_callback()
+        if outcome is not PingOutcome.UNREACHABLE:
+            self._reported_unregistered = unregistered
 
         if healthy:
             self._health_event.set()

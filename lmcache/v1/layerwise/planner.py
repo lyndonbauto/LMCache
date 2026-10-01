@@ -31,7 +31,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 # Local
-from .contract import MAX_SLOTS_PER_REQUEST, LayerFetchPlan, SlotPlacement
+from .contract import LayerFetchPlan, SlotPlacement
 
 if TYPE_CHECKING:
     # First Party
@@ -919,10 +919,12 @@ class FetchPlanner:
             and no overlaps.
 
         Raises:
+            PlanTooLargeError: If the fetch needs more than
+                ``MAX_SLOTS_PER_REQUEST`` slots (see :class:`LayerFetchPlan`).
+                The transport's own per-fetch limit is checked by the
+                transport, not here.
             ValueError: If the placements cover none of the layout's layers,
-                if the fetch needs more than ``MAX_SLOTS_PER_REQUEST`` slots,
-                or if ``record_keys`` returns an empty key. The transport's
-                own per-fetch limit is checked by the transport, not here.
+                or if ``record_keys`` returns an empty key.
             KeyError: If ``record_keys`` has no record for a slot the fetch
                 needs, which means the write side stored the chunk under a
                 different geometry than this layout describes.
@@ -952,14 +954,6 @@ class FetchPlanner:
                             record_keys,
                         )
                     )
-                    if len(slots) > MAX_SLOTS_PER_REQUEST:
-                        raise ValueError(
-                            f"request needs more than {MAX_SLOTS_PER_REQUEST} "
-                            "slots, which is all one fetch can address; fetch "
-                            "fewer chunks per request or use a coarser "
-                            "readiness granularity"
-                        )
-
         if not slots:
             raise ValueError(
                 "none of the placed object groups hold layers in this layout, "

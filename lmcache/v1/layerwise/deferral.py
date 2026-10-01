@@ -25,6 +25,10 @@ from lmcache.v1.layerwise.request_fetch import ChunkPlacer, FetchModel
 
 logger = init_logger(__name__)
 
+#: Default ceiling on loading a retrieve's deferred objects whole, either
+#: up front or as the fallback after the transport failed part way.
+DEFAULT_WHOLE_LOAD_TIMEOUT_SECONDS = 1.5
+
 
 class SharedKeyPolicy(Enum):
     """What a retrieve does with a deferred key another request is fetching."""
@@ -39,37 +43,80 @@ class SharedKeyPolicy(Enum):
 class PipelinedFetchConfig:
     """The daemon's settings for the pipelined retrieve.
 
+    The three waits are what a retrieve may spend before it publishes its
+    next layer, or its failure, to the worker. The worker waits for each
+    layer only so long and then stops the engine, so their sum is reported
+    to it at registration (see :attr:`layer_publish_budget_seconds`).
+
     Attributes:
         enabled: Whether lookups may defer L2 hits to a pipelined retrieve.
         max_chunks: Most chunks one request may defer. Registration checks
             that one RDMA window holds this many chunks of the model.
         shared_keys: See :class:`SharedKeyPolicy`.
         shared_wait_seconds: How long :attr:`SharedKeyPolicy.WAIT` waits.
+        layer_timeout_seconds: How long the pump waits for any one layer
+            before falling back to whole objects.
+        whole_load_timeout_seconds: How long loading deferred objects whole
+            may take, up front or as that fallback.
 
     Raises:
-        ValueError: If ``max_chunks`` is not positive, or
-            ``shared_wait_seconds`` is negative or not below the pump's
-            per-layer timeout. The worker's wait for the first layer covers
-            both, and it is twice the pump's timeout, so a longer wait would
-            let the worker give up first.
+        ValueError: If ``max_chunks`` is not positive,
+            ``shared_wait_seconds`` is negative, or either timeout is not
+            positive.
     """
 
     enabled: bool = False
     max_chunks: int = 64
     shared_keys: SharedKeyPolicy = SharedKeyPolicy.RECOMPUTE
     shared_wait_seconds: float = 1.0
+    layer_timeout_seconds: float = DEFAULT_LAYER_TIMEOUT_SECONDS
+    whole_load_timeout_seconds: float = DEFAULT_WHOLE_LOAD_TIMEOUT_SECONDS
 
     def __post_init__(self) -> None:
         if self.max_chunks <= 0:
             raise ValueError(
                 f"pipelined max_chunks must be positive, got {self.max_chunks}"
             )
-        if not 0 <= self.shared_wait_seconds < DEFAULT_LAYER_TIMEOUT_SECONDS:
+        if self.shared_wait_seconds < 0:
             raise ValueError(
-                "pipelined shared_wait_seconds must be in "
-                f"[0, {DEFAULT_LAYER_TIMEOUT_SECONDS}), got "
+                "pipelined shared_wait_seconds must not be negative, got "
                 f"{self.shared_wait_seconds}"
             )
+        if self.layer_timeout_seconds <= 0:
+            raise ValueError(
+                "pipelined layer_timeout_seconds must be positive, got "
+                f"{self.layer_timeout_seconds}"
+            )
+        if self.whole_load_timeout_seconds <= 0:
+            raise ValueError(
+                "pipelined whole_load_timeout_seconds must be positive, got "
+                f"{self.whole_load_timeout_seconds}"
+            )
+
+    @property
+    def layer_publish_budget_seconds(self) -> float:
+        """Longest a retrieve waits before publishing its next layer or failing.
+
+        The worst case is a retrieve's first layer: the shared-key wait
+        (under :attr:`SharedKeyPolicy.WAIT` only), then the pump's wait for
+        the layer, then the whole-object fallback. A later layer has only
+        the last two. Every other step (leasing, planning, issuing, the GPU
+        copies) is not bounded here; the worker's margin covers them.
+
+        Returns:
+            The sum in seconds, or ``0.0`` when the pipelined retrieve is
+            disabled, since a retrieve then defers nothing and never waits.
+        """
+        if not self.enabled:
+            return 0.0
+        shared_wait = (
+            self.shared_wait_seconds
+            if self.shared_keys is SharedKeyPolicy.WAIT
+            else 0.0
+        )
+        return (
+            shared_wait + self.layer_timeout_seconds + self.whole_load_timeout_seconds
+        )
 
 
 @dataclass(frozen=True)

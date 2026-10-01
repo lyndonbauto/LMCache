@@ -113,12 +113,26 @@ class ManagementModule:
                 worker's last-seen time is refreshed on every liveness target.
 
         Returns:
-            Always True.
+            ``False`` only when ``instance_id`` names a worker no liveness
+            target holds a registration for: this server restarted since the
+            worker registered, or reaped it. The worker must re-register;
+            nothing else tells it, since a restart faster than its heartbeat
+            interval fails no ping. ``True`` otherwise, including for an
+            untracked prober and for a server with no liveness targets,
+            which cannot tell.
         """
-        if instance_id is not None:
-            for target in self._liveness_targets:
-                target.touch_instance(instance_id)
-        return True
+        if instance_id is None or not self._liveness_targets:
+            return True
+        # Touch every target: a worker may be registered with several.
+        registered = any(
+            [target.touch_instance(instance_id) for target in self._liveness_targets]
+        )
+        logger.debug(
+            "PING from instance %d: %s",
+            instance_id,
+            "registered" if registered else "not registered",
+        )
+        return registered
 
     def _reap_cycle(self) -> ThreadRunSummary:
         """Run one reaper scan: reap stale workers, drop mirrored state.

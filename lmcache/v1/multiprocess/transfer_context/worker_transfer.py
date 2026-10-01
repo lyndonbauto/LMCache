@@ -58,6 +58,11 @@ logger = init_logger(__name__)
 # dispatch.
 ENV_MP_TRANSFER_MODE = "LMCACHE_MP_TRANSFER_MODE"
 
+#: How much longer than the server's layer publish budget a layerwise worker
+#: must wait for each layer. Covers what the budget does not bound: the
+#: RETRIEVE message reaching the server, leasing, planning, the GPU copies.
+LAYERWISE_WAIT_MARGIN_SECONDS = 0.5
+
 
 # Helper functions
 def _supports_async_primitives() -> bool:
@@ -94,6 +99,35 @@ def _supports_async_primitives() -> bool:
     except (RuntimeError, TypeError):
         return False
     return True
+
+
+def _check_layerwise_wait_covers_budget(
+    wait_timeout_seconds: float, publish_budget_seconds: float
+) -> None:
+    """Refuse a per-layer wait the server's layer publish budget could outlast.
+
+    Args:
+        wait_timeout_seconds: The worker's per-layer wait
+            (``lmcache.mp.layerwise_wait_timeout_seconds``).
+        publish_budget_seconds: The server's
+            ``RegisterKvCacheResponse.layer_publish_budget_seconds``; ``0.0``
+            means the server never waits before publishing.
+
+    Raises:
+        ValueError: If the wait is shorter than the budget plus
+            :data:`LAYERWISE_WAIT_MARGIN_SECONDS`.
+    """
+    if publish_budget_seconds <= 0:
+        return
+    required = publish_budget_seconds + LAYERWISE_WAIT_MARGIN_SECONDS
+    if wait_timeout_seconds < required:
+        raise ValueError(
+            f"lmcache.mp.layerwise_wait_timeout_seconds is {wait_timeout_seconds}s, "
+            f"but the LMCache server may take up to {publish_budget_seconds}s to "
+            "publish a layer (its pipelined shared-key wait, per-layer timeout "
+            f"and whole-load timeout), so it must be at least {required}s; raise "
+            "it or lower the server's pipelined timeouts"
+        )
 
 
 def _build_engine_driven_context(
@@ -534,7 +568,12 @@ class LMCacheDrivenTransferContext(TransferContext):
 
         Raises:
             RuntimeError: If event IPC is unsupported for the KV-cache device.
-            ValueError: If ``kv_caches`` is empty.
+            ValueError: If ``kv_caches`` is empty, or with ``use_layerwise``
+                if ``layerwise_wait_timeout_seconds`` is not at least
+                :data:`LAYERWISE_WAIT_MARGIN_SECONDS` longer than the
+                server's layer publish budget: a worker that gives up first
+                stops the engine while the server may still copy into its
+                blocks.
         """
         device = _get_kv_device(kv_caches)
         event_backend = get_event_ipc_backend(device)
@@ -594,6 +633,10 @@ class LMCacheDrivenTransferContext(TransferContext):
                     f"{register_response.server_use_layerwise}"
                 )
             if use_layerwise:
+                _check_layerwise_wait_covers_budget(
+                    layerwise_wait_timeout_seconds,
+                    register_response.layer_publish_budget_seconds,
+                )
                 if progress_record is None or self._layerwise_schedule is None:
                     raise RuntimeError("layerwise registration state incomplete")
                 if len(register_response.layer_event_ipc_handles) != launch_count:

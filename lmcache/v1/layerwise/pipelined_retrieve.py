@@ -42,6 +42,7 @@ from lmcache.v1.layerwise.contract import (
     LayerArrivalSource,
     LayerLoadSink,
     LayerwiseContractError,
+    PlanTooLargeError,
 )
 from lmcache.v1.layerwise.deferral import SharedKeyPolicy
 from lmcache.v1.layerwise.pump import (
@@ -396,7 +397,7 @@ def run_pipelined_retrieve(
         fetch = build_request_fetch(
             model, obj_keys_per_obj_group, max_record_bytes, lease, keys_to_fetch
         )
-    except (ValueError, KeyError) as exc:
+    except (ValueError, KeyError, PlanTooLargeError) as exc:
         _release_after_failure(lease, LeaseOutcome.NEVER_FETCHED)
         raise PipelinedRetrieveRefused(
             f"cannot plan a layerwise fetch into the leased window: {exc}"

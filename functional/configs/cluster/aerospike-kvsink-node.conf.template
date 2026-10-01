@@ -1,0 +1,62 @@
+# Aerospike kv-sink server (feat/kv-sink-fetch-pipelined) node @NODE@ of the
+# 3-node kv-sink cluster for T-RDMA-05 / T-FLT-04. Rendered by
+# functional/harness/kvsink_cluster.sh. All three nodes are processes in the
+# aero-kvsink container (host networking), on 127.0.0.1 only: n1 = 3400-3403,
+# n2 = 3410-3413, n3 = 3420-3423 (service, fabric, heartbeat, admin).
+# Heartbeats mesh over loopback. The RDMA device is the first verbs device
+# (rxe0) and the RC GID index is fixed at 1 (server issue 6). data-size is
+# 2G per node (not 16G) so the first fetch's stripe registration (server
+# issue 5) is short; a warm-up still follows every start.
+service {
+    proto-fd-max 15000
+    cluster-name lmcache-kvsink-e4
+    node-id b@N@
+    work-directory @WORK@
+}
+logging {
+    console {
+        context any info
+    }
+}
+mod-lua {
+    user-path @WORK@/usr/udf/lua
+    allow-unsafe-lua false
+}
+network {
+    service {
+        address 127.0.0.1
+        port @SVC@
+        access-address 127.0.0.1
+        access-port @SVC@
+    }
+    heartbeat {
+        mode mesh
+        address 127.0.0.1
+        port @HB@
+@SEEDS@
+        interval 150
+        timeout 10
+    }
+    fabric {
+        address 127.0.0.1
+        port @FAB@
+    }
+    # This build ignores an info stanza ("obsolete") and wants admin instead.
+    admin {
+        address 127.0.0.1
+        port @ADMIN@
+    }
+}
+# kv-sink writes straight from the namespace's memory stripes (zero copy), so
+# the namespace must use storage-engine memory. Each stripe is registered
+# with ibv_reg_mr on its first fetch (server issue 5), which pins it: memlock
+# must be unlimited in the container.
+namespace lmcache {
+    replication-factor @RF@
+    nsup-period 120
+    default-ttl 0
+    max-record-size 1048576
+    storage-engine memory {
+        data-size 2G
+    }
+}

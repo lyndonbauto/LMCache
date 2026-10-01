@@ -12,6 +12,7 @@ from lmcache.v1.layerwise import (
     MAX_SLOTS_PER_REQUEST,
     LayerFetchPlan,
     LayerNotInPlanError,
+    PlanTooLargeError,
 )
 
 # Local
@@ -86,8 +87,9 @@ def test_constructor_rejects_a_plan_past_the_slot_ceiling() -> None:
     """A hand-built plan is held to the ceiling, not only planner output.
 
     Slot 65536 would carry the same 16-bit index as slot 0, so its arrival
-    would be credited to the wrong slot.
+    would be credited to the wrong slot. Fewer chunks per request would fit,
+    so the refusal is the one a caller can split on.
     """
     slot = make_slot(0)
-    with pytest.raises(ValueError, match="at most 65536"):
+    with pytest.raises(PlanTooLargeError, match="at most 65536"):
         LayerFetchPlan((slot,) * (MAX_SLOTS_PER_REQUEST + 1), TEST_NODE_NAMES)
