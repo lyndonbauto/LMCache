@@ -5,8 +5,10 @@ Defects and contract gaps in the aerospike-server branch
 branch `sriram/kv-sink-batch-prio` of `aerospike-client-c` (checked at
 `769304f7`, based on 7.5.0), found by reading both against the LMCache
 Aerospike connector and by running LMCache's A8 suite against them on
-Soft-RoCE (RC, 2026-09-30). Issues 3 and 11 were reproduced there; the rest
-are from review. EFA has not been run yet. The test setups are in
+Soft-RoCE (RC, 2026-09-30) and EFA v2 (SRD, 2026-10-01). Issues 3 and 11 were
+reproduced on Soft-RoCE; the rest are from review. On EFA, with the client
+built by LMCache's script, the suite passed and the server logged no sink
+errors. The test setups are in
 [`rdma_testing_on_windows.md`](rdma_testing_on_windows.md) and
 [`rdma_testing_on_efa.md`](rdma_testing_on_efa.md).
 

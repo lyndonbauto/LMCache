@@ -671,10 +671,10 @@ no kv-sink, so CI's Docker server does not run this suite.
 |---|---|
 | Build profile, default-off | Unchanged for a default build: no libibverbs, no kv-sink client needed. The RDMA build compiles and links against the fork (Ubuntu 24.04, 2026-09-30). |
 | `SinkFetchTable` | **Covered** by `sink_fetch_table_test` and, through the fabric-free module, by the layerwise conformance suite. |
-| `AerospikeSinkFetchDriver` | **Proven on Soft-RoCE (RC)**: A8 passes against `sriram/kv-sink-batch-prio` (3/3). Needs a client built by the script; see [client issue 11](aerospike_server_issues.md#11-libaerospikeso-is-not-linked-against-libibverbs). |
+| `AerospikeSinkFetchDriver` | **Proven on Soft-RoCE (RC) and EFA v2 (SRD)**: A8 passes against `sriram/kv-sink-batch-prio` (3/3 on each). Needs a client built by the script; see [client issue 11](aerospike_server_issues.md#11-libaerospikeso-is-not-linked-against-libibverbs). |
 | Python layerwise path | **Unchanged and covered** device-free; only docstrings moved with the protocol. |
 | Windows, leaser, placer, TTL invariant | **Implemented and unit-tested**, independent of the transport. |
-| Byte-exact landing against a real server | **Proven on Soft-RoCE** on this protocol. EFA (SRD) proven on the previous protocol only; **to re-run**. |
+| Byte-exact landing against a real server | **Proven on Soft-RoCE and on EFA v2** (`g6.8xlarge`, `us-west-2`, 2026-10-01) on this protocol. |
 | Overlap: layer 0 consumed while later layers land | **Not proven.** Possible now, because each layer's batch returns on its own; A8 does not measure it. |
 | Multi-node cluster | **Not run.** Allowed now, since rows are routed by partition. |
 

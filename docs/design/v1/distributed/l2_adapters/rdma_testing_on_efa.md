@@ -8,7 +8,11 @@ except SRD, because Soft-RoCE supports only RC queue pairs.
 **What this answers:** A8 over SRD --- the kv-sink client's SRD transport
 against a real server, through LMCache's pipelined fetch. On the previous
 protocol all 15 Aerospike integration tests passed over SRD on EFA v2
-(2026-09-29). The kv-sink batch-read protocol has not been run on EFA yet.
+(2026-09-29). On the kv-sink batch-read protocol (server `24357d20d`, client
+`061f79b7`), A8 passed 3/3 over SRD and the layerwise, RDMA and Aerospike
+suites passed 578/578 (2026-10-01): `g6.8xlarge`, `us-west-2b`, Ubuntu 24.04,
+kernel 7.0.0-1013-aws, EFA installer 1.50.0 (driver 3.3.0g), PCI ID
+`1d0f:efa1`, device `rdmap47s0`.
 
 **A7** ([track-a-acceptance.md](../../../layerwise/track-a-acceptance.md#a7-the-efa-question-is-answered-with-hardware))
 asked whether an SRD write-with-immediate consumes a posted receive. It was
@@ -106,14 +110,28 @@ with these differences:
   `DEV=$(ibv_devices | awk 'NR>2 {print $1; exit}')`;
 - run the tests with `RDMA_TRANSPORT=SRD RDMA_DEVICE=$DEV`;
 - raise the server's locked-memory limit with `prlimit` as on the VM;
-- install the Python `aerospike` package (`uv pip install aerospike`). It is
-  not in `requirements/test.txt`, and without it the integration tests skip
-  rather than fail.
+- install the Python `aerospike` and `pybind11` packages
+  (`uv pip install aerospike pybind11`). Neither is in
+  `requirements/test.txt`; without them the integration tests and the
+  fabric-free harness tests skip rather than fail;
+- this server branch refuses a config without `cluster-name`, and an asd run
+  from the build tree needs `mod-lua { user-path ... }` pointing at an
+  existing directory and a `proto-fd-max` under the host's file limit.
 
 Pitfalls when the source is copied rather than cloned:
 
+- On Windows, `git archive` converts files marked `text` in
+  `.gitattributes` to CRLF (ICU marks all of them), and `configure` then
+  fails with `not found`. Archive with
+  `git -c core.autocrlf=false -c core.eol=lf archive`.
 - A tree without `.git` fails the LMCache build in setuptools-scm. Set
   `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE=0.0.0`.
+- The server's `pcre2lib` target runs `git submodule update` in
+  `modules/pcre2`. Ship `deps/sljit` with it and `git init` the directory.
+- Without `.git` the server builds with an empty `build` version, and the
+  Python `aerospike` client then fails to connect (`Failed to connect`), so
+  the integration tests skip. Write the version to `/work/VERSION` (e.g.
+  `8.1.3.0`), delete `target/Linux-x86_64/gen/version.c`, and rebuild.
 - A server tree already built elsewhere keeps that host's absolute paths in
   its CMake caches, and excluding `*.a` from the copy drops the prebuilt
   `libbacktrace.a` and `libjansson.a`. Copy the source only and build it on
