@@ -12,11 +12,12 @@ errors.
 
 **Status re-checked at server `046e8558d` and client `523d51ea`
 (2026-10-01).** Issues 2, 3, 7, 8, 10 and 11 and most minor items are fixed;
-issue 1 is partly fixed; 4, 5, 6 and 9 remain. On Soft-RoCE (RC) the suite
-passed (620 passed, 12 skipped for missing cluster or namespace setup; the
-byte oracle does not fit the VM) with the client built by LMCache's script
-without its link workaround, and the server logged no sink errors. Not yet
-rerun on EFA. The test setups are in
+issue 1 is partly fixed; 4, 5, 6 and 9 remain. With the client built by
+LMCache's script without its link workaround, the suite passed on Soft-RoCE
+(RC: 620 passed, 12 skipped; the byte oracle does not fit the VM) and on EFA v2
+(SRD, g6.8xlarge, us-east-1d: 622 passed including the byte oracle, 13 skipped
+for missing cluster, namespace or vLLM-key setup). The server logged no sink
+errors on either. The test setups are in
 [`rdma_testing_on_windows.md`](rdma_testing_on_windows.md) and
 [`rdma_testing_on_efa.md`](rdma_testing_on_efa.md).
 
