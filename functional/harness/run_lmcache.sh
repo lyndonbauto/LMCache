@@ -21,6 +21,8 @@ set -u
 MODEL=$1; CORPUS=$2; OUT=$3; TAG=$4; LW=$5; SETS=${6:-}
 HERE=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$OUT"
+# shellcheck source=loopback_env.sh
+source "$HERE/loopback_env.sh"
 export HF_HOME=${HF_HOME:-/work/hf} HF_HUB_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1
 export LMCACHE_LOG_LEVEL=${LMCACHE_LOG_LEVEL:-DEBUG}
 POLICY=${KV_LOAD_FAILURE_POLICY:-fail}
@@ -71,6 +73,7 @@ for _ in $(seq 1800); do
   sleep 1
 done
 curl -sf http://localhost:8000/health >/dev/null || { echo "vLLM did not come up"; exit 1; }
+bash "$HERE/listen_check.sh" "$TAG vllm" "$OUT/listeners_$TAG.txt" || exit 1
 echo "=== $TAG serving $(date -u +%T)"
 SET_ARG=""; [ -n "$SETS" ] && SET_ARG="--sets $SETS"
 METRICS_URLS=http://localhost:8000/metrics,http://localhost:8080/metrics

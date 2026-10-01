@@ -14,6 +14,8 @@ set -u
 MODEL=$1; CORPUS=$2; OUT=$3; TAG=$4; PORT=$5; shift 5
 HERE=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$OUT"
+# shellcheck source=loopback_env.sh
+source "$HERE/loopback_env.sh"
 export HF_HOME=${HF_HOME:-/work/hf} HF_HUB_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1
 URL=http://127.0.0.1:$PORT
 
@@ -37,6 +39,7 @@ for _ in $(seq 1200); do
   sleep 1
 done
 curl -sf "$URL/health" >/dev/null || { echo "vLLM did not come up"; exit 1; }
+bash "$HERE/listen_check.sh" "$TAG vllm" "$OUT/listeners_$TAG.txt" || exit 1
 echo "=== $TAG serving $(date -u +%T)"
 for step in "$@"; do
   name=""; sets=""; conc=1

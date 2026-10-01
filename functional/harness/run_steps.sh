@@ -99,6 +99,8 @@ set -u
 OUT=$1; TAG=$2; LW=$3; shift 3
 HERE=$(cd "$(dirname "$0")" && pwd)
 mkdir -p "$OUT"
+# shellcheck source=loopback_env.sh
+source "$HERE/loopback_env.sh"
 export HF_HOME=${HF_HOME:-/work/hf} HF_HUB_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1
 export LMCACHE_LOG_LEVEL=${LMCACHE_LOG_LEVEL:-DEBUG}
 POLICY=${KV_LOAD_FAILURE_POLICY:-fail}
@@ -139,7 +141,7 @@ launch_server() {
     --chunk-size 256 $SFLAG $more $extra >> "$log" 2>&1 &
   LAUNCHED_PID=$!
   for _ in $(seq 120); do
-    curl -sf "http://localhost:$http/metrics" >/dev/null && return 0
+    curl -sf "http://localhost:$http/metrics" >/dev/null && { listen_check "lmcache $port"; return; }
     kill -0 "$LAUNCHED_PID" 2>/dev/null || { echo "LMCache server exited"; return 1; }
     sleep 1
   done
@@ -182,15 +184,17 @@ n_vllm_on() {
 }
 server_log() { if [ "$1" = 2 ]; then echo "$LOG2"; else echo "$LOG"; fi; }
 start_vllm() {
-  start_vllm_on "$1" 8000 vllm "$P1" "$LOG" || return 1
+  start_vllm_on "$1" 8000 vllm "$P1" "$LOG"; local rc=$?
   VLLM_PID=$LAUNCHED_PID
+  return $rc
 }
 # start_vllm2 <model> [lmc]: lmc 2 attaches it to server 2.
 start_vllm2() {
   local lmc=${2:-1} mp=$P1 slog=$LOG
   [ "$lmc" = 2 ] && { mp=$P2; slog=$LOG2; }
-  start_vllm_on "$1" 8001 vllm2 $mp "$slog" || return 1
+  start_vllm_on "$1" 8001 vllm2 $mp "$slog"; local rc=$?
   VLLM2_PID=$LAUNCHED_PID; VLLM2_LMC=$lmc
+  return $rc
 }
 # start_vllm_on <model> <port> <log-prefix> <lmcache-port> <lmcache-log>:
 # sets LAUNCHED_PID.
@@ -216,6 +220,12 @@ start_vllm_on() {
   [ "$(grep -c "Registered KV cache" "$slog")" -gt "$before" ] \
     || echo "warning: no new KV cache registration in the LMCache log"
   echo "=== $TAG vLLM serving $model on port $port (LMCache $mp) $(date -u +%T)"
+  listen_check "vllm $port"
+}
+# listen_check <label>: fail the step if anything listens off loopback
+# (listen_check.sh); the tables go to $OUT/listeners_<tag>.txt.
+listen_check() {
+  bash "$HERE/listen_check.sh" "$TAG $1" "$OUT/listeners_$TAG.txt"
 }
 # wait_reregistered <registrations-before> [server 1|2]
 wait_reregistered() {
