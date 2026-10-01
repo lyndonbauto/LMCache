@@ -9,7 +9,11 @@ that the adapter and the storage manager above it report a miss or a failed
 read, never a present-but-wrong object.
 
 Functional test plan IDs: T-STO-03 (= T-FLT-09), T-STO-04 (= T-EVT-02's
-mechanism), T-STO-05, T-STO-07 and T-LKP-06.
+mechanism), T-STO-05, T-STO-07, T-LKP-03, T-LKP-06, T-EVT-01 and T-EVT-03.
+T-EVT-01 also needs ``AEROSPIKE_TEST_EVICT_NAMESPACE``, a namespace with
+``evict-used-pct`` set, a small ``data-size`` and ``evict-tenths-pct`` of
+at least 200: nsup will not evict a void-time bucket larger than that share,
+and each round of the test writes its records with one void-time.
 
 Requires Aerospike CE and the BUILD_AEROSPIKE=1 extension; skipped otherwise::
 
@@ -60,6 +64,9 @@ AEROSPIKE_HOST = os.environ.get("AEROSPIKE_TEST_HOST", "127.0.0.1")
 AEROSPIKE_PORT = int(os.environ.get("AEROSPIKE_TEST_PORT", "3000"))
 AEROSPIKE_NAMESPACE = os.environ.get("AEROSPIKE_TEST_NAMESPACE", "lmcache")
 RUN_AEROSPIKE_IT = os.environ.get("RUN_AEROSPIKE_INTEGRATION") == "1"
+#: A namespace configured to evict (``evict-used-pct``), for T-EVT-01. The
+#: test is skipped when it is not named.
+EVICT_NAMESPACE = os.environ.get("AEROSPIKE_TEST_EVICT_NAMESPACE", "")
 
 MODEL = "storage-integrity-it"
 #: Past the 1 MiB record cap (less the connector's 64 KiB margin): a meta
@@ -204,7 +211,9 @@ def _key(index: int, object_group_id: int = 0) -> ObjectKey:
     )
 
 
-def _adapter_config(set_name: str, default_ttl_seconds: int = 86400):
+def _adapter_config(
+    set_name: str, default_ttl_seconds: int = 86400, namespace: str = ""
+):
     # First Party
     from lmcache.v1.distributed.l2_adapters.aerospike_l2_adapter import (
         AerospikeL2AdapterConfig,
@@ -212,7 +221,7 @@ def _adapter_config(set_name: str, default_ttl_seconds: int = 86400):
 
     return AerospikeL2AdapterConfig(
         hosts=f"{AEROSPIKE_HOST}:{AEROSPIKE_PORT}",
-        namespace=AEROSPIKE_NAMESPACE,
+        namespace=namespace or AEROSPIKE_NAMESPACE,
         set_name=set_name,
         num_workers=2,
         default_ttl_seconds=default_ttl_seconds,
@@ -269,9 +278,11 @@ def _record_exists(inspector: object, record_key: tuple[str, str, str]) -> bool:
     return meta is not None
 
 
-def _namespace_field(inspector: object, name: str) -> str:
+def _namespace_field(
+    inspector: object, name: str, namespace: str = AEROSPIKE_NAMESPACE
+) -> str:
     reply = inspector.info_random_node(  # type: ignore[attr-defined]
-        f"namespace/{AEROSPIKE_NAMESPACE}"
+        f"namespace/{namespace}"
     )
     fields = dict(
         f.split("=", 1) for f in reply.split("\t")[-1].strip().split(";") if "=" in f
@@ -279,13 +290,13 @@ def _namespace_field(inspector: object, name: str) -> str:
     return fields[name]
 
 
-def _truncate(set_name: str) -> None:
+def _truncate(set_name: str, namespace: str = AEROSPIKE_NAMESPACE) -> None:
     # Third Party
     import aerospike
 
     client = aerospike.client({"hosts": [(AEROSPIKE_HOST, AEROSPIKE_PORT)]}).connect()
     try:
-        client.truncate(AEROSPIKE_NAMESPACE, set_name, 0)
+        client.truncate(namespace, set_name, 0)
     finally:
         client.close()
 
@@ -649,3 +660,132 @@ def test_keys_differing_only_in_object_group_are_stored_apart(
     assert not _exists(adapter, full)
     loaded, target = _load(adapter, sliding, SHARDED_BYTES)
     assert loaded and torch.equal(target, sliding_values)
+
+
+# T-LKP-03: prefix semantics.
+
+
+def test_only_the_leading_run_of_hits_is_served(
+    adapter: L2AdapterInterface, set_name: str
+) -> None:
+    """Chunks 0 and 2 stored, chunk 1 never: a prefix prefetch serves only
+    chunk 0, even though chunk 2 is in L2."""
+    keys = [_key(20 + i) for i in range(3)]
+    payloads = [_payload(20 + i, SHARDED_BYTES) for i in range(3)]
+    for index in (0, 2):
+        _store(adapter, keys[index], payloads[index])
+
+    manager = _storage_manager(set_name)
+    try:
+        handle = manager.submit_prefetch_task(
+            PrefetchRequestSpec(keys=keys, group_layout_descs=_layouts(SHARDED_BYTES))
+        )
+        assert manager.wait_prefetch_status(handle, TIMEOUT)
+        found = manager.query_prefetch_status(handle)
+        assert found is not None
+        assert [found.test(i) for i in range(3)] == [True, False, False]
+        with manager.read_prefetched_results(keys[:1]) as objs:
+            assert objs is not None
+            assert _bytes_of(objs[0], payloads[0]) == _raw(payloads[0])
+    finally:
+        manager.close()
+
+
+# T-EVT-03: records past their TTL.
+
+
+def test_an_object_past_its_ttl_is_absent_and_unreadable(set_name: str) -> None:
+    """The server hides an expired record at once, before nsup removes it."""
+    adapter = create_l2_adapter_from_registry(_adapter_config(set_name, 2))
+    try:
+        sharded, inline = _key(30), _key(31)
+        _store(adapter, sharded, _payload(30, SHARDED_BYTES))
+        _store(adapter, inline, _payload(31, INLINE_BYTES))
+        assert _exists(adapter, sharded) and _exists(adapter, inline)
+        time.sleep(3.5)
+        assert not _exists(adapter, sharded)
+        assert not _exists(adapter, inline)
+        assert not _load(adapter, sharded, SHARDED_BYTES)[0]
+        assert not _load(adapter, inline, INLINE_BYTES)[0]
+    finally:
+        adapter.close()
+
+
+# T-EVT-01: filling a namespace past eviction.
+
+
+def test_a_namespace_filled_past_eviction_serves_only_correct_hits_or_misses(
+    inspector: object, set_name: str
+) -> None:
+    """Store about twice an evicting namespace's eviction threshold, in
+    rounds with rising TTLs so eviction removes the earliest rounds. Every
+    object a load serves afterwards holds its own bytes; the rest miss."""
+    if not EVICT_NAMESPACE:
+        pytest.skip("set AEROSPIKE_TEST_EVICT_NAMESPACE to an evicting namespace")
+    data_size = int(
+        _namespace_field(inspector, "storage-engine.data-size", EVICT_NAMESPACE)
+    )
+    evict_pct = int(
+        _namespace_field(inspector, "storage-engine.evict-used-pct", EVICT_NAMESPACE)
+    )
+    if evict_pct == 0:
+        pytest.skip(f"namespace {EVICT_NAMESPACE} does not evict")
+    evicted_before = int(
+        _namespace_field(inspector, "evicted_objects", EVICT_NAMESPACE)
+    )
+    total_objects = (2 * data_size * evict_pct // 100) // SHARDED_BYTES
+    rounds = 12
+    stored: set[int] = set()
+    try:
+        for round_index in range(rounds):
+            adapter = create_l2_adapter_from_registry(
+                _adapter_config(set_name, 600 + 60 * round_index, EVICT_NAMESPACE)
+            )
+            try:
+                for i in range(total_objects // rounds):
+                    index = round_index * (total_objects // rounds) + i
+                    obj = _tensor_obj(_payload(index, SHARDED_BYTES))
+                    task = adapter.submit_store_task([_key(index)], [obj])
+                    _wait_fd(adapter.get_store_event_fd())
+                    if adapter.pop_completed_store_tasks()[task].is_successful():
+                        stored.add(index)
+                    # Writes stop at the namespace's stop-writes threshold;
+                    # pacing them lets nsup evict in between.
+                    time.sleep(0.02)
+            finally:
+                adapter.close()
+
+        deadline = time.monotonic() + 30.0
+        evicted = 0
+        while time.monotonic() < deadline:
+            evicted = (
+                int(_namespace_field(inspector, "evicted_objects", EVICT_NAMESPACE))
+                - evicted_before
+            )
+            if evicted > 0:
+                break
+            time.sleep(1.0)
+        assert evicted > 0, "the namespace never evicted"
+
+        reader = create_l2_adapter_from_registry(
+            _adapter_config(set_name, namespace=EVICT_NAMESPACE)
+        )
+        served = 0
+        try:
+            for index in range(rounds * (total_objects // rounds)):
+                loaded, target = _load(reader, _key(index), SHARDED_BYTES)
+                if loaded:
+                    served += 1
+                    assert index in stored, f"object {index} was never stored"
+                    assert torch.equal(target, _payload(index, SHARDED_BYTES)), (
+                        f"object {index} was served with other bytes"
+                    )
+        finally:
+            reader.close()
+        print(
+            f"stored {len(stored)}/{rounds * (total_objects // rounds)}, "
+            f"evicted {evicted} records, served {served}"
+        )
+        assert 0 < served < len(stored), "expected both hits and evicted misses"
+    finally:
+        _truncate(set_name, EVICT_NAMESPACE)
