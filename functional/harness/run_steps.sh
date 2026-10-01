@@ -31,6 +31,8 @@
 #                                  as restart; extra=alt starts the server with
 #                                  LMCACHE_SERVER_EXTRA_ALT instead (and keeps it
 #                                  for later restarts until extra=main)
+#   term                           SIGTERM the LMCache server (clean shutdown, no
+#                                  restart; its exit status is logged)
 #   kill9                          SIGKILL the LMCache server (no restart)
 #   server_up                      start the server again after kill9 and wait
 #                                  for vLLM to re-register
@@ -118,10 +120,18 @@ L1_GB=${L1_SIZE_GB:-40}; L1_GB2=${L1_SIZE_GB2:-$L1_GB}
 P1=${LMC1_PORT:-6555}; H1=${LMC1_HTTP:-8080}; P2=${LMC2_PORT:-6556}; H2=${LMC2_HTTP:-8081}
 PROM1=${LMC1_PROM:+--prometheus-port $LMC1_PROM}; PROM2="--prometheus-port ${LMC2_PROM:-9091}"
 BG_PIDS=""; BG_MARK=0; BG_MARK2=0; HOST_SEQ=0
+# stop_server: SIGTERM (a clean shutdown), SIGKILL after 5 s; logs the exit
+# status (143 = exited on TERM's KeyboardInterrupt path or by the signal,
+# 134/139 = abort/segfault during shutdown, 137 = needed the kill -9).
 stop_server() {
   [ "$SERVER_PID" -gt 0 ] && kill "$SERVER_PID" 2>/dev/null
   sleep 5
-  [ "$SERVER_PID" -gt 0 ] && kill -9 "$SERVER_PID" 2>/dev/null
+  if [ "$SERVER_PID" -gt 0 ]; then
+    local how=TERM rc
+    kill -0 "$SERVER_PID" 2>/dev/null && { how="kill -9"; kill -9 "$SERVER_PID" 2>/dev/null; }
+    wait "$SERVER_PID" 2>/dev/null; rc=$?
+    echo "=== $TAG LMCache server pid $SERVER_PID stopped ($how) exit=$rc $(date -u +%T)"
+  fi
   SERVER_PID=0
 }
 stop_server2() {
@@ -477,6 +487,8 @@ for step in "$@"; do
     wait_bg) wait_bg;;
     wait_log) # shellcheck disable=SC2086
       wait_log $rest || exit 1;;
+    term) echo "=== $TAG SIGTERM to the LMCache server (pid $SERVER_PID) $(date -u +%T.%N | cut -c1-12)"
+      stop_server;;
     kill9) echo "=== $TAG SIGKILL to the LMCache server (pid $SERVER_PID) $(date -u +%T.%N | cut -c1-12)"
       [ "$SERVER_PID" -gt 0 ] && kill -9 "$SERVER_PID"; SERVER_PID=0;;
     server_up) registrations=$(grep -c "Registered KV cache" "$LOG")

@@ -45,9 +45,11 @@
 # recomputing silently.
 # The kv-sink server is restarted (and warmed) before every group: it keeps
 # data in memory only, and every LMCache kill -9 leaks a region (issue 9).
+#   STAGE_DIR   results directory under functional/ (default stage3)
+#   LW_S        layerwise flag of every session (default true)
 set -u
-S=/root/lmc-work/functional/stage3
-W=/work/functional/stage3
+S=/root/lmc-work/functional/${STAGE_DIR:-stage3}
+W=/work/functional/${STAGE_DIR:-stage3}
 TREE_HOST=${TREE_HOST:-/root/lmc-work/LMCache}
 TREE_CTR=${TREE_CTR:-/work/LMCache}
 H=$TREE_CTR/functional/harness
@@ -125,10 +127,11 @@ session() {
     -e L1_SIZE_GB2=${L1_GB2_S:-${L1_GB_S:-40}} \
     -e CORPUS="${CORPUS_S:-$CB}" -e KV_LOAD_FAILURE_POLICY="$policy" \
     -e SEND_TIMEOUT=${SEND_TIMEOUT:-900} -e VLLM_EXTRA="${VLLM_EXTRA:-}" lmc-c \
-    bash $H/run_steps.sh $W/$dir $tag true "$@" > $S/$dir/session_$tag.txt 2>&1
+    bash $H/run_steps.sh $W/$dir $tag "${LW_S:-true}" "$@" > $S/$dir/session_$tag.txt 2>&1
   local rc=$?
   kill $watcher 2>/dev/null
   echo "rc=$rc"; grep -E "===|correct|exited|did not|FAILED|warning" $S/$dir/session_$tag.txt | tail -n 40
+  grep -q "listen_check.*FAIL" $S/$dir/session_$tag.txt && progress "!! $tag: a listener off loopback (listen_check FAIL)"
   echo "-- error lines: $(grep -cE 'Traceback|ERROR|Error' $S/$dir/lmcache_$tag.log $S/$dir/vllm_${tag}_*.log \
     $(ls $S/$dir/lmcache2_$tag.log $S/$dir/vllm2_${tag}_*.log 2>/dev/null) | paste -sd' ')"
   echo "-- registration: $(grep -hoE '[^ ]+ fetches layer by layer from L2 adapter [0-9]+, reading records of at most [0-9]+ bytes|Cannot fetch [^ ]+ layer by layer|No pipelined sink is installed|serves world size 1 only' $S/$dir/lmcache_$tag.log | sort | uniq -c | sed 's/^ *//' | paste -sd';')"
