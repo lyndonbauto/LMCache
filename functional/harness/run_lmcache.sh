@@ -4,7 +4,9 @@
 # adapter), vLLM with the MP connector, then the corpus twice at batch size 1:
 # "cold" (computed and stored) and "warm" (served from the cache).
 # Usage: run_lmcache.sh <model> <corpus.json> <out_dir> <tag> <layerwise true|false> [sets]
-# Environment: LMCACHE_SERVER_EXTRA, VLLM_EXTRA, KV_LOAD_FAILURE_POLICY
+# Environment: LMCACHE_SERVER_EXTRA, VLLM_EXTRA, KV_EXTRA (more
+# kv_connector_extra_config entries, e.g. '"lmcache.mp.heartbeat_interval":5'),
+# KV_LOAD_FAILURE_POLICY
 # (default "fail", so a bad load errors instead of silently recomputing),
 # RESTART_SERVER_BEFORE_WARM=1 (wait for L2 writes to settle, then restart
 # the LMCache server between the two sends, so the warm hit must come from
@@ -53,7 +55,7 @@ KV="{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\
 \"kv_connector_module_path\":\"lmcache.integration.vllm.lmcache_mp_connector\",\
 \"kv_load_failure_policy\":\"$POLICY\",\"kv_connector_extra_config\":{\
 \"lmcache.mp.host\":\"tcp://localhost\",\"lmcache.mp.port\":6555,\
-\"lmcache.mp.use_layerwise\":$LW}}"
+\"lmcache.mp.use_layerwise\":$LW${KV_EXTRA:+,$KV_EXTRA}}}"
 vllm serve "$MODEL" --host 127.0.0.1 --port 8000 --seed 0 --no-enable-prefix-caching \
   --max-model-len 17408 --gpu-memory-utilization 0.6 ${VLLM_EXTRA:-} \
   --kv-transfer-config "$KV" > "$OUT/vllm_$TAG.log" 2>&1 &
@@ -75,19 +77,19 @@ if [ "${RESTART_SERVER_BEFORE_WARM:-0}" = 1 ]; then
   echo "=== $TAG restarting the LMCache server (L1 is lost) $(date -u +%T)"
   registrations=$(grep -c "Registered KV cache" "$OUT/lmcache_$TAG.log")
   stop_server
-  # vLLM notices a restart only if a heartbeat fails while the server is
-  # down; a restart shorter than the heartbeat interval goes unnoticed.
   sleep "${RESTART_DOWNTIME_SECONDS:-0}"
   start_server || exit 1
-  # vLLM re-registers its KV cache on its next heartbeat; until then every
-  # lookup misses, which would make the warm send a recompute.
+  restarted_at=$(date +%s)
+  # vLLM re-registers its KV cache on its next heartbeat, whether or not a
+  # ping failed while the server was down; until then every lookup misses,
+  # which would make the warm send a recompute.
   for _ in $(seq 120); do
     [ "$(grep -c "Registered KV cache" "$OUT/lmcache_$TAG.log")" -gt "$registrations" ] && break
     sleep 1
   done
   [ "$(grep -c "Registered KV cache" "$OUT/lmcache_$TAG.log")" -gt "$registrations" ] \
     || { echo "vLLM did not re-register with the restarted server"; exit 1; }
-  echo "=== $TAG vLLM re-registered $(date -u +%T)"
+  echo "=== $TAG vLLM re-registered $(date -u +%T), $(( $(date +%s) - restarted_at )) s after the server came back"
   sleep 5
 fi
 python "$HERE/client.py" --corpus "$CORPUS" --out "$OUT/${TAG}_warm.json" --tag "${TAG}_warm" $SET_ARG \
