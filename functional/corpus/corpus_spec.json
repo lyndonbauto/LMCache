@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "description": "Prompt corpus for the functional test plan (docs/design/v1/layerwise/functional-test-plan.md, section 2). Each prompt is a registry of records followed by a question about a record in the first chunk, so KV loaded into the wrong place gives a wrong answer rather than drift. Lengths are exact token counts for the target model's tokenizer; functional/harness/build_corpus.py builds the prompts from this spec.",
   "chunk_size": 256,
   "pipelined_max_chunks": 64,
@@ -8,6 +8,10 @@
     "P-short": {
       "why": "Nothing cacheable; must never touch L2",
       "lengths": [48, 60, 72, 84, 96, 108, 120, 132, 144, 156, 168, 180, 192, 204, 216, 228, 236, 244, 250, 255]
+    },
+    "P-short-v2": {
+      "why": "Nothing cacheable even after decode: prompt + max_tokens stays under one chunk (lengths at most chunk_size - max_tokens = 208), so neither prompt nor generated tokens complete a chunk and nothing is stored; must never touch L2. Replaces P-short for T-E2E-01",
+      "lengths": [48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 172, 184, 196, 204, 208]
     },
     "P-exact": {
       "why": "Chunk-boundary off-by-one: exactly 1, 2, 4 and max (pipelined_max_chunks) chunks",
