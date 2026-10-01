@@ -11,6 +11,8 @@
 #            snapshotted around the P-exact/P-ragged L2 send (one object group:
 #            every layer fetches every chunk, the control for T-PIPE-11).
 #   pipe11   stage3.sh pipe11 (--separate-object-groups by default)
+#   e2e08pl2 the P-shared/P-multi store + restart + L2 tail of e2e08p on a fresh
+#            kv-sink (the full e2e08p sequence fills its 16 GiB namespace)
 # Oracles (Stage 2c, batch size 1, VLLM_BATCH_INVARIANT=1): the no-cache
 # baseline at block 16 for no-hit and whole-prompt hits; vLLM's own prefix
 # cache for proper-prefix hits, at block 256 (split-matched to LMCache, the
@@ -58,6 +60,25 @@ sec_e2e08p() {
   e2e08p_report $tag pc16_r1
   progress "e2e08p: rxe0 packets during l03elig: $(rxe_delta gpt_e2e08p $tag b a) \
 (one object group, so every layer reads every chunk)"
+}
+
+# e2e08p's full sequence stores about 17 GB, past kv-sink's 16 GiB data-size, so
+# its last P-shared/P-multi stores hit AEROSPIKE_ERR_SERVER_FULL and l2sh/l2mu
+# find nothing in L2. e2e08pl2 repeats that tail on a fresh kv-sink.
+sec_e2e08pl2() {
+  SERVER_FLAGS="$E2E08_SERVER_FLAGS $(server_flags 4 $GPT_CHUNK)"
+  local tag=e2e08pl2 ref
+  group gpt_e2e08pl2 $tag
+  CORPUS_S=$CG VLLM_EXTRA="${GPT_VLLM_EXTRA:-}" session gpt_e2e08pl2 $tag fail server "vllm model=$GPT" \
+    "send name=shc sets=P-shared" "send name=muc sets=P-multi" \
+    restart "send name=l2sh sets=P-shared stats=1" "send name=l2mu sets=P-multi stats=1"
+  for ref in pc256 pc16_r1; do
+    CORPUS_S=$CG BASES=$GPT_BASE report gpt_e2e08pl2 $tag $ref \
+      --oracle="${tag}_shc=$REF/${ref}_sc.json" --oracle="${tag}_muc=$REF/${ref}_mc.json" \
+      --oracle="${tag}_l2sh=$REF/${ref}_sw.json" --oracle="${tag}_l2mu=$REF/${ref}_mw.json" \
+      --outcomes="${tag}_l2sh=pipelined,not_deferred" --outcomes="${tag}_l2mu=pipelined,not_deferred" \
+      shc muc l2sh l2mu
+  done
 }
 
 mkdir -p $S
