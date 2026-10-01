@@ -53,8 +53,10 @@ engine worker adapter                            MP server
 ## 3. Protocol Change
 
 The PING payload changes in place from `[]` to `[int | None]`; the response stays
-`bool`, always `True` (`None` marks an untracked prober such as the scheduler
-adapter, which registers nothing and is never reapable). PING keeps its BLOCKING
+`bool` (`None` marks an untracked prober such as the scheduler adapter, which
+registers nothing and is never reapable). It is `False` only when the payload
+names a worker no liveness target holds a registration for, which tells the
+worker to re-register (Section 6.4). PING keeps its BLOCKING
 dispatch on the NORMAL thread pool. SYNC dispatch was considered but rejected:
 SYNC runs on the MQ main loop, where a slow `REGISTER_KV_CACHE` (also SYNC) would
 block PING and make a live worker look dead. Sharing the NORMAL pool is in fact
@@ -115,7 +117,7 @@ is stopped and joined before any module clears state.
 ```python
 class InstanceLivenessTarget(Protocol):
     # All methods default to a no-op; an implementer overrides only its role.
-    def touch_instance(self, instance_id: int) -> None: ...
+    def touch_instance(self, instance_id: int) -> bool: ...  # registered here?
     def reap_stale_instances(
         self, reap_timeout_s: float, registration_grace_s: float
     ) -> list[int]: ...
@@ -162,7 +164,29 @@ T1        recover callback re-registers (id absent -> fresh context) before
 ```
 
 A shorter outage hits the NOOP register path, which refreshes `last_seen` and
-builds nothing — the server never asks a worker to re-register.
+builds nothing.
+
+### 6.4 Recovery after a restart no ping saw
+
+A server that restarts between two pings (under the 10 s interval) fails no
+ping, so there is no unhealthy-to-healthy edge. Before, the worker stayed
+healthy and never re-registered, and every lookup logged "No GPU context
+found" and missed, with no recovery. Now the restarted server answers that
+worker's PING with `False`:
+
+```
+T0        server restarts; its registrations are gone
+T0+<10s   next ping answered False (UNREGISTERED)
+          -> health_event cleared (requests gated, not failed)
+          -> recover callback re-registers -> health_event set
+```
+
+`probe_server` (`lmcache/v1/multiprocess/ping.py`) sorts an answer into
+`REGISTERED`, `UNREGISTERED` or `UNREACHABLE`; the vLLM and ATOM heartbeats
+run the recover callback on `UNREGISTERED` as on a recovery edge. A heartbeat
+with no recover callback (SGLang) cannot re-register; it stays healthy as
+before and warns once. Requests in the gap until the next ping still miss
+and recompute; the gap is at most one heartbeat interval.
 
 ### 6.3 Shutdown
 
@@ -180,5 +204,7 @@ stop is already requested — a straggling cycle cannot re-create a ghost contex
 | Worker alive but never pinged, idle past the grace | Reaped while alive only if it never pinged (heartbeat never started). Once the heartbeat is running, pings refresh `last_seen` every interval, so a live worker is never reaped regardless of traffic. |
 | Heartbeat thread starved, worker transferring | Store/retrieve/prepare/commit refresh `last_seen`; never reaped. |
 | Partition shorter than the reap window | No reap. On heal, the recover callback re-registers; the NOOP path refreshes `last_seen`; zero context churn. |
+| Server restart shorter than the heartbeat interval | The next PING is answered `False`; the worker re-registers (Section 6.4). Requests before that ping miss. |
+| Worker reaped while still alive (one-way partition) | Its next answered PING is `False`; it re-registers. |
 | Worker crash + restart | The new process gets a fresh uuid-derived id and a fresh entry; the dead id is reaped independently. No PID-reuse aliasing. |
 | Mixed client/server versions | Every PING fails the payload-count check; the client sits permanently unhealthy. Loud, never silent corruption; upgrade both sides together. |

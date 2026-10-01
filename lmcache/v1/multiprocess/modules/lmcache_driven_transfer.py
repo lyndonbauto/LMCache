@@ -431,7 +431,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         with self._lock:
             return dict(self._cache_contexts)
 
-    def touch_instance(self, instance_id: int) -> None:
+    def touch_instance(self, instance_id: int) -> bool:
         """Refresh the worker's last-seen time and mark it ping-proven.
 
         A no-op if the instance is not tracked.
@@ -439,12 +439,17 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         Args:
             instance_id: The worker instance ID.
         """
+
+        Returns:
+            Whether the instance has a registered KV cache here.
         now = time.monotonic()
         with self._lock:
             entry = self._cache_contexts.get(instance_id)
-            if entry is not None:
-                entry.last_seen = now
-                entry.has_liveness_signal = True
+            if entry is None:
+                return False
+            entry.last_seen = now
+            entry.has_liveness_signal = True
+            return True
 
     def tracked_instance_count(self) -> int:
         """Return the number of currently registered instances."""

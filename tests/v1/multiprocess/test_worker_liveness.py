@@ -126,9 +126,9 @@ def test_gpu_touch_latches_get_does_not() -> None:
     assert module._cache_contexts[1].last_seen > 0.0
     assert module._cache_contexts[1].has_liveness_signal is False
 
-    module.touch_instance(1)
+    assert module.touch_instance(1) is True
     assert module._cache_contexts[1].has_liveness_signal is True
-    module.touch_instance(999)  # absent -> no error
+    assert module.touch_instance(999) is False  # absent -> no error
 
 
 def test_gpu_reap_two_tier_windows() -> None:
@@ -208,14 +208,16 @@ def test_non_gpu_resolve_for_transfer_refreshes_and_raises() -> None:
 class _FakeTarget:
     """Liveness target double recording touches/drops and scripted reaps."""
 
-    def __init__(self) -> None:
+    def __init__(self, registered: tuple[int, ...] = ()) -> None:
+        self.registered = set(registered)
         self.touched: list[int] = []
         self.to_reap: list[int] = []
         self.dropped: list[int] = []
         self.count = 0
 
-    def touch_instance(self, instance_id: int) -> None:
+    def touch_instance(self, instance_id: int) -> bool:
         self.touched.append(instance_id)
+        return instance_id in self.registered
 
     def reap_stale_instances(
         self, reap_timeout_s: float, registration_grace_s: float
@@ -241,12 +243,50 @@ def _reset_periodic_registry():
 
 def test_management_ping_touches_targets() -> None:
     """ping refreshes every target for a real id; None is ignored."""
-    target = _FakeTarget()
+    target = _FakeTarget(registered=(42,))
     mgmt = ManagementModule(MagicMock(), liveness_targets=[target])
 
     assert mgmt.ping(42) is True
     assert mgmt.ping(None) is True
     assert target.touched == [42]
+
+
+def test_management_ping_says_when_the_worker_is_not_registered() -> None:
+    """After a restart the server answers, but holds no registration for the
+    worker. False tells the worker to re-register."""
+    target = _FakeTarget()
+    mgmt = ManagementModule(MagicMock(), liveness_targets=[target])
+
+    assert mgmt.ping(42) is False
+    assert target.touched == [42]
+
+
+def test_management_ping_counts_a_registration_with_any_target() -> None:
+    """A worker registered with one module is registered; every target is
+    still refreshed."""
+    without, holding = _FakeTarget(), _FakeTarget(registered=(42,))
+    mgmt = ManagementModule(MagicMock(), liveness_targets=[without, holding])
+
+    assert mgmt.ping(42) is True
+    assert without.touched == holding.touched == [42]
+
+
+def test_management_ping_without_targets_cannot_tell_so_says_registered() -> None:
+    assert ManagementModule(MagicMock()).ping(42) is True
+
+
+def test_management_ping_reports_a_reaped_worker_as_unregistered() -> None:
+    """A worker the reaper dropped must re-register too, not miss silently."""
+    module = _bare_gpu_module()
+    old = time.monotonic() - 1000.0
+    module._cache_contexts[1] = ContextEntry(MagicMock(), "m", 1, old, True)
+    mgmt = ManagementModule(MagicMock(), liveness_targets=[module])
+    assert mgmt.ping(1) is True
+
+    module._cache_contexts[1].last_seen = old
+    module.reap_stale_instances(120.0, 3600.0)
+
+    assert mgmt.ping(1) is False
 
 
 def test_management_reaper_reaps_and_drops() -> None:
@@ -272,7 +312,7 @@ def test_management_reaper_disabled_when_timeout_zero() -> None:
     """timeout == 0 starts no reaper thread."""
     mgmt = ManagementModule(
         MagicMock(),
-        liveness_targets=[_FakeTarget()],
+        liveness_targets=[_FakeTarget(registered=(1,))],
         worker_reap_timeout_seconds=0.0,
     )
     assert mgmt._reaper is None

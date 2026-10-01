@@ -26,6 +26,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     ParallelStrategy,
 )
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
+from lmcache.v1.multiprocess.ping import PingOutcome
 from lmcache.v1.multiprocess.transport.base import RequestClient
 from lmcache.v1.platform.ipc_policy import (
     is_isolated_ipc,
@@ -892,7 +893,9 @@ def test_heartbeat_first_ping_runs_callback_before_setting_event(
     first successful ping invokes the recover callback while the event
     is still cleared, then sets the event."""
     monkeypatch.setattr(
-        adapter_mod, "send_ping", lambda req_client, timeout, instance_id=None: True
+        adapter_mod,
+        "probe_server",
+        lambda req_client, timeout, instance_id=None: PingOutcome.REGISTERED,
     )
     health_event = threading.Event()  # cleared: pessimistic start state
     heartbeat = HeartbeatThread(
@@ -1014,12 +1017,12 @@ def test_straggler_cycle_after_stop_skips_callback_and_event(monkeypatch) -> Non
 
     def slow_ping(
         req_client: object, timeout: float, instance_id: int | None = None
-    ) -> bool:
+    ) -> PingOutcome:
         ping_entered.set()
         release_ping.wait(timeout=10.0)
-        return True
+        return PingOutcome.REGISTERED
 
-    monkeypatch.setattr(adapter_mod, "send_ping", slow_ping)
+    monkeypatch.setattr(adapter_mod, "probe_server", slow_ping)
     health_event = threading.Event()  # cleared: a success would take the edge
     heartbeat = HeartbeatThread(
         req_client=MagicMock(name="req_client"),

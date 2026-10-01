@@ -26,6 +26,7 @@ from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
     expand_engine_block_ids,
 )
+from lmcache.v1.multiprocess.ping import PingOutcome, probe_server
 from lmcache.v1.multiprocess.transfer_context import (
     TransferContext,
     create_transfer_context,
@@ -110,15 +111,21 @@ class _HeartbeatThread(PeriodicThread):
 
     def _execute(self) -> ThreadRunSummary:
         was_healthy = self._health_event.is_set()
-        try:
-            healthy = bool(
-                self._client.ping(self._instance_id).result(timeout=self._timeout)
-            )
-        except Exception:
-            healthy = False
+        outcome = probe_server(self._client, self._timeout, self._instance_id)
+        healthy = outcome is not PingOutcome.UNREACHABLE
         if self.stop_requested:
             return ThreadRunSummary(success=True, message="stopping")
 
+        if outcome is PingOutcome.UNREGISTERED:
+            # The server restarted between two pings, or reaped this worker:
+            # it answers, but every request would miss. Re-register.
+            logger.warning(
+                "LMCache server holds no registration for this ATOM worker; "
+                "re-registering"
+            )
+            if was_healthy:
+                self._publish_unhealthy()
+                was_healthy = False
         if healthy and not was_healthy:
             try:
                 healthy = self._recover_callback()
