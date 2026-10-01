@@ -19,9 +19,41 @@
 #   reset                          truncate the L2 set, then restart (empty L1 and L2)
 #   keys name=<n>                  snapshot L2 digests -> $OUT/keys_<tag>_<n>.json
 #   delkeys before=<n> after=<n>   delete the L2 records added between two snapshots
+# Fault-test steps (Stages 3 and 5):
+#   send ... bg=1 errors=1         bg=1 runs the send in the background (finish
+#                                  it with wait_bg); errors=1 records failed
+#                                  requests instead of failing the step
+#   wait_bg                        wait for background sends; never fails
+#   wait_log what=<w> [timeout=<s>] wait for a new LMCache log line since the
+#                                  last background send: w = retrieve_start,
+#                                  retrieve_end, lookup_end
+#   restart [extra=alt] [downtime=<s>]
+#                                  as restart; extra=alt starts the server with
+#                                  LMCACHE_SERVER_EXTRA_ALT instead (and keeps it
+#                                  for later restarts until extra=main)
+#   kill9                          SIGKILL the LMCache server (no restart)
+#   server_up                      start the server again after kill9 and wait
+#                                  for vLLM to re-register
+#   freeze_server secs=<s>         SIGSTOP the LMCache server for s seconds
+#   host action=<a> [k=v ...]      ask the host driver to run action a (it
+#                                  watches $OUT/HOSTREQ_*; actions and their
+#                                  words in functional/harness/host_actions.sh)
+#                                  and wait up to 300 s for its answer
+#   vllm_check name=<n>            record whether vLLM is alive and its engine
+#                                  error lines -> $OUT/vllm_check_<tag>_<n>.txt;
+#                                  a dead vLLM is cleaned up so `vllm` restarts it
+#   vllm_ensure model=<id>         start vLLM only if none is running (after a
+#                                  vllm_check found it dead)
+#   l2seg prompt=<id> chunk=<c> seg=<s>
+#                                  delete record <s> of chunk <c> of a prompt
+#                                  (l2_segments.py); the meta record stays
+#   rxe name=<n>                   snapshot rxe0's port counters (packets of
+#                                  4096 bytes) -> $OUT/rxe_<tag>_<n>.txt
+#   sleep secs=<s>
 # Environment: CORPUS (default corpus for send), LMCACHE_SERVER_EXTRA,
-# VLLM_EXTRA, KV_EXTRA, KV_LOAD_FAILURE_POLICY (default fail), L2_NAMESPACE
-# (default lmcache), SEND_TIMEOUT (per-request seconds, default 900).
+# LMCACHE_SERVER_EXTRA_ALT, VLLM_EXTRA, KV_EXTRA, KV_LOAD_FAILURE_POLICY
+# (default fail), L2_NAMESPACE (default lmcache), L2_PORT (default 3000),
+# L2_SET (default kv_chunks), SEND_TIMEOUT (per-request seconds, default 900).
 # If a send fails, $OUT/HANG_<tag>_<n> is written with the PIDs and the
 # script waits up to 300 s for $OUT/STACKS_DONE_<tag>_<n> (the host driver
 # captures Python stacks) before stopping everything.
@@ -33,11 +65,14 @@ export HF_HOME=${HF_HOME:-/work/hf} HF_HUB_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1
 export LMCACHE_LOG_LEVEL=${LMCACHE_LOG_LEVEL:-DEBUG}
 POLICY=${KV_LOAD_FAILURE_POLICY:-fail}
 NS=${L2_NAMESPACE:-lmcache}
+L2_ARGS="--port ${L2_PORT:-3000} --namespace $NS"
 if [ "$LW" = true ]; then SFLAG=--use-layerwise; else SFLAG=--no-use-layerwise; fi
 LOG=$OUT/lmcache_$TAG.log
 METRICS_URLS=http://localhost:8000/metrics,http://localhost:8080/metrics
 
 SERVER_PID=0; VLLM_PID=0
+SERVER_EXTRA=${LMCACHE_SERVER_EXTRA:-}
+BG_PIDS=""; BG_MARK=0; HOST_SEQ=0
 stop_server() {
   [ "$SERVER_PID" -gt 0 ] && kill "$SERVER_PID" 2>/dev/null
   sleep 5
@@ -45,8 +80,9 @@ stop_server() {
   SERVER_PID=0
 }
 start_server() {
+  echo "=== $TAG server extra: $SERVER_EXTRA" >> "$LOG"
   lmcache server --port 6555 --http-host 127.0.0.1 --http-port 8080 --l1-size-gb 40 --eviction-policy LRU \
-    --chunk-size 256 $SFLAG ${LMCACHE_SERVER_EXTRA:-} >> "$LOG" 2>&1 &
+    --chunk-size 256 $SFLAG $SERVER_EXTRA >> "$LOG" 2>&1 &
   SERVER_PID=$!
   for _ in $(seq 120); do
     curl -sf http://localhost:8080/metrics >/dev/null && return 0
@@ -106,7 +142,69 @@ restart_server() {
   wait_reregistered "$registrations"
 }
 settle() {
-  python "$HERE/wait_l2_settle.py" --namespace "$NS" || echo "warning: L2 writes had not settled"
+  python "$HERE/wait_l2_settle.py" $L2_ARGS || echo "warning: L2 writes had not settled"
+}
+wait_bg() {
+  local pid
+  for pid in $BG_PIDS; do wait "$pid"; echo "=== $TAG background send (pid $pid) exited $? $(date -u +%T)"; done
+  BG_PIDS=""
+}
+wait_log() {
+  local what="" timeout=60 kv pattern
+  for kv in "$@"; do
+    case $kv in what=*) what=${kv#what=};; timeout=*) timeout=${kv#timeout=};;
+      *) echo "wait_log: unknown argument $kv"; return 1;; esac
+  done
+  case $what in
+    retrieve_start) pattern="MP retrieve start:";;
+    retrieve_end) pattern="MP retrieve end:";;
+    lookup_end) pattern="MP lookup/prefetch end:";;
+    *) echo "wait_log: unknown what=$what"; return 1;;
+  esac
+  local deadline=$(( $(date +%s) + timeout ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    [ "$(tail -n +"$((BG_MARK + 1))" "$LOG" | grep -c "$pattern")" -gt 0 ] \
+      && { echo "=== $TAG saw '$pattern' $(date -u +%T.%N | cut -c1-12)"; return 0; }
+    sleep 0.05
+  done
+  echo "=== $TAG wait_log: no '$pattern' within $timeout s"; return 1
+}
+host_action() {
+  # The request file holds the step's key=value words as given; the host
+  # driver parses them (action=, secs=, on=, ...).
+  case "$*" in *action=*) ;; *) echo "host: action= is required"; return 1;; esac
+  HOST_SEQ=$((HOST_SEQ + 1))
+  local req=$OUT/HOSTREQ_${TAG}_$HOST_SEQ
+  # A rerun into the same directory must not see the last run's answer; the
+  # request goes first so the host driver never replays it.
+  rm -f "$req" "$OUT/HOSTDONE_${TAG}_$HOST_SEQ" "$OUT/HOSTFAULT_${TAG}_$HOST_SEQ.txt"
+  echo "$*" > "$req.tmp" && mv "$req.tmp" "$req"
+  echo "=== $TAG host request $HOST_SEQ: $* $(date -u +%T.%N | cut -c1-12)"
+  for _ in $(seq 3000); do
+    [ -f "$OUT/HOSTDONE_${TAG}_$HOST_SEQ" ] && {
+      echo "=== $TAG host request $HOST_SEQ done: $(cat "$OUT/HOSTDONE_${TAG}_$HOST_SEQ") $(date -u +%T.%N | cut -c1-12)"
+      return 0; }
+    sleep 0.1
+  done
+  echo "=== $TAG host request $HOST_SEQ: no answer from the host driver in 300 s"; return 1
+}
+vllm_check() {
+  local name=${1#name=} f
+  f=$OUT/vllm_check_${TAG}_$name.txt
+  local vlog; vlog=$(ls -t "$OUT"/vllm_"${TAG}"_*.log 2>/dev/null | head -n 1)
+  {
+    if curl -sf http://localhost:8000/health >/dev/null; then echo "vllm=alive"; else echo "vllm=dead"; fi
+    echo "generation_timeout_errors=$(grep -c LayerProgressRetrieveGenerationTimeoutError "$vlog" 2>/dev/null)"
+    echo "engine_dead_errors=$(grep -cE 'EngineDeadError|EngineCore.*(died|failed)' "$vlog" 2>/dev/null)"
+    echo "tracebacks=$(grep -c Traceback "$vlog" 2>/dev/null)"
+    echo "last_error: $(grep -E 'Error' "$vlog" 2>/dev/null | tail -n 1 | cut -c1-300)"
+  } > "$f"
+  echo "=== $TAG vllm_check $name: $(paste -sd' ' "$f" | cut -c1-200)"
+  if grep -q vllm=dead "$f"; then
+    [ "$VLLM_PID" -gt 0 ] && kill -9 "$VLLM_PID" 2>/dev/null
+    pkill -9 -f "VLLM::" 2>/dev/null
+    VLLM_PID=0; sleep 10
+  fi
 }
 cleanup() {
   [ "$VLLM_PID" -gt 0 ] && kill "$VLLM_PID" 2>/dev/null
@@ -119,27 +217,53 @@ cleanup() {
 trap cleanup EXIT
 
 send() {
-  local name="" sets="" ids="" salt="" conc=1 corpus=${CORPUS:-} stats=0 kv
+  local name="" sets="" ids="" salt="" conc=1 corpus=${CORPUS:-} stats=0 bg=0 errors=0 kv
   for kv in "$@"; do
     case $kv in
       name=*) name=${kv#name=};; sets=*) sets=${kv#sets=};; ids=*) ids=${kv#ids=};;
       salt=*) salt=${kv#salt=};; conc=*) conc=${kv#conc=};; corpus=*) corpus=${kv#corpus=};;
-      stats=*) stats=${kv#stats=};; *) echo "send: unknown argument $kv"; return 1;;
+      stats=*) stats=${kv#stats=};; bg=*) bg=${kv#bg=};; errors=*) errors=${kv#errors=};;
+      *) echo "send: unknown argument $kv"; return 1;;
     esac
   done
   local run=${TAG}_$name
-  [ "$stats" = 1 ] && python "$HERE/l2_stats.py" dump --namespace "$NS" --out "$OUT/l2stats_${run}_before.json"
-  echo "=== $TAG send $name sets=$sets ids=${ids:--} salt=${salt:--} conc=$conc $(date -u +%T)"
+  local err_flag=""; [ "$errors" = 1 ] && err_flag=--allow-errors
+  [ "$stats" = 1 ] && python "$HERE/l2_stats.py" dump $L2_ARGS --out "$OUT/l2stats_${run}_before.json"
+  echo "=== $TAG send $name sets=$sets ids=${ids:--} salt=${salt:--} conc=$conc bg=$bg errors=$errors $(date -u +%T)"
+  if [ "$bg" = 1 ]; then
+    BG_MARK=$(wc -l < "$LOG")
+    python "$HERE/client.py" --corpus "$corpus" --out "$OUT/$run.json" --tag "$run" --sets "$sets" \
+      --ids "$ids" --salt "$salt" --concurrency "$conc" --timeout "${SEND_TIMEOUT:-900}" \
+      --metrics-urls "$METRICS_URLS" $err_flag > "$OUT/client_$run.txt" 2>&1 &
+    BG_PIDS="$BG_PIDS $!"
+    return 0
+  fi
   if ! python "$HERE/client.py" --corpus "$corpus" --out "$OUT/$run.json" --tag "$run" --sets "$sets" \
       --ids "$ids" --salt "$salt" --concurrency "$conc" --timeout "${SEND_TIMEOUT:-900}" \
-      --metrics-urls "$METRICS_URLS"; then
+      --metrics-urls "$METRICS_URLS" $err_flag; then
     echo "=== $TAG send $name FAILED $(date -u +%T)"
     echo "server_pid=$SERVER_PID vllm_pid=$VLLM_PID engine_pids=$(pgrep -f 'VLLM::' | paste -sd,)" > "$OUT/HANG_$run"
     for _ in $(seq 300); do [ -f "$OUT/STACKS_DONE_$run" ] && break; sleep 1; done
     return 1
   fi
-  [ "$stats" = 1 ] && python "$HERE/l2_stats.py" dump --namespace "$NS" --out "$OUT/l2stats_${run}_after.json"
+  [ "$stats" = 1 ] && python "$HERE/l2_stats.py" dump $L2_ARGS --out "$OUT/l2stats_${run}_after.json"
   return 0
+}
+restart_step() {
+  local downtime=0 kv
+  for kv in "$@"; do
+    case $kv in
+      extra=alt) SERVER_EXTRA=${LMCACHE_SERVER_EXTRA_ALT:?LMCACHE_SERVER_EXTRA_ALT is not set};;
+      extra=main) SERVER_EXTRA=${LMCACHE_SERVER_EXTRA:-};;
+      downtime=*) downtime=${kv#downtime=};;
+      *) echo "restart: unknown argument $kv"; return 1;;
+    esac
+  done
+  local registrations; registrations=$(grep -c "Registered KV cache" "$LOG")
+  stop_server
+  sleep "$downtime"
+  start_server || return 1
+  wait_reregistered "$registrations"
 }
 
 echo "=== $TAG start $(date -u +%T) layerwise=$LW policy=$POLICY server_extra='${LMCACHE_SERVER_EXTRA:-}' vllm_extra='${VLLM_EXTRA:-}'"
@@ -152,14 +276,35 @@ for step in "$@"; do
     send) # shellcheck disable=SC2086
       send $rest || exit 1;;
     settle) settle;;
-    restart) settle; echo "=== $TAG restarting the LMCache server (L1 is lost) $(date -u +%T)"
-      restart_server || exit 1;;
-    reset) python "$HERE/l2_keys.py" --namespace "$NS" truncate; sleep 5
+    restart) settle; echo "=== $TAG restarting the LMCache server (L1 is lost) $rest $(date -u +%T)"
+      # shellcheck disable=SC2086
+      restart_step $rest || exit 1;;
+    reset) python "$HERE/l2_keys.py" $L2_ARGS --set "${L2_SET:-kv_chunks}" truncate; sleep 5
       echo "=== $TAG L2 truncated, restarting the LMCache server $(date -u +%T)"
       restart_server || exit 1;;
-    keys) settle; python "$HERE/l2_keys.py" --namespace "$NS" dump --out "$OUT/keys_${TAG}_${rest#name=}.json";;
+    keys) settle; python "$HERE/l2_keys.py" $L2_ARGS --set "${L2_SET:-kv_chunks}" dump --out "$OUT/keys_${TAG}_${rest#name=}.json";;
     delkeys) read -r b a <<< "$rest"
-      python "$HERE/l2_keys.py" --namespace "$NS" delete "$OUT/keys_${TAG}_${b#before=}.json" "$OUT/keys_${TAG}_${a#after=}.json" || exit 1;;
+      python "$HERE/l2_keys.py" $L2_ARGS --set "${L2_SET:-kv_chunks}" delete "$OUT/keys_${TAG}_${b#before=}.json" "$OUT/keys_${TAG}_${a#after=}.json" || exit 1;;
+    wait_bg) wait_bg;;
+    wait_log) # shellcheck disable=SC2086
+      wait_log $rest || exit 1;;
+    kill9) echo "=== $TAG SIGKILL to the LMCache server (pid $SERVER_PID) $(date -u +%T.%N | cut -c1-12)"
+      [ "$SERVER_PID" -gt 0 ] && kill -9 "$SERVER_PID"; SERVER_PID=0;;
+    server_up) registrations=$(grep -c "Registered KV cache" "$LOG")
+      start_server || exit 1; wait_reregistered "$registrations" || exit 1;;
+    freeze_server) secs=${rest#secs=}
+      echo "=== $TAG SIGSTOP to the LMCache server (pid $SERVER_PID) for $secs s $(date -u +%T.%N | cut -c1-12)"
+      kill -STOP "$SERVER_PID"; sleep "$secs"; kill -CONT "$SERVER_PID"
+      echo "=== $TAG SIGCONT $(date -u +%T.%N | cut -c1-12)";;
+    host) # shellcheck disable=SC2086
+      host_action $rest || exit 1;;
+    vllm_check) vllm_check "$rest";;
+    vllm_ensure) [ "$VLLM_PID" -gt 0 ] || start_vllm "${rest#model=}" || exit 1;;
+    l2seg) # shellcheck disable=SC2086
+      python "$HERE/l2_segments.py" $L2_ARGS --set "${L2_SET:-kv_chunks}" --corpus "${CORPUS:-}" \
+      --model-url http://localhost:8000 delete $rest || exit 1;;
+    sleep) sleep "${rest#secs=}";;
+    rxe) rdma statistic show link rxe0/1 > "$OUT/rxe_${TAG}_${rest#name=}.txt" 2>&1;;
     *) echo "unknown step: $step"; exit 1;;
   esac
 done

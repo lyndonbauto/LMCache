@@ -18,10 +18,21 @@ The cache model is scoped by each run's model and ``cache_salt`` (from its
 names a reference run (for example vLLM's own prefix cache) that is the
 oracle for that send's prefix hits: requests whose expected hit is a proper
 prefix (more than 0 and less than ``n_tokens - 1``) are compared with it,
-and the rest with the baseline; the Exact cell then says which one. A
-baseline applies only to runs of the model it was recorded with; prompts
-with no baseline for the run's model show "n/a" for exactness and are not
-failed on it. For a
+and the rest with the baseline; the Exact cell then says which one.
+
+By default every retrieve must be ``not_deferred`` and the deferred counter
+must not move (the plain path). For the pipelined path,
+``--outcomes TAG=pipelined,not_deferred`` sets the outcomes a send's
+retrieves may have (the deferred counter is then reported, not checked),
+and ``--require TAG=pipelined`` also requires every request of that send
+with a modelled hit to have at least one retrieve with that outcome. ``*``
+as TAG applies to every send. ``--allow-error TAG`` accepts requests that
+``client.py --allow-errors`` recorded as failed (fault tests); otherwise
+they fail the row. ``--no-hit-check TAG`` reports the hit columns of that
+send without checking them (fault tests where vLLM counts a lookup hit
+whose load then fails). A baseline applies only
+to runs of the model it was recorded with; prompts with no baseline for the
+run's model show "n/a" for exactness and are not failed on it. For a
 concurrent run (``meta.concurrency`` > 1) the hit and deferred checks use the
 batch totals in ``meta.batch_metrics_delta``; exactness and outcomes are
 still per request.
@@ -123,8 +134,41 @@ def main() -> None:
         default=[],
         help="TAG=PATH: oracle for the prefix hits of send TAG",
     )
+    parser.add_argument(
+        "--outcomes",
+        action="append",
+        default=[],
+        help="TAG=OUTCOME[,OUTCOME...]: outcomes a send's retrieves may have",
+    )
+    parser.add_argument(
+        "--require",
+        action="append",
+        default=[],
+        help="TAG=OUTCOME: every request with a hit has a retrieve with it",
+    )
+    parser.add_argument(
+        "--allow-error",
+        action="append",
+        default=[],
+        help="TAG: accept requests recorded as failed in that send",
+    )
+    parser.add_argument(
+        "--no-hit-check",
+        action="append",
+        default=[],
+        help="TAG: report but do not check the hit and deferred columns",
+    )
     parser.add_argument("runs", nargs="+", help="client.py outputs in send order")
     args = parser.parse_args()
+    allowed_outcomes = {
+        tag: set(names.split(","))
+        for tag, _, names in (item.partition("=") for item in args.outcomes)
+    }
+    required_outcome = {
+        tag: name for tag, _, name in (item.partition("=") for item in args.require)
+    }
+    allow_error = set(args.allow_error)
+    no_hit_check = set(args.no_hit_check)
     with open(args.corpus) as f:
         corpus = json.load(f)
     # A baseline only applies to runs of the model it was recorded with.
@@ -160,6 +204,10 @@ def main() -> None:
         tag = meta["tag"]
         scope = (meta["model"], meta.get("salt", ""))
         concurrent_run = meta.get("concurrency", 1) > 1
+        allowed = allowed_outcomes.get(tag, allowed_outcomes.get("*", {"not_deferred"}))
+        plain_path = allowed == {"not_deferred"}
+        required = required_outcome.get(tag, required_outcome.get("*", ""))
+        errors_ok = tag in allow_error or "*" in allow_error
         print(f"\n### {tag} (model {scope[0]}, salt {scope[1] or '-'})\n")
         print(
             "| Prompt | Tokens | Exact | Expected hit | vLLM ext hit | "
@@ -179,22 +227,33 @@ def main() -> None:
             l2 = int(delta.get("lmcache_mp_lookup_hit_l2_tokens_total", -1))
             deferred = int(delta.get("lmcache_mp_num_deferred_retrieves_total", -1))
             retrieves = outcomes.get(result.get("request_id", ""), [])
+            error = result.get("error", "")
             exact: bool | None = None
             oracle = "baseline"
             if (
-                0 < want < len(tokens) - 1
+                not error
+                and 0 < want < len(tokens) - 1
                 and pid in prefix_oracles.get(tag, ("", {}))[1]
             ):
                 oracle, results = prefix_oracles[tag]
                 exact = result["token_ids"] == results[pid]["token_ids"]
-            elif (scope[0], pid) in baseline:
+            elif not error and (scope[0], pid) in baseline:
                 exact = result["token_ids"] == baseline[(scope[0], pid)]["token_ids"]
-            outcome_ok = all(o == "not_deferred" for _, o in retrieves)
+            outcome_ok = all(o in allowed for _, o in retrieves)
+            if required and want > 0:
+                outcome_ok = outcome_ok and any(o == required for _, o in retrieves)
             # Concurrent runs have no per-request counters; their hit and
-            # deferred checks are on the batch totals below.
-            hit_ok = concurrent_run or ext_hit == want
-            deferred_ok = concurrent_run or deferred == 0
+            # deferred checks are on the batch totals below. A failed request
+            # has no counters either, nor has one whose counters a fault took
+            # down in a send that allows errors.
+            unscraped = (errors_ok and "metrics_delta" not in result) or (
+                tag in no_hit_check or "*" in no_hit_check
+            )
+            hit_ok = concurrent_run or bool(error) or unscraped or ext_hit == want
+            deferred_ok = concurrent_run or not plain_path or unscraped or deferred == 0
             ok = exact is not False and hit_ok and deferred_ok and outcome_ok
+            if error:
+                ok = errors_ok and outcome_ok
             row = {
                 "prompt": pid,
                 "n_tokens": len(tokens),
@@ -207,12 +266,15 @@ def main() -> None:
                 "lmcache_hit_l2": l2,
                 "deferred_delta": deferred,
                 "retrieves": retrieves,
+                "error": error,
                 "ok": ok,
             }
             rows.append(row)
             totals[f"{tag}:n"] += 1
             totals[f"{tag}:exact"] += exact is True
-            totals[f"{tag}:no_baseline"] += exact is None
+            totals[f"{tag}:no_baseline"] += exact is None and not error
+            if error:
+                totals[f"{tag}:errors"] += 1
             if not concurrent_run:
                 totals[f"{tag}:hit_as_expected"] += ext_hit == want
             totals[f"{tag}:ok"] += ok
@@ -222,6 +284,8 @@ def main() -> None:
             exact_text = {True: "yes", False: "NO", None: "n/a"}[exact]
             if oracle != "baseline":
                 exact_text += f" ({oracle})"
+            if error:
+                exact_text = f"ERROR ({error[:60]})"
             print(
                 f"| {pid} | {len(tokens)} | {exact_text} | {want} | "
                 f"{ext_hit} | {lmc_hit} ({l1}/{l2}) | {deferred} | {retrieve_text} "
@@ -248,7 +312,7 @@ def main() -> None:
                     delta.get("lmcache_mp_lookup_hit_l2_tokens_total", -1)
                 ),
                 "deferred_delta": deferred,
-                "ok": ext == batch_want and deferred == 0,
+                "ok": ext == batch_want and (not plain_path or deferred == 0),
             }
             totals[f"{tag}:batch_ok"] += batch["ok"]
             print(

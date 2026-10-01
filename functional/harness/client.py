@@ -15,6 +15,11 @@ one request ran, so per-request cache hits can be read without parsing logs.
 flight; per-request deltas are then not recorded, and ``meta`` holds the
 whole batch's ``batch_metrics_delta`` instead.
 
+``--allow-errors`` is for fault tests: a request that fails (HTTP error,
+dropped connection, timeout) is recorded as ``{"error": ..., "correct":
+false}`` instead of aborting the send; the exit status is still 0. Without
+it any failed request aborts the send with a traceback.
+
 Usage::
 
     python client.py --corpus corpus_llama.json --out baseline_run1.json \
@@ -160,6 +165,11 @@ def main() -> None:
         default="",
         help="comma-separated Prometheus endpoints; record per-request deltas",
     )
+    parser.add_argument(
+        "--allow-errors",
+        action="store_true",
+        help="record a failed request as an error instead of aborting",
+    )
     args = parser.parse_args()
     metrics_urls = [u for u in args.metrics_urls.split(",") if u]
     with open(args.corpus) as f:
@@ -192,29 +202,54 @@ def main() -> None:
         result["correct"] = prompt["expected"] in result["text"]
         return result
 
+    def scrape(urls: list[str]) -> dict[str, float]:
+        # Under --allow-errors a fault may have taken an endpoint down.
+        if not urls:
+            return {}
+        if not args.allow_errors:
+            return scrape_counters(urls)
+        try:
+            return scrape_counters(urls)
+        except OSError:
+            return {}
+
+    def run_guarded(prompt: dict[str, Any]) -> dict[str, Any]:
+        if not args.allow_errors:
+            return run_one(prompt)
+        start = time.perf_counter()
+        try:
+            return run_one(prompt)
+        except Exception as e:  # noqa: BLE001 - every failure is the result
+            return {
+                "error": f"{type(e).__name__}: {e}",
+                "correct": False,
+                "request_id": "",
+                "latency_s": round(time.perf_counter() - start, 4),
+            }
+
     if args.concurrency > 1:
         # Per-request counter deltas are meaningless with requests in flight
         # together, so only the whole batch's delta is recorded (in meta).
         batch = [p for prompts in selected.values() for p in prompts]
-        before = scrape_counters(metrics_urls) if metrics_urls else {}
+        before = scrape(metrics_urls)
         start = time.perf_counter()
         with concurrent.futures.ThreadPoolExecutor(args.concurrency) as pool:
-            futures = {p["id"]: pool.submit(run_one, p) for p in batch}
+            futures = {p["id"]: pool.submit(run_guarded, p) for p in batch}
             for pid, future in futures.items():
                 results[pid] = future.result()
         wall = round(time.perf_counter() - start, 3)
-        if metrics_urls:
-            after = scrape_counters(metrics_urls)
+        after = scrape(metrics_urls)
+        if before and after:
             batch_delta = {k: after[k] - before[k] for k in after}
         print(f"{len(batch)} requests at concurrency {args.concurrency}: {wall} s")
     for name, prompts in selected.items():
         for prompt in prompts:
             if args.concurrency > 1:
                 continue
-            before = scrape_counters(metrics_urls) if metrics_urls else {}
-            result = run_one(prompt)
-            if metrics_urls:
-                after = scrape_counters(metrics_urls)
+            before = scrape(metrics_urls)
+            result = run_guarded(prompt)
+            after = scrape(metrics_urls)
+            if before and after:
                 result["metrics_delta"] = {k: after[k] - before[k] for k in after}
             results[prompt["id"]] = result
         correct = sum(results[p["id"]]["correct"] for p in prompts)
