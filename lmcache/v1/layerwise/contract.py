@@ -90,17 +90,18 @@ class LayerArrivalTimeoutError(LayerwiseContractError):
 
 
 class PlanTooLargeError(LayerwiseContractError):
-    """A request is more than this transport can accept in one fetch.
+    """A request is more than one fetch can carry.
 
-    Raised for a limit only the transport knows: by
-    :meth:`LayerArrivalSource.begin_fetch`, e.g. more slots than the device
-    can post receives for, or by the transport's chunk placer, e.g. a request
-    larger than any RDMA window. Distinct from its base class because the
-    caller has a response other than falling back: it can split the request
-    into smaller ones. A refusal that splitting would not fix, such as no
-    window being free right now, is a plain :class:`LayerwiseContractError`.
-    A caller that does not split can catch :class:`LayerwiseContractError`
-    and treat both alike.
+    Raised by :class:`LayerFetchPlan` for more slots than the RDMA immediate
+    can number (:data:`MAX_SLOTS_PER_REQUEST`), and for limits only the
+    transport knows: by :meth:`LayerArrivalSource.begin_fetch`, e.g. more
+    slots than the device can post receives for, or by the transport's chunk
+    placer, e.g. a request larger than any RDMA window. Distinct from its
+    base class because the caller has a response other than falling back: it
+    can split the request into smaller ones. A refusal that splitting would
+    not fix, such as no window being free right now, is a plain
+    :class:`LayerwiseContractError`. A caller that does not split can catch
+    :class:`LayerwiseContractError` and treat both alike.
     """
 
 
@@ -215,14 +216,15 @@ class LayerFetchPlan:
             not depend on.
 
     Raises:
-        ValueError: If ``slots`` is empty or holds more than
-            :data:`MAX_SLOTS_PER_REQUEST` slots, if any slot has a
-            non-positive length, if ``node_names`` is empty or repeats a
-            name, or if a slot names a node outside ``node_names`` -- the
-            last of which would otherwise surface as a fetch addressed to the
-            wrong node. A plan past the slot ceiling is refused rather than
-            truncated: the extra slots would reuse the low 16 bits of earlier
-            ones, and their arrivals would be credited to the wrong slot.
+        PlanTooLargeError: If ``slots`` holds more than
+            :data:`MAX_SLOTS_PER_REQUEST` slots. The plan is refused rather
+            than truncated: the extra slots would reuse the low 16 bits of
+            earlier ones, and their arrivals would be credited to the wrong
+            slot. Fetching fewer chunks per request fixes it.
+        ValueError: If ``slots`` is empty, if any slot has a non-positive
+            length, if ``node_names`` is empty or repeats a name, or if a
+            slot names a node outside ``node_names`` -- the last of which
+            would otherwise surface as a fetch addressed to the wrong node.
     """
 
     slots: tuple[SlotPlacement, ...]
@@ -232,7 +234,7 @@ class LayerFetchPlan:
         if not self.slots:
             raise ValueError("a fetch plan must contain at least one slot")
         if len(self.slots) > MAX_SLOTS_PER_REQUEST:
-            raise ValueError(
+            raise PlanTooLargeError(
                 f"fetch plan has {len(self.slots)} slots, but a request can "
                 f"address at most {MAX_SLOTS_PER_REQUEST}; fetch fewer chunks "
                 "per request"

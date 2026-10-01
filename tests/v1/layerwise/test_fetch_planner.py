@@ -20,9 +20,12 @@ import torch
 
 # First Party
 from lmcache.v1.distributed.api import MemoryLayoutDesc
-from lmcache.v1.layerwise import LayerFetchPlan
-from lmcache.v1.layerwise.planner import (
+from lmcache.v1.layerwise import (
     MAX_SLOTS_PER_REQUEST,
+    LayerFetchPlan,
+    PlanTooLargeError,
+)
+from lmcache.v1.layerwise.planner import (
     ChunkPlacement,
     FetchPlanner,
     KernelGroupGeometry,
@@ -959,11 +962,12 @@ def test_a_request_exceeding_the_slot_space_is_rejected_not_truncated() -> None:
     """Too many slots fails loudly rather than silently dropping writes.
 
     The immediate carries 16 bits of slot index. A truncated plan would look
-    valid and hang on the layers whose slots were dropped.
+    valid and hang on the layers whose slots were dropped. Fewer chunks would
+    fit, so it is the error a caller can split on.
     """
     layout = uniform_layout(num_layers=80, kv_planes=2, plane_bytes=4096)
     placements = place(range(600), nodes=tuple(0 for _ in range(600)))
-    with pytest.raises(ValueError, match="slots"):
+    with pytest.raises(PlanTooLargeError, match="slots"):
         FetchPlanner(layout).plan(
             request_for(placements, max_record_bytes=4096),
             KEYS,
