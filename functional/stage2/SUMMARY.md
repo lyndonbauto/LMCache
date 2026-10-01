@@ -1,3 +1,30 @@
+# Stage 2 roll-up (2a + 2b + 2c)
+
+Plain path (Aerospike CE L2, no RDMA, no pipelined fetch), product code
+`00cd3eee` throughout, `VLLM_BATCH_INVARIANT=1`, every test layerwise off and
+on. No S1, S2 or S3 found in Stage 2. Details per stage below.
+
+| Test | Llama-3.1-8B (2a, 2b) | gpt-oss-120b (2c) | Stage 2 status |
+| --- | --- | --- | --- |
+| T-E2E-01 P-short, zero L2 traffic | Pass on P-short-v2 (2b); v1 partial (2a, D-09) | Pass (P-short-v2) | Pass |
+| T-E2E-02 P-exact + P-ragged, L1 hit | Pass, 80/80 per mode | Pass, 80/80 per mode | Pass |
+| T-E2E-03 same, L2 hit after restart | Pass, 80/80 per mode | Pass, 40/40 per mode | Pass |
+| T-E2E-05 P-long at the cap and one over | Plain half pass | Plain half pass | Partial: pipelined half in Stage 3 |
+| T-E2E-06 P-shared | Pass | Pass | Pass |
+| T-E2E-07 P-multi, 5 turns | Pass | Pass | Pass |
+| T-E2E-08 T-E2E-02 to 07 on the hybrid model | - | Pass for 02, 03, 05 (plain), 06, 07 | Partial: T-E2E-04 and the pipelined half of 05 in Stage 3 |
+| T-E2E-10 outcome / deferred / external hits | Pass (plain path), 1,158 requests | Pass (plain path), 600 requests | Partial: pipelined outcomes in Stage 3 |
+| T-LKP-03 prefix semantics and a gap | Pass (2b) | - | Pass |
+| T-LKP-04 salt isolation | Pass (2b) | - | Pass |
+| T-LKP-05 model isolation | Model half pass (2b, Llama vs gpt-oss) | (same test) | Partial: TP half N/A on one GPU |
+| Concurrency regression (layerwise + async) | Pass, 4/8/16 concurrent (2b) | - | Pass |
+| T-CFG-08 pipelined registration log | - | Deferred: needs an RDMA adapter with a ready pipelined path | Deferred to Stage 3 |
+
+Findings: D-09 (closed by P-short-v2), D-10, D-13 and D-16 (gpt-oss not
+batch invariant across batch sizes), all Info. Oracle note for gpt-oss:
+vLLM's block-256 prefix cache is the split-matched prefix oracle (Stage 2c,
+"Oracles").
+
 # Functional testing, Stage 2a: the plain path end to end on Llama-3.1-8B
 
 Setup: Aerospike CE 8.2 as L2 (`127.0.0.1:3000`, namespace `lmcache`), no
@@ -161,3 +188,103 @@ S3 gpt-oss block size 16.
   concurrent clients over P-shared and P-multi, which batch invariance now
   allows with token equality).
 - The TP half of T-LKP-05 needs a multi-GPU droplet.
+
+# Stage 2c: T-E2E-08, the plain path end to end on gpt-oss-120b, and T-CFG-08
+
+Same setup as Stage 2a and 2b (Aerospike CE 8.2 L2 on 127.0.0.1:3000, no
+RDMA, no pipelined fetch, `VLLM_BATCH_INVARIANT=1`, temperature 0, default
+async scheduling, `kv_load_failure_policy` `fail`, batch size 1), product
+code unchanged since `00cd3eee`, model openai/gpt-oss-120b. Under the
+connector it runs at KV block size 16 (S3, D-02), so every reference also
+uses block size 16, except the split-matched one below. Prompts are raw
+token IDs, not the chat template: the corpus tooling builds exact token
+counts per chunk boundary, and a templated corpus would need new baselines
+for every set (decision 3 below). gpt-oss answers the registry question
+rarely either way (13/20 P-short-v2, 2/20 P-exact, 0/50 P-multi in the
+baseline); token equality is the oracle.
+
+One LMCache session per layerwise mode covers every test, in this order
+(driver `stage2c.sh`, section `lmc`): P-short-v2 cold and warm (T-E2E-01);
+P-exact + P-ragged cold, warm from L1 (T-E2E-02); LMCache restart, then
+P-exact + P-ragged from L2 (T-E2E-03); P-long cold and warm (T-E2E-05);
+P-shared cold and warm (T-E2E-06); P-multi cold and warm (T-E2E-07). The
+sets share no 256-token prefix with each other, so they cannot hit across
+tests. P-long is the Llama size (64 and 65 chunks, 16,384 and 16,640
+tokens): its 645 chunks take about 12 GB of the 40 GB L1, and the 17,408
+token model length holds the longest prompt. GPU time: 2 h 10 min (17:47
+to 19:57 UTC on 2026-10-01), of which 59 min for the references.
+
+## Oracles
+
+All references ran with `VLLM_BATCH_INVARIANT=1`, no connector, at batch
+size 1, in `stage2/gptoss_ref/` (two vLLM servers shared the GPU at a time,
+on ports 8000 and 8001).
+
+| Reference | What | Used for | Determinism |
+| --- | --- | --- | --- |
+| `base_b16_all` | No prefix cache, block 16, all six sets | Requests with no hit, and hits covering the whole prompt minus the last token (P-exact, P-long, P-ragged `k` chunks + 1, P-short) | Equal to Day 1's block-64 baseline on its 30 prompts (30/30) |
+| `pc16_r1` | vLLM's own prefix cache, block 16, sends in the session's order (P-ragged, P-shared, P-multi, each twice) | The plan's oracle for prefix hits | `pc16_r2` from a fresh server: 60/60 on P-ragged and P-shared; Day 1's P-shared run 10/10 |
+| `pc256` | vLLM's own prefix cache, block 256, same sends | Split-matched oracle: vLLM's cached prefix ends exactly where LMCache's does (per-request `vllm:prefix_cache_hits_total` equals LMCache's expected hit on all 160 requests) | Equal to `pc16` wherever the two split at the same token (P-shared cold, all no-hit requests) |
+
+Why a second prefix oracle: LMCache's prefix ends at a 256-token chunk
+boundary, vLLM's block-16 prefix cache at a 16-token one (P-ragged-11, 1635
+tokens: LMCache loads 1536, vLLM-16 caches 1632). gpt-oss's output depends
+on where the prefix ends (Day 1: batch invariance does not cover the
+prefix split for its sink and sliding-window attention): vLLM alone at block
+16 and at block 256 differ on 4 of the 20 warm P-ragged prompts
+(P-ragged-11, 13, 14, 16), on P-multi and P-shared they agree. The
+verdicts below use `pc256`; the `pc16` comparison is reported too.
+
+## Results by test ID
+
+| Test | What it checks | Result | Evidence (under `stage2/`) |
+| --- | --- | --- | --- |
+| T-E2E-08 | T-E2E-01, 02, 03, 05, 06, 07 on the hybrid model | **Pass (plain path)**, both modes: 600/600 requests (300 per mode) equal to their oracle, every hit the expected length, every retrieve `not_deferred`. T-E2E-04 and the pipelined half of 05 are Stage 3 | `gptoss_e2e/report_g_lw_*_pc256.md` |
+| T-E2E-01 on gpt-oss | P-short-v2: output equal, zero L2 traffic | **Pass.** 40/40 per mode equal to the baseline; the Aerospike namespace counters did not move from the cold send's start to the warm send's end | `gptoss_e2e/l2stats_g_lw_*_short*` |
+| T-E2E-02 on gpt-oss | P-exact + P-ragged, warm hits from L1 | **Pass.** 80/80 per mode. Warm hits exactly the full chunks (141,312 LMCache tokens, all L1; vLLM external 141,292 = expected, the 20 P-exact whole-prompt hits count `n - 1`). Prefix hits equal `pc256` 15/15; against `pc16` 11/15, the 4 misses being the prompts where `pc16` and `pc256` differ | `gptoss_e2e/` |
+| T-E2E-03 on gpt-oss | Same after an LMCache restart: hits from L2 | **Pass.** 40/40 per mode; vLLM re-registered 4 s (layerwise off) and 6 s (on) after the restart; 141,312 hit tokens from L2, 0 from L1; Aerospike 20,508 reads + 468 batch reads (about 37 records per chunk: 36 layers + metadata), 222 writes (6 decode-completed chunks rewritten, D-10) | `gptoss_e2e/l2stats_g_lw_*_l03_*` |
+| T-E2E-05 on gpt-oss | P-long at 64 and 65 chunks | **Partial: pipelined half in Stage 3.** Plain path 20/20 per mode equal to the baseline; whole-prompt hits 16,383 and 16,639 tokens; `not_deferred` | `gptoss_e2e/` |
+| T-E2E-06 on gpt-oss | P-shared, 2048-token shared prefix | **Pass.** 20/20 per mode. Cold: requests 2-10 hit 2048; warm: 10/10 hit 2048. Equal to `pc256` and to `pc16` (19/19 prefix hits; request 1 cold against the baseline) | `gptoss_e2e/` |
+| T-E2E-07 on gpt-oss | P-multi, 10 five-turn conversations | **Pass.** 100/100 per mode. Cold: turn k hits turn k-1's full chunks (0, 256, 512, 1024, 1280); warm: every turn its own full chunks. 90 prefix hits equal to `pc256` and to `pc16`; 10 first turns equal to the baseline | `gptoss_e2e/` |
+| T-E2E-10 on gpt-oss | Outcome, deferred counter, external hit tokens vs expected | **Pass (plain path).** Every retrieve `not_deferred`, deferred counter never incremented, external hits = expected on every request | `metrics_table_2c.md` |
+| T-CFG-08 | Registration logs `<model> fetches layer by layer from L2 adapter 0, reading records of at most <N> bytes` | **Deferred to Stage 3.** The line is logged only when `--pipelined-fetch` (needs `--use-layerwise`) is on and the pipelined model registers, which needs an L2 adapter with RDMA reception and a ready pipelined path (`StorageManager.pipelined_window_placer` raises "no L2 adapter enables RDMA reception" otherwise). On the plain path the server logs `Cannot fetch ... layer by layer` instead (`day1fix/e2e_run.log`). Stage 3 should capture it for both models against the kv-sink server | `lmcache_driven_transfer.py` `_register_pipelined_model`; `c9-bring-up.md` |
+
+Hybrid layout (from the registration log): two KV layer groups of 18
+layers each, group 0 (layers 0-17) sliding window of 128 tokens, group 1
+(18-35) full attention, both `tokens_per_block=16`. LMCache stores and
+loads every chunk whole for all 36 layers (about 37 Aerospike records per
+chunk), including the 256 tokens of the sliding-window layers of which
+attention needs at most the last 128; that is extra bytes, not wrong KV.
+
+### T-E2E-10 rows (layerwise off; layerwise on is identical in every column)
+
+| Test | Send | Requests | Retrieves by outcome | Deferred | vLLM external hit = expected | LMCache hit tokens L1 / L2 |
+| --- | --- | --- | --- | --- | --- | --- |
+| T-E2E-01 | cold / warm | 20 / 20 | none / none | 0 / 0 | 0 / 0 | 0 / 0 |
+| T-E2E-02 | cold | 40 | none | 0 | 0 | 0 / 0 |
+| T-E2E-02 | warm (L1) | 40 | not_deferred 40 | 0 | 141292 | 141312 / 0 |
+| T-E2E-03 | after restart (L2) | 40 | not_deferred 40 | 0 | 141292 | 0 / 141312 |
+| T-E2E-05 | cold / warm | 10 / 10 | none / not_deferred 10 | 0 / 0 | 0 / 165110 | 165120 / 0 (warm) |
+| T-E2E-06 | cold / warm | 10 / 10 | not_deferred 9 / 10 | 0 / 0 | 18432 / 20480 | 18432 / 0, 20480 / 0 |
+| T-E2E-07 | cold / warm | 50 / 50 | not_deferred 40 / 50 | 0 / 0 | 30720 / 46080 | 30720 / 0, 46080 / 0 |
+
+## Defects and findings
+
+No S1, S2 or S3 found. No tracebacks or ERROR lines in any LMCache or vLLM
+log.
+
+| Severity | Finding | Cause | Owner |
+| --- | --- | --- | --- |
+| Info (D-16) | gpt-oss-120b is not batch invariant across batch sizes under `VLLM_BATCH_INVARIANT=1`: the same baseline server at concurrency 8 matched its own batch-size-1 output on 79/130 prompts (every set affected, first divergence often at token 1). Llama-3.1-8B matched 56/56 in Stage 2b. Batch-size-1 equality, as used here, is unaffected | vLLM's batch-invariant mode on ROCm does not cover gpt-oss's kernels (MoE, sinks or sliding window) | vLLM (upstream). Concurrent gpt-oss tests (T-E2E-09) cannot use token equality with a batch-1 baseline |
+| Info (oracle) | vLLM's block-16 prefix cache is not a split-matched oracle for gpt-oss: its prefix ends at a 16-token boundary, LMCache's at a 256-token one, and on 4/20 P-ragged prompts the output depends on that (vLLM alone, b16 vs b256) | Same split sensitivity as Day 1 | Test plan (decision 1) |
+
+Known items seen, not re-filed: S3 block size 16 (D-02); D-10 (222
+records rewritten after the restart); the LMCache server outlived the 5 s
+SIGTERM grace and was SIGKILLed at the layerwise-off session's restart and end.
+
+## Next steps
+
+- Stage 3: T-E2E-04 and the pipelined half of T-E2E-05 on both models;
+  T-CFG-08 against the kv-sink server.
+- For gpt-oss concurrency (T-E2E-09): record a reference at the same
+  concurrency, or judge by the fallback oracle (D-16).

@@ -26,3 +26,17 @@ rebuilt with `c5a4ff99`). Corpus: spec version 2 (`edc901fc`),
 `corpus_llama-3.1-8b-instruct.v2.json`, plus P-prefix in
 `corpus_llama-3.1-8b-instruct.stage2b.json` (sha256 `c26fd7f2…`). Second
 model: openai/gpt-oss-120b (T-LKP-05). New baseline `stage2/base2b/bi_run1.json`.
+
+## Stage 2c
+
+Same host, kernel, ROCm, container (`lmc-c`), torch, HIP, vLLM, Aerospike
+server and C client as above. LMCache: product code (`lmcache/`, `csrc/`,
+`rust/`, `setup.py`) unchanged since `00cd3eee`; the box tree ran at
+`96c4563c` (harness `4fb6eda2`: `run_ref.sh`, prefix-cache counters in
+`client.py`, `hit_report.py --oracle`; driver `stage2c.sh` up to
+`96c4563c`). Model: openai/gpt-oss-120b (snapshot b5c939de8f75…), KV block
+size 16 under the connector. Corpus: `corpus_gpt-oss-120b.v2.json` built
+from spec version 2 (sha256 `09c6da97bf1a…`; the v1 sets are
+token-identical to `corpus_gpt-oss-120b.json`). References in
+`stage2/gptoss_ref/`: `base_b16_all.json`, `pc16_r1_*.json`,
+`pc16_r2_*.json`, `pc256_*.json`.
