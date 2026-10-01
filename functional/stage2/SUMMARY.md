@@ -91,3 +91,73 @@ after a restart (the harness waits for re-registration, 4 s here).
   `kv-sink` server build.
 - Optional: rerun T-E2E-06 and 07 with the restart between sends, so their
   prefix hits also come from L2 (not required by the plan).
+
+# Stage 2b: prefix semantics, tenant and model isolation, concurrency, T-E2E-01 redo
+
+Same setup as Stage 2a (Aerospike CE 8.2 L2 on 127.0.0.1:3000, no RDMA, no
+pipelined fetch, `VLLM_BATCH_INVARIANT=1`, temperature 0, default async
+scheduling, `kv_load_failure_policy` `fail`), product code unchanged since
+`00cd3eee` (box tree at `49f18d12`). Equality tests ran at batch size 1,
+layerwise off then on. GPU time: 45 minutes (9 sessions plus two
+baseline runs, 16:50 to 17:35 UTC on 2026-10-01).
+
+The driver is `stage2b.sh`; sessions are scripted with
+`functional/harness/run_steps.sh` (send a prompt subset, restart, truncate
+L2, snapshot or delete L2 records, switch models). Evidence is under
+`stage2/{base2b,e2e01v2,lkp03,lkp04,conc,lkp05}/` on the box:
+`report_<session>.md` checks each request (output equal to the baseline,
+vLLM external hit = expected hit, no deferred retrieve, `not_deferred`
+outcome); the T-E2E-10 table is `metrics_table_2b.md`.
+
+New oracle files: `base2b/bi_run1.json` covers P-short-v2 and P-prefix,
+deterministic against `bi_run2.json` from a second fresh server (28/28).
+Every other set uses `day1/step4/bi_run1.json`; the v2 corpus builds those
+sets token-identical to v1.
+
+## Results by test ID
+
+| Test | What it checks | Result | Evidence (under `stage2/`) |
+| --- | --- | --- | --- |
+| T-E2E-01 | P-short-v2 (20 prompts of 48-208 tokens, so prompt + 48 output tokens stays in one chunk): output equal, zero L2 traffic | **Pass** (option 2 of the Stage 2a decision). 80/80 equal (cold and warm, both modes). The Aerospike namespace counters did not move between the cold send's start and the warm send's end: zero reads, writes, batch or lookup traffic; no L2 store or lookup log lines | `e2e01v2/` |
+| T-LKP-03 | Prefix semantics: hits at 0, 1, 3, 5 and 6 of 6 chunks, and a gap | **Pass**, both modes. B = P-ragged-11 (6 chunks + 99 tokens) stored; variants changed in chunk 0, 1, 3, 5 hit exactly 0, 256, 768, 1280 tokens, B itself 1536. Gap: B2 stored chunk by chunk (2, then 1, then 3 chunks per send), the 65 records of chunk 2 alone deleted from Aerospike, LMCache restarted (L1 empty): B2 hit 512 tokens (chunks 0-1) from L2, 2 chunks loaded, chunks 3-5 not used though present (`L2 prefetch lookup completed: 2 prefix hits`; 130 record reads for the load). 22/22 equal | `lkp03/` |
+| T-LKP-04 | P-salt: salt B never hits salt A's entries | **Pass**, both modes. L1: A, then B, then A. B's first request hit 0 tokens (L1 0, L2 0) although A had stored its whole prefix; B's later requests hit only the prefix B's first request stored; A's repeat hit 2048 on 10/10. L2: L2 truncated, A sent, LMCache restarted, then B: B's first request again hit 0 (Aerospike: 8 lookups not found, no reads); A afterwards hit 2048 from L2 on 10/10. 120/120 equal | `lkp04/` |
+| T-LKP-05 | Same prompt, different model: no hit | **Pass (model half)**, both modes. One LMCache server and one Aerospike set: Llama-3.1-8B stored P-exact and P-shared; vLLM restarted with gpt-oss-120b (registered with 36 layers after Llama unregistered) and sent the **same token IDs**: P-exact 0 hits from L1 (20/20); after an LMCache restart, P-shared's first request 0 hits from L2 (8 lookups not found). Llama re-served afterwards hit its own entries from L2 on 30/30 (equal to the baseline), so the entries were there. No errors in any log. `--gpu-memory-utilization 0.45` in this test only, so the two models fit one after the other. **TP half: N/A on this box (one GPU)** | `lkp05/` |
+| Concurrency regression (layerwise + async deadlock fix `6eb51a66`) | 4, 8 and 16 concurrent cached requests, layerwise on, async scheduling on | **Pass.** P-ragged stored once, then batches of 4, 8, 16 from L1, and after an LMCache restart before each batch, 4, 8, 16 from L2. Every batch finished in about 3 s (timeout 600 s); 56/56 concurrent outputs token-equal to the batch-size-1 baseline; batch hit totals equal the expected hit (for example 16 requests: 49,152 tokens, L1 or L2 as set up); every retrieve `not_deferred`. No hang, no HANG marker, no engine error | `conc/` |
+| T-E2E-10 | `pipelined_outcome`, deferred counter, vLLM external hit tokens per setup | **Pass** for these runs (plain path). 478 requests: every retrieve `not_deferred`, the deferred-retrieve counter never incremented, external hit tokens = expected on every sequential request and every concurrent batch | `metrics_table_2b.md` |
+
+### T-E2E-10 rows (layerwise off; layerwise on is identical in every column)
+
+| Session | Send | Requests | Retrieves by outcome | Deferred | vLLM external hit | LMCache hit tokens L1 / L2 |
+| --- | --- | --- | --- | --- | --- | --- |
+| T-E2E-01 v2 | cold / warm | 20 / 20 | none / none | 0 / 0 | 0 / 2524 tokens, both | 0 / 0 |
+| T-LKP-03 | probe (0, 1, 3, 5, 6 chunks) | 5 | not_deferred 4 | 0 | 3840 = expected 3840 | 3840 / 0 |
+| T-LKP-03 | gap probe (after restart) | 1 | not_deferred 1 (2 chunks) | 0 | 512 = expected 512 | 0 / 512 |
+| T-LKP-04 | B first pass, L1 | 10 | not_deferred 9 | 0 | 18432 = expected (request 1: 0) | 18432 / 0 |
+| T-LKP-04 | B first pass, after restart | 10 | not_deferred 9 | 0 | 18432 = expected (request 1: 0) | 18432 / 0 |
+| T-LKP-04 | A repeat, after restart | 10 | not_deferred 10 | 0 | 20480 = expected | 0 / 20480 |
+| Concurrency | 4 / 8 / 16 from L1 (layerwise on) | 4 / 8 / 16 | not_deferred 4 / 8 / 16 | 0 | 30720 / 41984 / 49152 = expected | all L1 |
+| Concurrency | 4 / 8 / 16 from L2 (layerwise on) | 4 / 8 / 16 | not_deferred 4 / 8 / 16 | 0 | 30720 / 41984 / 49152 = expected | all L2 |
+| T-LKP-05 | gpt-oss on Llama's P-exact (L1) | 20 | none | 0 | 0 = expected 0 | 0 / 0 |
+| T-LKP-05 | gpt-oss on Llama's P-shared (after restart) | 10 | not_deferred 9 (its own prefix) | 0 | 18432 = expected (request 1: 0) | 18432 / 0 |
+| T-LKP-05 | Llama again | 30 | not_deferred 30 | 0 | 111340 = expected | 0 / 111360 |
+
+## Defects and findings
+
+No S1, S2 or S3. No tracebacks or ERROR lines in any LMCache or vLLM log.
+
+| Severity | Finding | Cause | Owner |
+| --- | --- | --- | --- |
+| Info (D-13) | Chunks prefetched from L2 are evicted from L1 right after the retrieve (`L1 eviction: 2 keys` after `L1 read finished`). A repeat of the gap probe therefore read all 6 chunks from L2 again (L1 hit 0), although chunks 2-5 had just been stored to L1: the L1 lookup counts a leading run from chunk 0, and chunk 0 was gone | Prefetch buffers are temporary in L1 | L1 / prefetch controller (locality, not correctness) |
+| Info | The L2 lookup reads every key of the request (5 found, 1 not found for the gap probe) and then uses the leading run; keys after the first miss cost one read each but are never loaded | Lookup design | none |
+
+Known items seen, not re-filed: the LMCache server often outlives the
+harness's 5 s SIGTERM grace and is SIGKILLed (19 times across the Stage 2a
+and 2b sessions; no effect on results; the known "ignores SIGTERM" trap);
+S3 gpt-oss block size 16.
+
+## Next steps
+
+- Stage 3: the pipelined halves of T-E2E-04, 05 and 10, and T-E2E-09 (16
+  concurrent clients over P-shared and P-multi, which batch invariance now
+  allows with token equality).
+- The TP half of T-LKP-05 needs a multi-GPU droplet.

@@ -15,3 +15,14 @@
 | Aerospike server | Aerospike Community Edition 8.2.0.0 (`aerospike/aerospike-server:latest`, sha256:583e882d540f…), one node on 127.0.0.1:3000, namespace `lmcache`, config `functional/configs/aerospike.conf` |
 | Model | meta-llama/Llama-3.1-8B-Instruct (snapshot 0e9e39f249a1…) |
 | Oracle | `VLLM_BATCH_INVARIANT=1`, temperature 0, batch size 1; baseline `functional/day1/step4/bi_run1.json` (deterministic against `bi_run2.json`, 130/130) |
+
+## Stage 2b
+
+Same host, container, torch, HIP, vLLM, Aerospike server and C client as
+above. LMCache: box tree fast-forwarded to `49f18d12` after the runs; the
+product code (`lmcache/`, `csrc/`, `rust/`, `setup.py`) is unchanged since
+`00cd3eee`, and the harness that ran is `f1a8c56e` + `9879ac44` (reports
+rebuilt with `c5a4ff99`). Corpus: spec version 2 (`edc901fc`),
+`corpus_llama-3.1-8b-instruct.v2.json`, plus P-prefix in
+`corpus_llama-3.1-8b-instruct.stage2b.json` (sha256 `c26fd7f2…`). Second
+model: openai/gpt-oss-120b (T-LKP-05). New baseline `stage2/base2b/bi_run1.json`.
