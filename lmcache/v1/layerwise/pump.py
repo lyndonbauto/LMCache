@@ -32,14 +32,14 @@ from .contract import (
 #: latency layerwise loading exists to remove.
 DEFAULT_POLL_INTERVAL_SECONDS = 0.0001
 
-#: Default ceiling on waiting for a single layer. It must stay below the
-#: worker's per-layer wait (``lmcache.mp.layerwise_wait_timeout_seconds``,
-#: 5 s by default) so the pump gives up first: a worker that times out first
-#: leaves attention while the daemon may still copy layers into GPU blocks
-#: vLLM no longer expects to be written. The pump waits for a layer from
-#: before the worker does, so an equal timeout still expires first; the
-#: margin covers the time the abandon takes to reach the worker.
-DEFAULT_LAYER_TIMEOUT_SECONDS = 2.5
+#: Default ceiling on waiting for a single layer. A retrieve may follow it
+#: with a whole-object load, and before its first layer with a shared-key
+#: wait, all inside one worker wait (``lmcache.mp.layerwise_wait_timeout_seconds``,
+#: 5 s by default). A worker that times out first leaves attention while the
+#: daemon may still copy layers into GPU blocks vLLM no longer expects to be
+#: written, so the sum must fit: see
+#: :attr:`~.deferral.PipelinedFetchConfig.layer_publish_budget_seconds`.
+DEFAULT_LAYER_TIMEOUT_SECONDS = 1.5
 
 
 class LoadLeftOpenError(LayerwiseContractError):

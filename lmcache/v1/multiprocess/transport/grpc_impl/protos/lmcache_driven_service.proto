@@ -22,6 +22,7 @@ message RegisterKvCacheRequest {
 message RegisterKvCacheResponse {
   bool server_use_layerwise = 1;
   repeated bytes layer_event_ipc_handles = 2;
+  double layer_publish_budget_seconds = 3;
 }
 
 message UnregisterKvCacheRequest {

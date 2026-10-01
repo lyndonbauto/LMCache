@@ -55,14 +55,19 @@ from lmcache.v1.layerwise import (
     LayerArrivalStatus,
     LayerFetchPlan,
 )
-from lmcache.v1.layerwise.deferral import PipelinedModel
+from lmcache.v1.layerwise.deferral import PipelinedFetchConfig, PipelinedModel
 from lmcache.v1.layerwise.request_fetch import first_in_window_chunk
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.mp_observability.errors import LMCacheTimeoutError
 from lmcache.v1.multiprocess import object_group_transfer
 from lmcache.v1.multiprocess.layer_progress import (
     DaemonLayerLaunchEventPool,
+    LayerLaunchEventPool,
+    LayerProgressError,
     LayerProgressRecord,
+    LayerProgressRetrieveFailedError,
+    LayerProgressRetrieveProgressTimeoutError,
+    LayerProgressWaiter,
 )
 from lmcache.v1.multiprocess.layerwise_schedule import LayerwiseSchedule
 from lmcache.v1.multiprocess.pipelined_loading import (
@@ -73,6 +78,9 @@ from lmcache.v1.multiprocess.pipelined_loading import (
     fetch_deferred_objects,
 )
 from lmcache.v1.multiprocess.pipelined_sink import MultiprocessPipelinedSinkFactory
+from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
+    LAYERWISE_WAIT_MARGIN_SECONDS,
+)
 
 # Local
 from .aerospike_harness import WINDOW_BYTES, FabricFreeClient, fabric_free_connector
@@ -97,6 +105,12 @@ MAX_BATCH = 4
 #: Every ``GROUP_LAYOUTS`` shape is ``(planes, layers, tokens, hidden)``.
 PLANES = 2
 LAYERS_PER_GROUP = 2
+#: Short timeouts so a stalled layer resolves quickly. The fabric-free
+#: client completes no batch read, so a whole load always takes the full
+#: whole-load timeout and then fails.
+CONFIG = PipelinedFetchConfig(
+    enabled=True, layer_timeout_seconds=0.5, whole_load_timeout_seconds=0.5
+)
 
 
 class _FakeEventBackend:
@@ -309,6 +323,48 @@ class _Retrieved:
     table: ObjectTable
     progress: LayerProgressRecord
     window_positions: list[tuple[int, int]]
+    #: Per scheduled layer the worker reached: the error its wait raised, or
+    #: ``None`` if the layer was ready. Empty without a worker.
+    worker_waits: list[tuple[int, LayerProgressError | None]]
+
+
+class _Worker:
+    """vLLM's side: waits for each scheduled layer in order, as attention does.
+
+    Runs the real :class:`LayerProgressWaiter`. Stops at the first wait that
+    raises, as the connector does: a failed retrieve's remaining waits are
+    skipped, and a timeout stops the engine.
+    """
+
+    def __init__(
+        self, progress: LayerProgressRecord, wait_timeout_seconds: float
+    ) -> None:
+        self._waiter = LayerProgressWaiter(
+            progress,
+            LayerLaunchEventPool(),
+            wait_timeout_seconds=wait_timeout_seconds,
+        )
+        self.waits: list[tuple[int, LayerProgressError | None]] = []
+        self._thread = threading.Thread(target=self._run)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def join(self) -> None:
+        self._thread.join(JOIN_TIMEOUT)
+        assert not self._thread.is_alive(), "the worker never finished waiting"
+
+    def _run(self) -> None:
+        schedule = _schedule()
+        for launch in schedule.launches:
+            try:
+                self._waiter.wait_for_layer(
+                    RETRIEVE_GENERATION, launch.layer_id, schedule
+                )
+            except LayerProgressError as exc:
+                self.waits.append((launch.layer_id, exc))
+                return
+            self.waits.append((launch.layer_id, None))
 
 
 @dataclass
@@ -339,6 +395,9 @@ class _Daemon:
         self,
         in_l1: frozenset[tuple[int, int]] = frozenset(),
         decline_slot: int | None = None,
+        stall_layer: int | None = None,
+        config: PipelinedFetchConfig = CONFIG,
+        worker_wait_seconds: float = 0.0,
     ) -> _Retrieved:
         """Run one deferred retrieve as ``LMCacheDrivenTransferModule`` does.
 
@@ -347,6 +406,12 @@ class _Daemon:
                 already left in L1; the rest of the window is deferred.
             decline_slot: A plan slot the transport declines; every other
                 slot lands.
+            stall_layer: A layer none of whose slots ever land, nor are
+                declined, as when a server stops writing mid-fetch.
+            config: The daemon's pipelined settings.
+            worker_wait_seconds: If positive, a worker waits on every
+                scheduled layer from before the retrieve starts, for this long
+                per layer, and its waits are reported.
         """
         keys = _request_keys()
         rows: list[list[MemoryObj | None]] = [[] for _ in keys]
@@ -392,11 +457,17 @@ class _Daemon:
                         MultiprocessPipelinedSinkFactory(),
                         request,
                         GROUP_LAYOUTS,
+                        config,
                     )
                 )
             except BaseException as exc:
                 errors.append(exc)
 
+        worker = (
+            _Worker(progress, worker_wait_seconds) if worker_wait_seconds > 0 else None
+        )
+        if worker is not None:
+            worker.start()
         thread = threading.Thread(target=run)
         thread.start()
         while storage.tap is None:
@@ -413,19 +484,22 @@ class _Daemon:
             assert window_obj is not None and window_obj.raw_tensor is not None
             window_obj.raw_tensor.view(torch.float16).fill_(_mark(g, c))
         generation = storage.tap.generation
-        for index in range(len(plan.slots)):
+        for index, slot in enumerate(plan.slots):
             if index == decline_slot:
                 self.connector.decline_slot(index, generation)
-            else:
+            elif slot.layer_id != stall_layer:
                 self.connector.land_slot(index, generation)
         thread.join(JOIN_TIMEOUT)
         assert not thread.is_alive(), "retrieve did not finish"
+        if worker is not None:
+            worker.join()
         return _Retrieved(
             outcome[0] if outcome else None,
             errors[0] if errors else None,
             table,
             progress,
             window_positions,
+            worker.waits if worker is not None else [],
         )
 
 
@@ -529,3 +603,52 @@ def test_a_declined_slot_with_no_whole_copy_fails_the_retrieve_for_recompute(
     assert snapshot.retrieve_failed
     keys = _request_keys()
     assert daemon.resident([keys[g][c] for g, c in retrieved.window_positions]) == set()
+
+
+def _fetched_layers() -> list[int]:
+    """The layers the plan fetches, ascending: every retrieved group's."""
+    layout = fetch_model().layout
+    return [
+        layer_id
+        for layer_id in layout.layer_ids()
+        if layout.object_group_of_layer(layer_id) != AUX_GROUP
+    ]
+
+
+@pytest.mark.parametrize("position", [0, -1], ids=["first_layer", "last_layer"])
+def test_a_stalled_layer_fails_the_retrieve_before_the_worker_gives_up(
+    daemon: _Daemon, copies: _Copies, position: int
+) -> None:
+    """The worst case for one layer: the pump's timeout, then a whole load that
+    also times out. A worker that waits the server's budget plus the margin
+    sees the failure, which vLLM recovers from, not a timeout, which stops it.
+    """
+    retrieved = daemon.retrieve(
+        stall_layer=_fetched_layers()[position],
+        worker_wait_seconds=(
+            CONFIG.layer_publish_budget_seconds + LAYERWISE_WAIT_MARGIN_SECONDS
+        ),
+    )
+
+    assert isinstance(retrieved.error, LMCacheTimeoutError)
+    assert retrieved.progress.read().retrieve_failed
+    *ready, (_, last_wait) = retrieved.worker_waits
+    assert all(error is None for _, error in ready)
+    assert isinstance(last_wait, LayerProgressRetrieveFailedError)
+
+
+def test_a_worker_that_waits_less_than_the_budget_times_out_first(
+    daemon: _Daemon, copies: _Copies
+) -> None:
+    """Why registration refuses such a worker: it gives up while the server is
+    still inside its budget, which in vLLM stops the engine."""
+    retrieved = daemon.retrieve(
+        stall_layer=_fetched_layers()[0],
+        worker_wait_seconds=(
+            CONFIG.layer_timeout_seconds + CONFIG.whole_load_timeout_seconds / 2
+        ),
+    )
+
+    assert isinstance(retrieved.error, LMCacheTimeoutError)
+    (_, last_wait) = retrieved.worker_waits[-1]
+    assert isinstance(last_wait, LayerProgressRetrieveProgressTimeoutError)

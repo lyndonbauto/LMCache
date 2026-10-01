@@ -195,10 +195,16 @@ class RegisterKvCacheResponse(msgspec.Struct, frozen=True):
         server_use_layerwise: Whether the MP server has layerwise load enabled.
         layer_event_ipc_handles: Daemon-owned IPC events (one per launch ordinal)
             when layerwise is enabled on both sides; empty otherwise.
+        layer_publish_budget_seconds: Longest the server may take to publish a
+            retrieve's next layer, or its failure, to the worker. A layerwise
+            worker must wait longer than this for each layer. ``0.0`` when
+            the server never waits before publishing (no pipelined fetch), or
+            from a server that predates the field.
     """
 
     server_use_layerwise: bool = False
     layer_event_ipc_handles: list[bytes] = []
+    layer_publish_budget_seconds: float = 0.0
 
 
 @dataclass

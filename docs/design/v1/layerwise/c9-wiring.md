@@ -45,7 +45,11 @@ Four daemon options, all in `MPServerConfig` and on the command line:
 | `--pipelined-fetch` | off | Enable the deferred lookup and pipelined retrieve. Needs `--use-layerwise`; the daemon refuses to start otherwise. With no sink factory installed (see "Retrieve"), registration logs a warning and every lookup takes today's path. |
 | `--pipelined-max-chunks` | 64 | Most chunks one request may defer. The lookup defers only up to this, and registration checks that one window holds it. |
 | `--pipelined-shared-keys` | `recompute` | What a retrieve does when another request is still fetching one of its deferred keys (see "Shared keys"). `recompute` or `wait`. |
-| `--pipelined-shared-wait-seconds` | 1.0 | Budget for `wait`. |
+| `--pipelined-shared-wait-seconds` | 1.0 | Budget for `wait`. Counts toward the layer publish budget (see "The budget is shared with the worker"). |
+
+Two more timeouts live in `PipelinedFetchConfig` with no flag: the pump's
+per-layer timeout (`layer_timeout_seconds`, 1.5 s) and the whole-object load
+(`whole_load_timeout_seconds`, 1.5 s).
 
 `--pipelined-max-chunks` is Track A's Q2 byte cap, expressed in chunks,
 because chunks are what the lookup counts. Registration turns it into bytes
@@ -86,6 +90,20 @@ as a warning, and every lookup for that model takes today's path.
 The record cap and adapter id come from the same adapter as the placer,
 through `pipelined_max_record_bytes()` and `pipelined_adapter_id()`, which
 follow Track A's accessor pattern (`pipelined_max_slots_per_request`).
+
+Before any of that, registration checks that the transport will land each
+layer where the sink reads it. The planner places a layer's planes from the
+registered shapes (`ModelLayout.layer_plane_ranges`); per-layer staging
+copies them from offsets it derives from the cache context's staging views
+(`per_layer_staging_ranges`). Nothing else ties the two together, and a
+drift would be silent: attention reads bytes no write touched, or another
+layer's. `check_staging_matches_plan` compares them for every layer and, on
+any difference, logs an error naming the layers and leaves the model loading
+whole objects:
+
+```text
+Per-layer staging matches the pipelined fetch plan for all 32 layers of <model>
+```
 
 ## Lookup: deciding to defer
 
@@ -249,13 +267,32 @@ the readable keys and reports the rest as busy (write-locked) or absent:
     finishes, so they usually vanish. A key still busy at the deadline fails
     the retrieve.
 
-**The budget is shared with the worker.** The worker's wait for layer 0
-starts when it enters attention, and it covers leasing, any shared-key wait,
-the pump's first layer (2.5 s) and any fallback. It is 5 s by default, twice
-the pump's per-layer timeout, and it is set on the worker, so the daemon
-cannot see it. The daemon therefore refuses a `wait` budget that is not
-below the pump's per-layer timeout (`PipelinedFetchConfig`); with the
-defaults, wait plus first layer stays under the worker's 5 s.
+**The budget is shared with the worker.** The worker waits for each layer
+for `lmcache.mp.layerwise_wait_timeout_seconds` (5 s by default), and a
+timeout there stops the engine: the daemon may still be copying into the
+blocks, so they cannot be handed back for recompute. Only a published
+failure is recoverable. So the daemon must publish each layer, or the
+failure, before the worker gives up. The longest it can wait first is the
+first layer's chain:
+
+```text
+worker waits for layer 0 ........................................ 5.0 s
+daemon: shared-key wait (`wait` only)   1.0 s
+        pump waits for the layer        1.5 s   (layer_timeout_seconds)
+        whole-object fallback           1.5 s   (whole_load_timeout_seconds)
+        = layer publish budget          4.0 s   (3.0 s under `recompute`)
+```
+
+A later layer's chain is the last two. The daemon reports the sum,
+`PipelinedFetchConfig.layer_publish_budget_seconds`, in the registration
+reply (`RegisterKvCacheResponse.layer_publish_budget_seconds`; 0 without the
+pipelined fetch), and the worker refuses to register unless its wait is at
+least the budget plus `LAYERWISE_WAIT_MARGIN_SECONDS` (0.5 s), which covers
+what the budget does not bound: the RETRIEVE reaching the daemon, leasing,
+planning and the GPU copies. A misconfiguration therefore fails at startup
+rather than as an engine stop under load. Before this, the fallback was
+missing from the sum: 2.5 s for the pump plus 2.5 s for the whole load already
+equalled the worker's 5 s.
 
 ## Observability
 
@@ -287,6 +324,8 @@ Soft-RoCE run, with a triage table by outcome.
 | Where | What happens | Result |
 |---|---|---|
 | Lookup: not eligible | Today's path | Unchanged |
+| Registration: per-layer staging and the plan place a layer differently | Error logged; no pipelined fetch for the model | Served, slower |
+| Registration: worker's per-layer wait below the layer publish budget plus margin | Worker's `register` raises `ValueError` | vLLM does not start |
 | Retrieve: busy shared key (`recompute`, or `wait` past its budget) | Sink never begun; failure flag set | vLLM recomputes |
 | Lease or plan refused | Whole-object load into general L1, then today's layerwise path | Served, slower |
 | Layer declined or timed out | Fallback continues the same load | Served, slower |
@@ -295,13 +334,10 @@ Soft-RoCE run, with a triage table by outcome.
 
 ## Risks
 
-- **A generation timeout is silent.** The connector swallows
-  `LayerProgressRetrieveGenerationTimeoutError` and computes on KV that was
-  never loaded. Any retrieve that fails to begin its load within the
-  worker's wait produces wrong output, not an error. That is true today; the
-  pipelined path adds leasing and the shared-key wait before the load
-  begins, which is why the `wait` budget is checked at startup. Track B
-  should make that timeout report failed blocks, as R5 does for the others.
+- **A worker timeout stops the engine.** Any wait the daemon makes outside
+  the layer publish budget, or a worker configured below it, turns a slow
+  fetch into an engine stop. The budget is checked at registration (see
+  "Shared keys"); leasing, planning and the copies rely on the 0.5 s margin.
 - **A pipelined retrieve holds a GPU worker thread** for the whole fetch.
   `RETRIEVE` runs with client affinity, so the same worker's next STORE
   waits behind it. The windows (4 by default) bound how many run at once.

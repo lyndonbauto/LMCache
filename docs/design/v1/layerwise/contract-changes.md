@@ -11,6 +11,38 @@ defect coming back.
 
 ---
 
+## The slot ceiling raises `PlanTooLargeError`; the timeouts are one budget
+
+**Who is affected:** anyone catching the slot-ceiling error as `ValueError`;
+callers of `fetch_deferred_objects` (new `config` argument); anyone relying
+on the pump's 2.5 s default.
+
+**What changed.**
+
+- `LayerFetchPlan` raises `PlanTooLargeError` for more slots than
+  `MAX_SLOTS_PER_REQUEST`, and `FetchPlanner.plan` no longer checks the
+  ceiling itself; the plan is the one place. `run_pipelined_retrieve` treats
+  it as a refusal (window released `NEVER_FETCHED`, the error as
+  `__cause__`), so the retrieve loads whole objects instead of recomputing.
+- `DEFAULT_LAYER_TIMEOUT_SECONDS` is 1.5 s, down from 2.5 s, and the
+  whole-object load has its own `DEFAULT_WHOLE_LOAD_TIMEOUT_SECONDS` (1.5 s)
+  instead of reusing the pump's. Both are fields of `PipelinedFetchConfig`,
+  whose `layer_publish_budget_seconds` sums them with the shared-key wait.
+  `fetch_deferred_objects` takes the config and uses those values.
+- The `shared_wait_seconds < DEFAULT_LAYER_TIMEOUT_SECONDS` check is gone:
+  the budget is checked against the worker's actual wait at registration
+  (see [c9-wiring.md](c9-wiring.md), "The budget is shared with the worker").
+
+**What breaks.** `except ValueError` around a plan past the ceiling;
+`fetch_deferred_objects` calls without `config`; `WHOLE_LOAD_TIMEOUT_SECONDS`
+imports (removed).
+
+**Why.** The ceiling is a "split the request" limit, which is what
+`PlanTooLargeError` means, but it raised the error for "fall back". And a
+retrieve could wait 2.5 s for a layer and then 2.5 s more for the fallback
+inside the worker's 5 s per-layer wait, where a worker timeout stops the
+engine. Nothing checked the sum.
+
 ## `DeferredFetchResult` reports an outcome, not a load
 
 **Who is affected:** anyone constructing `DeferredFetchResult` (test fakes of

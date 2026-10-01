@@ -79,8 +79,10 @@ class MPServerConfig:
     pipelined_shared_wait_seconds for it."""
 
     pipelined_shared_wait_seconds: float = 1.0
-    """How long pipelined_shared_keys='wait' waits; must be below the
-    per-layer timeout (2.5 s)."""
+    """How long pipelined_shared_keys='wait' waits. It counts toward the
+    layer publish budget the server reports at registration, which each
+    worker's per-layer wait must exceed (see
+    ``PipelinedFetchConfig.layer_publish_budget_seconds``)."""
 
     enable_segmented_prefix: bool = False
     """CacheBlend only (engine_type='blend'): on a mid-prefix L2 retrieve
@@ -475,8 +477,11 @@ def add_mp_server_args(
         "--pipelined-shared-wait-seconds",
         type=float,
         default=1.0,
-        help="How long --pipelined-shared-keys wait waits; must be below "
-        "2.5. Default is 1.0.",
+        help="How long --pipelined-shared-keys wait waits. It counts toward "
+        "the layer publish budget (with the 1.5 s per-layer and 1.5 s "
+        "whole-load timeouts, 4.0 s in all by default), which each worker's "
+        "lmcache.mp.layerwise_wait_timeout_seconds must exceed by 0.5 s. "
+        "Default is 1.0.",
     )
     mp_group.add_argument(
         "--worker-reap-timeout-seconds",

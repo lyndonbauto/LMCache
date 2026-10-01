@@ -19,7 +19,10 @@ import pytest
 
 # First Party
 from lmcache.v1.distributed.api import ResidentKeys
-from lmcache.v1.layerwise.deferral import PipelinedFetchConfig
+from lmcache.v1.layerwise.deferral import (
+    DEFAULT_WHOLE_LOAD_TIMEOUT_SECONDS,
+    PipelinedFetchConfig,
+)
 from lmcache.v1.mp_observability.event import EventType
 from lmcache.v1.multiprocess import pipelined_loading
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
@@ -173,8 +176,16 @@ def _harness(
     }
 
     def fetch(
-        storage_arg, model, keys_per_group, keys_to_fetch, factory_arg, request, layouts
+        storage_arg,
+        model,
+        keys_per_group,
+        keys_to_fetch,
+        factory_arg,
+        request,
+        layouts,
+        config,
     ):
+        assert config is ctx.pipelined_fetch
         h.fetches.append((tuple(keys_to_fetch), request.objects.by_group()))
         if delivery is DeferredLoad.PIPELINED:
             return DeferredFetchResult(PipelinedOutcome.PIPELINED, ())
@@ -272,7 +283,7 @@ def test_a_retrieve_that_is_not_layerwise_loads_the_deferred_keys_whole(
 
     [call] = h.storage.load_into_l1.call_args_list
     assert call.args[0] == DEFERRED
-    assert call.args[2] == pipelined_loading.WHOLE_LOAD_TIMEOUT_SECONDS
+    assert call.args[2] == DEFAULT_WHOLE_LOAD_TIMEOUT_SECONDS
     assert h.fetches == []
     assert h.reads == KEYS
     assert [(g, _names(objs)) for g, objs in h.group_transfers] == [

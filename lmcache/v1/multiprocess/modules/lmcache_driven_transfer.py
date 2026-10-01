@@ -60,17 +60,18 @@ from lmcache.v1.multiprocess.native_completion import (
 )
 from lmcache.v1.multiprocess.object_group_transfer import (
     downsample_and_stage_block_ids,
+    per_layer_staging_ranges,
     transfer_kv_layerwise_h2d,
     transfer_kv_per_object_group,
 )
 from lmcache.v1.multiprocess.pipelined_loading import (
     NO_PIPELINED_SINK_FACTORY,
-    WHOLE_LOAD_TIMEOUT_SECONDS,
     DeferredLoad,
     ObjectTable,
     PipelinedLoadRequest,
     PipelinedOutcome,
     PipelinedSinkFactory,
+    check_staging_matches_plan,
     fetch_deferred_objects,
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
@@ -438,10 +439,10 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
 
         Args:
             instance_id: The worker instance ID.
-        """
 
         Returns:
             Whether the instance has a registered KV cache here.
+        """
         now = time.monotonic()
         with self._lock:
             entry = self._cache_contexts.get(instance_id)
@@ -624,6 +625,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 return RegisterKvCacheResponse(
                     server_use_layerwise=self._ctx.use_layerwise,
                     layer_event_ipc_handles=response_handles,
+                    layer_publish_budget_seconds=(
+                        self._ctx.pipelined_fetch.layer_publish_budget_seconds
+                    ),
                 )
 
         if layer_event_ipc_handles:
@@ -702,7 +706,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             self._fetch_models.register(model_name, world_size, fetch_model)
             if self._ctx.pipelined_fetch.enabled:
                 self._register_pipelined_model(
-                    model_name, world_size, fetch_model, group_layout_descs
+                    model_name,
+                    world_size,
+                    fetch_model,
+                    group_layout_descs,
+                    cache_context,
                 )
 
         layerwise_schedule: LayerwiseSchedule | None = None
@@ -758,6 +766,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         return RegisterKvCacheResponse(
             server_use_layerwise=self._ctx.use_layerwise,
             layer_event_ipc_handles=response_handles,
+            layer_publish_budget_seconds=(
+                self._ctx.pipelined_fetch.layer_publish_budget_seconds
+            ),
         )
 
     @request_handler(RequestType.UNREGISTER_KV_CACHE)
@@ -1317,6 +1328,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                                 transfer_key=transfer_key,
                             ),
                             self._group_layout_descs(model_name, key.world_size),
+                            self._ctx.pipelined_fetch,
                         )
                         prefetched_keys.extend(deferred_fetch.locked_keys)
                         memory_objs_by_group = table.by_group()
@@ -1540,7 +1552,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             loaded = storage_manager.load_into_l1(
                 list(to_fetch),
                 self._group_layout_descs(model_name, key.world_size),
-                WHOLE_LOAD_TIMEOUT_SECONDS,
+                config.whole_load_timeout_seconds,
             )
         except Exception:
             if resolution.reused:
@@ -1581,19 +1593,23 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         world_size: int,
         fetch_model: FetchModel,
         group_layout_descs: dict[int, MemoryLayoutDesc],
+        cache_context: BaseCacheContext,
     ) -> None:
         """Make a model's lookups eligible for the pipelined retrieve.
 
         On any reason the model cannot be served -- no pipelined sink, a
-        world size above one, no ready pipelined path, or a window too small
-        for the chunk cap --
-        logs it and leaves the model loading whole objects at lookup.
+        world size above one, per-layer staging reading layers from other
+        bytes than the planner lands them at, no ready pipelined path, or a
+        window too small for the chunk cap -- logs it and leaves the model
+        loading whole objects at lookup.
 
         Args:
             model_name: The model being registered.
             world_size: Its world size.
             fetch_model: Its registered layout and attention windows.
             group_layout_descs: Its per-object-group layouts.
+            cache_context: Its cache context, whose staging views per-layer
+                staging copies through.
         """
         if self._pipelined_sink_factory is NO_PIPELINED_SINK_FACTORY:
             logger.warning(
@@ -1609,6 +1625,31 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 world_size,
             )
             return
+        try:
+            check_staging_matches_plan(
+                fetch_model.layout,
+                per_layer_staging_ranges(
+                    cache_context,
+                    LayerwiseSchedule.from_kernel_groups(
+                        cache_context.kv_layer_groups_manager.kernel_groups
+                    ),
+                ),
+            )
+        except (LayerwiseContractError, ValueError):
+            logger.error(
+                "Per-layer staging would read %s's layers from other bytes than "
+                "the pipelined fetch writes them to; it loads whole objects at "
+                "lookup",
+                model_name,
+                exc_info=True,
+            )
+            return
+        logger.info(
+            "Per-layer staging matches the pipelined fetch plan for all %d "
+            "layers of %s",
+            len(fetch_model.layout.layer_ids()),
+            model_name,
+        )
         max_chunks = self._ctx.pipelined_fetch.max_chunks
         storage_manager = self._ctx.storage_manager
         try:

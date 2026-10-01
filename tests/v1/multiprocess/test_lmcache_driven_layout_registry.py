@@ -31,15 +31,56 @@ class _FakeKVLayerGroupsManager:
         return AttnWindowDesc(num_chunks_in_sw=[-1])
 
 
+#: The one kernel group's staging view: (K/V, layers, slots, hidden) float16,
+#: the shape ``_pipelined_layout`` registers.
+_STAGING_SHAPE = (2, 2, 16, 32)
+
+
 class _FakeGPUContext:
-    """Small stand-in for GPUCacheContext used by registration tests."""
+    """Small stand-in for GPUCacheContext used by registration tests.
+
+    Its staging buffer is real CPU memory with the shape the pipelined tests
+    register, so per-layer staging and the fetch plan agree, as they do for a
+    real context.
+    """
 
     device: torch.device = torch.device("cpu")
     num_layers: int = 2
     kv_layer_groups_manager: _FakeKVLayerGroupsManager = _FakeKVLayerGroupsManager()
 
+    def __init__(self) -> None:
+        self.staging = torch.zeros(_STAGING_SHAPE, dtype=torch.float16)
+
+    def get_temp_kernel_group_buffer(
+        self, batch_idx: int, kernel_group_idx: int
+    ) -> torch.Tensor:
+        """The kernel group's view over its object group's buffer."""
+        return self.staging
+
+    def get_temp_object_group_buffer(
+        self, batch_idx: int, object_group_idx: int
+    ) -> torch.Tensor:
+        """The object group's buffer, as flat bytes."""
+        return self.staging.view(-1).view(torch.uint8)
+
     def close(self) -> None:
         """No-op teardown (real GPUCacheContext.close deregisters its GDS buffer)."""
+
+
+class _ShiftedStagingContext(_FakeGPUContext):
+    """A context whose kernel group view starts 64 bytes into its object
+    group's buffer, while the registered layout says it starts at 0."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        nbytes = self.staging.numel() * self.staging.element_size()
+        self._buffer = torch.zeros(nbytes + 64, dtype=torch.uint8)
+        self.staging = self._buffer[64:].view(torch.float16).view(_STAGING_SHAPE)
+
+    def get_temp_object_group_buffer(
+        self, batch_idx: int, object_group_idx: int
+    ) -> torch.Tensor:
+        return self._buffer
 
 
 class _FakeDeviceHostFuncDispatcher:
@@ -98,6 +139,7 @@ def _registration_module(
     ctx: Any,
     layout_desc: Any,
     sink_factory: Any = None,
+    cache_context_factory: Any = _FakeGPUContext,
 ) -> Any:
     """Build the transfer module with CUDA-touching collaborators stubbed out.
 
@@ -106,6 +148,7 @@ def _registration_module(
         ctx: Engine context the module is built with.
         layout_desc: Layout descriptor every object group reports.
         sink_factory: The pipelined sink factory, or ``None`` for none.
+        cache_context_factory: Builds the cache context registration gets.
 
     Returns:
         A ``LMCacheDrivenTransferModule`` ready for ``register_kv_cache``.
@@ -123,7 +166,7 @@ def _registration_module(
     monkeypatch.setattr(
         lmcache_driven_transfer_mod,
         "create_cache_context",
-        lambda *args, **kwargs: _FakeGPUContext(),
+        lambda *args, **kwargs: cache_context_factory(),
     )
     monkeypatch.setattr(
         lmcache_driven_transfer_mod,
@@ -499,6 +542,56 @@ def test_a_pipelined_setup_storage_refuses_does_not_fail_registration(
     module.fetch_model("model", 1)
     with pytest.raises(KeyError):
         ctx.pipelined_models.find("model", 1)
+    module.unregister_kv_cache(1)
+
+
+def test_staging_that_disagrees_with_the_plan_keeps_the_pipelined_fetch_off(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_lmcache_native: Any,
+) -> None:
+    """Writes would land 64 bytes from where staging reads them: silent
+    corruption. Registration succeeds, but the model loads whole objects."""
+    # First Party
+    from lmcache.utils import EngineType
+
+    ctx = _pipelined_ctx()
+    module = _registration_module(
+        monkeypatch,
+        ctx,
+        _pipelined_layout(),
+        _SinkFactory(),
+        cache_context_factory=_ShiftedStagingContext,
+    )
+    module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [], [])
+
+    module.fetch_model("model", 1)
+    ctx.storage_manager.pipelined_window_placer.assert_not_called()
+    with pytest.raises(KeyError):
+        ctx.pipelined_models.find("model", 1)
+    module.unregister_kv_cache(1)
+
+
+@pytest.mark.parametrize("enabled", [True, False], ids=["pipelined", "disabled"])
+def test_registration_reports_the_layer_publish_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_lmcache_native: Any,
+    enabled: bool,
+) -> None:
+    """The worker checks its per-layer wait against this, so every reply,
+    including a repeat registration's, must carry it."""
+    # First Party
+    from lmcache.utils import EngineType
+
+    ctx = _pipelined_ctx(enabled=enabled)
+    module = _registration_module(monkeypatch, ctx, _pipelined_layout(), _SinkFactory())
+    expected = ctx.pipelined_fetch.layer_publish_budget_seconds
+
+    first = module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [], [])
+    again = module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [], [])
+
+    assert expected == (3.0 if enabled else 0.0)
+    assert first.layer_publish_budget_seconds == expected
+    assert again.layer_publish_budget_seconds == expected
     module.unregister_kv_cache(1)
 
 

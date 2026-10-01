@@ -13,6 +13,7 @@ to release.
 from collections.abc import Sequence
 from typing import Any, cast
 from unittest.mock import MagicMock
+import time
 
 # Third Party
 import pytest
@@ -27,7 +28,8 @@ from lmcache.v1.layerwise import (
     ScriptedLayerArrivalSource,
     UnservableLayerArrivalSource,
 )
-from lmcache.v1.layerwise.deferral import PipelinedModel
+from lmcache.v1.layerwise.deferral import PipelinedFetchConfig, PipelinedModel
+from lmcache.v1.layerwise.pump import DEFAULT_LAYER_TIMEOUT_SECONDS
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.pipelined_loading import (
     DeferredLoad,
@@ -55,6 +57,10 @@ RETRIEVED_GROUPS = (0, 1)
 # Layer 4 is the aux group's, so the plan's last layer is 3.
 LAST_RETRIEVED_LAYER = 3
 DEFERRED = [(g, c) for g in RETRIEVED_GROUPS for c in range(NUM_CHUNKS - 2, NUM_CHUNKS)]
+#: Distinct timeouts, so a test can tell which one a wait used.
+CONFIG = PipelinedFetchConfig(
+    enabled=True, layer_timeout_seconds=0.05, whole_load_timeout_seconds=0.75
+)
 
 
 class _Held:
@@ -116,6 +122,7 @@ class FakeStorage:
         self.source = source
         self.missing = set(missing)
         self.loads: list[list[ObjectKey]] = []
+        self.timeouts: list[float] = []
         self.released: list[ObjectKey] = []
 
     def layer_arrival_source(self) -> LayerArrivalSource:
@@ -130,6 +137,7 @@ class FakeStorage:
         timeout_seconds: float,
     ) -> dict[ObjectKey, MemoryObj]:
         self.loads.append(list(keys))
+        self.timeouts.append(timeout_seconds)
         return {
             k: _held(f"whole:{k.chunk_hash!r}") for k in keys if k not in self.missing
         }
@@ -188,6 +196,7 @@ def _fetch(
     placer: PackingPlacer | None = None,
     factory: Factory | None = None,
     table: ObjectTable | None = None,
+    config: PipelinedFetchConfig = CONFIG,
 ):
     table = table if table is not None else _table()
     result = fetch_deferred_objects(
@@ -198,6 +207,7 @@ def _fetch(
         factory if factory is not None else Factory(),
         _request(table),
         GROUP_LAYOUTS,
+        config,
     )
     return result, table
 
@@ -306,3 +316,44 @@ def test_a_sink_failure_in_the_window_leaves_nothing_locked() -> None:
         _fetch(storage, factory=factory)
 
     assert storage.loads == storage.released == []
+
+
+@pytest.mark.parametrize(
+    "source", [None, UnservableLayerArrivalSource()], ids=["no_source", "fallback"]
+)
+def test_every_whole_load_is_bounded_by_the_whole_load_timeout(
+    source: LayerArrivalSource | None,
+) -> None:
+    storage = FakeStorage(source)
+
+    _fetch(storage)
+
+    assert storage.timeouts == [CONFIG.whole_load_timeout_seconds]
+
+
+def test_a_refused_lease_is_bounded_by_the_whole_load_timeout() -> None:
+    placer = PackingPlacer()
+    placer.busy = True
+    storage = FakeStorage(LandingSource())
+
+    _fetch(storage, placer)
+
+    assert storage.timeouts == [CONFIG.whole_load_timeout_seconds]
+
+
+def test_the_pump_falls_back_after_the_configured_layer_timeout() -> None:
+    """A layer that never lands is given up on after the config's timeout.
+
+    The source never lands anything, so the first layer is what times out.
+    The default timeout is far longer than this config's, so finishing well
+    within the default shows the config's value was the one used.
+    """
+    storage = FakeStorage(ScriptedLayerArrivalSource())
+    start = time.monotonic()
+
+    result, _ = _fetch(storage)
+
+    elapsed = time.monotonic() - start
+    assert result.outcome is PipelinedOutcome.FELL_BACK
+    assert CONFIG.layer_timeout_seconds <= elapsed < DEFAULT_LAYER_TIMEOUT_SECONDS
+    assert storage.timeouts == [CONFIG.whole_load_timeout_seconds]

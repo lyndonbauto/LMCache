@@ -731,7 +731,7 @@ def _build_layerwise_batch_descriptors(
                         block_ids_curr_batch=block_ids_curr_batch,
                         tmp_gpu_buffer_data_ptrs=tmp_gpu_buffer_data_ptrs,
                         staging_region_offsets=tuple(
-                            data_ptr - buffer.data_ptr()
+                            _staging_region_offset(data_ptr, buffer)
                             for data_ptr, buffer in zip(
                                 tmp_gpu_buffer_data_ptrs,
                                 object_group_buffers,
@@ -916,6 +916,63 @@ def _layer_plane_geometry(kernel_group_view: torch.Tensor) -> _LayerPlaneGeometr
     raise ValueError(
         f"unsupported kernel group staging shape {tuple(kernel_group_view.shape)}"
     )
+
+
+def _staging_region_offset(
+    kernel_group_data_ptr: int, object_group_buffer: torch.Tensor
+) -> int:
+    """Where a kernel group's staging view starts inside its object group's
+    staging buffer, in bytes. A memory object is laid out byte for byte like
+    that buffer, so the same offset addresses the object."""
+    return kernel_group_data_ptr - object_group_buffer.data_ptr()
+
+
+def per_layer_staging_ranges(
+    cache_context: BaseCacheContext, schedule: LayerwiseSchedule
+) -> dict[int, tuple[tuple[int, int], ...]]:
+    """Return the bytes per-layer staging copies for each scheduled layer.
+
+    Computed exactly as :class:`LayerwiseH2DRetrieve` with
+    :attr:`LayerStaging.PER_LAYER` computes them at each launch, from the
+    staging views of batch slot 0 (every slot has the same layout). A
+    pipelined fetch must land each layer at exactly these bytes, so a caller
+    can check them against what its planner asks the transport to write.
+
+    Args:
+        cache_context: The registered worker cache context.
+        schedule: The launch order built from the same kernel groups.
+
+    Returns:
+        ``{layer_id: ((offset, length), ...)}``, one pair per plane, offsets
+        relative to the start of the layer's object group payload.
+
+    Raises:
+        ValueError: If a staging view is not contiguous or has an
+            unsupported rank.
+    """
+    kernel_to_object_group = _kernel_group_to_object_group(cache_context)
+    region_offsets: dict[int, int] = {}
+    geometries: dict[int, _LayerPlaneGeometry] = {}
+    ranges: dict[int, tuple[tuple[int, int], ...]] = {}
+    for launch in schedule.launches:
+        kernel_group_id = launch.kernel_group_index
+        if kernel_group_id not in geometries:
+            view = cache_context.get_temp_kernel_group_buffer(0, kernel_group_id)
+            object_group_buffer = cache_context.get_temp_object_group_buffer(
+                0, kernel_to_object_group[kernel_group_id]
+            )
+            region_offsets[kernel_group_id] = _staging_region_offset(
+                view.data_ptr(), object_group_buffer
+            )
+            geometries[kernel_group_id] = _layer_plane_geometry(view)
+        base = region_offsets[kernel_group_id]
+        ranges[launch.layer_id] = tuple(
+            (base + offset, length)
+            for offset, length in geometries[kernel_group_id].byte_ranges(
+                launch.position_in_group
+            )
+        )
+    return ranges
 
 
 @dataclass(frozen=True)

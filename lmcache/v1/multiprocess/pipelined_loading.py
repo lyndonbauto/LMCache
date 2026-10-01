@@ -19,7 +19,7 @@ layer, not when it is built, because the fallback swaps objects in.
 """
 
 # Standard
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
@@ -36,13 +36,13 @@ from lmcache.v1.layerwise.contract import (
     LayerLoadSink,
     LayerwiseContractError,
 )
-from lmcache.v1.layerwise.deferral import PipelinedModel
+from lmcache.v1.layerwise.deferral import PipelinedFetchConfig, PipelinedModel
 from lmcache.v1.layerwise.pipelined_retrieve import (
     PipelinedRetrieveRefused,
     RetrieveCompletion,
     run_pipelined_retrieve,
 )
-from lmcache.v1.layerwise.pump import DEFAULT_LAYER_TIMEOUT_SECONDS
+from lmcache.v1.layerwise.planner import ModelLayout
 from lmcache.v1.layerwise.request_fetch import (
     ObjectToPlace,
     WindowLease,
@@ -58,10 +58,56 @@ from lmcache.v1.platform.base.cache_context import BaseCacheContext
 
 logger = init_logger(__name__)
 
-#: How long loading deferred objects whole may take. The worker's wait for
-#: its first layer is already running, so this stays within the pump's
-#: per-layer timeout.
-WHOLE_LOAD_TIMEOUT_SECONDS = DEFAULT_LAYER_TIMEOUT_SECONDS
+#: Mismatching layers named in a :func:`check_staging_matches_plan` error.
+_MISMATCHES_REPORTED = 4
+
+
+def check_staging_matches_plan(
+    layout: ModelLayout,
+    staging_ranges: Mapping[int, Sequence[tuple[int, int]]],
+) -> None:
+    """Check that the planner lands every layer where per-layer staging reads it.
+
+    The planner asks the transport to write each layer's planes at
+    :meth:`~lmcache.v1.layerwise.planner.ModelLayout.layer_plane_ranges`, and
+    the sink copies a layer to the GPU from the bytes per-layer staging
+    computes. The two are derived separately (from the registered shapes and
+    from the staging views' strides), so if they ever disagree the GPU reads
+    bytes that were never written, or another layer's, and nothing fails.
+    Run once per registered model, before it is allowed the pipelined fetch.
+
+    Args:
+        layout: The model's fetch layout.
+        staging_ranges: ``{layer_id: ((offset, length), ...)}`` from
+            :func:`~lmcache.v1.multiprocess.object_group_transfer.per_layer_staging_ranges`.
+
+    Raises:
+        LayerwiseContractError: If the two cover different layers, or place
+            any layer's planes differently. The message names the first few
+            layers that differ.
+    """
+    planned_layers = frozenset(layout.layer_ids())
+    staged_layers = frozenset(staging_ranges)
+    if planned_layers != staged_layers:
+        raise LayerwiseContractError(
+            "the fetch plan and per-layer staging cover different layers: "
+            f"only planned {sorted(planned_layers - staged_layers)}, only "
+            f"staged {sorted(staged_layers - planned_layers)}"
+        )
+    mismatches: list[str] = []
+    for layer_id in sorted(planned_layers):
+        planned = tuple(
+            (plane.offset, plane.length)
+            for plane in layout.layer_plane_ranges(layer_id)
+        )
+        staged = tuple(staging_ranges[layer_id])
+        if planned != staged:
+            mismatches.append(f"layer {layer_id}: planned {planned}, staged {staged}")
+    if mismatches:
+        raise LayerwiseContractError(
+            f"{len(mismatches)} layer(s) would land where staging does not read "
+            f"them: {'; '.join(mismatches[:_MISMATCHES_REPORTED])}"
+        )
 
 
 class ObjectTable:
@@ -281,11 +327,13 @@ class _WindowLoader:
         sink_factory: PipelinedSinkFactory,
         request: PipelinedLoadRequest,
         group_layout_descs: dict[int, MemoryLayoutDesc],
+        whole_load_timeout_seconds: float,
     ) -> None:
         self._storage = storage
         self._sink_factory = sink_factory
         self._request = request
         self._group_layout_descs = group_layout_descs
+        self._whole_load_timeout_seconds = whole_load_timeout_seconds
         self._sink: PipelinedSink | None = None
         self._objects: tuple[ObjectToPlace, ...] = ()
         self.locked_keys: list[ObjectKey] = []
@@ -319,7 +367,11 @@ class _WindowLoader:
 
     def reload_whole(self, objects: Sequence[ObjectToPlace]) -> None:
         loaded = _load_whole(
-            self._storage, objects, self._group_layout_descs, self.locked_keys
+            self._storage,
+            objects,
+            self._group_layout_descs,
+            self.locked_keys,
+            self._whole_load_timeout_seconds,
         )
         self._request.objects.put(loaded)
 
@@ -329,6 +381,7 @@ def _load_whole(
     objects: Sequence[ObjectToPlace],
     group_layout_descs: dict[int, MemoryLayoutDesc],
     locked_keys: list[ObjectKey],
+    timeout_seconds: float,
 ) -> dict[tuple[int, int], MemoryObj]:
     """Load objects whole into L1, recording the keys it locked.
 
@@ -336,10 +389,10 @@ def _load_whole(
         LayerwiseContractError: If an object is in neither L1 nor L2. The
             keys that did load stay in ``locked_keys`` for the caller to
             release.
-        LMCacheTimeoutError: If the load took too long.
+        LMCacheTimeoutError: If the load took longer than ``timeout_seconds``.
     """
     loaded = storage.load_into_l1(
-        [o.key for o in objects], group_layout_descs, WHOLE_LOAD_TIMEOUT_SECONDS
+        [o.key for o in objects], group_layout_descs, timeout_seconds
     )
     locked_keys.extend(loaded)
     missing = [o.key for o in objects if o.key not in loaded]
@@ -358,12 +411,15 @@ def fetch_deferred_objects(
     sink_factory: PipelinedSinkFactory,
     request: PipelinedLoadRequest,
     group_layout_descs: dict[int, MemoryLayoutDesc],
+    config: PipelinedFetchConfig,
 ) -> DeferredFetchResult:
     """Deliver a retrieve's deferred objects, layer by layer if possible.
 
     Blocks until the sink loaded every layer, or the objects are whole in
     L1. On any failure, the keys this call locked are released before the
-    error is raised.
+    error is raised. No wait exceeds its timeout in ``config``, so the
+    worker sees a layer or the failure within
+    ``config.layer_publish_budget_seconds``.
 
     Args:
         storage: Where the objects are fetched or loaded from.
@@ -376,6 +432,8 @@ def fetch_deferred_objects(
             holding its L1 objects.
         group_layout_descs: The model's per-object-group layouts, for whole
             loads.
+        config: The daemon's pipelined settings: the pump's per-layer
+            timeout and the whole-load timeout.
 
     Returns:
         How the objects were delivered, and the keys the caller now releases.
@@ -383,10 +441,18 @@ def fetch_deferred_objects(
     Raises:
         LayerwiseContractError: If the objects could not be delivered either
             way; a load the sink began has been abandoned.
+        LMCacheTimeoutError: If a whole load took longer than
+            ``config.whole_load_timeout_seconds``.
         Exception: Anything else the transport, sink or storage raises.
     """
     wanted = frozenset(keys_to_fetch)
-    loader = _WindowLoader(storage, sink_factory, request, group_layout_descs)
+    loader = _WindowLoader(
+        storage,
+        sink_factory,
+        request,
+        group_layout_descs,
+        config.whole_load_timeout_seconds,
+    )
     try:
         try:
             source = storage.layer_arrival_source()
@@ -404,6 +470,7 @@ def fetch_deferred_objects(
                     source,
                     loader,
                     keys_to_fetch=wanted,
+                    layer_timeout_seconds=config.layer_timeout_seconds,
                 )
                 return DeferredFetchResult(
                     (
@@ -420,7 +487,13 @@ def fetch_deferred_objects(
                 outcome = PipelinedOutcome.REFUSED
         objects = _objects_of(model, obj_keys_per_obj_group, wanted)
         request.objects.put(
-            _load_whole(storage, objects, group_layout_descs, loader.locked_keys)
+            _load_whole(
+                storage,
+                objects,
+                group_layout_descs,
+                loader.locked_keys,
+                config.whole_load_timeout_seconds,
+            )
         )
         return DeferredFetchResult(outcome, tuple(loader.locked_keys))
     except BaseException:
