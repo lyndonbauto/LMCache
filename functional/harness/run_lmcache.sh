@@ -11,7 +11,8 @@
 # RESTART_SERVER_BEFORE_WARM=1 (wait for L2 writes to settle, then restart
 # the LMCache server between the two sends, so the warm hit must come from
 # L2; L2_NAMESPACE names the Aerospike namespace, default lmcache;
-# RESTART_DOWNTIME_SECONDS keeps the server down that long, default 0).
+# RESTART_DOWNTIME_SECONDS keeps the server down that long, default 0;
+# RESTART_AFTER_PING=1 restarts right after a worker heartbeat).
 set -u
 MODEL=$1; CORPUS=$2; OUT=$3; TAG=$4; LW=$5; SETS=${6:-}
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -76,6 +77,16 @@ if [ "${RESTART_SERVER_BEFORE_WARM:-0}" = 1 ]; then
     || echo "warning: L2 writes had not settled"
   echo "=== $TAG restarting the LMCache server (L1 is lost) $(date -u +%T)"
   registrations=$(grep -c "Registered KV cache" "$OUT/lmcache_$TAG.log")
+  if [ "${RESTART_AFTER_PING:-0}" = 1 ]; then
+    # Restart right after a worker heartbeat, so a restart shorter than the
+    # heartbeat interval falls between two pings and no ping fails.
+    pings=$(grep -c "PING from instance" "$OUT/lmcache_$TAG.log")
+    for _ in $(seq 1200); do
+      [ "$(grep -c "PING from instance" "$OUT/lmcache_$TAG.log")" -gt "$pings" ] && break
+      sleep 0.1
+    done
+    echo "=== $TAG restarting right after a heartbeat $(date -u +%T)"
+  fi
   stop_server
   sleep "${RESTART_DOWNTIME_SECONDS:-0}"
   start_server || exit 1
