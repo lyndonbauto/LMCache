@@ -3,7 +3,8 @@
 # on the hybrid model gpt-oss-120b, plus the references they are judged
 # against. Aerospike CE L2, no RDMA, no pipelined fetch. Runs on the host;
 # each session runs in lmc-c. Usage: stage2c.sh [section ...]
-# Sections: corpus refs1 refs2 lmc reports (default: all, in order).
+# Sections: corpus refs1 refs2 lmc reports (default: corpus refs1 refs2 lmc);
+# pc16r1 runs refs1's prefix-cache half alone.
 #   refs1: no-cache baseline at block size 16 (port 8000) alongside vLLM's own
 #          prefix cache at block size 16 (port 8001), same send order as the
 #          LMCache session.
@@ -49,10 +50,13 @@ watch_hangs() {
   done
 }
 
-# ref <tag> <port> <vllm flags> <send>...: one reference server in the background.
+# ref <tag> <port> <gpu util> <vllm flags> <send>...: one reference server in
+# the background. Two share the GPU: the no-cache baseline needs little KV
+# (0.45 leaves about 51k tokens), a prefix-cache server must keep a whole
+# send cached (0.47 leaves about 100k tokens, 0.5 about 190k).
 ref() {
-  local tag=$1 port=$2 flags=$3; shift 3
-  timeout 5400 docker exec -e VLLM_BATCH_INVARIANT=1 -e VLLM_EXTRA="$flags" lmc-c \
+  local tag=$1 port=$2 util=$3 flags=$4; shift 4
+  timeout 5400 docker exec -e VLLM_BATCH_INVARIANT=1 -e GPU_UTIL=$util -e VLLM_EXTRA="$flags" lmc-c \
     bash $H/run_ref.sh $GPT $CG $R $tag $port "$@" > $S/gptoss_ref/session_$tag.txt 2>&1 &
 }
 # Start the second server only once the first serves, so their memory
@@ -75,22 +79,32 @@ print('v1 sets unchanged in v2:', same, '; P-short-v2 lengths', [p['n_tokens'] f
 sec_refs1() {
   mkdir -p $S/gptoss_ref
   echo "##### refs1 $(date -u +%T) $(wait_idle)"
-  ref base_b16 8000 "--no-enable-prefix-caching --block-size 16" "name=all sets=$ALL" "name=conc sets=$ALL conc=8"
+  ref base_b16 8000 0.45 "--no-enable-prefix-caching --block-size 16" "name=all sets=$ALL" "name=conc sets=$ALL conc=8"
   local a=$!
   wait_serving base_b16 || echo "base_b16 did not come up"
-  ref pc16_r1 8001 "--enable-prefix-caching --block-size 16" "${PC_SENDS[@]}"
+  ref pc16_r1 8001 0.5 "--enable-prefix-caching --block-size 16" "${PC_SENDS[@]}"
   local b=$!
   wait $a; echo "base_b16 rc=$?"; wait $b; echo "pc16_r1 rc=$?"
   grep -hE "===|correct" $S/gptoss_ref/session_base_b16.txt $S/gptoss_ref/session_pc16_r1.txt
   progress "refs1: baseline vs concurrent-8 on the same server: $(cmp base_b16_all base_b16_conc)"
 }
 
+# The block-16 prefix-cache run of refs1 alone, next to a baseline server
+# that is already running; then the baseline's concurrency check.
+sec_pc16r1() {
+  ref pc16_r1 8001 0.5 "--enable-prefix-caching --block-size 16" "${PC_SENDS[@]}"
+  wait $!; echo "pc16_r1 rc=$?"
+  for _ in $(seq 1800); do grep -q "=== base_b16 done" $S/gptoss_ref/session_base_b16.txt && break; sleep 2; done
+  grep -hE "===|correct" $S/gptoss_ref/session_base_b16.txt $S/gptoss_ref/session_pc16_r1.txt
+  progress "refs1: baseline vs concurrent-8 on the same server: $(cmp base_b16_all base_b16_conc)"
+}
+
 sec_refs2() {
   echo "##### refs2 $(date -u +%T) $(wait_idle)"
-  ref pc16_r2 8000 "--enable-prefix-caching --block-size 16" "${PC_SENDS[@]}"
+  ref pc16_r2 8000 0.47 "--enable-prefix-caching --block-size 16" "${PC_SENDS[@]}"
   local a=$!
   wait_serving pc16_r2 || echo "pc16_r2 did not come up"
-  ref pc256 8001 "--enable-prefix-caching --block-size 256" "${PC_SENDS[@]}"
+  ref pc256 8001 0.5 "--enable-prefix-caching --block-size 256" "${PC_SENDS[@]}"
   local b=$!
   wait $a; echo "pc16_r2 rc=$?"; wait $b; echo "pc256 rc=$?"
   grep -hE "===|correct|rror" $S/gptoss_ref/session_pc16_r2.txt $S/gptoss_ref/session_pc256.txt | tail -n 30
