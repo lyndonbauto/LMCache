@@ -51,6 +51,9 @@ class PipelinedNativeClientStub:
     def close(self) -> None:
         self._efd.close()
 
+    def read_write_ids(self, keys: Sequence[str]) -> dict[str, str]:
+        return {key: "" for key in keys}
+
     def pipelined_fetch_ready(self) -> bool:
         return not self.init_error
 

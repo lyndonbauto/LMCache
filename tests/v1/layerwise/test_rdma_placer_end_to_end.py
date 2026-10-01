@@ -8,7 +8,7 @@ cluster is needed.
 """
 
 # Standard
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 import threading
 
 # Third Party
@@ -96,6 +96,9 @@ class _Tap:
         self._begun = threading.Event()
         self.generation = NO_GENERATION
         self.plan: LayerFetchPlan | None = None
+
+    def read_write_ids(self, cache_keys: Sequence[str]) -> Mapping[str, str]:
+        return self._source.read_write_ids(cache_keys)
 
     def begin_fetch(self, plan: LayerFetchPlan) -> int:
         self.plan = plan

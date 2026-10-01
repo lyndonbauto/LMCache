@@ -634,6 +634,11 @@ def _race(
     """Release two writer processes on the same key ``rounds`` times and
     classify what a third adapter reads after each round.
 
+    The reader deletes the key after classifying it, so every round races
+    two first stores of an absent key -- what two engines computing the
+    same new chunk do. (Stores are create-only since D-14: without the
+    delete, every round after the first would read round 0's bytes.)
+
     Returns:
         ``(tally, examples)``: rounds per outcome (``writer1``, ``writer2``,
         ``mixed``, ``miss``, ``store_failed``), and a description of up to
@@ -654,6 +659,7 @@ def _race(
             if any(r[0] != "ok" for r in replies):
                 tally["store_failed"] += 1
             loaded, buffer = _load(reader, key, num_bytes)
+            reader.delete([key])
             if not loaded:
                 tally["miss"] += 1
                 continue
@@ -680,23 +686,53 @@ def _race(
     return tally, first_mixed
 
 
-def test_two_writers_racing_on_one_inline_chunk_never_mix(set_name: str) -> None:
+def _set_records(inspector: object, set_name: str) -> int:
+    """Records of ``set_name`` summed over the live nodes (replicas
+    included), so 0 means none anywhere."""
+    total = 0
+    replies = inspector.info_all(f"sets/{NAMESPACE}/{set_name}")  # type: ignore[attr-defined]
+    for node, (err, reply) in replies.items():
+        assert err is None, f"info from {node}: {err}"
+        fields = dict(
+            f.split("=", 1)
+            for f in reply.strip().replace(";", ":").split(":")
+            if "=" in f
+        )
+        total += int(fields.get("objects", "0"))
+    return total
+
+
+@pytest.mark.parametrize("rf", [1, 2])
+def test_two_writers_racing_on_one_inline_chunk_never_mix(
+    set_name: str, inspector: object, rf: int
+) -> None:
     """One-record objects: every read after a race equals one writer's
     bytes. The record write is atomic, so this is the control."""
-    _cluster_up(2)
+    _cluster_up(rf)
     tally, examples = _race(set_name, INLINE_BYTES, RACE_ROUNDS, key_index=7)
-    print(f"[T-FLT-10 inline, {RACE_ROUNDS} rounds] {tally} {examples}")
+    left = _set_records(inspector, set_name)
+    label = f"T-FLT-10 inline RF {rf}, {RACE_ROUNDS} rounds"
+    print(f"[{label}] {tally} {examples} left={left}")
     assert tally["mixed"] == 0 and tally["miss"] == 0 and tally["store_failed"] == 0
+    assert left == 0, f"{left} records left after deleting every round's key"
 
 
-def test_two_writers_racing_on_one_sharded_chunk_never_mix(set_name: str) -> None:
+@pytest.mark.parametrize("rf", [1, 2])
+def test_two_writers_racing_on_one_sharded_chunk_never_mix(
+    set_name: str, inspector: object, rf: int
+) -> None:
     """Sharded objects (four segments and a meta record): every read after
-    a race equals one writer's bytes, never a mix (plan T-FLT-10)."""
-    _cluster_up(2)
+    a race equals one writer's bytes, never a mix (plan T-FLT-10); and the
+    losing writer's segments are gone, so once each round's key is deleted
+    the set is empty."""
+    _cluster_up(rf)
     tally, examples = _race(set_name, SHARDED_BYTES, RACE_ROUNDS, key_index=8)
-    print(f"[T-FLT-10 sharded, {RACE_ROUNDS} rounds] {tally} {examples}")
+    left = _set_records(inspector, set_name)
+    label = f"T-FLT-10 sharded RF {rf}, {RACE_ROUNDS} rounds"
+    print(f"[{label}] {tally} {examples} left={left}")
     assert tally["miss"] == 0 and tally["store_failed"] == 0
     assert tally["mixed"] == 0, f"mixed reads: {tally} {examples}"
+    assert left == 0, f"{left} orphan records after deleting every round's key"
 
 
 # T-EVT-06: two hosts share the cluster with client-side eviction off.

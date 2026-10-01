@@ -30,7 +30,7 @@ caches) both ways, without writing anything. On the Soft-RoCE VM::
 """
 
 # Standard
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 import json
 import os
@@ -175,6 +175,9 @@ class _PlanTap:
     def __init__(self, source: LayerArrivalSource) -> None:
         self._source = source
         self.plan: LayerFetchPlan | None = None
+
+    def read_write_ids(self, cache_keys: Sequence[str]) -> Mapping[str, str]:
+        return self._source.read_write_ids(cache_keys)
 
     def begin_fetch(self, plan: LayerFetchPlan) -> int:
         self.plan = plan

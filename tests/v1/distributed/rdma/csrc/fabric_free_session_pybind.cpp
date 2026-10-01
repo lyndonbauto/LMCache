@@ -26,6 +26,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -105,6 +106,18 @@ class FabricFreeConnector {
   }
 
   bool pipelined_fetch_ready() const { return true; }
+
+  // Every object is stored, under its unsuffixed segment keys: there is no
+  // cluster behind this connector, so the planner's keys only need to be
+  // non-empty.
+  std::map<std::string, std::string> read_write_ids(
+      const std::vector<std::string>& keys) const {
+    std::map<std::string, std::string> ids;
+    for (const std::string& key : keys) {
+      ids[key] = "";
+    }
+    return ids;
+  }
 
   std::string pipelined_fetch_init_error() const { return {}; }
 
@@ -219,6 +232,8 @@ PYBIND11_MODULE(fabric_free_session, m) {
       .def("drain_completions", &FabricFreeConnector::drain_completions)
       .def("close", &FabricFreeConnector::close)
       .def("pipelined_fetch_ready", &FabricFreeConnector::pipelined_fetch_ready)
+      .def("read_write_ids", &FabricFreeConnector::read_write_ids,
+           py::arg("keys"))
       .def("pipelined_fetch_init_error",
            &FabricFreeConnector::pipelined_fetch_init_error)
       .def("pipelined_max_slots_per_request",

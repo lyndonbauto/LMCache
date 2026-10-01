@@ -14,6 +14,15 @@ from lmcache.v1.layerwise import (
 )
 
 
+def _unsuffixed_record_keys(
+    layout: ModelLayout, max_record_bytes: int, cache_keys: dict[tuple[int, int], str]
+) -> RecordKeys:
+    """Records named as objects written before write IDs existed."""
+    return RecordKeys(
+        layout, max_record_bytes, cache_keys, {key: "" for key in cache_keys.values()}
+    )
+
+
 def _two_chunk_fetch() -> tuple[PlanRequest, RecordKeys, FetchPlanner]:
     layout = ModelLayout(
         {0: [KernelGroupGeometry((0, 1), kv_planes=2, plane_bytes=4096)]}
@@ -28,7 +37,7 @@ def _two_chunk_fetch() -> tuple[PlanRequest, RecordKeys, FetchPlanner]:
         node_names=("node-a", "node-b"),
         max_record_bytes=4096,
     )
-    keys = RecordKeys(layout, 4096, {(0, 0): "key-a", (1, 0): "key-b"})
+    keys = _unsuffixed_record_keys(layout, 4096, {(0, 0): "key-a", (1, 0): "key-b"})
     return request, keys, FetchPlanner(layout)
 
 
@@ -49,7 +58,7 @@ def _one_chunk_on_two_nodes() -> tuple[PlanRequest, LayerFetchPlan]:
         max_record_bytes=4096,
     )
     plan = FetchPlanner(layout).plan(
-        request, RecordKeys(layout, 4096, {(0, 0): "g0", (0, 1): "g1"})
+        request, _unsuffixed_record_keys(layout, 4096, {(0, 0): "g0", (0, 1): "g1"})
     )
     return request, plan
 

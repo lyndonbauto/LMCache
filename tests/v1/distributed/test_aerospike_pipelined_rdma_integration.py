@@ -25,7 +25,7 @@ On AWS EFA, build with ``BUILD_WITH_AEROSPIKE_EFA=1`` and run with
 """
 
 # Standard
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from multiprocessing import shared_memory
 import os
@@ -164,6 +164,9 @@ class _PlanTap:
     def __init__(self, source: LayerArrivalSource) -> None:
         self._source = source
         self.plan: LayerFetchPlan | None = None
+
+    def read_write_ids(self, cache_keys: Sequence[str]) -> Mapping[str, str]:
+        return self._source.read_write_ids(cache_keys)
 
     def begin_fetch(self, plan: LayerFetchPlan) -> int:
         self.plan = plan
@@ -405,9 +408,9 @@ def test_a_missing_record_falls_back_to_a_whole_reload(
     damaged = next(iter(stored))
     client = aerospike.client({"hosts": [(AEROSPIKE_HOST, AEROSPIKE_PORT)]}).connect()
     try:
-        client.remove(
-            (AEROSPIKE_NAMESPACE, set_name, f"{object_key_to_string(damaged)}|s|0")
-        )
+        cache_key = object_key_to_string(damaged)
+        _, _, meta = client.get((AEROSPIKE_NAMESPACE, set_name, f"{cache_key}|m"))
+        client.remove((AEROSPIKE_NAMESPACE, set_name, f"{cache_key}|s|{meta['wid']}|0"))
     finally:
         client.close()
 

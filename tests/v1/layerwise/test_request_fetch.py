@@ -9,7 +9,7 @@ offsets, which are not the request's to decide.
 """
 
 # Standard
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import re
 
 # Third Party
@@ -51,7 +51,31 @@ def plan_for(
     """Lease a window the way retrieve does, then plan into it."""
     placer = placer or PackingPlacer()
     lease = placer.lease(objects_to_place(fetch_model(), keys))
-    return build_request_fetch(fetch_model(), keys, MAX_RECORD_BYTES, lease)
+    return build_request_fetch(
+        fetch_model(), keys, MAX_RECORD_BYTES, lease, write_ids=STORED
+    )
+
+
+class _MetaRecords:
+    """Write IDs as the meta records name them; records every read."""
+
+    def __init__(self, write_ids: Mapping[str, str]) -> None:
+        self.write_ids = dict(write_ids)
+        self.reads: list[list[str]] = []
+
+    def read_write_ids(self, cache_keys: Sequence[str]) -> Mapping[str, str]:
+        self.reads.append(list(cache_keys))
+        return {k: self.write_ids[k] for k in cache_keys if k in self.write_ids}
+
+
+class _AllStored:
+    """Every object stored, named as objects written before write IDs."""
+
+    def read_write_ids(self, cache_keys: Sequence[str]) -> Mapping[str, str]:
+        return {key: "" for key in cache_keys}
+
+
+STORED = _AllStored()
 
 
 _RECORD_SUFFIX = re.compile(r"\|(?:m|s\|(\d+))$")
@@ -185,7 +209,9 @@ def test_an_object_reaching_past_the_window_is_refused() -> None:
     lease, keys = _lease_with(1 << 30, others_from=0, c0g0=(1 << 30) - size + 1)
 
     with pytest.raises(ValueError, match="outside the"):
-        build_request_fetch(fetch_model(), keys, MAX_RECORD_BYTES, lease)
+        build_request_fetch(
+            fetch_model(), keys, MAX_RECORD_BYTES, lease, write_ids=STORED
+        )
 
 
 def test_an_object_that_exactly_fills_the_window_end_is_accepted() -> None:
@@ -193,7 +219,9 @@ def test_an_object_that_exactly_fills_the_window_end_is_accepted() -> None:
     size = fetch_model().layout.object_group_bytes(0)
     lease, keys = _lease_with(1 << 30, others_from=0, c0g0=(1 << 30) - size)
 
-    fetch = build_request_fetch(fetch_model(), keys, MAX_RECORD_BYTES, lease)
+    fetch = build_request_fetch(
+        fetch_model(), keys, MAX_RECORD_BYTES, lease, write_ids=STORED
+    )
 
     assert max(s.offset + s.length for s in fetch.plan.slots) == 1 << 30
 
@@ -203,7 +231,9 @@ def test_a_negative_offset_is_refused() -> None:
     lease, keys = _lease_with(1 << 30, c0g0=-1)
 
     with pytest.raises(ValueError, match="outside the"):
-        build_request_fetch(fetch_model(), keys, MAX_RECORD_BYTES, lease)
+        build_request_fetch(
+            fetch_model(), keys, MAX_RECORD_BYTES, lease, write_ids=STORED
+        )
 
 
 WINDOW_START = 3 << 30
@@ -216,7 +246,9 @@ def test_a_later_window_plans_registration_offsets() -> None:
     keys = resolve_obj_keys(vllm_request())
     lease = placer.lease(objects_to_place(fetch_model(), keys))
 
-    fetch = build_request_fetch(fetch_model(), keys, MAX_RECORD_BYTES, lease)
+    fetch = build_request_fetch(
+        fetch_model(), keys, MAX_RECORD_BYTES, lease, write_ids=STORED
+    )
 
     assert min(p.dest_offset for p in fetch.request.placements) == WINDOW_START + 4096
     assert min(s.offset for s in fetch.plan.slots) == WINDOW_START + 4096
@@ -235,7 +267,9 @@ def test_an_object_before_the_window_start_is_refused() -> None:
     )
 
     with pytest.raises(ValueError, match="outside the leased window"):
-        build_request_fetch(fetch_model(), keys, MAX_RECORD_BYTES, lease)
+        build_request_fetch(
+            fetch_model(), keys, MAX_RECORD_BYTES, lease, write_ids=STORED
+        )
 
 
 def test_an_object_past_a_later_window_end_is_refused() -> None:
@@ -250,7 +284,9 @@ def test_an_object_past_a_later_window_end_is_refused() -> None:
     )
 
     with pytest.raises(ValueError, match="outside the leased window"):
-        build_request_fetch(fetch_model(), keys, MAX_RECORD_BYTES, lease)
+        build_request_fetch(
+            fetch_model(), keys, MAX_RECORD_BYTES, lease, write_ids=STORED
+        )
 
 
 def test_an_object_ending_at_a_later_window_end_is_accepted() -> None:
@@ -264,7 +300,9 @@ def test_an_object_ending_at_a_later_window_end_is_accepted() -> None:
         c1g0=end - size,
     )
 
-    fetch = build_request_fetch(fetch_model(), keys, MAX_RECORD_BYTES, lease)
+    fetch = build_request_fetch(
+        fetch_model(), keys, MAX_RECORD_BYTES, lease, write_ids=STORED
+    )
 
     assert max(s.offset + s.length for s in fetch.plan.slots) == end
 
@@ -275,7 +313,9 @@ def test_two_objects_sharing_bytes_are_refused() -> None:
     lease, keys = _lease_with(1 << 30, c0g0=0, c1g0=size - 1)
 
     with pytest.raises(ValueError, match="overlap"):
-        build_request_fetch(fetch_model(), keys, MAX_RECORD_BYTES, lease)
+        build_request_fetch(
+            fetch_model(), keys, MAX_RECORD_BYTES, lease, write_ids=STORED
+        )
 
 
 def test_adjacent_objects_are_not_an_overlap() -> None:
@@ -283,7 +323,7 @@ def test_adjacent_objects_are_not_an_overlap() -> None:
     size = fetch_model().layout.object_group_bytes(0)
     lease, keys = _lease_with(1 << 30, c0g0=0, c1g0=size)
 
-    build_request_fetch(fetch_model(), keys, MAX_RECORD_BYTES, lease)
+    build_request_fetch(fetch_model(), keys, MAX_RECORD_BYTES, lease, write_ids=STORED)
 
 
 def test_request_bytes_counts_exactly_the_objects_a_request_reads() -> None:
@@ -395,3 +435,42 @@ def test_the_registry_separates_world_sizes() -> None:
     registry.register(MODEL_NAME, 2, fetch_model())
     with pytest.raises(KeyError):
         registry.find(MODEL_NAME, 4)
+
+
+# D-14: records are named by the write the meta record names.
+
+
+def test_each_object_is_named_by_the_write_its_meta_record_names() -> None:
+    """One read covers every planned object, and each slot names a record of
+    the write that object's meta record points at."""
+    keys = resolve_obj_keys(vllm_request())
+    lease = PackingPlacer().lease(objects_to_place(fetch_model(), keys))
+    stored = sorted({object_key_to_string(k) for group in keys for k in group})
+    meta = _MetaRecords({key: f"{n:016x}" for n, key in enumerate(stored)})
+
+    fetch = build_request_fetch(
+        fetch_model(), keys, MAX_RECORD_BYTES, lease, write_ids=meta
+    )
+
+    assert len(meta.reads) == 1
+    read = meta.reads[0]
+    assert read == sorted(set(read))
+    assert any(not slot.record_key.endswith("|m") for slot in fetch.plan.slots)
+    for slot in fetch.plan.slots:
+        if slot.record_key.endswith("|m"):
+            continue
+        cache_key, write_id, _ = slot.record_key.rsplit("|", 2)
+        assert cache_key.endswith("|s")
+        assert write_id == meta.write_ids[cache_key[: -len("|s")]]
+
+
+def test_an_object_without_a_meta_record_refuses_the_plan() -> None:
+    """A key deleted between lookup and fetch has nothing to name; the plan
+    is refused (the retrieve then loads whole objects) rather than guessed."""
+    keys = resolve_obj_keys(vllm_request())
+    lease = PackingPlacer().lease(objects_to_place(fetch_model(), keys))
+
+    with pytest.raises(KeyError, match="no meta record"):
+        build_request_fetch(
+            fetch_model(), keys, MAX_RECORD_BYTES, lease, write_ids=_MetaRecords({})
+        )

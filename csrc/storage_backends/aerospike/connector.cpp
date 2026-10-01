@@ -14,11 +14,17 @@
 
 #include <algorithm>
 #include <cassert>
+#include <chrono>
+#include <cinttypes>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <functional>
+#include <random>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 
 namespace lmcache {
 namespace connector {
@@ -36,7 +42,33 @@ constexpr const char* kBinTotalBytes = "tot_b";
 constexpr const char* kBinVersion = "ver";
 constexpr const char* kBinCreatedAt = "created_at";
 constexpr const char* kBinPin = "pin";
+constexpr const char* kBinWriteId = "wid";
 constexpr const char* kReady = "ready";
+// Read by read_write_ids(); the batch API takes non-const names but only
+// reads them.
+char kBinStateName[] = "state";
+char kBinWriteIdName[] = "wid";
+char* kWriteIdBins[] = {kBinStateName, kBinWriteIdName};
+
+// 64 random bits as 16 lowercase hex digits. Each thread seeds its own
+// generator, so concurrent stores never share state.
+std::string new_write_id() {
+  thread_local std::mt19937_64 rng(
+      (static_cast<uint64_t>(std::random_device{}()) << 32) ^
+      static_cast<uint64_t>(std::random_device{}()) ^
+      static_cast<uint64_t>(
+          std::chrono::steady_clock::now().time_since_epoch().count()) ^
+      std::hash<std::thread::id>{}(std::this_thread::get_id()));
+  char hex[17];
+  std::snprintf(hex, sizeof(hex), "%016" PRIx64, rng());
+  return std::string(hex);
+}
+
+// The write ID a meta record names, or "" for inline and old-layout records.
+std::string write_id_of(as_record* rec) {
+  const char* wid = as_record_get_str(rec, kBinWriteId);
+  return wid == nullptr ? std::string() : std::string(wid);
+}
 
 std::vector<std::string> split(const std::string& s, char sep) {
   std::vector<std::string> out;
@@ -264,6 +296,7 @@ void AerospikeNativeConnector::do_single_get(WorkerAerospikeConn& conn,
     }
   }
   uint32_t nseg = shard.nseg;
+  const std::string write_id = write_id_of(rec);
   // Read the stored total directly with a sentinel so a missing or corrupt bin
   // fails the integrity check instead of silently matching `len`.
   int64_t total_raw = as_record_get_int64(rec, kBinTotalBytes, -1);
@@ -291,11 +324,14 @@ void AerospikeNativeConnector::do_single_get(WorkerAerospikeConn& conn,
 
   size_t covered = 0;
   for (uint32_t i = 0; i < nseg; ++i) {
-    std::string segment_key_i = segment_user_key(key, i);
+    std::string segment_key_i = segment_user_key(key, write_id, i);
     ShardRange range = segment_range(shard, i, len);
     if (!read_payload_record(conn, segment_key_i,
                              static_cast<char*>(buf) + range.offset,
                              range.length)) {
+      // A miss, never a delete: at replication factor 1 a segment reads as
+      // absent while its node is down and is back when the node rejoins.
+      // A store of this key replaces the object if it is still damaged.
       throw std::runtime_error("missing segment payload");
     }
     covered += range.length;
@@ -310,19 +346,48 @@ void AerospikeNativeConnector::do_single_set(WorkerAerospikeConn& conn,
                                              const void* buf, size_t len,
                                              size_t /*chunk_size*/) {
   ShardPlan shard = plan(len);
+  as_error err;
 
   if (shard.nseg == 1) {
-    put_meta_record(conn, meta_user_key(key), shard, len, buf);
+    const as_status status =
+        create_meta_record(conn, key, shard, len, buf, "", &err);
+    // RECORD_EXISTS: another write of this key won; the key is stored.
+    if (status != AEROSPIKE_OK && status != AEROSPIKE_ERR_RECORD_EXISTS) {
+      throw_status("put-meta", status, err);
+    }
     return;
   }
 
-  for (uint32_t i = 0; i < shard.nseg; ++i) {
-    ShardRange range = segment_range(shard, i, len);
-    put_payload_record(conn, segment_user_key(key, i),
-                       static_cast<const char*>(buf) + range.offset,
-                       range.length);
+  // Segments go under keys no other write uses, so nothing here can touch
+  // the records an existing meta record names. See
+  // docs/design/v1/distributed/l2_adapters/aerospike_concurrent_writes.md.
+  const std::string write_id = new_write_id();
+  try {
+    for (uint32_t i = 0; i < shard.nseg; ++i) {
+      ShardRange range = segment_range(shard, i, len);
+      put_payload_record(conn, segment_user_key(key, write_id, i),
+                         static_cast<const char*>(buf) + range.offset,
+                         range.length);
+    }
+  } catch (...) {
+    remove_segments(conn, key, write_id, shard.nseg);
+    throw;
   }
-  put_meta_record(conn, meta_user_key(key), shard, len, nullptr);
+
+  const as_status status =
+      create_meta_record(conn, key, shard, len, nullptr, write_id, &err);
+  if (status == AEROSPIKE_OK) {
+    return;
+  }
+  // Lost the race (RECORD_EXISTS) or failed: no meta record names these
+  // segments. An in-doubt put may have landed, so its segments stay; the TTL
+  // reclaims them if it did not.
+  if (status == AEROSPIKE_ERR_RECORD_EXISTS || !err.in_doubt) {
+    remove_segments(conn, key, write_id, shard.nseg);
+  }
+  if (status != AEROSPIKE_ERR_RECORD_EXISTS) {
+    throw_status("put-meta", status, err);
+  }
 }
 
 bool AerospikeNativeConnector::do_single_exists(WorkerAerospikeConn& conn,
@@ -405,6 +470,7 @@ bool AerospikeNativeConnector::do_single_delete(WorkerAerospikeConn& conn,
                                                 const std::string& key) {
   std::string user_key = meta_user_key(key);
   uint32_t nseg = 1;
+  std::string write_id;
 
   as_key as_meta_key;
   as_key_init_str(&as_meta_key, conn.ns.c_str(), conn.set_name.c_str(),
@@ -422,6 +488,7 @@ bool AerospikeNativeConnector::do_single_delete(WorkerAerospikeConn& conn,
   }
   if (rec != nullptr) {
     nseg = static_cast<uint32_t>(positive_int_bin(rec, kBinNseg, 1));
+    write_id = write_id_of(rec);
     as_record_destroy(rec);
   }
 
@@ -434,16 +501,75 @@ bool AerospikeNativeConnector::do_single_delete(WorkerAerospikeConn& conn,
     throw_status("delete-meta", status, err);
   }
 
-  for (uint32_t i = 0; i < nseg; ++i) {
-    as_key as_segment_key;
-    std::string segment_key_i = segment_user_key(key, i);
-    as_key_init_str(&as_segment_key, conn.ns.c_str(), conn.set_name.c_str(),
-                    segment_key_i.c_str());
-    as_error seg_err;
-    aerospike_key_remove(conn.client, &seg_err, &conn.remove_policy,
-                         &as_segment_key);
+  if (nseg > 1) {
+    remove_segments(conn, key, write_id, nseg);
   }
   return true;
+}
+
+std::map<std::string, std::string> AerospikeNativeConnector::read_write_ids(
+    const std::vector<std::string>& keys) {
+  as_policy_batch policy;
+  as_policy_batch_init(&policy);
+  policy.base.total_timeout = read_timeout_ms_;
+  policy.base.socket_timeout = read_timeout_ms_;
+  policy.base.max_retries = 2;
+  policy.replica = AS_POLICY_REPLICA_SEQUENCE;
+  policy.concurrent = true;
+  // A lookup, not a load: extending the meta record alone would let it
+  // outlive its segments.
+  policy.read_touch_ttl_percent = -1;
+
+  std::map<std::string, std::string> found;
+  for (size_t begin = 0; begin < keys.size(); begin += kMaxBatchExistsKeys) {
+    const size_t end = std::min(begin + kMaxBatchExistsKeys, keys.size());
+    const uint32_t count = static_cast<uint32_t>(end - begin);
+
+    // as_key_init_str keeps a pointer to the user key, so the strings must
+    // outlive the batch call.
+    std::vector<std::string> user_keys;
+    user_keys.reserve(count);
+    for (size_t i = begin; i < end; ++i) {
+      user_keys.push_back(meta_user_key(keys[i]));
+    }
+
+    std::unique_ptr<as_batch_records, void (*)(as_batch_records*)> records(
+        as_batch_records_create(count), &as_batch_records_destroy);
+    for (const std::string& user_key : user_keys) {
+      as_batch_read_record* record = as_batch_read_reserve(records.get());
+      as_key_init_str(&record->key, ns_.c_str(), set_name_.c_str(),
+                      user_key.c_str());
+      record->read_all_bins = false;
+      record->bin_names = kWriteIdBins;
+      record->n_bin_names = 2;
+    }
+
+    as_error err;
+    const as_status status =
+        aerospike_batch_read(&as_, &err, &policy, records.get());
+    if (status != AEROSPIKE_OK && status != AEROSPIKE_BATCH_FAILED) {
+      throw_status("read-write-ids", status, err);
+    }
+
+    for (uint32_t i = 0; i < count; ++i) {
+      as_batch_read_record* record =
+          static_cast<as_batch_read_record*>(as_vector_get(&records->list, i));
+      if (record->result == AEROSPIKE_ERR_RECORD_NOT_FOUND) {
+        continue;
+      }
+      if (record->result != AEROSPIKE_OK) {
+        as_error key_err;
+        as_error_init(&key_err);
+        throw_status("read-write-ids", record->result, key_err);
+      }
+      const char* state = as_record_get_str(&record->record, kBinState);
+      if (state == nullptr || std::strcmp(state, kReady) != 0) {
+        continue;
+      }
+      found[keys[begin + i]] = write_id_of(&record->record);
+    }
+  }
+  return found;
 }
 
 void AerospikeNativeConnector::shutdown_connections() {
@@ -486,8 +612,112 @@ std::string AerospikeNativeConnector::meta_user_key(
 }
 
 std::string AerospikeNativeConnector::segment_user_key(
-    const std::string& cache_key, uint32_t index) {
-  return cache_key + "|s|" + std::to_string(index);
+    const std::string& cache_key, const std::string& write_id, uint32_t index) {
+  if (write_id.empty()) {
+    return cache_key + "|s|" + std::to_string(index);
+  }
+  return cache_key + "|s|" + write_id + "|" + std::to_string(index);
+}
+
+void AerospikeNativeConnector::remove_segments(WorkerAerospikeConn& conn,
+                                               const std::string& cache_key,
+                                               const std::string& write_id,
+                                               uint32_t nseg) {
+  for (uint32_t i = 0; i < nseg; ++i) {
+    const std::string segment_key_i = segment_user_key(cache_key, write_id, i);
+    as_key as_segment_key;
+    as_key_init_str(&as_segment_key, conn.ns.c_str(), conn.set_name.c_str(),
+                    segment_key_i.c_str());
+    as_error seg_err;
+    aerospike_key_remove(conn.client, &seg_err, &conn.remove_policy,
+                         &as_segment_key);
+  }
+}
+
+as_status AerospikeNativeConnector::create_meta_record(
+    WorkerAerospikeConn& conn, const std::string& cache_key,
+    const ShardPlan& shard, size_t total_bytes, const void* inline_buf,
+    const std::string& write_id, as_error* err) {
+  const std::string user_key = meta_user_key(cache_key);
+  as_status status = put_meta_record(conn, user_key, shard, total_bytes,
+                                     inline_buf, write_id, err);
+  if (status != AEROSPIKE_ERR_RECORD_EXISTS ||
+      !remove_damaged_object(conn, cache_key)) {
+    return status;
+  }
+  // One retry: RECORD_EXISTS again means another store took the freed key.
+  return put_meta_record(conn, user_key, shard, total_bytes, inline_buf,
+                         write_id, err);
+}
+
+bool AerospikeNativeConnector::remove_damaged_object(
+    WorkerAerospikeConn& conn, const std::string& cache_key) {
+  const std::string user_key = meta_user_key(cache_key);
+  as_key as_meta_key;
+  as_key_init_str(&as_meta_key, conn.ns.c_str(), conn.set_name.c_str(),
+                  user_key.c_str());
+
+  static const char* kLayoutBins[] = {kBinNseg, kBinWriteId, nullptr};
+  as_error err;
+  as_record* rec = nullptr;
+  as_status status = aerospike_key_select(
+      conn.client, &err, &conn.lookup_policy, &as_meta_key, kLayoutBins, &rec);
+  if (status == AEROSPIKE_ERR_RECORD_NOT_FOUND) {
+    return true;
+  }
+  if (status != AEROSPIKE_OK || rec == nullptr) {
+    if (rec != nullptr) {
+      as_record_destroy(rec);
+    }
+    return false;
+  }
+  const uint32_t nseg =
+      static_cast<uint32_t>(positive_int_bin(rec, kBinNseg, 1));
+  const std::string write_id = write_id_of(rec);
+  const uint16_t meta_gen = rec->gen;
+  as_record_destroy(rec);
+  if (nseg <= 1) {
+    return false;
+  }
+
+  // Only a segment the cluster reports absent counts as damage; any other
+  // error leaves the object alone.
+  bool missing = false;
+  for (uint32_t i = 0; i < nseg && !missing; ++i) {
+    const std::string segment_key_i = segment_user_key(cache_key, write_id, i);
+    as_key as_segment_key;
+    as_key_init_str(&as_segment_key, conn.ns.c_str(), conn.set_name.c_str(),
+                    segment_key_i.c_str());
+    as_record* seg = nullptr;
+    status = aerospike_key_exists(conn.client, &err, &conn.lookup_policy,
+                                  &as_segment_key, &seg);
+    if (seg != nullptr) {
+      as_record_destroy(seg);
+    }
+    if (status == AEROSPIKE_ERR_RECORD_NOT_FOUND) {
+      missing = true;
+    } else if (status != AEROSPIKE_OK) {
+      return false;
+    }
+  }
+  if (!missing) {
+    return false;
+  }
+
+  // Remove only at the generation just read. A delete and a new store in
+  // between can recreate the record at the same generation; the caller then
+  // replaces that winner with its own complete object, so a reader still
+  // sees one write's bytes. Filter expressions would close the window, but
+  // the C client's macros do not compile as C++ under g++.
+  as_policy_remove policy = conn.remove_policy;
+  policy.gen = AS_POLICY_GEN_EQ;
+  policy.generation = meta_gen;
+  status = aerospike_key_remove(conn.client, &err, &policy, &as_meta_key);
+  if (status == AEROSPIKE_OK) {
+    remove_segments(conn, cache_key, write_id, nseg);
+    return true;
+  }
+  return status == AEROSPIKE_ERR_RECORD_NOT_FOUND;
 }
 
 void AerospikeNativeConnector::throw_status(const char* op, as_status status,
@@ -823,11 +1053,10 @@ void AerospikeNativeConnector::put_payload_record(WorkerAerospikeConn& conn,
   }
 }
 
-void AerospikeNativeConnector::put_meta_record(WorkerAerospikeConn& conn,
-                                               const std::string& user_key,
-                                               const ShardPlan& shard,
-                                               size_t total_bytes,
-                                               const void* inline_buf) {
+as_status AerospikeNativeConnector::put_meta_record(
+    WorkerAerospikeConn& conn, const std::string& user_key,
+    const ShardPlan& shard, size_t total_bytes, const void* inline_buf,
+    const std::string& write_id, as_error* err) {
   as_key key;
   as_key_init_str(&key, conn.ns.c_str(), conn.set_name.c_str(),
                   user_key.c_str());
@@ -839,8 +1068,9 @@ void AerospikeNativeConnector::put_meta_record(WorkerAerospikeConn& conn,
   as_record rec;
   // Bin count must match the number of as_record_set_* calls below: the bin
   // array is allocated on the stack here, so an undercount overruns it.
-  as_record_inita(&rec,
-                  8 + (inline_buf == nullptr ? 0 : 1) + (runs.empty() ? 0 : 1));
+  as_record_inita(&rec, 8 + (inline_buf == nullptr ? 0 : 1) +
+                            (runs.empty() ? 0 : 1) +
+                            (write_id.empty() ? 0 : 1));
   rec.ttl = AS_RECORD_CLIENT_DEFAULT_TTL;
   as_record_set_int64(&rec, kBinVersion, 1);
   as_record_set_str(&rec, kBinState, kReady);
@@ -860,6 +1090,9 @@ void AerospikeNativeConnector::put_meta_record(WorkerAerospikeConn& conn,
   as_record_set_int64(&rec, kBinCreatedAt,
                       static_cast<int64_t>(std::time(nullptr)));
   as_record_set_bool(&rec, kBinPin, false);
+  if (!write_id.empty()) {
+    as_record_set_str(&rec, kBinWriteId, write_id.c_str());
+  }
   if (inline_buf != nullptr) {
     // The inline payload path is only taken for single-record writes, where
     // do_single_set() already guaranteed (via plan()) that
@@ -872,13 +1105,14 @@ void AerospikeNativeConnector::put_meta_record(WorkerAerospikeConn& conn,
                       static_cast<uint32_t>(total_bytes));
   }
 
-  as_error err;
-  as_status status =
-      aerospike_key_put(conn.client, &err, &conn.write_policy, &key, &rec);
+  // Create-only: the first write of a key wins and is never replaced, so no
+  // reader ever races a writer over the records a meta record names.
+  as_policy_write policy = conn.write_policy;
+  policy.exists = AS_POLICY_EXISTS_CREATE;
+  const as_status status =
+      aerospike_key_put(conn.client, err, &policy, &key, &rec);
   as_record_destroy(&rec);
-  if (status != AEROSPIKE_OK) {
-    throw_status("put-meta", status, err);
-  }
+  return status;
 }
 
 bool AerospikeNativeConnector::read_payload_record(WorkerAerospikeConn& conn,

@@ -56,9 +56,21 @@ struct WorkerAerospikeConn {
 // Records use a meta + segment layout: every cache key maps to a meta record
 // (``<key>|m``) carrying the shard plan, and payloads larger than the
 // discovered Aerospike record-size cap are split across segment records
-// (``<key>|s|<i>``). Payloads that fit a single record are stored inline in
-// the meta record. The connector key is used verbatim as the Aerospike user
-// key base (the framework's ObjectKey-to-string format).
+// (``<key>|s|<wid>|<i>``), where ``wid`` is a random write ID drawn per store
+// and recorded in the meta record's ``wid`` bin. Payloads that fit a single
+// record are stored inline in the meta record. The connector key is used
+// verbatim as the Aerospike user key base (the framework's ObjectKey-to-string
+// format).
+//
+// The meta record is written last and create-only, so the first store of a
+// key wins and a reader always reads one store's segments; a store that loses
+// deletes its own segments and still succeeds, unless the winner names a
+// segment the cluster reports absent, in which case the store replaces it. A
+// load that finds a segment missing is a miss and deletes nothing. Meta
+// records without a
+// ``wid`` bin were written before write IDs existed and name segments
+// ``<key>|s|<i>``; they stay readable. See
+// docs/design/v1/distributed/l2_adapters/aerospike_concurrent_writes.md.
 //
 // `plane_bytes` opts into plane-aligned sharding, which keeps every record
 // confined to one model layer so a layer-pipelined reader can serve one layer
@@ -143,6 +155,25 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
   //
   // Thread safety: safe to call concurrently; fixed at construction.
   size_t max_record_bytes() const;
+
+  // Write ID of every stored object among `keys`, read from their meta
+  // records in batch reads (one request per node per sub-batch of at most
+  // kMaxBatchExistsKeys keys).
+  //
+  // A key that has a ready meta record maps to its write ID: 16 hex digits
+  // for a sharded object, "" for an inline object or one written before
+  // write IDs existed (whose segments are ``<key>|s|<i>``). A key with no
+  // meta record, or one that is not ready, is absent from the result. A
+  // reader naming segment records itself (the pipelined fetch planner) must
+  // use the ID returned here. Never extends a TTL.
+  //
+  // Thread safety: safe to call concurrently; uses the shared client on the
+  // caller's thread.
+  //
+  // Throws std::runtime_error if the batch, or any key, fails with anything
+  // other than "record not found".
+  std::map<std::string, std::string> read_write_ids(
+      const std::vector<std::string>& keys);
 
 #ifdef LMCACHE_AEROSPIKE_RDMA
   // Report whether pipelined kv-sink-fetch is initialized and at least one
@@ -266,7 +297,10 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
   static std::vector<std::pair<std::string, int>> parse_hosts(
       const std::string& hosts);
   static std::string meta_user_key(const std::string& cache_key);
+  // ``<key>|s|<write_id>|<index>``, or ``<key>|s|<index>`` when `write_id` is
+  // empty (records written before write IDs existed).
   static std::string segment_user_key(const std::string& cache_key,
+                                      const std::string& write_id,
                                       uint32_t index);
   static void throw_status(const char* op, as_status status,
                            const as_error& err);
@@ -277,9 +311,32 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
   void put_payload_record(WorkerAerospikeConn& conn,
                           const std::string& user_key, const void* buf,
                           size_t len);
-  void put_meta_record(WorkerAerospikeConn& conn, const std::string& user_key,
-                       const ShardPlan& plan, size_t total_bytes,
-                       const void* inline_buf);
+  // Create-only put of the meta record. Returns the put's status (OK, or
+  // AEROSPIKE_ERR_RECORD_EXISTS when another write of the key won) and fills
+  // `err`; never throws on a server status.
+  as_status put_meta_record(WorkerAerospikeConn& conn,
+                            const std::string& user_key, const ShardPlan& plan,
+                            size_t total_bytes, const void* inline_buf,
+                            const std::string& write_id, as_error* err);
+  // Best-effort removal of segments 0..nseg-1 of one write.
+  void remove_segments(WorkerAerospikeConn& conn, const std::string& cache_key,
+                       const std::string& write_id, uint32_t nseg);
+  // put_meta_record for `cache_key`; on RECORD_EXISTS, if the existing object
+  // is damaged (remove_damaged_object), retries the create once. Returns the
+  // last put's status: OK when this write's meta record landed,
+  // RECORD_EXISTS when an intact object (or a concurrent store) holds the key.
+  as_status create_meta_record(WorkerAerospikeConn& conn,
+                               const std::string& cache_key,
+                               const ShardPlan& plan, size_t total_bytes,
+                               const void* inline_buf,
+                               const std::string& write_id, as_error* err);
+  // If the key's meta record names a segment the cluster reports absent,
+  // removes the meta record at the generation just read, then its segments.
+  // Returns true when the key has no meta record afterwards (removed here,
+  // or already gone); false when the object is intact, inline, or any read
+  // failed. Never throws.
+  bool remove_damaged_object(WorkerAerospikeConn& conn,
+                             const std::string& cache_key);
   bool read_payload_record(WorkerAerospikeConn& conn,
                            const std::string& user_key, void* buf, size_t len);
 

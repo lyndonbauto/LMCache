@@ -320,6 +320,19 @@ class LayerFetchPlan:
 
 
 @runtime_checkable
+class RecordWriteIdReader(Protocol):
+    """Reads the write ID each stored object's meta record names.
+
+    The part of :class:`LayerArrivalSource` that planning needs; see
+    :meth:`LayerArrivalSource.read_write_ids` for the contract.
+    """
+
+    def read_write_ids(self, cache_keys: Sequence[str]) -> Mapping[str, str]:
+        """Return the write ID per cache key that has a meta record."""
+        ...
+
+
+@runtime_checkable
 class LayerArrivalSource(Protocol):
     """Reports which layers of an in-flight fetch have landed in host memory.
 
@@ -330,6 +343,30 @@ class LayerArrivalSource(Protocol):
     polled from a different thread than the one that began the fetch, so
     implementations must be safe for concurrent :meth:`poll_layer` calls.
     """
+
+    def read_write_ids(self, cache_keys: Sequence[str]) -> Mapping[str, str]:
+        """Read which store's records each object's meta record names.
+
+        Called once per request, before planning: a sharded object's records
+        are named by the write that stored them (D-14; see
+        ``docs/design/v1/distributed/l2_adapters/aerospike_concurrent_writes.md``),
+        so a plan cannot name them from the cache key alone. Never extends a
+        record's TTL.
+
+        Args:
+            cache_keys: The stored objects' cache keys, as the connector
+                serializes them.
+
+        Returns:
+            Write ID per cache key that has a meta record: 16 hex digits for
+            a sharded object, ``""`` for one stored inline or before write
+            IDs existed. Keys without a meta record are absent.
+
+        Raises:
+            LayerwiseContractError: If the backend cannot read the meta
+                records. Callers fall back to whole-object loads.
+        """
+        ...
 
     def begin_fetch(self, plan: LayerFetchPlan) -> int:
         """Start fetching every slot in ``plan``.

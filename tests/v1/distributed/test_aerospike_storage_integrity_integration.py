@@ -27,6 +27,7 @@ from collections.abc import Iterator
 from pathlib import Path
 import os
 import random
+import re
 import select
 import signal
 import subprocess
@@ -77,6 +78,9 @@ INLINE_BYTES = 64 * 1024
 #: Nine segments, so a writer killed at a random moment is most likely
 #: between its first segment and its meta record.
 KILL_OBJECT_BYTES = 8 * 1024 * 1024
+#: Records one such object is stored as: nine segments of at most
+#: 1 MiB - 64 KiB, and its meta record.
+KILL_OBJECT_RECORDS = 10
 TIMEOUT = 30.0
 _EMPTY_LAYOUT = MemoryLayoutDesc(shapes=[], dtypes=[])
 
@@ -263,8 +267,23 @@ def _meta_key(set_name: str, key: ObjectKey) -> tuple[str, str, str]:
     return (AEROSPIKE_NAMESPACE, set_name, f"{object_key_to_string(key)}|m")
 
 
-def _segment_key(set_name: str, key: ObjectKey, index: int) -> tuple[str, str, str]:
-    return (AEROSPIKE_NAMESPACE, set_name, f"{object_key_to_string(key)}|s|{index}")
+def _segment_key(
+    inspector: object, set_name: str, key: ObjectKey, index: int
+) -> tuple[str, str, str]:
+    """Segment ``index`` of the write ``key``'s meta record names (D-14)."""
+    _, _, bins = inspector.get(_meta_key(set_name, key))  # type: ignore[attr-defined]
+    write_id = bins.get("wid", "")
+    suffix = f"{write_id}|{index}" if write_id else str(index)
+    return (AEROSPIKE_NAMESPACE, set_name, f"{object_key_to_string(key)}|s|{suffix}")
+
+
+def _set_objects(inspector: object, set_name: str) -> int:
+    """Records in ``set_name`` on the (single) node, segments included."""
+    reply = inspector.info_random_node(  # type: ignore[attr-defined]
+        f"sets/{AEROSPIKE_NAMESPACE}/{set_name}"
+    )
+    match = re.search(r"objects=(\d+)", reply)
+    return int(match.group(1)) if match else 0
 
 
 def _record_exists(inspector: object, record_key: tuple[str, str, str]) -> bool:
@@ -380,8 +399,9 @@ def test_segments_without_their_meta_record_are_absent_and_unreadable(
     key = _key(1)
     values = _payload(1, SHARDED_BYTES)
     _store(adapter, key, values)
+    first_segment = _segment_key(inspector, set_name, key, 0)
     inspector.remove(_meta_key(set_name, key))  # type: ignore[attr-defined]
-    assert _record_exists(inspector, _segment_key(set_name, key, 0))
+    assert _record_exists(inspector, first_segment)
 
     assert not _exists(adapter, key)
     loaded, _ = _load(adapter, key, SHARDED_BYTES)
@@ -425,11 +445,13 @@ def test_a_writer_killed_mid_store_never_leaves_an_entry_reported_present(
             # Kill as soon as a later object's first segment lands: the
             # writer is then most likely still writing that object's
             # segments, before its meta record.
+            # Segment keys carry a write ID only the meta record names, so
+            # "the first segment landed" is "the set holds more records than
+            # the objects before the target".
             reported = [int(v) for v in progress.read_text().split() if v.isdigit()]
-            target = _key(max(reported, default=-1) + 2)
-            first_segment = _segment_key(attempt_set, target, 0)
+            target = max(reported, default=-1) + 2
             deadline = time.monotonic() + 30.0
-            while not _record_exists(inspector, first_segment):
+            while _set_objects(inspector, attempt_set) <= target * KILL_OBJECT_RECORDS:
                 assert writer.poll() is None, "writer exited while storing"
                 assert time.monotonic() < deadline, "writer stalled"
             writer.send_signal(signal.SIGKILL)
@@ -446,12 +468,14 @@ def test_a_writer_killed_mid_store_never_leaves_an_entry_reported_present(
 
         reader = create_l2_adapter_from_registry(_adapter_config(attempt_set))
         try:
+            records = _set_objects(inspector, attempt_set)
+            present_objects = 0
             # The object after the last one reported stored was in flight.
             for index in range(max(stored) + 3):
                 key = _key(index)
                 meta = _record_exists(inspector, _meta_key(attempt_set, key))
-                segment = _record_exists(inspector, _segment_key(attempt_set, key, 0))
                 present = _exists(reader, key)
+                present_objects += int(present)
                 loaded, target = _load(reader, key, KILL_OBJECT_BYTES)
                 assert present == meta, f"object {index}: lookup disagrees with meta"
                 if index in stored:
@@ -461,8 +485,8 @@ def test_a_writer_killed_mid_store_never_leaves_an_entry_reported_present(
                     assert torch.equal(target, _payload(index, KILL_OBJECT_BYTES))
                 else:
                     assert not loaded, f"object {index} is absent but loaded"
-                if segment and not meta:
-                    orphans += 1
+            # Records no meta record names: the killed store's segments.
+            orphans += records - present_objects * KILL_OBJECT_RECORDS
         finally:
             reader.close()
             _truncate(attempt_set)
@@ -484,7 +508,7 @@ def test_a_missing_segment_fails_the_load(
     key = _key(2)
     values = _payload(2, SHARDED_BYTES)
     _store(adapter, key, values)
-    inspector.remove(_segment_key(set_name, key, 1))  # type: ignore[attr-defined]
+    inspector.remove(_segment_key(inspector, set_name, key, 1))  # type: ignore[attr-defined]
 
     assert _exists(adapter, key)
     loaded, _ = _load(adapter, key, SHARDED_BYTES)
@@ -502,7 +526,7 @@ def test_the_storage_manager_treats_a_missing_segment_as_a_miss(
     payloads = [_payload(10 + i, SHARDED_BYTES) for i in range(3)]
     for key, values in zip(keys, payloads, strict=True):
         _store(adapter, key, values)
-    inspector.remove(_segment_key(set_name, keys[1], 2))  # type: ignore[attr-defined]
+    inspector.remove(_segment_key(inspector, set_name, keys[1], 2))  # type: ignore[attr-defined]
 
     manager = _storage_manager(set_name)
     try:
@@ -527,6 +551,75 @@ def test_the_storage_manager_treats_a_missing_segment_as_a_miss(
             manager.finish_read_prefetched(list(loaded))
     finally:
         manager.close()
+
+
+# D-14: per-write segment keys and a create-only meta record.
+
+#: Records a SHARDED_BYTES object is stored as: four segments and its meta.
+SHARDED_RECORDS = 5
+
+
+@pytest.mark.parametrize(
+    ("num_bytes", "records"),
+    [(SHARDED_BYTES, SHARDED_RECORDS), (INLINE_BYTES, 1)],
+    ids=["sharded", "inline"],
+)
+def test_a_second_store_of_a_key_keeps_the_first_and_leaves_no_records(
+    adapter: L2AdapterInterface,
+    inspector: object,
+    set_name: str,
+    num_bytes: int,
+    records: int,
+) -> None:
+    """The first store wins: a later store of the same key with other bytes
+    succeeds, the key still reads the first bytes, and the loser's segments
+    are gone."""
+    key = _key(20)
+    first, second = _payload(20, num_bytes), _payload(21, num_bytes)
+    _store(adapter, key, first)
+    _store(adapter, key, second)
+
+    loaded, buffer = _load(adapter, key, num_bytes)
+    assert loaded and torch.equal(buffer, first)
+    assert _set_objects(inspector, set_name) == records
+
+
+def test_a_store_replaces_an_object_whose_segment_is_missing(
+    adapter: L2AdapterInterface, inspector: object, set_name: str
+) -> None:
+    """A load that finds a named segment missing is a miss and deletes
+    nothing (at RF 1 the segment may only be on a node that is down). The
+    next store sees the damage, replaces the object instead of being refused
+    until the TTL, and leaves no record of the damaged one."""
+    key = _key(22)
+    damaged, fresh = _payload(22, SHARDED_BYTES), _payload(23, SHARDED_BYTES)
+    _store(adapter, key, damaged)
+    inspector.remove(_segment_key(inspector, set_name, key, 1))  # type: ignore[attr-defined]
+
+    loaded, _ = _load(adapter, key, SHARDED_BYTES)
+    assert not loaded
+    assert _exists(adapter, key)
+    assert _set_objects(inspector, set_name) == SHARDED_RECORDS - 1
+
+    _store(adapter, key, fresh)
+    loaded, buffer = _load(adapter, key, SHARDED_BYTES)
+    assert loaded and torch.equal(buffer, fresh)
+    assert _set_objects(inspector, set_name) == SHARDED_RECORDS
+
+
+def test_a_delete_removes_the_segments_its_meta_record_names(
+    adapter: L2AdapterInterface, inspector: object, set_name: str
+) -> None:
+    """The delete (client LRU's path) leaves no record of the object."""
+    keys = [_key(24), _key(25)]
+    _store(adapter, keys[0], _payload(24, SHARDED_BYTES))
+    _store(adapter, keys[1], _payload(25, INLINE_BYTES))
+    assert _set_objects(inspector, set_name) == SHARDED_RECORDS + 1
+
+    adapter.delete(keys)
+
+    assert _set_objects(inspector, set_name) == 0
+    assert not _exists(adapter, keys[0]) and not _exists(adapter, keys[1])
 
 
 # T-STO-05: a corrupt meta record fails as corrupt, never as a short read.
@@ -609,7 +702,7 @@ def test_every_record_carries_the_configured_ttl(
         adapter.close()
 
     records = [_meta_key(set_name, inline), _meta_key(set_name, sharded)] + [
-        _segment_key(set_name, sharded, i) for i in range(4)
+        _segment_key(inspector, set_name, sharded, i) for i in range(4)
     ]
     for record in records:
         _, meta = inspector.exists(record)  # type: ignore[attr-defined]
@@ -630,7 +723,7 @@ def test_a_zero_ttl_takes_the_namespace_default(
     finally:
         adapter.close()
 
-    for record in [_meta_key(set_name, key), _segment_key(set_name, key, 0)]:
+    for record in [_meta_key(set_name, key), _segment_key(inspector, set_name, key, 0)]:
         _, meta = inspector.exists(record)  # type: ignore[attr-defined]
         assert namespace_ttl - 10 <= meta["ttl"] <= namespace_ttl
 

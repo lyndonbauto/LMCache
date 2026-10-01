@@ -32,6 +32,9 @@ class _ReadyConnector:
     def pipelined_fetch_ready(self) -> bool:
         return True
 
+    def read_write_ids(self, keys: Sequence[str]) -> dict[str, str]:
+        return {key: "" for key in keys}
+
     def pipelined_fetch_init_error(self) -> str:
         return ""
 

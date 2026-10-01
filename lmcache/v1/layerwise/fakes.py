@@ -14,7 +14,7 @@ a bug in the real implementation, not in its own assumptions.
 """
 
 # Standard
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from enum import Enum
 from typing import Protocol, runtime_checkable
 import threading
@@ -149,6 +149,18 @@ class ScriptedLayerArrivalSource:
         self._declined_layers: set[int] = set()
         self._finished_generations: list[int] = []
         self._abandoned_generations: list[int] = []
+
+    def read_write_ids(self, cache_keys: Sequence[str]) -> Mapping[str, str]:
+        """Report every object stored, under its unsuffixed segment keys.
+
+        Args:
+            cache_keys: The objects' cache keys.
+
+        Returns:
+            ``""`` for every key, so plans name records as objects written
+            before write IDs existed are named.
+        """
+        return {cache_key: "" for cache_key in cache_keys}
 
     def begin_fetch(self, plan: LayerFetchPlan) -> int:
         """Start a scripted fetch with every slot outstanding.
@@ -596,6 +608,17 @@ class UnservableLayerArrivalSource:
         """Build a source that refuses everything."""
         self._generation = 0
         self._layer_ids: tuple[int, ...] = ()
+
+    def read_write_ids(self, cache_keys: Sequence[str]) -> Mapping[str, str]:
+        """Report every object stored, so the caller reaches the decline.
+
+        Args:
+            cache_keys: The objects' cache keys.
+
+        Returns:
+            ``""`` for every key.
+        """
+        return {cache_key: "" for cache_key in cache_keys}
 
     def begin_fetch(self, plan: LayerFetchPlan) -> int:
         """Accept the fetch so the caller reaches the decline on poll.

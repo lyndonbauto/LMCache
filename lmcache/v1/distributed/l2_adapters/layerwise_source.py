@@ -23,7 +23,7 @@ accounting can be tested without a native client.
 """
 
 # Standard
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import Protocol, runtime_checkable
 import threading
@@ -85,6 +85,10 @@ class PipelinedFetchConnector(Protocol):
 
     def pipelined_fetch_ready(self) -> bool:
         """Return whether pipelined fetch is initialized and usable."""
+        ...
+
+    def read_write_ids(self, keys: Sequence[str]) -> Mapping[str, str]:
+        """Return the write ID per key with a ready meta record (batch read)."""
         ...
 
     def pipelined_fetch_init_error(self) -> str:
@@ -243,6 +247,27 @@ class AerospikeLayerArrivalSource:
         self._lock = threading.Lock()
         self._generation = NO_GENERATION
         self._layer_ids: frozenset[int] = frozenset()
+
+    def read_write_ids(self, cache_keys: Sequence[str]) -> Mapping[str, str]:
+        """Read each object's write ID from its meta record.
+
+        One native batch read of the meta records' ``state`` and ``wid``
+        bins, sent to every node at once; see
+        :meth:`~lmcache.v1.layerwise.contract.LayerArrivalSource.read_write_ids`.
+        Needs no active fetch and takes no lock: the native client is safe
+        for concurrent use.
+
+        Args:
+            cache_keys: The stored objects' cache keys.
+
+        Returns:
+            Write ID per cache key that has a ready meta record.
+
+        Raises:
+            LayerwiseContractError: If the native batch read fails.
+        """
+        with _as_contract_errors("write-id read"):
+            return dict(self._connector.read_write_ids(list(cache_keys)))
 
     def begin_fetch(self, plan: LayerFetchPlan) -> int:
         """Issue every slot in ``plan`` to the nodes that hold it.

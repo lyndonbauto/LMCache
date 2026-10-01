@@ -213,10 +213,15 @@ def _meta(inspector: object, set_name: str, key: ObjectKey) -> dict[str, object]
 def _record_sizes(
     inspector: object, set_name: str, key: ObjectKey, count: int
 ) -> list[int]:
+    write_id = _meta(inspector, set_name, key)["wid"]
     sizes = []
     for index in range(count):
         _, _, bins = inspector.get(  # type: ignore[attr-defined]
-            (AEROSPIKE_NAMESPACE, set_name, f"{object_key_to_string(key)}|s|{index}")
+            (
+                AEROSPIKE_NAMESPACE,
+                set_name,
+                f"{object_key_to_string(key)}|s|{write_id}|{index}",
+            )
         )
         sizes.append(len(bins["b"]))
     return sizes
@@ -265,7 +270,12 @@ def test_every_planned_slot_names_a_record_holding_exactly_its_bytes(
             node_names=("node",),
             max_record_bytes=MAX_RECORD_BYTES,
         ),
-        RecordKeys(layout, MAX_RECORD_BYTES, {(0, 0): object_key_to_string(key)}),
+        RecordKeys(
+            layout,
+            MAX_RECORD_BYTES,
+            {(0, 0): object_key_to_string(key)},
+            native_client.read_write_ids([object_key_to_string(key)]),  # type: ignore[attr-defined]
+        ),
     )
 
     assert len(plan.slots) == 8
@@ -356,6 +366,7 @@ def test_a_request_planned_from_its_cache_lookup_reads_back_its_objects(
         keys,
         native_client.max_record_bytes(),  # type: ignore[attr-defined]
         lease,
+        write_ids=native_client,  # type: ignore[arg-type]
     )
 
     destination_of = {
@@ -458,3 +469,71 @@ def test_a_corrupt_runs_bin_fails_the_read(
         {"runs": "2048:2048:4,1228800:614400:3"},
     )
     assert not _load(adapter, key, values)
+
+
+def test_an_object_written_before_write_ids_existed_is_still_readable(
+    adapter: L2AdapterInterface, inspector: object, native_client: object, set_name: str
+) -> None:
+    """T-STO-06 for the D-14 layout change: a meta record with no ``wid``
+    bin names segments ``<key>|s|<i>``. The load and the pipelined planner
+    both read those records, and a delete removes them."""
+    adapter.set_object_group_layouts({0: UNIFORM})
+    key = ObjectKey(ObjectKey.IntHash2Bytes(6), MODEL, 0)
+    values = _payload(8 * 2048)
+    payload = values.view(torch.uint8).numpy().tobytes()
+    cache_key = object_key_to_string(key)
+    for index in range(8):
+        inspector.put(  # type: ignore[attr-defined]
+            (AEROSPIKE_NAMESPACE, set_name, f"{cache_key}|s|{index}"),
+            {"b": bytearray(payload[index * 2048 : (index + 1) * 2048])},
+        )
+    inspector.put(  # type: ignore[attr-defined]
+        (AEROSPIKE_NAMESPACE, set_name, f"{cache_key}|m"),
+        {
+            "ver": 1,
+            "state": "ready",
+            "nseg": 8,
+            "seg_b": 2048,
+            "tot_b": 8 * 2048,
+            "created_at": 0,
+            "pin": 0,
+        },
+    )
+
+    assert _load(adapter, key, values)
+    assert native_client.read_write_ids([cache_key]) == {cache_key: ""}  # type: ignore[attr-defined]
+    layout = ModelLayout.from_registration({0: UNIFORM})
+    source = RecordKeys(layout, MAX_RECORD_BYTES, {(0, 0): cache_key}, {cache_key: ""})
+    assert source.record_key_for(0, 0, 0, 0) == f"{cache_key}|s|0"
+
+    adapter.delete([key])
+    for index in range(8):
+        record = (AEROSPIKE_NAMESPACE, set_name, f"{cache_key}|s|{index}")
+        _, meta = inspector.exists(record)  # type: ignore[attr-defined]
+        assert meta is None, f"old-layout segment {index} survived the delete"
+
+
+def test_write_ids_name_sharded_inline_and_absent_objects(
+    adapter: L2AdapterInterface, inspector: object, native_client: object, set_name: str
+) -> None:
+    """D-14: a sharded object's write ID is the one its segments carry; an
+    inline object has none; a key never stored is absent."""
+    adapter.set_object_group_layouts({0: UNIFORM})
+    sharded = ObjectKey(ObjectKey.IntHash2Bytes(7), MODEL, 0)
+    inline = ObjectKey(ObjectKey.IntHash2Bytes(8), MODEL, 0)
+    absent = ObjectKey(ObjectKey.IntHash2Bytes(9), MODEL, 0)
+    _store(adapter, sharded, _payload(8 * 2048))
+    _store(adapter, inline, _payload(1024))
+    keys = [object_key_to_string(k) for k in (sharded, inline, absent)]
+
+    ids = native_client.read_write_ids(keys)  # type: ignore[attr-defined]
+
+    assert set(ids) == {keys[0], keys[1]}
+    assert ids[keys[1]] == ""
+    write_id = ids[keys[0]]
+    assert len(write_id) == 16 and int(write_id, 16) >= 0
+    assert _meta(inspector, set_name, sharded)["wid"] == write_id
+    _, meta = inspector.exists(  # type: ignore[attr-defined]
+        (AEROSPIKE_NAMESPACE, set_name, f"{keys[0]}|s|{write_id}|0")
+    )
+    assert meta is not None

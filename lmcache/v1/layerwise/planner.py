@@ -808,8 +808,16 @@ class RecordKeys:
     The key layout mirrors ``meta_user_key`` and ``segment_user_key`` in
     ``csrc/storage_backends/aerospike/connector.cpp``. An object stored as a
     single record lives under its meta key; a sharded one has its records
-    suffixed by index. Getting that wrong asks for a record that does not
-    exist, which at least fails loudly.
+    named by the write that stored them, ``<key>|s|<write id>|<index>``, or
+    ``<key>|s|<index>`` for objects written before write IDs existed.
+    Getting that wrong asks for a record that does not exist, which at least
+    fails loudly.
+
+    The write ID is the one the object's meta record names, read just before
+    planning (see
+    ``docs/design/v1/distributed/l2_adapters/aerospike_concurrent_writes.md``).
+    Naming segments from it is what keeps a fetch from mixing two stores'
+    records.
     """
 
     def __init__(
@@ -817,6 +825,7 @@ class RecordKeys:
         layout: ModelLayout,
         max_record_bytes: int,
         cache_keys: Mapping[tuple[int, int], str],
+        write_ids: Mapping[str, str],
     ) -> None:
         """Build a record key source for one request.
 
@@ -827,6 +836,10 @@ class RecordKeys:
                 how many records exist.
             cache_keys: The stored object's cache key per ``(chunk id, object
                 group id)``, as the connector serializes it.
+            write_ids: Write ID per stored cache key, as the meta records
+                name them: 16 hex digits, or ``""`` for an object stored
+                inline or before write IDs existed. A cache key that is
+                absent has no meta record.
 
         Raises:
             ValueError: If ``max_record_bytes`` is not positive.
@@ -838,6 +851,7 @@ class RecordKeys:
         self._layout = layout
         self._max_record_bytes = max_record_bytes
         self._cache_keys = dict(cache_keys)
+        self._write_ids = dict(write_ids)
 
     def record_key_for(
         self, chunk_id: int, layer_id: int, plane: int, piece: int
@@ -855,7 +869,8 @@ class RecordKeys:
 
         Raises:
             KeyError: If no object was stored for this chunk and object
-                group, or the layout does not cover ``layer_id``.
+                group, its meta record was not found, or the layout does not
+                cover ``layer_id``.
             ValueError: If the model is one the write side does not shard
                 along layer boundaries.
         """
@@ -866,13 +881,21 @@ class RecordKeys:
                 f"no object was stored for chunk {chunk_id} of object group "
                 f"{object_group_id}, so this fetch cannot be served"
             )
+        write_id = self._write_ids.get(cache_key)
+        if write_id is None:
+            raise KeyError(
+                f"no meta record for chunk {chunk_id} of object group "
+                f"{object_group_id}, so its records cannot be named"
+            )
 
         index = self._layout.record_index_for(
             layer_id, plane, piece, self._max_record_bytes
         )
         if self._layout.record_count(object_group_id, self._max_record_bytes) == 1:
             return f"{cache_key}|m"
-        return f"{cache_key}|s|{index}"
+        if not write_id:
+            return f"{cache_key}|s|{index}"
+        return f"{cache_key}|s|{write_id}|{index}"
 
 
 class FetchPlanner:

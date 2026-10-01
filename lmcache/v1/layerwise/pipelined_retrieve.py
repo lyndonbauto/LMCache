@@ -42,7 +42,6 @@ from lmcache.v1.layerwise.contract import (
     LayerArrivalSource,
     LayerLoadSink,
     LayerwiseContractError,
-    PlanTooLargeError,
 )
 from lmcache.v1.layerwise.deferral import SharedKeyPolicy
 from lmcache.v1.layerwise.pump import (
@@ -339,7 +338,8 @@ def run_pipelined_retrieve(
 ) -> PipelinedRetrieveResult:
     """Fetch every deferred object a retrieve reads, loading layers as they land.
 
-    Leases a window for the objects, plans the fetch into it, builds the
+    Leases a window for the objects, reads their write IDs from ``source``
+    (one batch read of their meta records), plans the fetch into it, builds the
     loader's sink over the lease, and pumps the plan from ``source`` to the
     sink. Blocks until every layer is loaded or the load is abandoned, so
     call it from a worker thread, not the request handler.
@@ -374,8 +374,9 @@ def run_pipelined_retrieve(
         The fetch, and whether it finished or fell back.
 
     Raises:
-        PipelinedRetrieveRefused: If the placer, the planner or
-            ``begin_fetch`` refused the request. No load was begun.
+        PipelinedRetrieveRefused: If the placer, the meta-record read
+            (``source.read_write_ids``), the planner or ``begin_fetch``
+            refused the request. No load was begun.
         LayerwiseContractError: If the load was begun and then abandoned: a
             contract violation, or the fallback failing to load an object.
         BaseException: Anything else the loader or transport raises,
@@ -395,9 +396,14 @@ def run_pipelined_retrieve(
 
     try:
         fetch = build_request_fetch(
-            model, obj_keys_per_obj_group, max_record_bytes, lease, keys_to_fetch
+            model,
+            obj_keys_per_obj_group,
+            max_record_bytes,
+            lease,
+            keys_to_fetch,
+            write_ids=source,
         )
-    except (ValueError, KeyError, PlanTooLargeError) as exc:
+    except (ValueError, KeyError, LayerwiseContractError) as exc:
         _release_after_failure(lease, LeaseOutcome.NEVER_FETCHED)
         raise PipelinedRetrieveRefused(
             f"cannot plan a layerwise fetch into the leased window: {exc}"

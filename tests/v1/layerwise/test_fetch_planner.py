@@ -38,6 +38,17 @@ from lmcache.v1.layerwise.planner import (
 
 #: Chunk objects are spaced far enough apart that two chunks cannot overlap
 #: by accident, so a coverage failure is always a planning bug.
+
+
+def _unsuffixed_record_keys(
+    layout: ModelLayout, max_record_bytes: int, cache_keys: dict[tuple[int, int], str]
+) -> RecordKeys:
+    """Records named as objects written before write IDs existed."""
+    return RecordKeys(
+        layout, max_record_bytes, cache_keys, {key: "" for key in cache_keys.values()}
+    )
+
+
 OBJECT_STRIDE = 1 << 20
 
 
@@ -649,7 +660,7 @@ def test_every_slot_of_a_plan_names_a_distinct_record() -> None:
 def test_a_sharded_object_names_its_records_by_index() -> None:
     """Record keys follow the write side's segment naming."""
     layout = uniform_layout(num_layers=2, kv_planes=2, plane_bytes=4096)
-    source = RecordKeys(layout, 4096, {(7, 0): "cache-key"})
+    source = _unsuffixed_record_keys(layout, 4096, {(7, 0): "cache-key"})
 
     key = source.record_key_for(chunk_id=7, layer_id=1, plane=1, piece=0)
     assert key == "cache-key|s|3"
@@ -664,7 +675,7 @@ def test_an_object_stored_as_one_record_uses_its_meta_key() -> None:
     """
     layout = uniform_layout(num_layers=1, kv_planes=1, plane_bytes=4096)
     assert layout.record_count(0, 4096) == 1
-    source = RecordKeys(layout, 4096, {(0, 0): "cache-key"})
+    source = _unsuffixed_record_keys(layout, 4096, {(0, 0): "cache-key"})
 
     key = source.record_key_for(chunk_id=0, layer_id=0, plane=0, piece=0)
     assert key == "cache-key|m"
@@ -673,7 +684,7 @@ def test_an_object_stored_as_one_record_uses_its_meta_key() -> None:
 def test_each_chunk_is_named_by_its_own_stored_object() -> None:
     """Chunks are separate objects, so they must not share a cache key."""
     layout = uniform_layout(num_layers=2, kv_planes=2, plane_bytes=4096)
-    source = RecordKeys(layout, 4096, {(0, 0): "key-a", (1, 0): "key-b"})
+    source = _unsuffixed_record_keys(layout, 4096, {(0, 0): "key-a", (1, 0): "key-b"})
 
     first = source.record_key_for(chunk_id=0, layer_id=0, plane=0, piece=0)
     second = source.record_key_for(chunk_id=1, layer_id=0, plane=0, piece=0)
@@ -683,16 +694,46 @@ def test_each_chunk_is_named_by_its_own_stored_object() -> None:
 def test_a_chunk_with_no_stored_object_is_reported_not_guessed() -> None:
     """A miss must reach the planner, which refuses the whole fetch."""
     layout = uniform_layout(num_layers=2, kv_planes=2, plane_bytes=4096)
-    source = RecordKeys(layout, 4096, {(0, 0): "key-a"})
+    source = _unsuffixed_record_keys(layout, 4096, {(0, 0): "key-a"})
 
     with pytest.raises(KeyError, match="chunk 4"):
         source.record_key_for(chunk_id=4, layer_id=0, plane=0, piece=0)
 
 
+def test_a_sharded_object_names_the_records_of_the_write_its_meta_names() -> None:
+    """D-14: segments are named by the write ID the meta record carries, so a
+    fetch reads one store's records and never another's."""
+    layout = uniform_layout(num_layers=2, kv_planes=2, plane_bytes=4096)
+    source = RecordKeys(
+        layout,
+        4096,
+        {(7, 0): "cache-key", (8, 0): "old-key"},
+        {"cache-key": "9f3c0a17e2b45d68", "old-key": ""},
+    )
+
+    assert (
+        source.record_key_for(chunk_id=7, layer_id=1, plane=1, piece=0)
+        == "cache-key|s|9f3c0a17e2b45d68|3"
+    )
+    assert (
+        source.record_key_for(chunk_id=8, layer_id=1, plane=1, piece=0) == "old-key|s|3"
+    )
+
+
+def test_an_object_without_a_meta_record_is_reported_not_guessed() -> None:
+    """A key the meta read did not find (deleted, expired, never stored) has
+    no write ID to name its records by; the planner refuses the fetch."""
+    layout = uniform_layout(num_layers=2, kv_planes=2, plane_bytes=4096)
+    source = RecordKeys(layout, 4096, {(0, 0): "key-a", (1, 0): "key-b"}, {"key-a": ""})
+
+    with pytest.raises(KeyError, match="no meta record for chunk 1"):
+        source.record_key_for(chunk_id=1, layer_id=0, plane=0, piece=0)
+
+
 def test_a_planned_fetch_asks_for_every_record_of_every_chunk_once() -> None:
     """End to end: the plan's slots name each stored record exactly once."""
     layout = uniform_layout(num_layers=2, kv_planes=2, plane_bytes=10_000)
-    source = RecordKeys(layout, 4096, {(0, 0): "key-a", (1, 0): "key-b"})
+    source = _unsuffixed_record_keys(layout, 4096, {(0, 0): "key-a", (1, 0): "key-b"})
 
     plan = FetchPlanner(layout).plan(request_for(place([0, 1])), source)
 
@@ -706,7 +747,7 @@ def test_a_planned_fetch_asks_for_every_record_of_every_chunk_once() -> None:
 def test_a_hybrid_fetch_asks_for_every_record_of_its_object_once() -> None:
     """End to end for a hybrid object: every stored record, none twice."""
     layout = hybrid_layout()
-    source = RecordKeys(layout, 4096, {(0, 0): "key-a"})
+    source = _unsuffixed_record_keys(layout, 4096, {(0, 0): "key-a"})
 
     plan = FetchPlanner(layout).plan(request_for(place([0])), source)
     assert sorted(slot.record_key for slot in plan.slots) == sorted(
@@ -722,7 +763,7 @@ def test_an_unattributable_payload_size_cannot_be_named_at_all() -> None:
             1: [KernelGroupGeometry((2,), kv_planes=1, plane_bytes=4096)],
         }
     )
-    source = RecordKeys(layout, 4096, {(0, 0): "key-a"})
+    source = _unsuffixed_record_keys(layout, 4096, {(0, 0): "key-a"})
 
     with pytest.raises(ValueError, match="cannot tell"):
         FetchPlanner(layout).plan(request_for(place([0])), source)

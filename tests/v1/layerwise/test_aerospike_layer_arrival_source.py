@@ -70,6 +70,9 @@ class FakeNativeConnector:
         self.next_generation = 1
         self.issue_error: Exception | None = None
         self.issued: list[tuple[tuple[str, ...], list[FlatSlot]]] = []
+        #: What the meta records name, per cache key; absent keys have none.
+        self.write_ids: dict[str, str] = {}
+        self.write_id_error: Exception | None = None
 
     def begin(self, generation: int) -> None:
         """Start a native request, as issue_pipelined_fetch_by_slots would."""
@@ -88,6 +91,11 @@ class FakeNativeConnector:
 
     def pipelined_fetch_ready(self) -> bool:
         return self.ready
+
+    def read_write_ids(self, keys: Sequence[str]) -> dict[str, str]:
+        if self.write_id_error is not None:
+            raise self.write_id_error
+        return {key: self.write_ids[key] for key in keys if key in self.write_ids}
 
     def pipelined_fetch_init_error(self) -> str:
         return self.init_error
@@ -522,3 +530,29 @@ def test_the_pump_falls_back_when_a_layer_is_declined() -> None:
     assert sink.loaded_layers() == (0,)
     assert sink.abandoned_generations() == (connector.abandon_calls[0],)
     assert len(connector.abandon_calls) == 1
+
+
+# Write IDs (D-14): the meta-record read that precedes planning.
+
+
+def test_write_ids_are_read_without_an_active_fetch() -> None:
+    """The read names sharded, inline and absent objects as the native
+    client reports them, before any fetch begins."""
+    connector = FakeNativeConnector()
+    connector.write_ids = {"sharded": "9f3c0a17e2b45d68", "inline": ""}
+    source = AerospikeLayerArrivalSource(connector, NativePlanIssuer(connector))
+
+    ids = source.read_write_ids(["sharded", "inline", "absent"])
+
+    assert dict(ids) == {"sharded": "9f3c0a17e2b45d68", "inline": ""}
+
+
+def test_a_failed_write_id_read_is_a_contract_error() -> None:
+    """A native failure reaches the caller as LayerwiseContractError, which
+    the retrieve treats as a refusal and loads whole objects instead."""
+    connector = FakeNativeConnector()
+    connector.write_id_error = RuntimeError("read-write-ids: timeout")
+    source = AerospikeLayerArrivalSource(connector, NativePlanIssuer(connector))
+
+    with pytest.raises(LayerwiseContractError, match="write-id read"):
+        source.read_write_ids(["key"])

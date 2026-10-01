@@ -91,7 +91,10 @@ PYBIND11_MODULE(lmcache_aerospike, m) {
                &lmcache::connector::AerospikeNativeConnector::record_node,
                py::arg("user_key"))
           .def("max_record_bytes",
-               &lmcache::connector::AerospikeNativeConnector::max_record_bytes);
+               &lmcache::connector::AerospikeNativeConnector::max_record_bytes)
+          .def("read_write_ids",
+               &lmcache::connector::AerospikeNativeConnector::read_write_ids,
+               py::arg("keys"), py::call_guard<py::gil_scoped_release>());
 #ifdef LMCACHE_AEROSPIKE_RDMA
   aerospike_client
       .def("pipelined_fetch_ready",

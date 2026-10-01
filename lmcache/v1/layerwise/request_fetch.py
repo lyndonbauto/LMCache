@@ -30,7 +30,7 @@ from lmcache.v1.distributed.api import AttnWindowDesc, ObjectKey
 from lmcache.v1.distributed.l2_adapters.native_connector_l2_adapter import (
     object_key_to_string,
 )
-from lmcache.v1.layerwise.contract import LayerFetchPlan
+from lmcache.v1.layerwise.contract import LayerFetchPlan, RecordWriteIdReader
 from lmcache.v1.layerwise.planner import (
     ChunkPlacement,
     FetchPlanner,
@@ -470,12 +470,18 @@ def build_request_fetch(
     max_record_bytes: int,
     lease: WindowLease,
     keys_to_fetch: AbstractSet[ObjectKey] | None = None,
+    *,
+    write_ids: RecordWriteIdReader,
 ) -> RequestFetch:
     """Plan the pipelined fetch of every object a retrieve would read.
 
     Every location the lease returns is checked against the window before it
     is planned: an object reaching past the window, or two objects sharing
     bytes, would have RDMA writes land on the wrong data without any error.
+
+    Reads every planned object's write ID through ``write_ids`` first -- one
+    batch read of their meta records -- so each slot names the records of
+    the store its meta record points at (D-14).
 
     Args:
         model: The registered model's layout and windows.
@@ -485,6 +491,8 @@ def build_request_fetch(
             the connector reports it as ``max_record_bytes()``.
         lease: The request's window lease, which places each object.
         keys_to_fetch: As for :func:`objects_to_place`; pass the same set.
+        write_ids: Reads the objects' write IDs; normally the transport's
+            :class:`~lmcache.v1.layerwise.contract.LayerArrivalSource`.
 
     Returns:
         The placements and the plan built from them. Placements are ordered
@@ -498,11 +506,15 @@ def build_request_fetch(
             lease places an object outside its window or over another one,
             or the model's records cannot be named layer by layer.
         KeyError: If the layout does not cover an object group the request
-            reads, or the lease cannot locate an object.
+            reads, the lease cannot locate an object, or an object has no
+            meta record.
+        LayerwiseContractError: If ``write_ids`` cannot read the meta
+            records.
     """
     cache_keys = _fetched_cache_keys(
         obj_keys_per_obj_group, model.attn_desc, keys_to_fetch
     )
+    stored_write_ids = write_ids.read_write_ids(sorted(set(cache_keys.values())))
     window_start = lease.window_start()
     window_end = window_start + lease.window_bytes()
     node_indices: dict[str, int] = {}
@@ -543,6 +555,7 @@ def build_request_fetch(
         max_record_bytes=max_record_bytes,
     )
     plan = FetchPlanner(model.layout).plan(
-        request, RecordKeys(model.layout, max_record_bytes, cache_keys)
+        request,
+        RecordKeys(model.layout, max_record_bytes, cache_keys, stored_write_ids),
     )
     return RequestFetch(request=request, plan=plan)

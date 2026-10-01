@@ -16,7 +16,7 @@ staged.
 """
 
 # Standard
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import cast
@@ -266,6 +266,9 @@ class _Tap:
 
     def abandon_fetch(self, generation: int) -> None:
         self._source.abandon_fetch(generation)
+
+    def read_write_ids(self, cache_keys: Sequence[str]) -> Mapping[str, str]:
+        return self._source.read_write_ids(cache_keys)
 
     def wait(self) -> LayerFetchPlan:
         if not self._begun.wait(JOIN_TIMEOUT) or self.plan is None:
