@@ -251,7 +251,10 @@ sec_pipe06() {
             "send name=stall$i sets=P-exact ids=P-exact-$i errors=1" "sleep secs=4" "vllm_check name=stall$i"
             "vllm_ensure model=$LLAMA")
   done
-  steps+=("send name=after13 sets=P-exact ids=P-exact-13" "send name=after14 sets=P-exact ids=P-exact-14"
+  # An abandoned fetch quarantines its window for fetch_timeout_seconds (30 s
+  # by default); after13/14 check that the windows are leased again after it.
+  steps+=("sleep secs=${PIPE06_REUSE_WAIT:-32}"
+          "send name=after13 sets=P-exact ids=P-exact-13" "send name=after14 sets=P-exact ids=P-exact-14"
           "vllm_check name=end")
   session pipe06 $tag "$FAULT_POLICY" "${steps[@]}"
   report pipe06 $tag all "--allow-error=*" "--no-hit-check=${tag}_stall10" \
