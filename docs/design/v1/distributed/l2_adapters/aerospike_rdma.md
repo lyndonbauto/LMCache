@@ -694,6 +694,9 @@ no kv-sink, so CI's Docker server does not run this suite.
 
 ## Related
 
+- [`aerospike_concurrent_writes.md`](aerospike_concurrent_writes.md) — D-14
+  decision record: per-write segment keys and create-only metadata, and what
+  that means for the pipelined fetch's record keys.
 - [`aerospike_server_issues.md`](aerospike_server_issues.md) — server- and
   client-side defects and contract gaps on the kv-sink branches.
 - [`layerwise_transfer_data_model.md`](layerwise_transfer_data_model.md) — how

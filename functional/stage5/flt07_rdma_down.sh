@@ -34,8 +34,20 @@
 #   # device_name rxefa0, gid_index 1.
 #
 # Adding rxe devices needs no rdma_rxe reload and leaves rxe0 alone, but it
-# is a host network change (new netns, veth, rxe devices): ask first. Until
-# then Stage 5 runs T-FLT-07's stand-in: freeze the kv-sink server for 2 s
+# is a host network change (new netns, veth, rxe devices): ask first.
+#
+# PROBED 2026-10-01 (approved as "mitigation 1"): THIS DOES NOT WORK with the
+# v6.11 rdma_rxe on this box. That rxe opens its UDP 4791 socket and routes
+# its sends only in the initial netns (rxe_net.c: init_net), so an rxe
+# device inside netns kvs gets no packets (rxe1 -> rxe2 ibv_rc_pingpong
+# timed out; 65 UdpNoPorts in the netns). See stage5/CHANGES.md and
+# flt07_netns_probe.sh. The working variants need either a newer rdma_rxe
+# (rxe0 recreated), or both rxe devices in the host netns with the netns as
+# a wire plus a host routing-policy change (the `local` fib rule moved after
+# two `ip rule from/to` rules). Both need a new approval. LMCache would also
+# need a container that sees /dev/infiniband/uverbs1; lmc-c has only uverbs0.
+#
+# Until then Stage 5 runs T-FLT-07's stand-in: freeze the kv-sink server for 2 s
 # right after a lookup (host_actions.sh freeze_kvsink). That stalls the RDMA
 # writes and the server's TCP service together, so it shows timeout,
 # quarantine, reuse and output equality, but not a link-only failure.
