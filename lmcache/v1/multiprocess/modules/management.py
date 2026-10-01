@@ -124,10 +124,15 @@ class ManagementModule:
         if instance_id is None or not self._liveness_targets:
             return True
         # Touch every target: a worker may be registered with several.
-        registered = [
-            target.touch_instance(instance_id) for target in self._liveness_targets
-        ]
-        return any(registered)
+        registered = any(
+            [target.touch_instance(instance_id) for target in self._liveness_targets]
+        )
+        logger.debug(
+            "PING from instance %d: %s",
+            instance_id,
+            "registered" if registered else "not registered",
+        )
+        return registered
 
     def _reap_cycle(self) -> ThreadRunSummary:
         """Run one reaper scan: reap stale workers, drop mirrored state.
