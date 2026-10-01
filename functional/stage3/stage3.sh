@@ -72,8 +72,11 @@ l2_json() {
   echo "{\"type\":\"aerospike\",\"hosts\":\"127.0.0.1:3100\",\"namespace\":\"lmcache\",\"set_name\":\"kv_chunks\"${adapter_extra:+,$adapter_extra},\"rdma\":{\"transport\":\"RC\",\"device_name\":\"rxe0\",\"gid_index\":1,\"window_count\":2,\"window_bytes\":$((cap * chunk))${rdma_extra:+,$rdma_extra}}}"
 }
 # server_flags <cap> <chunk-bytes> [rdma-extra] [adapter-extra]
+# RDMA windows live in a fixed L1 slab, so lazy L1 allocation must be off
+# (it is the default whenever pinned memory is supported, i.e. on the GPU;
+# the CPU dry run had it off implicitly).
 server_flags() {
-  echo "--pipelined-fetch --pipelined-max-chunks $1 --l2-adapter $(l2_json "$@")"
+  echo "--no-l1-use-lazy --pipelined-fetch --pipelined-max-chunks $1 --l2-adapter $(l2_json "$@")"
 }
 # ids <set> <min-chunks> <max-chunks> [corpus]: comma-separated prompt ids.
 ids() {
