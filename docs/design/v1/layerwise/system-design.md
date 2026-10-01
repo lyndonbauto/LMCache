@@ -341,11 +341,10 @@ otherwise, where `<wid>` is the write ID the object's meta record names and
 `build_request_fetch` reads it with `read_write_ids` before planning; `wid`
 is empty for objects stored before the D-14 fix, giving `<cache key>|s|<index>`; see
 [aerospike_concurrent_writes.md](../distributed/l2_adapters/aerospike_concurrent_writes.md)).
-Turning a key into a digest is the client's job:
-`issue_pipelined_fetch_by_slots` calls `record_digest_hex` for each slot and
-hands the session the digests it has always taken. Python never hashes --
-most OpenSSL builds disable RIPEMD-160 -- and when the transport stops using
-an info command, only the native side changes.
+Turning a key into a digest is the client's job: the sink-fetch driver
+(`connector_sink_fetch.cpp`) sets each slot's user key as the key of its
+kv-sink batch-read row, and the C client hashes it. Python never hashes --
+most OpenSSL builds disable RIPEMD-160.
 
 Two facts per chunk still cannot come from Track C, and it is worth being
 precise about why, so nobody re-attempts them in Python:

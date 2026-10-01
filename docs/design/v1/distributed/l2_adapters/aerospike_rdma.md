@@ -60,7 +60,7 @@ aerospike_sink_create(&as, &err, l1_base, window_count * window_bytes,
 
 // Per layer: a batch read whose rows carry a destination.
 as_batch_read_record* row = as_batch_read_reserve(records);
-as_key_init_str(&row->key, ns, set, "<cache key>|s|3");
+as_key_init_str(&row->key, ns, set, "<cache key>|s|<wid>|3");
 row->read_all_bins = true;
 row->sink = sink;
 row->sink_offset = slab_offset;   // relative to l1_base
@@ -401,7 +401,8 @@ through an epoch counter. A row that fails with 220 again fails its slot.
 ### Records a sink can read
 
 The server places only single-blob-bin records of at most 2 MiB. LMCache's
-segment records (`<key>|s|<i>`, one bin `b`) qualify, and layer-aligned
+segment records (`<key>|s|<wid>|<i>`, or `<key>|s|<i>` for objects
+stored before D-14; one bin `b`) qualify, and layer-aligned
 writes cut them per plane under the record cap, so every slot of a sharded
 object is readable. An object small enough to be stored inline in its meta
 record (`<key>|m`, 8+ bins) is refused with `AEROSPIKE_ERR_INCOMPATIBLE_TYPE`,
