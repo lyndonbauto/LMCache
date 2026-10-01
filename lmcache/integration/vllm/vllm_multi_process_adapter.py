@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Standard
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from typing import TYPE_CHECKING, Any, Callable, NoReturn, Protocol
 import enum
 import math
@@ -159,6 +159,56 @@ def is_layerwise_enabled(extra_config: dict[str, Any] | None) -> bool:
     if raw is None:
         return default
     return bool(_coerce_extra_config_value(default, raw))
+
+
+def vllm_rewinds_rejected_kv_loads() -> bool:
+    """Return whether the installed vLLM rewinds a request whose KV load failed.
+
+    Detects the fix for vllm#49250 (vllm#53298), which adds
+    ``CachedRequestData.rewound_req_ids``. Without it, a request recovered
+    from a rejected synchronous KV load -- every layerwise load is one --
+    continues from stale state and produces wrong tokens.
+
+    Returns:
+        True when ``vllm.v1.core.sched.output.CachedRequestData`` is a
+        dataclass with a ``rewound_req_ids`` field; False otherwise,
+        including when vLLM is not installed.
+    """
+    try:
+        # Third Party
+        from vllm.v1.core.sched.output import CachedRequestData
+    except ImportError:
+        return False
+    if not is_dataclass(CachedRequestData):
+        return False
+    return any(f.name == "rewound_req_ids" for f in fields(CachedRequestData))
+
+
+def layerwise_recompute_is_unsafe(
+    extra_config: dict[str, Any] | None, kv_load_failure_policy: str
+) -> bool:
+    """Return whether recovering a failed layerwise load would give wrong output.
+
+    A failed layerwise retrieve is reported to vLLM as load errors. Under
+    ``kv_load_failure_policy="recompute"`` vLLM reschedules the request, but
+    a vLLM without :func:`vllm_rewinds_rejected_kv_loads` does so from stale
+    state (vllm#49250). Under ``"fail"`` the request errors instead, which is
+    safe.
+
+    Args:
+        extra_config: vLLM ``kv_connector_extra_config`` (may be ``None``).
+        kv_load_failure_policy: vLLM's ``kv_load_failure_policy``
+            (``"fail"`` or ``"recompute"``).
+
+    Returns:
+        True when layerwise load is on, the policy is ``"recompute"``, and
+        the installed vLLM lacks the rewind fix.
+    """
+    return (
+        is_layerwise_enabled(extra_config)
+        and kv_load_failure_policy == "recompute"
+        and not vllm_rewinds_rejected_kv_loads()
+    )
 
 
 def _resolve_extra_config(

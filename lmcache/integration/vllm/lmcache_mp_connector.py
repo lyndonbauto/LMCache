@@ -72,6 +72,7 @@ try:
         LMCacheMPWorkerAdapter,
         ParallelStrategy,
         is_layerwise_enabled,
+        layerwise_recompute_is_unsafe,
     )
 
     try:
@@ -98,6 +99,12 @@ except ImportError:
     )
 
     def is_layerwise_enabled(extra_config: dict[str, Any] | None) -> bool:
+        """Return False: vLLM's vendored adapter has no layerwise load."""
+        return False
+
+    def layerwise_recompute_is_unsafe(
+        extra_config: dict[str, Any] | None, kv_load_failure_policy: str
+    ) -> bool:
         """Return False: vLLM's vendored adapter has no layerwise load."""
         return False
 
@@ -607,6 +614,23 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # Banner from the scheduler role only, so tensor-parallel
             # deployments print it once rather than once per worker.
             print_banner_once(sys.stderr)
+            # vLLM predating the policy field always recomputed failed loads.
+            if layerwise_recompute_is_unsafe(
+                vllm_config.kv_transfer_config.kv_connector_extra_config,
+                getattr(
+                    vllm_config.kv_transfer_config,
+                    "kv_load_failure_policy",
+                    "recompute",
+                ),
+            ):
+                logger.error(
+                    "lmcache.mp.use_layerwise with kv_load_failure_policy="
+                    "'recompute' needs a vLLM that rewinds requests after a "
+                    "failed KV load (vllm#49250). This vLLM does not, so a "
+                    "request recovered from a failed layerwise load produces "
+                    "wrong tokens. Use kv_load_failure_policy='fail' or a "
+                    "vLLM with the fix."
+                )
             self.scheduler_adapter = LMCacheMPSchedulerAdapter(
                 server_urls=server_urls,
                 context=zmq_context,
@@ -818,11 +842,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         blocks are reported through :meth:`get_block_ids_with_load_errors` and
         the forward pass continues. vLLM then discards this step's output for
         the affected requests and fails them (``kv_load_failure_policy="fail"``,
-        vLLM's default) or recomputes them (``"recompute"``; a hybrid model's
-        request restarts from its first token). The rest of this step's layer
-        waits return immediately, because the failed retrieve is no longer
-        active. This is safe because the daemon publishes a failure only after
-        every copy the retrieve queued has landed.
+        vLLM's default) or reschedules them for recompute (``"recompute"``; a
+        hybrid model's request restarts from its first token). The rest of
+        this step's layer waits return immediately, because the failed
+        retrieve is no longer active. No LMCache copy lands in the blocks
+        afterwards: the daemon publishes a failure only after every copy the
+        retrieve queued has landed.
+
+        The recompute is correct only on a vLLM with the fix for vllm#49250;
+        without it the rescheduled request produces wrong tokens, and the
+        connector logs an error at startup (see
+        :func:`layerwise_recompute_is_unsafe`).
 
         Args:
             layer_name: vLLM KV cache layer name from the forward pass.
@@ -845,7 +875,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             flagged = self.worker_adapter.report_failed_layer_load()
             logger.warning(
                 "Layerwise KV load failed at layer %r (%s); reporting %d "
-                "blocks as load errors so vLLM recomputes them.",
+                "blocks as load errors to vLLM.",
                 layer_name,
                 exc,
                 len(flagged),

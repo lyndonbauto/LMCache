@@ -38,6 +38,13 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 RDMA_ENV_VAR = "BUILD_WITH_AEROSPIKE_RDMA"
 EFA_ENV_VAR = "BUILD_WITH_AEROSPIKE_EFA"
 
+# Searched in order for the system libyaml runtime (``libyaml-0.so.N``).
+SYSTEM_LIB_DIRS: tuple[str, ...] = (
+    "/usr/lib/x86_64-linux-gnu",
+    "/usr/lib64",
+    "/usr/lib",
+)
+
 
 def is_rdma_requested() -> bool:
     """Return True when the RDMA reception path was explicitly requested.
@@ -62,7 +69,7 @@ def _system_yaml_soname() -> str:
     Returns:
         A name such as ``"libyaml-0.so.2"``, or ``""`` if none is installed.
     """
-    for directory in ("/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib"):
+    for directory in SYSTEM_LIB_DIRS:
         for candidate in sorted(Path(directory).glob("libyaml-0.so.[0-9]")):
             return candidate.name
     return ""
