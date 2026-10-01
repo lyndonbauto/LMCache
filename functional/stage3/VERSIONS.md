@@ -1,4 +1,23 @@
-# Stage 3: versions (T-RDMA-06 CPU half and harness dry runs, 2026-10-01)
+# Stage 3: versions
+
+## GPU runs (gpu-stage3, 2026-10-01 20:00Z onward)
+
+| Component | Version |
+|---|---|
+| Host | DigitalOcean gpu-mi300x1-192gb, 1x MI300X (gfx942), Ubuntu 24.04, kernel 6.8.0-138-generic |
+| ROCm / HIP | ROCm 10.0.0 / HIP 7.15.26333 (unchanged since Day 1) |
+| Container image | `lmcache-rocm:day1` (`sha256:50c62263906e…`), container `lmc-c` (all sessions); `aero-kvsink` (kv-sink server) from the same image |
+| torch | 2.12.0+rocm10.0.0 |
+| vLLM | 0.27.1.dev5+gf46a9dfe2.d20260827; async scheduling on (the default: no disabling condition applies, no warning logged) |
+| LMCache | `prototype-stage1`; box tree pinned at `d872268c` at start, then fast-forwarded only for harness commits (`functional/` only, checked with `git diff --stat`). Product code (`lmcache/`, `csrc/`, `rust/`, `setup.py`) unchanged since `00cd3eee`; native extensions from Day 1 (`BUILD_WITH_HIP=1 BUILD_WITH_AEROSPIKE=1 BUILD_WITH_AEROSPIKE_RDMA=1`) |
+| kv-sink server (`asd` in `aero-kvsink`, 127.0.0.1:3100-3103) | `feat/kv-sink-fetch-pipelined` @ `512b0c2079eb`, build `8.1.3.0-112-g512b0c207` (fencing, server issue 4) |
+| Aerospike C client (LMCache's extension) | stock aerospike-client-c-libuv 7.3.0; Sriram's kv-sink client not switched in |
+| Aerospike CE (`aerospike-ce`, 127.0.0.1:3000) | 8.2.0.0, not used by Stage 3 sessions (all L2 traffic goes to kv-sink) |
+| RDMA | Soft-RoCE `rxe0` on `lo`, RC, GID index 1, port active_mtu 4096; unchanged |
+| Models | meta-llama/Llama-3.1-8B-Instruct (snapshot `0e9e39f249a1…`); openai/gpt-oss-120b (snapshot `b5c939de8f75…`) |
+| Oracle | `VLLM_BATCH_INVARIANT=1`, temperature 0, batch size 1. Llama: `day1/step4/bi_run1.json`, `stage2/base2b/bi_run1.json`. gpt-oss: Stage 2c `stage2/gptoss_ref/base_b16_all.json` (no-hit and whole-prompt hits), `pc256_*` (proper-prefix hits, verdict) and `pc16_r1_*` (reported) |
+
+## CPU prep (T-RDMA-06 CPU half and harness dry runs, 2026-10-01)
 
 | Component | Version |
 |---|---|
