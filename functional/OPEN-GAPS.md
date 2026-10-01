@@ -35,8 +35,10 @@ D-14 (concurrent writers mix segments) has its own decision record:
 | [G-10](#g-10-client-teardown-leaves-l1-writable-by-the-server) | Client teardown leaves L1 writable by the server | D-15 | Track B |
 | [G-11](#g-11-server-deregister-does-not-drain-in-flight-writes) | Server deregister does not drain in-flight writes | D-15 (proposed server issue 12) | Aerospike server team |
 | [G-12](#g-12-multi-command-pipelined-fetch-breaks-the-region) | Multi-command pipelined fetch breaks the region | D-12, T-RDMA-06, T-E2E-04 | Aerospike server team |
-| [G-13](#g-13-rdma-link-down-needs-a-dedicated-link) | RDMA link-down needs a dedicated link | T-FLT-07 | Harness (approved host change) |
+| [G-13](#g-13-rdma-link-down-needs-a-dedicated-link) | RDMA link-down needs a dedicated link | T-FLT-07 | Harness; new host-change approval needed |
 | [G-14](#g-14-gpt-oss-is-not-batch-invariant-across-batch-sizes) | gpt-oss is not batch invariant across batch sizes | T-E2E-09, D-06 | vLLM upstream; test plan |
+| [G-15](#g-15-no-per-request-byte-oracle-for-concurrent-retrieves) | No per-request byte oracle for concurrent retrieves | T-E2E-09 | Test plan / harness; Track C |
+| [G-16](#g-16-retrieves-from-one-vllm-never-run-concurrently) | Retrieves from one vLLM never run concurrently | T-PIPE-08, T-PIPE-10 | Test plan |
 
 ## G-01 Late write after re-lease cannot be forced end to end
 
@@ -227,15 +229,28 @@ D-14 (concurrent writers mix segments) has its own decision record:
 - **History**: the default was a stand-in (kv-sink frozen 2 s, test marked
   partial), which exercises the same timeout, quarantine and reuse path
   through a server stall. Lyndon Bauto approved the host change on
-  2026-10-01 18:32Z: a veth pair `lmcfa0`/`lmcfb0` with `lmcfb0` in its own
-  netns, rxe devices on both ends, the kv-sink RDMA side moved there;
-  `flt07_rdma_down.sh down 2` drops only `lmcfa0`. Reversible, logged in
-  `stage5/CHANGES.md`, torn down after the run.
-- **Proposed change**: none beyond the approved setup; on a real fabric (E5a)
-  run T-FLT-07 by downing the port.
-- **Owner**: harness (Stage 5).
-- **Evidence**: `functional/stage5/flt07_rdma_down.sh` (header),
-  `functional/stage5/SUMMARY.md`.
+  2026-10-01 18:32Z ("mitigation 1"): a veth pair with one end in its own
+  netns and an rxe device on each end. **Probed the same day: it does not
+  work on this box.** The v6.11 rdma_rxe opens its UDP 4791 socket and does
+  its route lookups only in the initial netns (`rxe_net.c`: `init_net`). The
+  rxe device inside the netns therefore gets nothing: rxe1 to rxe2
+  `ibv_rc_pingpong` timed out, and the netns counted 65 `UdpNoPorts`. The
+  probe was torn down; `stage5/CHANGES.md` has the log.
+- **Still open (stand-in still needed)**: the working variants need a new
+  approval:
+  (1) both rxe devices in the host netns with the netns as a wire, plus a
+  host routing-policy change (move the `local` fib rule after two `ip rule
+  from/to` rules; set `accept_local` on the two veths);
+  (2) a newer, netns-aware rdma_rxe (rmmod, rxe0 recreated between GPU work
+  items).
+  Either way, LMCache needs a container that sees `/dev/infiniband/uverbs1`
+  (`lmc-c` maps only uverbs0).
+- **Proposed change**: option 1 or 2 above if a human approves; otherwise keep
+  the stand-in and run T-FLT-07 on a real fabric (E5a) by downing the port.
+- **Owner**: harness (Stage 5); a human decides on the host change.
+- **Evidence**: `functional/stage5/CHANGES.md`, `functional/stage5/SUMMARY.md`,
+  `functional/stage5/flt07_netns_probe.sh`; box
+  `stage5/flt07_probe/pingpong_netns.txt`.
 
 ## G-14 gpt-oss is not batch invariant across batch sizes
 
@@ -252,3 +267,42 @@ D-14 (concurrent writers mix segments) has its own decision record:
 - **Owner**: vLLM upstream (kernels); test plan (oracle).
 - **Evidence**: `stage2/gptoss_ref/session_base_b16.txt` (Stage 2c, in
   progress).
+
+## G-15 No per-request byte oracle for concurrent retrieves
+
+- **Tests / defects**: T-E2E-09 (plan section 2: "the KV bytes each request
+  received must equal the bytes stored for its keys"); G-14.
+- **Missing**: a check of the bytes one request actually received.
+- **Why not now**: LMCache has no hook for it. `POST /cache/checksums` hashes
+  GPU KV blocks by block id, but the harness cannot learn a request's block
+  ids, and under concurrency those blocks are reused. Pipelined bytes go
+  from the RDMA window straight to the GPU, so no L1 object is left to
+  checksum afterwards. The T-RDMA-06 byte-oracle test covers P-exact keys
+  only.
+- **Proposed change**: (1) test-only, transport half: an `RDMA_ORACLE_SETS`
+  option on `test_aerospike_rdma_byte_oracle_integration.py`, run after
+  `stage4.sh e2e09` over the P-shared and P-multi records (about 20 lines);
+  (2) full oracle: an env-gated debug log of each retrieved chunk's MD5
+  after the H2D copy, compared with a plain get. Until then, Llama's
+  T-E2E-09 uses token equality (batch invariant, checked by `stage4.sh
+  ref16`) plus top-1 agreement.
+- **Owner**: test plan / harness (1); Track C (2).
+- **Evidence**: `functional/stage4/HARNESS.md` (oracle decision).
+
+## G-16 Retrieves from one vLLM never run concurrently
+
+- **Tests / defects**: T-PIPE-08, T-PIPE-10.
+- **Missing**: window exhaustion (`refused`) and same-key overlap
+  (`shared_keys_busy`, `reused`) from a single vLLM instance.
+- **Why not now**: this is by design. `RETRIEVE` is a blocking handler on
+  the affinity pool, keyed by the ZMQ client identity, so one vLLM (TP=1)
+  runs its retrieves one at a time. Each pipelined fetch holds and releases
+  its window inside its own retrieve.
+- **Proposed change**: none to the product. Stage 4 runs these two tests
+  with two vLLM instances against one LMCache server started with
+  `--max-gpu-workers 2` (`stage4.sh pipe08`, `pipe10`); `pipe08s` records
+  the single-instance behaviour. Worth stating in `c9-wiring.md`: with one
+  engine per server, `window_count` above 1 only helps when there are
+  several engines or TP ranks.
+- **Owner**: test plan (Track C for the doc note).
+- **Evidence**: `functional/stage4/HARNESS.md`.
