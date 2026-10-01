@@ -155,7 +155,28 @@ PYHARNESS_SOURCES := \
 	$(CONNECTOR_DIR)/slot_planner.cpp \
 	$(CONNECTOR_DIR)/shard_plan.cpp
 
-.PHONY: all test logic logic-test pyharness efa-probe clean
+# T-RDMA-05: kv-sink-register fanout against a real kv-sink cluster. Links
+# the Aerospike C client, so it is built only by `make fanout-probe`, with
+# AEROSPIKE_PREFIX naming the client install (include/ and lib/ beneath it).
+AEROSPIKE_PREFIX ?= /usr
+# Without libyaml-dev only the versioned runtime exists: YAML_LIB=-l:libyaml-0.so.2
+YAML_LIB ?= -lyaml
+FANOUT_BIN := $(BUILD_DIR)/kv_sink_fanout_probe
+FANOUT_SOURCES := \
+	$(SRC_DIR)/kv_sink_fanout_probe.cpp \
+	$(CONNECTOR_DIR)/kv_sink_fanout.cpp \
+	$(CONNECTOR_DIR)/kv_sink_client.cpp \
+	$(CONNECTOR_DIR)/rdma_context.cpp \
+	$(CONNECTOR_DIR)/layer_pipeline.cpp
+
+.PHONY: all test logic logic-test pyharness efa-probe fanout-probe clean
+
+fanout-probe: $(FANOUT_BIN)
+
+$(FANOUT_BIN): $(FANOUT_SOURCES) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -isystem $(AEROSPIKE_PREFIX)/include $(FANOUT_SOURCES) \
+		$(LDFLAGS) -L$(AEROSPIKE_PREFIX)/lib -Wl,-rpath,$(AEROSPIKE_PREFIX)/lib \
+		-laerospike $(LDLIBS) -luv $(YAML_LIB) -lssl -lcrypto -lz -lpthread -lm -o $@
 
 # conftest.py runs a bare `make`, which builds the first target in the file.
 .DEFAULT_GOAL := all
