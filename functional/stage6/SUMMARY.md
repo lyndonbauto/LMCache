@@ -47,7 +47,7 @@ Logs are under `logs/` on the box.
 | T-FLT-02 | Kill a node mid-fetch, RF 1 | **partial: storage half pass**; end to end with vLLM in Stage 6 GPU | `flt02_03.txt`, `flt02_rf1_flushwait_{1,2,3}.txt` |
 | T-FLT-03 | Same at RF 2: reads fail over to the replica | **partial: storage half pass** | `flt02_03.txt`, `cluster_it_full.txt` |
 | T-FLT-04 | Node restart | **partial**: CE half pass; kv-sink half pass at the fanout level (registration dropped by the restarted node, re-registration on a fresh context); the adapter path can't run on 3 nodes (N1) | `flt02_rf1_flushwait_*.txt`, `flt04_kvsink_probe.txt`, `rdma05_adapter_probe.txt` |
-| T-FLT-10 | Two engines store the same chunk at once, 1,000 times | **fail (S2, D-13)**: sharded chunks mixed in 141/1000 and 145/1000 rounds; inline chunks 0/1000 twice | `flt10.txt`, `cluster_it_full.txt` |
+| T-FLT-10 | Two engines store the same chunk at once, 1,000 times | **fail (S2, D-14)**: sharded chunks mixed in 141/1000 and 145/1000 rounds; inline chunks 0/1000 twice | `flt10.txt`, `cluster_it_full.txt` |
 | T-EVT-06 | Client LRU off, two hosts share the cluster | **partial: storage half pass** (two storage managers in two processes); vLLM hosts in Stage 6 GPU | `evt06b.txt`, `cluster_it_full.txt` |
 | T-RDMA-05 | Per-node `kv-sink-register` fanout on a real cluster | **pass** at the fanout level: 3/3 nodes, one region per node, every QP to RTS. LMCache's adapter does not call the fanout on more than one node (N1) | `rdma05_fanout.txt`, `rdma05_adapter_probe.txt` |
 
@@ -80,7 +80,7 @@ Details:
   rounds, writer 2 won 403 and 484, and **141 and 145 rounds were mixed**,
   always whole segments from each writer (196,608 words = one segment) and
   never a word from neither. Inline (64 KiB, one record): 0 mixed in
-  2 × 1,000 rounds. See D-13.
+  2 × 1,000 rounds. See D-14.
 - **T-EVT-06.** Two processes each ran a `StorageManager`. Each stored 24
   shared keys and 24 keys of its own through `reserve_write`/`finish_write`,
   with no L2 capacity, so client LRU was off. Afterwards all 72 keys were
@@ -115,7 +115,7 @@ Details:
 
 | ID | Severity | Defect | Cause |
 |---|---|---|---|
-| D-13 | S2 | Two writers storing the same sharded key at the same time leave a mixed object: the meta record says present and the segments come from both writers (about 14% of rounds). A reader during a rewrite can see the same | `do_single_set` writes segments under fixed keys `<key>\|s\|<i>` with `AS_POLICY_EXISTS_IGNORE` and then the meta record. Nothing ties a meta record to the segment set it describes. A create-only meta write (the plan's Track A blocker) would **not** fix this alone: the losing writer has already overwritten segments of the winner's committed object before its meta write fails |
+| D-14 | S2 | Two writers storing the same sharded key at the same time leave a mixed object: the meta record says present and the segments come from both writers (about 14% of rounds). A reader during a rewrite can see the same | `do_single_set` writes segments under fixed keys `<key>\|s\|<i>` with `AS_POLICY_EXISTS_IGNORE` and then the meta record. Nothing ties a meta record to the segment set it describes. A create-only meta write (the plan's Track A blocker) would **not** fix this alone: the losing writer has already overwritten segments of the winner's committed object before its meta write fails |
 
 Why S2 and not S1: two engines storing one key compute the same tokens on
 the same model, so the two payloads are equal or close (differing only
@@ -139,7 +139,7 @@ Observations (not defects):
 
 ## Next steps
 
-1. D-13: Track A decides the fix (see the proposal in the work result). After
+1. D-14: Track A decides the fix (see the proposal in the work result). After
    it lands, rerun `-k racing` with 1,000 rounds.
 2. Stage 6 GPU: T-FLT-02/03/04 and T-EVT-06 end to end with two vLLM +
    LMCache hosts on `cluster.sh`. Wait 2.5 s or more after the last store
