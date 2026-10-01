@@ -17,7 +17,7 @@ of server memory. ``RDMA_ORACLE_CORPUS`` names a built corpus
 without it the prompts are synthetic token runs of the same lengths.
 ``RDMA_ORACLE_MODEL_NAME`` sets the model name in the keys (vLLM sends the
 model path it loaded). A second test fetches the same keys in fetches of at
-most 4 chunks, the most the kv-sink server sends in one command. With
+most 4 chunks. With
 ``RDMA_ORACLE_STORED_SET`` naming the set vLLM stored P-exact into, a third
 test reads those production records (written by LMCache from real KV
 caches) both ways, without writing anything. On the Soft-RoCE VM::
