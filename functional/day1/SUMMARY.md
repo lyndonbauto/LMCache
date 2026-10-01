@@ -81,9 +81,9 @@ attempt, without batch invariance, is in `step5/`.
 
 | Severity | Finding | Cause (if known) | Owner |
 | --- | --- | --- | --- |
-| S2 | If the LMCache server restarts faster than vLLM's heartbeat interval (10 s), vLLM never re-registers. Every later lookup misses ("No GPU context found"), with no recovery | The worker notices a restart only when a heartbeat fails while the server is down; it does not detect a new server instance | vLLM MP adapter |
-| S2 | vLLM takes up to one heartbeat interval to re-register after an LMCache restart, and requests in that window recompute | Same mechanism | vLLM MP adapter |
-| S3 | A failed L2 store logs `Store task N to adapter 0 failed for keys: [...]` with no reason | The store controller drops the error detail | Storage manager |
+| S2 | If the LMCache server restarts faster than vLLM's heartbeat interval (10 s), vLLM never re-registers. Every later lookup misses ("No GPU context found"), with no recovery | The worker notices a restart only when a heartbeat fails while the server is down; it does not detect a new server instance | **Fixed** (`717ec8e4`); see "Fixes after Day 1" |
+| S2 | vLLM takes up to one heartbeat interval to re-register after an LMCache restart, and requests in that window recompute | Same mechanism | Open, by design: still up to one interval |
+| S3 | A failed L2 store logs `Store task N to adapter 0 failed for keys: [...]` with no reason | The store controller drops the error detail | **Fixed** (`29ec44cf`) |
 | S3 | With the MP connector, gpt-oss-120b runs with KV block size 16, where vLLM alone picks 64 for its ROCm attention backend | LMCache's resolved MP geometry | MP connector |
 | Info | For gpt-oss-120b, a cached prefix changes the output even in vLLM alone (vLLM's prefix cache vs no cache: 7/10 exact on P-shared under batch invariance). LMCache matches vLLM's prefix cache exactly | vLLM's batch-invariant kernels are not prefix-split-invariant for sink and sliding-window attention | vLLM (upstream) |
 | Info | The Aerospike container I started was reachable from the internet; outside IPs connected. Fixed: every port bound to 127.0.0.1, and vLLM and LMCache's HTTP server now bind to 127.0.0.1 in the harness. Earlier vLLM sessions on this box listened on 0.0.0.0:8000 | Host networking | Test setup (fixed) |
@@ -101,18 +101,21 @@ Fixed in `16d471e8`:
   fetches could come from different adapters.
 - `downsample_and_stage_block_ids` validated block-id lists with `assert`.
 
-Listed for their owners, not fixed today:
+Listed for their owners on Day 1; items 1, 2 and 4 are now fixed (see
+"Fixes after Day 1"):
 
-1. The timeout budget does not fit. Pump timeout (2.5 s), then whole-object
-   fallback (2.5 s), plus any shared-key wait exceeds the worker's 5 s
-   per-layer wait, and a worker timeout stops the engine. (Tracks B and C.)
-2. Nothing cross-checks that Track C's planner and Track B's per-layer staging
-   compute the same per-layer byte ranges. Drift would be silent corruption.
+1. **Fixed (`b88ec0ff`).** The timeout budget does not fit. Pump timeout
+   (2.5 s), then whole-object fallback (2.5 s), plus any shared-key wait
+   exceeds the worker's 5 s per-layer wait, and a worker timeout stops the
+   engine.
+2. **Fixed (`b88ec0ff`).** Nothing cross-checks that Track C's planner and
+   Track B's per-layer staging compute the same per-layer byte ranges. Drift
+   would be silent corruption.
 3. The whole-object fallback re-runs `_objects_of` after it has just failed,
    and on success `objects_to_place` and `request_cache_keys` run two or three
    times. (Track C.)
-4. "Too many slots" raises `ValueError` where `PlanTooLargeError` is
-   documented, and the check is duplicated. (Track C.)
+4. **Fixed (`93a77e56`).** "Too many slots" raises `ValueError` where
+   `PlanTooLargeError` is documented, and the check is duplicated.
 5. Cleanups:
    - the test-only C++ `SlotPlanner` and `FetchPlanner.participating_chunks`;
    - the sliding-window rule, written four times;
@@ -122,6 +125,59 @@ Listed for their owners, not fixed today:
    - per-layer staging's Python call count;
    - the test fakes imported by `lmcache.v1.layerwise`;
    - the duplicated shared-memory attach helper.
+
+## Fixes after Day 1
+
+Five findings fixed on `prototype-stage1`. Evidence is on the box under
+`/root/lmc-work/functional/day1fix/`.
+
+| Finding | Fix | Commit |
+| --- | --- | --- |
+| Timeout budget (merge review 1) | The daemon's three waits are `PipelinedFetchConfig` fields: shared-key wait 1.0 s (under `wait` only), pump per-layer 1.5 s, whole-object load 1.5 s. Their sum, the layer publish budget, goes to the worker in `RegisterKvCacheResponse`. A layerwise worker refuses to register unless its per-layer wait is at least the budget plus 0.5 s | `b88ec0ff` |
+| Planner vs per-layer staging (merge review 2) | At registration, `check_staging_matches_plan` compares the planner's per-layer byte ranges with the ones per-layer staging computes from the real staging views. On any difference the model loads whole objects instead of taking the pipelined fetch | `b88ec0ff` |
+| Restart shorter than the heartbeat (S2) | PING answers `False` to a worker the server holds no registration for, and the vLLM and ATOM heartbeats re-register on that answer. The server logs each PING at debug level | `717ec8e4`, `d41162b4` |
+| Failed L2 stores have no reason (S3) | `L2StoreResult` carries the backend's error. The store controller logs it and adds it to `L2_STORE_COMPLETED` | `29ec44cf` |
+| Slot ceiling raises `ValueError` (merge review 4) | `LayerFetchPlan` raises `PlanTooLargeError`, the planner's duplicate check is gone, and the retrieve treats the error as a refusal | `93a77e56` |
+
+**Tests, run once for all five fixes** (`batch1/`, `batch1b/`):
+
+- The layerwise, multiprocess and distributed suites, the vLLM and ATOM
+  adapter tests, and RDMA on `rxe0`: 2,720 passed. The only failures are the
+  Day 1 ones: `test_cache_server` and `test_mq` expect registration to return
+  `None`. The Aerospike integration suites passed 15/15, plus the fixed
+  staging tests.
+- **Fix 1:** a real three-track retrieve (real storage manager, sink and
+  progress record) with a layer that never lands. A worker that waits the
+  budget plus the margin gets the recoverable "retrieve failed", whether the
+  first or the last layer stalls. A worker that waits less than the budget
+  times out, which in vLLM stops the engine; that is the case registration
+  now refuses.
+- **Fix 2:** staging matches the plan on real CPU and GPU cache contexts for
+  four layouts: dense, two kernel groups of different shapes, a gpt-oss-style
+  hybrid with sliding windows, and a compressed group. Kernel groups planned
+  in the wrong order, and two layers planned at each other's positions, are
+  both caught.
+- **Fix 4:** against Aerospike CE, a store into a missing namespace reports
+  `put-meta: Aerospike status 20: Invalid namespace: ...`.
+
+**End to end** (`e2e/`; every run uses batch-invariant mode, layerwise on,
+`--pipelined-fetch`, and token equality against the Day 1 baselines):
+
+| Run | What it shows | Result |
+| --- | --- | --- |
+| `llama_restart0` | Llama with Aerospike L2, LMCache restarted between the sends | Staging matches the plan for all 32 layers. vLLM registers against a budget of 3.0 s and re-registers after the restart. Cold and warm sends 20/20 exact |
+| `llama_wait_too_short` | Worker per-layer wait 3.0 s against a budget of 3.0 s | vLLM refuses to start: `lmcache.mp.layerwise_wait_timeout_seconds is 3.0s, but the LMCache server may take up to 3.0s ... so it must be at least 3.5s` |
+| `gptoss_staging` | gpt-oss-120b, the hybrid model | Staging matches the plan for all 36 layers. Cold and warm sends 20/20 exact |
+| `llama_restart_between_pings` | Heartbeat every 30 s; LMCache restarted right after a ping, so no ping fails (the Day 1 S2 case) | The first ping after the restart is answered `not registered`, and vLLM re-registers within 0.2 s of that answer. Warm send 20/20 exact |
+
+In `llama_restart0` and `llama_restart_unseen` a ping happened to land
+during the restart and timed out, so recovery ran on the following ping.
+That outage path worked before the fix too. `llama_restart_between_pings`
+is the run that shows the fix.
+
+Still open: after a restart, requests sent before the next ping miss and
+recompute (at most one heartbeat interval). The gpt-oss block size (S3) and
+merge-review items 3 and 5 are also still open.
 
 ## Soft-RoCE on this host
 
@@ -168,8 +224,9 @@ of 150.
 ## Next steps (Day 2, not started)
 
 - **Oracle:** run every test with `VLLM_BATCH_INVARIANT=1`.
-- **LMCache restarts:** keep them longer than vLLM's heartbeat interval, or
-  restart vLLM too, until the S2 above is fixed.
+- **LMCache restarts:** vLLM now re-registers on the next heartbeat, however
+  short the restart (fixed after Day 1). Wait for "Registered KV cache"
+  before sending, as the harness does.
 - **gpt-oss prompts:** send its prompts through its chat template, so wrong KV
   also shows up as a wrong answer. With raw prompts it answers the registry
   question correctly only about 3 times in 30.
