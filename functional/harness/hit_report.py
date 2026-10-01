@@ -14,9 +14,14 @@ request's ``MP retrieve end`` log lines.
 The cache model is scoped by each run's model and ``cache_salt`` (from its
 ``meta``), so a different model or salt starts from an empty cache.
 ``--expect TAG:PROMPT_ID=TOKENS`` overrides the modelled hit for one request
-(for example after a test deleted chunks from L2). A baseline applies only
-to runs of the model it was recorded with; prompts with no baseline for the
-run's model show "n/a" for exactness and are not failed on it. For a
+(for example after a test deleted chunks from L2). ``--oracle TAG=PATH``
+names a reference run (for example vLLM's own prefix cache) that is the
+oracle for that send's prefix hits: requests whose expected hit is a proper
+prefix (more than 0 and less than ``n_tokens - 1``) are compared with it,
+and the rest with the baseline; the Exact cell then says which one. A
+baseline applies only to runs of the model it was recorded with; prompts
+with no baseline for the run's model show "n/a" for exactness and are not
+failed on it. For a
 concurrent run (``meta.concurrency`` > 1) the hit and deferred checks use the
 batch totals in ``meta.batch_metrics_delta``; exactness and outcomes are
 still per request.
@@ -25,6 +30,7 @@ Usage::
 
     python hit_report.py --corpus corpus.json --baseline bi_run1.json \
         [--baseline more.json] [--expect warm:P-prefix-07=512] \
+        [--oracle warm=vllm_pc_warm.json] \
         --lmcache-log lmcache_tag.log --out report.json cold.json warm.json
 
 Prints a markdown table per send and a totals line; exits 0 always (the
@@ -111,6 +117,12 @@ def main() -> None:
         default=[],
         help="TAG:PROMPT_ID=TOKENS overrides the modelled hit of one request",
     )
+    parser.add_argument(
+        "--oracle",
+        action="append",
+        default=[],
+        help="TAG=PATH: oracle for the prefix hits of send TAG",
+    )
     parser.add_argument("runs", nargs="+", help="client.py outputs in send order")
     args = parser.parse_args()
     with open(args.corpus) as f:
@@ -127,6 +139,12 @@ def main() -> None:
         key, _, value = item.rpartition("=")
         tag, _, pid = key.partition(":")
         overrides[(tag, pid)] = int(value)
+    prefix_oracles: dict[str, tuple[str, dict[str, Any]]] = {}
+    for item in args.oracle:
+        tag, _, path = item.partition("=")
+        with open(path) as f:
+            recorded = json.load(f)
+        prefix_oracles[tag] = (recorded["meta"]["tag"], recorded["results"])
     chunk = corpus["chunk_size"]
     prompts = {p["id"]: p for s in corpus["sets"].values() for p in s}
     outcomes = retrieve_outcomes(args.lmcache_log)
@@ -162,7 +180,14 @@ def main() -> None:
             deferred = int(delta.get("lmcache_mp_num_deferred_retrieves_total", -1))
             retrieves = outcomes.get(result.get("request_id", ""), [])
             exact: bool | None = None
-            if (scope[0], pid) in baseline:
+            oracle = "baseline"
+            if (
+                0 < want < len(tokens) - 1
+                and pid in prefix_oracles.get(tag, ("", {}))[1]
+            ):
+                oracle, results = prefix_oracles[tag]
+                exact = result["token_ids"] == results[pid]["token_ids"]
+            elif (scope[0], pid) in baseline:
                 exact = result["token_ids"] == baseline[(scope[0], pid)]["token_ids"]
             outcome_ok = all(o == "not_deferred" for _, o in retrieves)
             # Concurrent runs have no per-request counters; their hit and
@@ -174,6 +199,7 @@ def main() -> None:
                 "prompt": pid,
                 "n_tokens": len(tokens),
                 "exact": exact,
+                "oracle": oracle,
                 "expected_hit": want,
                 "vllm_external_hit": ext_hit,
                 "lmcache_hit": lmc_hit,
@@ -194,6 +220,8 @@ def main() -> None:
                 totals[f"{tag}:outcome={outcome}"] += 1
             retrieve_text = ", ".join(f"{c}: {o}" for c, o in retrieves) or "-"
             exact_text = {True: "yes", False: "NO", None: "n/a"}[exact]
+            if oracle != "baseline":
+                exact_text += f" ({oracle})"
             print(
                 f"| {pid} | {len(tokens)} | {exact_text} | {want} | "
                 f"{ext_hit} | {lmc_hit} ({l1}/{l2}) | {deferred} | {retrieve_text} "

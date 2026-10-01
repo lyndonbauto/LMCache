@@ -37,6 +37,8 @@ TRACKED_COUNTERS = (
     "vllm:external_prefix_cache_queries_total",
     "vllm:external_prefix_cache_hits_total",
     "vllm:prompt_tokens_total",
+    "vllm:prefix_cache_queries_total",
+    "vllm:prefix_cache_hits_total",
     "lmcache_mp_lookup_requested_tokens_total",
     "lmcache_mp_lookup_hit_tokens_total",
     "lmcache_mp_lookup_hit_l1_tokens_total",
