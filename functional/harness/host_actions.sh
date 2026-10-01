@@ -4,10 +4,10 @@
 # lmc-c paths of the LMCache tree the sessions run from) and PY314.
 #
 #   kvsink_restart <log-dir>   stop the kv-sink server, start it, warm it
-#                              (kvsink_smoke.sh; server issue 5). A restart
+#                              (kvsink_smoke.sh; old server's issue 5). A restart
 #                              also empties it (storage-engine memory) and
 #                              frees the regions dead clients leaked (issue 9)
-#   kvsink_host_pid            host PID of the kv-sink asd (the one in aero-kvsink)
+#   kvsink_host_pid            host PID of the kv-sink asd (the one in $KVSINK_CTR)
 #   watch_host <dir>           serve run_steps.sh's requests in <dir> until
 #                              killed: HANG_* (capture Python stacks, then
 #                              STACKS_DONE_*) and HOSTREQ_* (run the action,
@@ -32,16 +32,25 @@
 # (w = lookup_start, lookup_end, retrieve_start; log=2 watches server 2's log),
 # read with tail -F on the host so no container round trip delays it. Its
 # answer goes to HOSTFAULT_<run>.txt.
-# KVSINK_CONF_FILE overrides the kv-sink server config kvsink_restart uses
-# (default functional/configs/aerospike-kvsink.conf).
+# KVSINK_CONF_FILE (or KVSINK_CONF) overrides the kv-sink server config
+# kvsink_restart uses (default functional/configs/aerospike-kvsink.conf), and
+# KVSINK_CTR its container (default aero-kvsink); kvsink_server.sh takes the
+# other KVSINK_* variables from the environment. KVSINK_WARM=0 skips the
+# warm-up: the batch-read server (046e8558d) copies values into a staging
+# buffer registered at start-up, so it has no lazy registration to warm
+# (functional/newstack/kvsink_bp_env.sh sets all of these).
 set -u
-KVSINK_CTR=aero-kvsink
+KVSINK_CTR=${KVSINK_CTR:-aero-kvsink}
 
 kvsink_restart() {
-  local dir=$1 conf=${KVSINK_CONF_FILE:-$TREE_HOST/functional/configs/aerospike-kvsink.conf}
+  local dir=$1 conf=${KVSINK_CONF_FILE:-${KVSINK_CONF:-$TREE_HOST/functional/configs/aerospike-kvsink.conf}}
   mkdir -p "$dir"
   KVSINK_CONF=$conf KVSINK_LOG=$dir/asd-kvsink.log bash "$TREE_HOST/functional/harness/kvsink_server.sh" stop
   KVSINK_CONF=$conf KVSINK_LOG=$dir/asd-kvsink.log bash "$TREE_HOST/functional/harness/kvsink_server.sh" start || return 1
+  if [ "${KVSINK_WARM:-1}" = 0 ]; then
+    echo "kv-sink restarted ($KVSINK_CTR, $conf; no warm-up needed)"
+    return 0
+  fi
   # The smoke's pytest process has crashed (abort/segfault) in its second test
   # after the first fell back on the cold server; one retry finishes the warm-up.
   local passed attempt

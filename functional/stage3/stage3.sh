@@ -7,7 +7,7 @@
 #
 # Usage: stage3.sh [section ...]
 # Sections (default: precheck cfg08 e2e04 e2e05 pipe05 pipe06 pipe12 pipe11 rdma06gpu idle):
-#   precheck   refuse to run if 8000/6555/8080/3100 are taken or the GPU is busy
+#   precheck   refuse to run if 8000/6555/8080/$KVSINK_PORT are taken or the GPU is busy
 #   cfg08      runbook stage 3: registration line (T-CFG-08) and one pure L2 hit
 #              of a 4-chunk prompt, pipelined, equal to the baseline
 #   e2e04      T-E2E-04: P-exact + P-ragged cold, LMCache restart, warm from L2.
@@ -34,6 +34,10 @@
 #               client.py output covering P-exact (pipe11 refuses without it)
 #   GPT_SERVER_FLAGS  extra LMCache flags for gpt-oss (default --separate-object-groups,
 #               which T-PIPE-11 needs so sliding-window layers get their own group)
+#   KVSINK_PORT the kv-sink server's service port (default 3100, the old
+#               info-command server; 3700 for the batch-read server: source
+#               functional/newstack/kvsink_bp_env.sh, which also sets the
+#               container, binary, config and KVSINK_WARM=0 for kvsink_restart)
 #   FAULT_POLICY  kv_load_failure_policy for pipe05/pipe06 (default fail: under
 #               recompute a mid-forward layerwise failure hits D-17, vllm#49250,
 #               so the recompute half is recorded as blocked by D-17)
@@ -56,9 +60,12 @@ BASE2=/work/functional/stage2/base2b/bi_run1.json
 GPT_BASE=${GPT_BASE:-}
 GPT_SERVER_FLAGS=${GPT_SERVER_FLAGS:---separate-object-groups}
 CAPS=${CAPS:-64 4}
+KVSINK_PORT=${KVSINK_PORT:-3100}
 FAULT_POLICY=${FAULT_POLICY:-fail}
-# rxe0's rcvd_pkts counts about 1 KiB packets (a 128 MiB fetch: 133,120).
-RXE_PKT=1024
+# rxe0's rcvd_pkts counts about 1 KiB packets on the old server (a 128 MiB
+# fetch: 133,120). The batch-read server and client negotiate the RC path MTU
+# as the smaller port's active MTU, 4096 on rxe0 (kvsink_bp_env.sh sets it).
+RXE_PKT=${RXE_PKT:-1024}
 export PY314=/root/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/bin/python3.14
 # One 256-token chunk, all layers, K and V, bf16.
 LLAMA_CHUNK=$((32 * 2 * 8 * 128 * 256 * 2))   # 32 MiB
@@ -75,7 +82,7 @@ progress() { echo "$(date -u +%FT%TZ) $*" | tee -a $S/progress.log; }
 # <cap> chunks each (registration checks one window holds the cap).
 l2_json() {
   local cap=$1 chunk=$2 rdma_extra=${3:-} adapter_extra=${4:-}
-  echo "{\"type\":\"aerospike\",\"hosts\":\"127.0.0.1:3100\",\"namespace\":\"lmcache\",\"set_name\":\"kv_chunks\"${adapter_extra:+,$adapter_extra},\"rdma\":{\"transport\":\"RC\",\"device_name\":\"rxe0\",\"gid_index\":1,\"window_count\":2,\"window_bytes\":$((cap * chunk))${rdma_extra:+,$rdma_extra}}}"
+  echo "{\"type\":\"aerospike\",\"hosts\":\"127.0.0.1:$KVSINK_PORT\",\"namespace\":\"lmcache\",\"set_name\":\"kv_chunks\"${adapter_extra:+,$adapter_extra},\"rdma\":{\"transport\":\"RC\",\"device_name\":\"rxe0\",\"gid_index\":1,\"window_count\":2,\"window_bytes\":$((cap * chunk))${rdma_extra:+,$rdma_extra}}}"
 }
 # server_flags <cap> <chunk-bytes> [rdma-extra] [adapter-extra]
 # RDMA windows live in a fixed L1 slab, so lazy L1 allocation must be off
@@ -113,7 +120,7 @@ session() {
   echo "##### $tag $(date -u +%T) $(wait_idle) policy=$policy"
   watch_host $S/$dir & local watcher=$!
   timeout 7200 docker exec -e VLLM_BATCH_INVARIANT=1 -e LMCACHE_SERVER_EXTRA="$SERVER_FLAGS" \
-    -e LMCACHE_SERVER_EXTRA_ALT="${SERVER_FLAGS_ALT:-}" -e L2_PORT=${L2_PORT_S:-3100} \
+    -e LMCACHE_SERVER_EXTRA_ALT="${SERVER_FLAGS_ALT:-}" -e L2_PORT=${L2_PORT_S:-$KVSINK_PORT} \
     -e LMCACHE_SERVER2_EXTRA="${SERVER2_FLAGS:-}" -e L1_SIZE_GB=${L1_GB_S:-40} \
     -e L1_SIZE_GB2=${L1_GB2_S:-${L1_GB_S:-40}} \
     -e CORPUS="${CORPUS_S:-$CB}" -e KV_LOAD_FAILURE_POLICY="$policy" \
@@ -126,7 +133,9 @@ session() {
     $(ls $S/$dir/lmcache2_$tag.log $S/$dir/vllm2_${tag}_*.log 2>/dev/null) | paste -sd' ')"
   echo "-- registration: $(grep -hoE '[^ ]+ fetches layer by layer from L2 adapter [0-9]+, reading records of at most [0-9]+ bytes|Cannot fetch [^ ]+ layer by layer|No pipelined sink is installed|serves world size 1 only' $S/$dir/lmcache_$tag.log | sort | uniq -c | sed 's/^ *//' | paste -sd';')"
   echo "-- outcomes: $(grep -oE 'pipelined_outcome=[a-z_]+' $S/$dir/lmcache_$tag.log | sort | uniq -c | sed 's/^ *//' | paste -sd' ')"
-  echo "-- kv-sink: late completions $(grep -c 'late completion' $KVDIR/asd-kvsink.log 2>/dev/null), region error lines $(grep -c 'in error state' $KVDIR/asd-kvsink.log 2>/dev/null)"
+  echo "-- kv-sink: late completions $(grep -c 'late completion' $KVDIR/asd-kvsink.log 2>/dev/null), region error lines $(grep -c 'in error state' $KVDIR/asd-kvsink.log 2>/dev/null), \
+failed writes/posts $(grep -cE 'kv-sink: region [0-9]+ (write|post) failed' $KVDIR/asd-kvsink.log 2>/dev/null), \
+regions dropped $(grep -c 'dropped after a failed write' $KVDIR/asd-kvsink.log 2>/dev/null)"
   ls $S/$dir/HANG_* 2>/dev/null && echo "!! a send failed; stacks in $S/$dir/pystacks_*"
   return $rc
 }
@@ -153,9 +162,9 @@ rxe_delta() {
 }
 
 sec_precheck() {
-  local busy; busy=$(ss -ltn | grep -E '127.0.0.1:(8000|6555|8080|3100) ')
+  local busy; busy=$(ss -ltn | grep -E "127.0.0.1:(8000|6555|8080|$KVSINK_PORT) ")
   [ -z "$busy" ] || { echo "ports in use (another session?):"; echo "$busy"; exit 1; }
-  echo "ports 8000/6555/8080/3100 free; $(wait_idle)"
+  echo "ports 8000/6555/8080/$KVSINK_PORT free; $(wait_idle)"
 }
 
 sec_cfg08() {
@@ -299,11 +308,11 @@ sec_rdma06gpu() {
   local ids17; ids17=$(docker exec lmc-c python -c "print(','.join(f'P-exact-{i:02d}' for i in range(17)))")
   session rdma06gpu rdma06gpu fail server "vllm model=$LLAMA" "send name=store sets=P-exact ids=$ids17" settle
   local snap; snap=$(docker exec -e MODEL_NAME=$LLAMA -e HF_HOME=/work/hf lmc-c \
-    python $H/l2_segments.py --port 3100 --corpus $CB model prompt=P-exact-00)
+    python $H/l2_segments.py --port $KVSINK_PORT --corpus $CB model prompt=P-exact-00)
   progress "rdma06gpu: keys stored under model name '$snap'"
   docker exec -w $TREE_CTR lmc-c env HIP_VISIBLE_DEVICES= CUDA_VISIBLE_DEVICES= \
     PYTHONDONTWRITEBYTECODE=1 RUN_AEROSPIKE_INTEGRATION=1 \
-    AEROSPIKE_TEST_HOST=127.0.0.1 AEROSPIKE_TEST_PORT=3100 AEROSPIKE_TEST_NAMESPACE=lmcache \
+    AEROSPIKE_TEST_HOST=127.0.0.1 AEROSPIKE_TEST_PORT=$KVSINK_PORT AEROSPIKE_TEST_NAMESPACE=lmcache \
     RDMA_DEVICE=rxe0 RDMA_GID_INDEX=1 RDMA_ORACLE_CORPUS=$CB RDMA_ORACLE_MODEL_NAME="$snap" \
     RDMA_ORACLE_STORED_SET=kv_chunks \
     timeout 1500 python -m pytest -p no:cacheprovider -v -rfEs \
