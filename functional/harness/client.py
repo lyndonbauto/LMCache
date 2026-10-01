@@ -10,16 +10,23 @@ With ``--metrics-urls``, each result also holds ``metrics_delta``: how much
 each counter in ``TRACKED_COUNTERS`` (summed over its labels) grew while that
 one request ran, so per-request cache hits can be read without parsing logs.
 
+``--ids`` keeps only the named prompts of the selected sets. With
+``--concurrency N`` (N > 1) every selected prompt is sent at once, N in
+flight; per-request deltas are then not recorded, and ``meta`` holds the
+whole batch's ``batch_metrics_delta`` instead.
+
 Usage::
 
     python client.py --corpus corpus_llama.json --out baseline_run1.json \
-        [--sets P-exact,P-shared] [--salt tenant-a] [--url http://localhost:8000] \
+        [--sets P-exact,P-shared] [--ids P-exact-00,P-exact-05] [--salt tenant-a] \
+        [--concurrency 16] [--timeout 600] [--url http://localhost:8000] \
         [--metrics-urls http://localhost:8000/metrics,http://localhost:8080/metrics]
 """
 
 # Standard
 from typing import Any
 import argparse
+import concurrent.futures
 import json
 import time
 import urllib.request
@@ -71,7 +78,12 @@ def scrape_counters(urls: list[str]) -> dict[str, float]:
 
 
 def complete(
-    url: str, model: str, token_ids: list[int], max_tokens: int, salt: str
+    url: str,
+    model: str,
+    token_ids: list[int],
+    max_tokens: int,
+    salt: str,
+    timeout_s: float = 900.0,
 ) -> dict[str, Any]:
     """Run one greedy completion and return its text, tokens and logprobs.
 
@@ -81,6 +93,7 @@ def complete(
         token_ids: Prompt token IDs.
         max_tokens: Completion length.
         salt: ``cache_salt`` for the request, or "" for none.
+        timeout_s: Socket timeout for the request.
 
     Returns:
         ``text``, ``token_ids``, ``top_logprobs`` (one ``{token_id: logprob}``
@@ -105,7 +118,7 @@ def complete(
         headers={"Content-Type": "application/json"},
     )
     start = time.perf_counter()
-    with urllib.request.urlopen(request, timeout=900) as response:
+    with urllib.request.urlopen(request, timeout=timeout_s) as response:
         reply = json.load(response)
     latency = time.perf_counter() - start
     choice = reply["choices"][0]
@@ -132,6 +145,14 @@ def main() -> None:
     parser.add_argument("--sets", default="", help="comma-separated; default all")
     parser.add_argument("--salt", default="")
     parser.add_argument("--tag", default="")
+    parser.add_argument("--ids", default="", help="comma-separated prompt ids")
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=1,
+        help="send all selected prompts at once with this many in flight",
+    )
+    parser.add_argument("--timeout", type=float, default=900.0)
     parser.add_argument(
         "--metrics-urls",
         default="",
@@ -144,27 +165,59 @@ def main() -> None:
     with urllib.request.urlopen(f"{args.url}/v1/models", timeout=30) as response:
         model = json.load(response)["data"][0]["id"]
     wanted = [s for s in args.sets.split(",") if s] or list(corpus["sets"])
+    ids = [i for i in args.ids.split(",") if i]
+    selected = {
+        name: [p for p in corpus["sets"][name] if not ids or p["id"] in ids]
+        for name in wanted
+    }
     results: dict[str, Any] = {}
-    for name in wanted:
-        for prompt in corpus["sets"][name]:
-            before = scrape_counters(metrics_urls) if metrics_urls else {}
-            result = complete(
-                args.url, model, prompt["token_ids"], corpus["max_tokens"], args.salt
+    batch_delta: dict[str, float] = {}
+
+    def run_one(prompt: dict[str, Any]) -> dict[str, Any]:
+        result = complete(
+            args.url,
+            model,
+            prompt["token_ids"],
+            corpus["max_tokens"],
+            args.salt,
+            args.timeout,
+        )
+        if result["prompt_tokens"] != prompt["n_tokens"]:
+            raise RuntimeError(
+                f"{prompt['id']}: server saw {result['prompt_tokens']} prompt "
+                f"tokens, corpus has {prompt['n_tokens']}"
             )
+        result["correct"] = prompt["expected"] in result["text"]
+        return result
+
+    if args.concurrency > 1:
+        # Per-request counter deltas are meaningless with requests in flight
+        # together, so only the whole batch's delta is recorded (in meta).
+        batch = [p for prompts in selected.values() for p in prompts]
+        before = scrape_counters(metrics_urls) if metrics_urls else {}
+        start = time.perf_counter()
+        with concurrent.futures.ThreadPoolExecutor(args.concurrency) as pool:
+            futures = {p["id"]: pool.submit(run_one, p) for p in batch}
+            for pid, future in futures.items():
+                results[pid] = future.result()
+        wall = round(time.perf_counter() - start, 3)
+        if metrics_urls:
+            after = scrape_counters(metrics_urls)
+            batch_delta = {k: after[k] - before[k] for k in after}
+        print(f"{len(batch)} requests at concurrency {args.concurrency}: {wall} s")
+    for name, prompts in selected.items():
+        for prompt in prompts:
+            if args.concurrency > 1:
+                continue
+            before = scrape_counters(metrics_urls) if metrics_urls else {}
+            result = run_one(prompt)
             if metrics_urls:
                 after = scrape_counters(metrics_urls)
                 result["metrics_delta"] = {k: after[k] - before[k] for k in after}
-            if result["prompt_tokens"] != prompt["n_tokens"]:
-                raise RuntimeError(
-                    f"{prompt['id']}: server saw {result['prompt_tokens']} prompt "
-                    f"tokens, corpus has {prompt['n_tokens']}"
-                )
-            result["correct"] = prompt["expected"] in result["text"]
             results[prompt["id"]] = result
-        correct = sum(results[p["id"]]["correct"] for p in corpus["sets"][name])
+        correct = sum(results[p["id"]]["correct"] for p in prompts)
         print(
-            f"{name}: {len(corpus['sets'][name])} prompts, answers correct "
-            f"{correct}/{len(corpus['sets'][name])}",
+            f"{name}: {len(prompts)} prompts, answers correct {correct}/{len(prompts)}",
             flush=True,
         )
     meta = {
@@ -173,6 +226,9 @@ def main() -> None:
         "corpus_sha256": corpus["sha256"],
         "salt": args.salt,
         "sets": wanted,
+        "ids": ids,
+        "concurrency": args.concurrency,
+        "batch_metrics_delta": batch_delta,
         "finished_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     with open(args.out, "w") as f:

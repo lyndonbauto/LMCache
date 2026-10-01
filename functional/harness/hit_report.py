@@ -11,9 +11,20 @@ LMCache's lookup hit tokens (both from ``client.py --metrics-urls``), the
 deferred-retrieve counter delta and the ``pipelined_outcome`` of the
 request's ``MP retrieve end`` log lines.
 
+The cache model is scoped by each run's model and ``cache_salt`` (from its
+``meta``), so a different model or salt starts from an empty cache.
+``--expect TAG:PROMPT_ID=TOKENS`` overrides the modelled hit for one request
+(for example after a test deleted chunks from L2). A baseline applies only
+to runs of the model it was recorded with; prompts with no baseline for the
+run's model show "n/a" for exactness and are not failed on it. For a
+concurrent run (``meta.concurrency`` > 1) the hit and deferred checks use the
+batch totals in ``meta.batch_metrics_delta``; exactness and outcomes are
+still per request.
+
 Usage::
 
     python hit_report.py --corpus corpus.json --baseline bi_run1.json \
+        [--baseline more.json] [--expect warm:P-prefix-07=512] \
         --lmcache-log lmcache_tag.log --out report.json cold.json warm.json
 
 Prints a markdown table per send and a totals line; exits 0 always (the
@@ -74,35 +85,63 @@ def expected_hit(tokens: list[int], stored: set[tuple[int, ...]], chunk: int) ->
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--corpus", required=True)
-    parser.add_argument("--baseline", required=True)
+    parser.add_argument(
+        "--baseline",
+        action="append",
+        default=[],
+        help="client.py output with the oracle; repeat to merge several",
+    )
     parser.add_argument("--lmcache-log", required=True)
     parser.add_argument("--out", default="")
+    parser.add_argument(
+        "--expect",
+        action="append",
+        default=[],
+        help="TAG:PROMPT_ID=TOKENS overrides the modelled hit of one request",
+    )
     parser.add_argument("runs", nargs="+", help="client.py outputs in send order")
     args = parser.parse_args()
     with open(args.corpus) as f:
         corpus = json.load(f)
-    with open(args.baseline) as f:
-        baseline = json.load(f)["results"]
+    # A baseline only applies to runs of the model it was recorded with.
+    baseline: dict[tuple[str, str], Any] = {}
+    for path in args.baseline:
+        with open(path) as f:
+            recorded = json.load(f)
+        for pid, result in recorded["results"].items():
+            baseline[(recorded["meta"]["model"], pid)] = result
+    overrides: dict[tuple[str, str], int] = {}
+    for item in args.expect:
+        key, _, value = item.rpartition("=")
+        tag, _, pid = key.partition(":")
+        overrides[(tag, pid)] = int(value)
     chunk = corpus["chunk_size"]
     prompts = {p["id"]: p for s in corpus["sets"].values() for p in s}
     outcomes = retrieve_outcomes(args.lmcache_log)
-    stored: set[tuple[int, ...]] = set()
+    # Cache entries are scoped by model and cache_salt.
+    stored: dict[tuple[str, str], set[tuple[int, ...]]] = collections.defaultdict(set)
     report: dict[str, Any] = {}
-    totals = collections.Counter()
+    batches: dict[str, Any] = {}
+    totals: collections.Counter[str] = collections.Counter()
     for run_path in args.runs:
         with open(run_path) as f:
             run = json.load(f)
-        tag = run["meta"]["tag"]
-        print(f"\n### {tag}\n")
+        meta = run["meta"]
+        tag = meta["tag"]
+        scope = (meta["model"], meta.get("salt", ""))
+        concurrent_run = meta.get("concurrency", 1) > 1
+        print(f"\n### {tag} (model {scope[0]}, salt {scope[1] or '-'})\n")
         print(
             "| Prompt | Tokens | Exact | Expected hit | vLLM ext hit | "
             "LMCache hit (L1/L2) | Deferred | Retrieves (chunks: outcome) | OK |"
         )
         print("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
         rows = []
+        batch_want = 0
         for pid, result in run["results"].items():
             tokens = prompts[pid]["token_ids"]
-            want = expected_hit(tokens, stored, chunk)
+            want = overrides.get((tag, pid), expected_hit(tokens, stored[scope], chunk))
+            batch_want += want
             delta = result.get("metrics_delta", {})
             ext_hit = int(delta.get("vllm:external_prefix_cache_hits_total", -1))
             lmc_hit = int(delta.get("lmcache_mp_lookup_hit_tokens_total", -1))
@@ -110,9 +149,15 @@ def main() -> None:
             l2 = int(delta.get("lmcache_mp_lookup_hit_l2_tokens_total", -1))
             deferred = int(delta.get("lmcache_mp_num_deferred_retrieves_total", -1))
             retrieves = outcomes.get(result.get("request_id", ""), [])
-            exact = result["token_ids"] == baseline[pid]["token_ids"]
+            exact: bool | None = None
+            if (scope[0], pid) in baseline:
+                exact = result["token_ids"] == baseline[(scope[0], pid)]["token_ids"]
             outcome_ok = all(o == "not_deferred" for _, o in retrieves)
-            ok = exact and ext_hit == want and deferred == 0 and outcome_ok
+            # Concurrent runs have no per-request counters; their hit and
+            # deferred checks are on the batch totals below.
+            hit_ok = concurrent_run or ext_hit == want
+            deferred_ok = concurrent_run or deferred == 0
+            ok = exact is not False and hit_ok and deferred_ok and outcome_ok
             row = {
                 "prompt": pid,
                 "n_tokens": len(tokens),
@@ -128,24 +173,58 @@ def main() -> None:
             }
             rows.append(row)
             totals[f"{tag}:n"] += 1
-            totals[f"{tag}:exact"] += exact
-            totals[f"{tag}:hit_as_expected"] += ext_hit == want
+            totals[f"{tag}:exact"] += exact is True
+            totals[f"{tag}:no_baseline"] += exact is None
+            if not concurrent_run:
+                totals[f"{tag}:hit_as_expected"] += ext_hit == want
             totals[f"{tag}:ok"] += ok
             for _, outcome in retrieves:
                 totals[f"{tag}:outcome={outcome}"] += 1
             retrieve_text = ", ".join(f"{c}: {o}" for c, o in retrieves) or "-"
+            exact_text = {True: "yes", False: "NO", None: "n/a"}[exact]
             print(
-                f"| {pid} | {len(tokens)} | {'yes' if exact else 'NO'} | {want} | "
+                f"| {pid} | {len(tokens)} | {exact_text} | {want} | "
                 f"{ext_hit} | {lmc_hit} ({l1}/{l2}) | {deferred} | {retrieve_text} "
                 f"| {'yes' if ok else 'NO'} |"
             )
+        for pid in run["results"]:
+            tokens = prompts[pid]["token_ids"]
             for end in range(chunk, len(tokens) + 1, chunk):
-                stored.add(tuple(tokens[:end]))
+                stored[scope].add(tuple(tokens[:end]))
+        batch: dict[str, Any] = {}
+        if concurrent_run:
+            delta = meta.get("batch_metrics_delta", {})
+            ext = int(delta.get("vllm:external_prefix_cache_hits_total", -1))
+            deferred = int(delta.get("lmcache_mp_num_deferred_retrieves_total", -1))
+            batch = {
+                "expected_hit": batch_want,
+                "vllm_external_hit": ext,
+                "lmcache_hit_l1": int(
+                    delta.get("lmcache_mp_lookup_hit_l1_tokens_total", -1)
+                ),
+                "lmcache_hit_l2": int(
+                    delta.get("lmcache_mp_lookup_hit_l2_tokens_total", -1)
+                ),
+                "deferred_delta": deferred,
+                "ok": ext == batch_want and deferred == 0,
+            }
+            totals[f"{tag}:batch_ok"] += batch["ok"]
+            print(
+                f"\nBatch of {len(rows)} at concurrency {meta['concurrency']}: "
+                f"expected hit {batch_want}, vLLM ext hit {ext}, LMCache L1/L2 "
+                f"{batch['lmcache_hit_l1']}/{batch['lmcache_hit_l2']}, deferred "
+                f"{deferred}, {'OK' if batch['ok'] else 'NOT OK'}"
+            )
         report[tag] = rows
+        batches[tag] = batch
     print("\nTotals: " + ", ".join(f"{k}={v}" for k, v in sorted(totals.items())))
     if args.out:
         with open(args.out, "w") as f:
-            json.dump({"rows": report, "totals": dict(totals)}, f, indent=1)
+            json.dump(
+                {"rows": report, "batches": batches, "totals": dict(totals)},
+                f,
+                indent=1,
+            )
 
 
 if __name__ == "__main__":
