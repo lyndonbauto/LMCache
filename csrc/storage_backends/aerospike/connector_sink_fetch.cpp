@@ -104,12 +104,27 @@ void AerospikeSinkFetchDriver::initialize(aerospike* client) {
     if (status != AEROSPIKE_OK || created == nullptr) {
       throw std::runtime_error(
           std::string("Aerospike sink fetch: aerospike_sink_create failed "
-                      "(every node must accept the registration): ") +
+                      "(no node accepted the registration): ") +
           err.message);
+    }
+    // The client accepts a sink some nodes refused: their rows fail with
+    // AEROSPIKE_ERR_SINK_UNKNOWN_REGION and a refresh retries them.
+    uint32_t registered = 0;
+    for (uint32_t i = 0; i < created->n_nodes; ++i) {
+      registered += created->nodes[i].registered ? 1 : 0;
+    }
+    if (registered < created->n_nodes) {
+      std::fprintf(stderr,
+                   "LMCache Aerospike sink fetch: sink registered on %u of %u "
+                   "nodes; rows for the others reload whole objects until a "
+                   "refresh registers them: %s\n",
+                   registered, created->n_nodes, err.message);
     }
 
     // A late row must fail rather than write after LMCache gave up on it,
-    // so rows are never retried and the deadline is the fetch timeout.
+    // so rows are never retried and the deadline is the fetch timeout. The
+    // server fails a queued write past the same deadline, but one already
+    // on the wire still lands; the window leaser's quarantine covers that.
     batch_policy_.base.total_timeout = registration_.fetch_timeout_ms;
     batch_policy_.base.socket_timeout = registration_.fetch_timeout_ms;
     batch_policy_.base.max_retries = 0;
@@ -297,9 +312,11 @@ void AerospikeSinkFetchDriver::run_worker() {
   }
 }
 
-// A row that fails with AEROSPIKE_ERR_SINK_UNKNOWN_REGION was never written:
-// that node restarted or reclaimed the sink. Those rows get one retry after
-// the sink is refreshed; every other failure is final for the slot.
+// A row that fails with AEROSPIKE_ERR_SINK_UNKNOWN_REGION found no usable
+// region on its node: the node restarted, reclaimed the sink, never had it, or
+// dropped it after a failed write. The row's bytes are not complete either
+// way, and a retry rewrites the same destination, so those rows get one retry
+// after the sink is refreshed; every other failure is final for the slot.
 void AerospikeSinkFetchDriver::execute(const QueuedBatch& queued) {
   const sink::LayerBatch& batch = queued.batch;
   std::vector<uint32_t> pending = batch.slot_indices;

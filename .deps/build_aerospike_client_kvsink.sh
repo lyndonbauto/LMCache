@@ -51,16 +51,7 @@ fi
 
 # No EVENT_LIB: the connector uses only the synchronous API, so the build
 # needs no libuv/libev/libevent.
-#
-# The fork links libaerospike.so without libibverbs, so its ibv_* references
-# carry no symbol version and resolve at runtime to libibverbs' IBVERBS_1.0
-# compatibility entry points, whose ibv_mr is a different struct: the sink
-# then advertises a garbage rkey and every server write fails with a remote
-# access error. --no-as-needed is required because the Makefile places
-# LDFLAGS before the objects. The rm forces a relink with these flags.
-rm -f "${SRC}"/target/*/lib/libaerospike.so
-make -C "${SRC}" -j"$(nproc)" EVENT_LIB= \
-  LDFLAGS="-Wl,--no-as-needed -libverbs -lefa"
+make -C "${SRC}" -j"$(nproc)" EVENT_LIB=
 
 PLATFORM_DIR="$(find "${SRC}/target" -mindepth 1 -maxdepth 1 -type d -name '*-*' | head -n 1)"
 if [[ -z "${PLATFORM_DIR}" || ! -f "${PLATFORM_DIR}/include/aerospike/as_sink.h" ]]; then
@@ -68,9 +59,14 @@ if [[ -z "${PLATFORM_DIR}" || ! -f "${PLATFORM_DIR}/include/aerospike/as_sink.h"
   exit 1
 fi
 
+# A libaerospike.so not linked against libibverbs (client before 18b68325)
+# binds ibv_* at runtime to the IBVERBS_1.0 compatibility entry points, whose
+# ibv_mr is a different struct: the sink advertises a garbage rkey and every
+# server write fails with a remote access error.
 DYNSYMS="$(objdump -T "${PLATFORM_DIR}/lib/libaerospike.so")"
 if ! grep -q 'IBVERBS_1\.1.*ibv_reg_mr$' <<<"${DYNSYMS}"; then
-  echo "error: libaerospike.so does not bind ibv_reg_mr@IBVERBS_1.1" >&2
+  echo "error: libaerospike.so does not bind ibv_reg_mr@IBVERBS_1.1;" \
+    "use a client at or after 18b68325" >&2
   exit 1
 fi
 

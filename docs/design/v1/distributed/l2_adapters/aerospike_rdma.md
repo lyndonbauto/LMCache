@@ -100,7 +100,8 @@ layer unservable:
 | `AEROSPIKE_ERR_RECORD_NOT_FOUND` | The record is gone (evicted, expired, never written). |
 | `AEROSPIKE_ERR_INCOMPATIBLE_TYPE` | Not a single-blob-bin record of at most 2 MiB (`KV_SINK_MAX_VALUE_SZ`); see [Records a sink can read](#records-a-sink-can-read). |
 | a length mismatch error | `sink_length` differs from the stored value's size; nothing is written. |
-| `AEROSPIKE_ERR_TIMEOUT` / `AEROSPIKE_NO_RESPONSE` | The batch did not answer the row by `fetch_timeout_seconds`. |
+| `AEROSPIKE_ERR_TIMEOUT` / `AEROSPIKE_NO_RESPONSE` | The batch did not answer the row by `fetch_timeout_seconds`, or the server dropped the queued write at that deadline. |
+| `AEROSPIKE_ERR_UNSUPPORTED_FEATURE` | Strong-consistency namespace or a filter expression; the server refuses sink reads there. |
 | `AEROSPIKE_ERR_SINK_UNKNOWN_REGION` (220) | That node no longer knows the sink; see [Sink refresh](#sink-refresh). |
 
 ## Registration scope: bounded windows
@@ -266,10 +267,11 @@ leaser.release(lease, FetchOutcome.FINISHED)   # or ABANDONED on any other exit
   `reclaim_rdma_window`. Reads after the fetch don't refresh that order.
 - **Quarantine.** A window released as `ABANDONED` isn't leased again for
   `fetch_timeout_seconds`. This is what makes an abandoned fetch safe: the
-  server queues sink writes with no deadline of its own
-  ([server issue 2](aerospike_server_issues.md)), so a row LMCache gave up on
-  can still be written later. `FINISHED` means every layer became resident,
-  so the window can be reused at once.
+  server fails a queued sink write once the row's deadline (the batch's
+  `total_timeout`, set to the fetch timeout) has passed, but a write already
+  posted to the NIC by then still lands, shortly after LMCache gave up on it.
+  `FINISHED` means every layer became resident, so the window can be reused
+  at once.
 - **One lease per window.** The native client runs one fetch per window (W3),
   so up to `window_count` leases are outstanding at once. A leased window is
   never a candidate, even for reclaiming. When every window is leased or
@@ -388,10 +390,11 @@ poll_layer -> table.is_layer_ready / unservable_layers
 
 ### Sink refresh
 
-A node that restarts, or reclaims a sink unused for its idle timeout
-(`KV_SINK_IDLE_SEC`, default 600 s), answers that node's rows with
-`AEROSPIKE_ERR_SINK_UNKNOWN_REGION`. Nothing was written for those rows. The
-worker calls `aerospike_sink_refresh`, which re-registers only where the sink
+A node that restarts, reclaims a sink unused for its idle timeout
+(`KV_SINK_IDLE_SEC`, default 600 s), never registered it, or dropped it after
+one of its RDMA writes failed, answers that node's rows with
+`AEROSPIKE_ERR_SINK_UNKNOWN_REGION`. Those rows' bytes are not complete, and a
+resend rewrites the same destination. The worker calls `aerospike_sink_refresh`, which re-registers only where the sink
 is missing, and resends those rows once. Concurrent workers share one refresh
 through an epoch counter. A row that fails with 220 again fails its slot.
 
@@ -680,17 +683,18 @@ no kv-sink, so CI's Docker server does not run this suite.
 
 ## Open questions
 
-- **Late writes after abandon.** The server keeps queued sink writes with no
-  deadline ([server issue 2](aerospike_server_issues.md)). The leaser's
-  quarantine assumes a row that missed `fetch_timeout_seconds` is written by
-  then or never; under heavy queuing that assumption can break. A server-side
-  deadline per row would close it.
+- **Late writes after abandon.** The server now fails a queued write past its
+  row's deadline, so only writes already on the wire at the deadline can land
+  late, within one network round trip. The leaser's quarantine of
+  `fetch_timeout_seconds` covers that with a wide margin; it has not been
+  measured under heavy queuing.
 - **Sink ownership.** The server trusts the region id a row carries
   ([server issue 4](aerospike_server_issues.md)), so the window bound is only
   as strong as the ids are unguessable.
-- **Partial registration.** `aerospike_sink_create` fails if any node refuses
-  the registration ([server issue 10](aerospike_server_issues.md)), which
-  turns one bad node into no pipelined fetch at all.
+- **Partial registration.** `aerospike_sink_create` succeeds when at least
+  one node registers. The driver logs how many did; rows for the others fail
+  with 220, are retried once after a refresh, and otherwise reload whole
+  objects. Not yet exercised on a multi-node cluster.
 
 ## Related
 

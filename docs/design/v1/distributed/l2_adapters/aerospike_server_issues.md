@@ -1,14 +1,19 @@
 # Aerospike server issues found from the LMCache side
 
 Defects and contract gaps in the aerospike-server branch
-`sriram/kv-sink-batch-prio` (checked at `24357d20d`) and the matching C client
-branch `sriram/kv-sink-batch-prio` of `aerospike-client-c` (checked at
-`769304f7`, based on 7.5.0), found by reading both against the LMCache
-Aerospike connector and by running LMCache's A8 suite against them on
-Soft-RoCE (RC, 2026-09-30) and EFA v2 (SRD, 2026-10-01). Issues 3 and 11 were
-reproduced on Soft-RoCE; the rest are from review. On EFA, with the client
+`sriram/kv-sink-batch-prio` and the matching C client branch
+`sriram/kv-sink-batch-prio` of `aerospike-client-c-kvsink` (based on 7.5.0),
+found by reading both against the LMCache Aerospike connector and by running
+LMCache's A8 suite against them on Soft-RoCE (RC, 2026-09-30) and EFA v2
+(SRD, 2026-10-01), at server `24357d20d` and client `061f79b7`. Issues 3 and 11
+were reproduced on Soft-RoCE; the rest are from review. On EFA, with the client
 built by LMCache's script, the suite passed and the server logged no sink
-errors. The test setups are in
+errors.
+
+**Status re-checked by review at server `046e8558d` and client `523d51ea`
+(2026-10-01).** Issues 2, 3, 7, 8, 10 and 11 and most minor items are fixed;
+issue 1 is partly fixed; 4, 5, 6 and 9 remain. These fixes have not been run
+through the A8 suite yet. The test setups are in
 [`rdma_testing_on_windows.md`](rdma_testing_on_windows.md) and
 [`rdma_testing_on_efa.md`](rdma_testing_on_efa.md).
 
@@ -36,17 +41,17 @@ with sink rows through the patched client; see
 
 | # | Issue | Severity | Where | Status |
 |---|---|---|---|---|
-| 1 | [The local transport writes into any process on the server host](#1-the-local-transport-writes-into-any-process-on-the-server-host) | Security: remote memory write | Server and client | Open |
-| 2 | [Queued writes have no deadline](#2-queued-writes-have-no-deadline) | Data corruption | Server | Open |
-| 3 | [A failed RC write breaks the region with the wrong error](#3-a-failed-rc-write-breaks-the-region-with-the-wrong-error) | Silent permanent fallback | Server | Open |
+| 1 | [The local transport writes into any process on the server host](#1-the-local-transport-writes-into-any-process-on-the-server-host) | Security: remote memory write | Server and client | Partly fixed: opt-in, no peer check |
+| 2 | [Queued writes have no deadline](#2-queued-writes-have-no-deadline) | Data corruption | Server | Fixed in `046e8558d` |
+| 3 | [A failed RC write breaks the region with the wrong error](#3-a-failed-rc-write-breaks-the-region-with-the-wrong-error) | Silent permanent fallback | Server | Fixed in `046e8558d` |
 | 4 | [Region ownership is self-declared](#4-region-ownership-is-self-declared) | Security: silent wrong data | Server | Open |
-| 5 | [Only single-blob-bin records up to 2 MiB can be sink-read](#5-only-single-blob-bin-records-up-to-2-mib-can-be-sink-read) | Contract gap | Server | Open |
+| 5 | [Only single-blob-bin records up to 2 MiB can be sink-read](#5-only-single-blob-bin-records-up-to-2-mib-can-be-sink-read) | Contract gap | Server | Open; limit now advertised |
 | 6 | [Placement runs on the completion poller](#6-placement-runs-on-the-completion-poller) | Throughput ceiling | Server | Open |
-| 7 | [Sink reads skip duplicate resolution, ping and filters](#7-sink-reads-skip-duplicate-resolution-ping-and-filters) | Stale reads under strong consistency | Server | Open |
-| 8 | [RoCE hop limit is 1](#8-roce-hop-limit-is-1) | No routed RoCEv2 | Server and client | Open |
+| 7 | [Sink reads skip duplicate resolution, ping and filters](#7-sink-reads-skip-duplicate-resolution-ping-and-filters) | Stale reads under strong consistency | Server | Fixed in `046e8558d` (refused) |
+| 8 | [RoCE hop limit is 1](#8-roce-hop-limit-is-1) | No routed RoCEv2 | Server and client | Fixed in `046e8558d` and `18b68325` |
 | 9 | [The poller never sleeps when idle](#9-the-poller-never-sleeps-when-idle) | CPU | Server | Open |
-| 10 | [One registration failure fails the whole sink](#10-one-registration-failure-fails-the-whole-sink) | Availability | Client | Open |
-| 11 | [`libaerospike.so` is not linked against libibverbs](#11-libaerospikeso-is-not-linked-against-libibverbs) | RDMA unusable through the shared library | Client | Open; worked around in LMCache's build script |
+| 10 | [One registration failure fails the whole sink](#10-one-registration-failure-fails-the-whole-sink) | Availability | Client | Fixed in `18b68325` |
+| 11 | [`libaerospike.so` is not linked against libibverbs](#11-libaerospikeso-is-not-linked-against-libibverbs) | RDMA unusable through the shared library | Client | Fixed in `18b68325` |
 
 Smaller items are under [Minor](#minor).
 
@@ -97,6 +102,14 @@ process on the server host.
 - Client: define the verbs transport when `infiniband/verbs.h` is present, and
   gate only the SRD code on `efadv.h`.
 
+**Status: partly fixed.** The server refuses `transport=local` unless `asd`
+runs with `KV_SINK_ENABLE_LOCAL=1` (`046e8558d`). The client no longer falls
+back: with no RDMA device `aerospike_sink_create` fails unless the caller
+asked for `local`, and the Makefile gates verbs on `verbs.h` and SRD on
+`efadv.h` (`18b68325`). Still open: with the variable set, the server does not
+check that the PID belongs to the connecting peer, so the switch must stay off
+anywhere a client can reach `asd` from another host.
+
 ## 2. Queued writes have no deadline
 
 **Where:** `kv_sink_op` in `as/include/base/kv_sink.h`; `sched_pick`, `drain`
@@ -122,6 +135,13 @@ the region.
 op with `AS_ERR_TIMEOUT` instead of placing it once the deadline has passed.
 Document that a row's destination may still be written until the server-side
 timeout, so clients can keep their own timeout longer than it.
+
+**Status: fixed in `046e8558d`.** Each op carries the transaction's
+`end_time`; one past it fails with `AS_ERR_TIMEOUT` instead of being placed. A
+write already posted to the NIC cannot be recalled and may land just after the
+deadline. LMCache sets the batch `total_timeout` to its fetch timeout, so the
+server deadline equals the client's, and the window leaser's quarantine of
+`fetch_timeout_seconds` absorbs the in-flight tail.
 
 ## 3. A failed RC write breaks the region with the wrong error
 
@@ -154,6 +174,11 @@ with 220, the next read gets 220, and the client's refresh re-registers it.
 **Reproduced** on Soft-RoCE while chasing issue 11: one remote access error,
 then every later write on the region `Work Request Flushed Error`, until the
 client closed.
+
+**Status: fixed in `046e8558d`.** A failed completion or a refused post calls
+`region_failed()`, which removes the region; the row and every later row on
+it fail with 220, and LMCache's existing refresh-and-retry re-registers it.
+The server logs a failed write once per region.
 
 ## 4. Region ownership is self-declared
 
@@ -200,6 +225,11 @@ optional bin-name field next to field 46), so a multi-bin record can be
 sink-read. Advertise the maximum value size in the register reply instead of
 leaving it as a compile-time constant the client must know.
 
+**Status: open; the limit is now advertised.** The register reply carries
+`max-value=<bytes>` and the client exposes the smallest across nodes as
+`as_sink.max_value_size` (`046e8558d`, `18b68325`). The single-blob-bin rule
+is unchanged, so inline small objects still fall back.
+
 ## 6. Placement runs on the completion poller
 
 **Where:** `drain`, `place` in `as/src/base/kv_sink.c`; `run_poller`,
@@ -236,6 +266,10 @@ can return a value that a linearizable read would not.
 clear error until the full read path is supported, and refuse or apply filter
 expressions rather than ignoring them.
 
+**Status: fixed in `046e8558d`.** Sink reads on a strong-consistency namespace
+or with a filter expression fail with `AS_ERR_UNSUPPORTED_FEATURE`. LMCache
+uses neither.
+
 ## 8. RoCE hop limit is 1
 
 **Where:** `to_rts` and `peer_ah_get` in `as/src/base/kv_sink_verbs.c`;
@@ -251,6 +285,8 @@ in different L3 subnets.
 
 **Expected fix:** use 64 (the usual value), or make it configurable next to
 the device and GID index.
+
+**Status: fixed** in server `046e8558d` and client `18b68325`: both use 64.
 
 ## 9. The poller never sleeps when idle
 
@@ -283,6 +319,12 @@ the whole cluster, and repeated attempts leave server-side regions behind.
 **Expected fix:** let `aerospike_sink_create` succeed with a per-node result
 (rows sent to an unregistered node already fail with 220, which the caller
 handles), and deregister on the server when the client-side connect fails.
+
+**Status: fixed in `18b68325`.** `aerospike_sink_create` succeeds when at
+least one node registered; `err` then still holds the last node's failure,
+and `nodes[].registered` says which nodes have it. A failed client-side
+connect sends `kv-sink-deregister`. LMCache logs a partial registration and
+otherwise relies on its 220 retry.
 
 ## 11. `libaerospike.so` is not linked against libibverbs
 
@@ -318,26 +360,30 @@ loads; `aerospike_sink_create` and registration report success.
 since the rule places `LDFLAGS` before the objects and Ubuntu links
 `--as-needed` by default. The result must show
 `(IBVERBS_1.1) ibv_reg_mr` and `NEEDED libibverbs.so.1`.
-`.deps/build_aerospike_client_kvsink.sh` does this from the outside and
-refuses a library that lacks the versioned binding.
+
+**Status: fixed in `18b68325`.** The Makefile appends `-libverbs` (and
+`-lefa` when `efadv.h` exists) after the objects of the shared-library link;
+`examples/kv_sink` gained `sinktest-so` to check it. LMCache's build script no
+longer adds the flags itself but still refuses a library that lacks the
+versioned binding.
 
 ## Minor
 
-- **Stale header comment.** The top of `kv_sink_verbs.c` still says "the
-  payload is never copied ... registered once as a memory region", which
-  contradicts the staging-slot copy below it. `as_storage_stripe_region()` in
-  `storage.c` is now unused.
-- **Unseeded PSNs.** Both sides pick the PSN with `rand()` without seeding it,
-  so every process starts from the same sequence.
-- **Failed writes still log once each.** The poller logs every failed
-  completion; the region ID is there now, but a failed batch still floods the
-  log. Log once per region per interval with a count.
-- **The server links `-libverbs -lefa` unconditionally**, so it cannot build
-  or start on a host without libefa, even with RDMA unused.
-- **Client:**
-  - `aerospike_key_get_into` dereferences `sink` without a NULL check.
-  - `rc_init` registers the buffer with `IBV_ACCESS_REMOTE_READ`, which the
-    protocol never uses.
-  - `as_sink` is not thread-safe: `aerospike_sink_refresh` and
-    `aerospike_sink_reregister` rewrite `nodes[]` and destroy queue pairs, so
-    the header should say callers must serialize them.
+Open:
+
+- **The server links `-libverbs -lefa` unconditionally** (`as/src/Makefile`),
+  so it cannot build or start on a host without libefa, even with RDMA unused.
+
+Fixed in server `2fb7e6084`/`046e8558d` and client `18b68325`:
+
+- The stale "payload is never copied" header comment in `kv_sink_verbs.c`,
+  and the unused `as_storage_stripe_region()`.
+- Unseeded PSNs: both sides now draw them from `getrandom`.
+- Failed writes log once per region instead of once per completion.
+- `aerospike_key_get_into` checks `sink` for NULL.
+- `rc_init` no longer grants `IBV_ACCESS_REMOTE_READ`.
+- `as_sink.h` documents its threading rule: reads naming a sink may run on any
+  thread; `aerospike_sink_refresh`, `aerospike_sink_reregister` and
+  `aerospike_sink_destroy` must not run concurrently with each other. LMCache
+  serializes refreshes under one mutex and destroys only after its workers
+  stop.

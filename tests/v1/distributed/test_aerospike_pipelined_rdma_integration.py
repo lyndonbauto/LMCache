@@ -455,11 +455,11 @@ def test_no_server_write_reaches_l1_after_close(
 ) -> None:
     """Once ``close()`` returns, the server cannot write into the L1 slab.
 
-    A fetch the client gave up on can still be queued at the server: queued
-    sink writes have no deadline (server issue 2), and the deregistration
-    ``close()`` sends does not wait for them, so ``close()`` must revoke the
-    remote's access before L1 frees the slab; otherwise those writes land in
-    freed memory.
+    A fetch the client gave up on can still have writes in flight at the
+    server: the server fails queued writes past their deadline, but not one
+    already posted, and the deregistration ``close()`` sends does not wait for
+    them, so ``close()`` must revoke the remote's access before L1 frees the
+    slab; otherwise those writes land in freed memory.
 
     L1 is a named shared-memory segment that the test maps too, so the pages
     outlive ``close()`` and any later write is visible instead of corrupting
