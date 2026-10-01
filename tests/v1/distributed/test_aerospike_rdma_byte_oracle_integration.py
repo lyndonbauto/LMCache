@@ -16,7 +16,11 @@ of server memory. ``RDMA_ORACLE_CORPUS`` names a built corpus
 (``functional/harness/build_corpus.py``) whose P-exact token IDs to use;
 without it the prompts are synthetic token runs of the same lengths.
 ``RDMA_ORACLE_MODEL_NAME`` sets the model name in the keys (vLLM sends the
-model path it loaded). On the Soft-RoCE VM::
+model path it loaded). A second test fetches the same keys in fetches of at
+most 4 chunks, the most the kv-sink server sends in one command. With
+``RDMA_ORACLE_STORED_SET`` naming the set vLLM stored P-exact into, a third
+test reads those production records (written by LMCache from real KV
+caches) both ways, without writing anything. On the Soft-RoCE VM::
 
     RUN_AEROSPIKE_INTEGRATION=1 AEROSPIKE_TEST_HOST=127.0.0.1 \\
     AEROSPIKE_TEST_PORT=3100 AEROSPIKE_TEST_NAMESPACE=lmcache \\
@@ -100,6 +104,8 @@ ORACLE_CORPUS = os.environ.get("RDMA_ORACLE_CORPUS", "")
 MODEL_NAME = os.environ.get(
     "RDMA_ORACLE_MODEL_NAME", "meta-llama/Llama-3.1-8B-Instruct"
 )
+#: A set holding the keys as vLLM stored them (the production-key half).
+STORED_SET = os.environ.get("RDMA_ORACLE_STORED_SET", "")
 
 CHUNK_TOKENS = 256
 NUM_KEYS = 100
@@ -362,22 +368,48 @@ def set_name() -> Iterator[str]:
         client.close()
 
 
-def test_pipelined_rdma_fetches_equal_plain_gets_for_100_p_exact_keys(
+def _split(prompts: Sequence[_Prompt], max_chunks: int) -> list[_Prompt]:
+    """Each prompt's keys cut, in order, into fetches of at most ``max_chunks``."""
+    return [
+        _Prompt(
+            f"{p.name}[{i}:{i + len(p.keys[i : i + max_chunks])}]",
+            p.keys[i : i + max_chunks],
+        )
+        for p in prompts
+        for i in range(0, len(p.keys), max_chunks)
+    ]
+
+
+def _test_payloads(fetches: Sequence[_Prompt]) -> dict[ObjectKey, torch.Tensor]:
+    """A distinct payload for every key of ``fetches``, in fetch order."""
+    keys = [key for fetch in fetches for key in fetch.keys]
+    return {key: _payload(index) for index, key in enumerate(keys)}
+
+
+def _fetch_and_compare(
     set_name: str,
+    fetches: Sequence[_Prompt],
+    payloads: dict[ObjectKey, torch.Tensor],
 ) -> None:
-    """Every byte a pipelined fetch lands equals the plain get and the store."""
-    prompts = _prompts()
-    keys = [key for prompt in prompts for key in prompt.keys]
+    """Store ``payloads``, then fetch each fetch by pipelined RDMA and compare.
+
+    Every byte that lands is compared with a plain get of the same key and,
+    for a key in ``payloads``, with what was stored. ``payloads`` is empty
+    when someone else (vLLM) stored the keys. Each fetch gets its own
+    storage manager (a fresh registration), so a region the server disables
+    during one fetch cannot affect the next.
+    """
+    keys = [key for fetch in fetches for key in fetch.keys]
     assert len(keys) == NUM_KEYS and len(set(keys)) == NUM_KEYS
 
     plain = create_l2_adapter_from_registry(_adapter_config(set_name, L1RdmaConfig()))
     try:
         plain.set_object_group_layouts(dict(GROUP_LAYOUTS), KERNEL_LAYERS)
-        for index, key in enumerate(keys):
-            _store(plain, key, _payload(index))
+        for key, values in payloads.items():
+            _store(plain, key, values)
 
-        index = 0
-        for prompt in prompts:
+        compared = 0
+        for prompt in fetches:
             manager = _build_manager(set_name, len(prompt.keys))
             try:
                 assert manager.pipelined_fetch_node_name(), (
@@ -424,14 +456,50 @@ def test_pipelined_rdma_fetches_equal_plain_gets_for_100_p_exact_keys(
                         assert torch.equal(landed, got), (
                             f"{prompt.name} {key}: RDMA bytes differ from a plain get"
                         )
-                        assert torch.equal(got, _payload(index)), (
-                            f"{prompt.name} {key}: plain get differs from the store"
-                        )
-                        index += 1
+                        if key in payloads:
+                            assert torch.equal(got, payloads[key]), (
+                                f"{prompt.name} {key}: plain get differs from the store"
+                            )
+                        compared += 1
                 finally:
                     manager.finish_read_prefetched(list(resident.locked))
             finally:
                 manager.close()
-        assert index == NUM_KEYS
+        assert compared == NUM_KEYS
     finally:
         plain.close()
+
+
+def test_pipelined_rdma_fetches_equal_plain_gets_for_100_p_exact_keys(
+    set_name: str,
+) -> None:
+    """Every byte a pipelined fetch lands equals the plain get and the store."""
+    fetches = _prompts()
+    _fetch_and_compare(set_name, fetches, _test_payloads(fetches))
+
+
+def test_rdma_equals_plain_gets_for_100_p_exact_keys_in_fetches_of_4_chunks(
+    set_name: str,
+) -> None:
+    """The same 100 keys, each fetch at most 4 chunks (one server command).
+
+    With Llama-3.1-8B's 64 slots per chunk, 4 chunks is 256 slots, which the
+    kv-sink server sends as a single ``kv-sink-fetch-pipelined`` command;
+    the 64-chunk prompts' keys are fetched 4 at a time, in order.
+    """
+    fetches = _split(_prompts(), 4)
+    _fetch_and_compare(set_name, fetches, _test_payloads(fetches))
+
+
+@pytest.mark.skipif(
+    not STORED_SET,
+    reason="no set of vLLM-stored P-exact keys named (set RDMA_ORACLE_STORED_SET)",
+)
+def test_rdma_equals_plain_gets_for_100_keys_stored_by_vllm() -> None:
+    """The same 100 keys as stored by vLLM through LMCache, read twice.
+
+    Nothing is written, and the set is left as it was. Fetches are at most
+    4 chunks, as above. ``RDMA_ORACLE_MODEL_NAME`` must be the model name
+    vLLM sent with the keys.
+    """
+    _fetch_and_compare(STORED_SET, _split(_prompts(), 4), {})
