@@ -429,7 +429,7 @@ class L2AdapterInterface(ABC):
         return ""
 
     def pipelined_fetch_node_name(self) -> str:
-        """Return the one node this backend's pipelined fetches read from.
+        """Return the node name this backend's pipelined placer is built with.
 
         The default raises: most backends have no layer-pipelined path.
 

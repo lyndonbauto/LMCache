@@ -163,11 +163,10 @@ class ChunkPlacement:
         object_group_id: Object group this placement is for. A chunk has one
             placement per object group it participates in.
         node_index: Index into :attr:`PlanRequest.node_names` identifying the
-            cluster node every slot cut from this object is fetched from.
-            This is only correct on a single-node cluster: each of an
-            object's records is placed by the digest of its own key, so on
-            more nodes they are spread out. Per-record routing is future
-            work (see ``docs/design/v1/layerwise/track-c-status.md``).
+            cluster node every slot cut from this object names. The
+            Aerospike transport treats it as nominal: its client routes each
+            record by the digest of its own key, so an object whose records
+            are spread over several nodes is still served.
         dest_offset: Base offset of this object within the registered window.
 
     Raises:
@@ -921,14 +920,14 @@ class FetchPlanner:
         Slots are appended layer-major -- every participating chunk's pieces
         of the lowest layer, then of the next, and so on -- which is the order
         the servers are asked to push in so the head of the pipeline arrives
-        first. The order is only a hint: the fabric reorders writes in flight
-        and independent nodes interleave regardless.
+        first. The order is only a hint: each node places its own rows by
+        layer priority, and independent nodes interleave regardless.
 
         A slot's index is **its position in the returned plan's** ``slots``.
         That numbering spans the whole request rather than restarting per
-        node, which is what keeps two nodes' notifications distinguishable
-        when they land on the same queue pair. Slot order is therefore
-        load-bearing, and this method is deterministic for a given request.
+        node, which is what keeps two nodes' results distinguishable in one
+        readiness table. Slot order is therefore load-bearing, and this
+        method is deterministic for a given request.
 
         Placements for an object group the layout does not cover are ignored,
         and a layer whose object group the request did not place contributes
@@ -943,9 +942,9 @@ class FetchPlanner:
             and no overlaps.
 
         Raises:
-            PlanTooLargeError: If the fetch needs more slots than the RDMA
-                immediate can address (see :class:`LayerFetchPlan`). The
-                device's own limit on writes in flight is checked by the
+            PlanTooLargeError: If the fetch needs more than
+                ``MAX_SLOTS_PER_REQUEST`` slots (see :class:`LayerFetchPlan`).
+                The transport's own per-fetch limit is checked by the
                 transport, not here.
             ValueError: If the placements cover none of the layout's layers,
                 or if ``record_keys`` returns an empty key.
@@ -978,7 +977,6 @@ class FetchPlanner:
                             record_keys,
                         )
                     )
-
         if not slots:
             raise ValueError(
                 "none of the placed object groups hold layers in this layout, "

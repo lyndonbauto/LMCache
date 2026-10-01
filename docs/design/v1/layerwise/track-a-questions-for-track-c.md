@@ -758,7 +758,7 @@ still land. Either build the leaser from the config of the adapter
     - Retrieve should wrap the accessor call in the same
       `LayerwiseContractError` handler as the placer and the pump.
 13. Concurrent fetches, one per window (W3). See
-    [aerospike_rdma.md](../distributed/l2_adapters/aerospike_rdma.md#concurrent-fetches).
+    [aerospike_rdma.md](../distributed/l2_adapters/aerospike_rdma.md#pipelined-fetch).
     - Native: `PipelinedFetchPool` holds one `PipelinedFetchSession` per
       window and routes each immediate by its generation. The native
       `finish_pipelined_fetch`, `abandon_pipelined_fetch` and
@@ -784,8 +784,10 @@ still land. Either build the leaser from the config of the adapter
         layer resident.
 14. A7 is ready to run on hardware. `efa_imm_probe` checks whether a
     write-with-immediate consumes a posted receive: it starves the receive
-    queue, then posts the missing receives. See
-    [aerospike_rdma.md](../distributed/l2_adapters/aerospike_rdma.md#receive-queue-depth-and-device-limits).
+    queue, then posts the missing receives. (Written against the
+    write-with-immediate protocol; the kv-sink batch-read protocol that
+    replaced it posts no receives, and the probe was removed. See the git
+    history of `aerospike_rdma.md` for the analysis.)
     - RC baseline on Soft-RoCE: yes. A starved write stalls and lands no
       bytes until a receive is posted; with `rnr_retry 0` the writer fails.
       `make test` pins this.
@@ -933,8 +935,9 @@ still land. Either build the leaser from the config of the adapter
 
     The first run showed that the probe's `--unsolicited` mode flagged only
     the receiver; it now flags both and also records the mismatch. Results
-    are in
-    [aerospike_rdma.md](../distributed/l2_adapters/aerospike_rdma.md#a7-result-on-efa-srd).
+    are in the git history of `aerospike_rdma.md` ("A7 result on EFA
+    (SRD)"), from before the kv-sink batch-read protocol replaced
+    write-with-immediate.
 25. A8 over SRD on EFA: the three A8 tests and the two other Aerospike
     integration suites pass (15 tests) on the same `g6.8xlarge`, with
     `RDMA_TRANSPORT=SRD` now read by the A8 test. It needed one client fix:
@@ -944,8 +947,9 @@ still land. Either build the leaser from the config of the adapter
     scratch buffer; Soft-RoCE still passes. `RdmaContext` now also clamps
     the receive depth to efadv's `max_rq_wr` (it did not bind: ibv reports
     4096, efadv 32768). The server needed a local patch, and two bugs for
-    the server team are in
-    [A8 on EFA](../distributed/l2_adapters/aerospike_rdma.md#a8-on-efa-srd).
+    the server team were recorded in "A8 on EFA (SRD)" in the git history of
+    `aerospike_rdma.md`; open server issues are tracked in
+    [aerospike_server_issues.md](../distributed/l2_adapters/aerospike_server_issues.md).
     For Track C: nothing in the plan or the arrival contract changes. The
     fetch command runs under the C client's default 1000 ms info timeout,
     and a cold server's first fetch came close to it while registering its

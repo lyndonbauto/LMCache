@@ -956,8 +956,8 @@ class StorageManager:
         """Return the node the layerwise ``ChunkPlacer`` locates objects on.
 
         Adapters are asked in registration order, as by
-        :meth:`layer_arrival_source`. Pipelined fetches run on single-node
-        clusters only.
+        :meth:`layer_arrival_source`. The name is nominal: the native
+        client routes each row by partition, on a cluster of any size.
 
         Returns:
             The node name from the first adapter with a ready pipelined path.
@@ -985,9 +985,7 @@ class StorageManager:
             LayerwiseContractError: If no L2 adapter has a ready pipelined
                 path, with each adapter's reason.
         """
-        _, adapter = self._first_ready_pipelined_adapter(
-            "a pipelined fetch slot limit"
-        )
+        _, adapter = self._first_ready_pipelined_adapter("a pipelined fetch slot limit")
         return adapter.pipelined_max_slots_per_request()
 
     def pipelined_adapter_id(self) -> int:
@@ -1034,8 +1032,8 @@ class StorageManager:
     ) -> ChunkPlacer:
         """Build the layerwise placer for one registered model.
 
-        Objects are reserved inside L1's RDMA windows and fetched from the
-        pipelined adapter's one node. Fetched objects are kept in L1 or
+        Objects are reserved inside L1's RDMA windows and fetched through
+        the pipelined adapter. Fetched objects are kept in L1 or
         freed as the prefetch policy's ``select_l1_retentions`` decides, the
         same as objects the prefetch controller loads.
 
@@ -1052,9 +1050,9 @@ class StorageManager:
 
         Raises:
             LayerwiseContractError: If no adapter enables RDMA reception,
-                none has a ready pipelined path (including a cluster of more
-                than one node), or the adapter with the pipelined path is not
-                the one L1's windows were built with, with the reason.
+                none has a ready pipelined path, or the adapter with the
+                pipelined path is not the one L1's windows were built with,
+                with the reason.
             ValueError: If one window cannot hold ``max_pipelined_chunks``
                 chunks of this model, or ``max_pipelined_chunks`` is not
                 positive. The message states the window size needed.

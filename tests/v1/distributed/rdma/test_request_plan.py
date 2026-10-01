@@ -2,8 +2,7 @@
 """Pytest wrapper for the request-scoped readiness harness.
 
 Build plumbing lives in ``conftest.py``. This covers the bookkeeping rather
-than the data path, so it needs no RDMA device; ``test_rdma_pipeline.py``
-exercises the same structures over a real fabric for a single chunk.
+than the data path, so it needs no RDMA device.
 """
 
 # Standard

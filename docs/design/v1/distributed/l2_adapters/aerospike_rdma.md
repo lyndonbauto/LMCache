@@ -1,28 +1,28 @@
 # Aerospike RDMA reception into L1
 
-Status: **prototype, data path executed.** The verbs foundation, the build
-profile, the adapter plumbing, the per-node registration fanout, the mock RDMA
-writer, and the byte-equivalence and layer-pipelining harnesses are implemented
-and passing over Soft-RoCE (`rxe0` on `lo`, GID index 1). Real RDMA writes land
-in L1 byte-identically, and a layer is provably consumable while later layers
-are still absent. A fetch from a real Aerospike server has run over Soft-RoCE
-and over EFA/SRD (A8), and A7's receive question is answered on EFA. What
-remains unproven is overlap against a server that replies before its writes
-finish, and any multi-node fetch; see
-[What is not proven yet](#what-is-not-proven-yet).
+Status: **reworked onto kv-sink batch reads, not yet run against a server.**
+LMCache now reads layerwise fetches through the kv-sink fork of the Aerospike
+C client (`sriram/kv-sink-batch-prio` in `aerospike-client-c-kvsink`) against
+the matching server branch (`sriram/kv-sink-batch-prio` in
+`aerospike-server`). The client owns the RDMA endpoint; LMCache registers its
+L1 windows once as a sink and issues ordinary batch reads whose rows name a
+destination in them. The bookkeeping (`SinkFetchTable`) and every Python
+layer above it are covered without a device. The end-to-end suite (A8) has
+been updated for this protocol but has not been re-run yet; see
+[What is proven](#what-is-proven-and-what-is-not).
 
-This document covers the `kv-sink` wire protocol, the handshake ordering, the
-opt-in build profile, the registration-scope decision, and how to reproduce a
-Soft-RoCE test environment from scratch.
+This document covers the kv-sink protocol as LMCache uses it, the
+registration-scope decision, the L1 invariants that keep RDMA writes safe,
+the opt-in build, and how to reproduce a test setup.
 
 ## Why
 
 In MP mode an L2 adapter fetches opaque bytes from a remote store into a
 caller-provided pinned host buffer ("L1"), which is then copied to GPU paged KV
-blocks. Today those bytes travel Aerospike server → Aerospike client library
-buffer → L1, so every byte is copied once more than it needs to be. If the
-Aerospike server can RDMA-WRITE straight into L1, that copy disappears and the
-client library leaves the data path entirely.
+blocks. Without RDMA those bytes travel Aerospike server → Aerospike client
+library buffer → L1, so every byte is copied once more than it needs to be. If
+the Aerospike server can RDMA-write straight into L1, that copy disappears and
+the client library leaves the data path entirely.
 
 **Be precise about what that is worth, because the obvious answer is wrong.**
 The M0 baseline measured the existing TCP path at 98% of 100 GbE line rate, so
@@ -34,152 +34,118 @@ for RDMA is the other two axes:
 - **Per-operation latency.** Scattered small reads pay the round-trip and the
   library's per-record cost repeatedly. The M0 sweep saw a single object reach
   only 1.88 GB/s against the 12.2 GB/s NIC ceiling — that gap, not the ceiling,
-  is the target. CacheBlend's sparse leg is the extreme case and is the
-  benchmark most likely to show RDMA's value.
+  is the target.
 
 A gate written against aggregate GB/s will therefore show RDMA achieving
 nothing while being perfectly correct. See AIE-90.
 
+The layerwise loader adds a third reason: a fetch that reports each layer as
+it lands lets vLLM start attention on layer 0 while later layers are still on
+the wire.
+
 ## Protocol
 
-The control plane is an **Aerospike info command**, not the batch-read path.
-Both operations are `asinfo` commands with `key=value;`-delimited requests and
-replies. `csrc/storage_backends/aerospike/connector.cpp` already speaks this
-idiom in `discover_record_cap()`, and the RDMA path follows it.
+Two client calls, both in the kv-sink client (`aerospike/as_sink.h`,
+`aerospike/aerospike_batch.h`):
 
-### Register (once, per node)
+```c
+// Once, at startup: register [buf, buf + size) with every node.
+as_sink_config cfg;
+as_sink_config_init(&cfg);
+cfg.transport = "rc";          // or "srd"; LMCache never uses "local"
+cfg.device = "rxe0";           // NULL: first device
+cfg.gid_index = 1;
+aerospike_sink_create(&as, &err, l1_base, window_count * window_bytes,
+                      &cfg, &sink);
 
-```text
-kv-sink-register:transport=verbs;gid=<32 hex>;qpn=<u32>;psn=<u32>;
-                 rkey=<u32>;addr=<u64>;size=<usize>
+// Per layer: a batch read whose rows carry a destination.
+as_batch_read_record* row = as_batch_read_reserve(records);
+as_key_init_str(&row->key, ns, set, "<cache key>|s|3");
+row->read_all_bins = true;
+row->sink = sink;
+row->sink_offset = slab_offset;   // relative to l1_base
+row->sink_length = record_bytes;  // must equal the value's size
+row->sink_priority = layer_ordinal;
+row->result = AEROSPIKE_NO_RESPONSE;
+aerospike_batch_read(&as, &err, &policy, records);
 ```
 
-Reply:
+Four properties drive the design:
 
-```text
-region=4;transport=verbs;qp=srd;qpn=49152;psn=..;gid=..;max_sinks=256
-```
+1. **The client chooses the destination offsets.** LMCache's plan picks every
+   `sink_offset`; the server knows nothing about transformer layers.
+2. **A row's result is its completion.** The server RDMA-writes the value into
+   the sink and answers the row only once that write has completed. So
+   `AEROSPIKE_OK` on a row means its bytes are in L1, and a batch per layer
+   gives a per-layer signal with no immediates, no receive queue, and no
+   completion polling on the client.
+3. **Rows are routed like any batch read.** The client sends each row to its
+   record's partition master, so a cluster of any size is served, and the
+   node a plan names is nominal.
+4. **Priority orders placement per sink.** Each node queues sink writes per
+   region by `sink_priority` (lower first) and round-robins across regions.
+   LMCache sets it to the layer's ordinal in the plan, so every layer is in
+   flight at once but layer 0 is placed first.
 
-`max_sinks` is the maximum number of sinks this node accepts in one
-`kv-sink-fetch-pipelined` command. It is **per node**: a cluster mid-upgrade
-may advertise different values, and the client chunks each node's fanout
-against that node's own limit, never a cluster-wide minimum. When the token is
-absent — servers built before the field existed — the client assumes
-**256**, the historical fixed parse buffer on the server, rather than treating
-omission as unlimited. An unlimited default would rebuild the single oversized
-command every node already rejects.
+The sink wire format (field 46 on each batch row: region, offset, length,
+priority) and the per-node registration (`kv-sink-register`,
+`kv-sink-touch`, `kv-sink-deregister`) are the client's business; LMCache
+never builds an info command.
 
-The reply hands back a `region` handle **scoped to the node that answered**, so
-registration is inherently per-node. `aerospike_info_any()` sends to an
-arbitrary node and is therefore the wrong call here: the code must fan out with
-the node-specific info call and hold **one region handle per node**. The server
-PoC is single-node, but this is exactly the seam where the design becomes a
-cluster, and retrofitting it later is painful.
+**Failure modes a row can report**, all of which fail the slot and make its
+layer unservable:
 
-`region` is connection-lifetime state. It must be invalidated when the slab is
-re-registered or a node restarts; a stale region handle points at memory the
-server believes it may still write.
-
-### Fetch (hot path)
-
-```text
-kv-sink-fetch:namespace=<ns>;region=<id>;sinks=<digest>@<off>:<len>,...
-```
-
-Reply:
-
-```text
-n=16;ok=16;bytes=16777216;in-place=16;results=ok,ok,...
-```
-
-Four properties of this protocol drive the whole design:
-
-1. **The client chooses the destination offsets.** `<off>` is picked by
-   LMCache and never by the server. The server needs to know nothing about
-   transformer layers.
-2. **The info reply *is* the completion.** The server polls its own send
-   completion queue until every RDMA write has landed, and only then replies.
-   LMCache posts no work request and polls no CQ. The operation is synchronous
-   and all-or-nothing.
-3. **LMCache is a pure target.** It never calls `ibv_post_send`.
-4. **There is no per-layer signal**, which is why layer-by-layer pipelining
-   cannot be built on this protocol as it stands.
-
-## Handshake ordering
-
-The ordering is forced by the protocol and is easy to get wrong, because the
-register command must carry our `qpn`/`psn` while the peer's `gid`/`qpn` only
-arrive in its reply:
-
-```text
-1. ibv_open_device / ibv_alloc_pd / ibv_query_gid      -> our gid
-2. ibv_reg_mr over each L1 window (LOCAL_WRITE|REMOTE_WRITE) -> our rkeys
-3. ibv_create_qp (RC) or efadv_create_qp_ex (SRD)      -> our qpn
-   ibv_modify_qp -> INIT                                  (qkey on SRD)
-4. send "kv-sink-register" with gid, qpn, psn, rkey, addr, size
-5. parse reply -> region id, peer gid, peer qpn, peer psn
-6. ibv_modify_qp -> RTR, then -> RTS
-7. ibv_create_ah for the server peer                   <-- do not skip
-```
-
-Step 7 looks like dead code: LMCache only ever receives, so why build an
-address handle for the sender? Because the peer relationship is bidirectional
-at the device level. Without an AH for the server, **the server's write fails
-with `UNKNOWN_PEER`** — and that error surfaces on the *server*, which makes it
-close to invisible from the receiving side. This is called out explicitly in
-`rdma_context.cpp` for the same reason.
-
-`RdmaContext` splits `create_queue_pair()` (steps 3) from `connect_peer()`
-(steps 6–7) precisely so the register command can be sent in between.
+| Row result | Meaning |
+|---|---|
+| `AEROSPIKE_ERR_RECORD_NOT_FOUND` | The record is gone (evicted, expired, never written). |
+| `AEROSPIKE_ERR_INCOMPATIBLE_TYPE` | Not a single-blob-bin record of at most 2 MiB (`KV_SINK_MAX_VALUE_SZ`); see [Records a sink can read](#records-a-sink-can-read). |
+| a length mismatch error | `sink_length` differs from the stored value's size; nothing is written. |
+| `AEROSPIKE_ERR_TIMEOUT` / `AEROSPIKE_NO_RESPONSE` | The batch did not answer the row by `fetch_timeout_seconds`, or the server dropped the queued write at that deadline. |
+| `AEROSPIKE_ERR_UNSUPPORTED_FEATURE` | Strong-consistency namespace or a filter expression; the server refuses sink reads there. |
+| `AEROSPIKE_ERR_SINK_UNKNOWN_REGION` (220) | That node no longer knows the sink; see [Sink refresh](#sink-refresh). |
 
 ## Registration scope: bounded windows
 
-**Decision: a pool of bounded memory-region windows, pre-registered at init,
-one leased per in-flight request.** Implemented as `RdmaWindowPlan` in
+**Decision: a pool of bounded windows, pre-registered at init, one leased per
+in-flight request.** Implemented as `RdmaWindowPlan` in
 `lmcache/v1/distributed/l2_adapters/rdma_registration.py` and
-`RdmaContext::register_l1` in `csrc/storage_backends/aerospike/rdma_context.cpp`.
+`AerospikeSinkFetchDriver::initialize` in
+`csrc/storage_backends/aerospike/connector_sink_fetch.cpp`.
 
 `get_l1_memory_desc()` describes the *entire* L1 slab, so the obvious
-implementation registers it once and publishes one slab-wide rkey. That was
-rejected. A slab-wide rkey lets any Aerospike node write anywhere in the KV
-cache, so a bad destination offset, or a late write from a request that was
-already abandoned, silently overwrites an unrelated request's KV. Corrupted KV
-**does not crash** — it produces confidently wrong tokens, which is the hardest
-possible failure to attribute and would likely be blamed on the model.
+implementation registers it once. That was rejected. A slab-wide registration
+lets any Aerospike node write anywhere in the KV cache, so a bad destination
+offset, or a late write from a request that was already abandoned, silently
+overwrites an unrelated request's KV. Corrupted KV **does not crash** — it
+produces confidently wrong tokens, which is the hardest possible failure to
+attribute and would likely be blamed on the model.
 
 Bounded windows do not make misdirected writes impossible; they bound the blast
 radius to one request's own buffer, which keeps the failure attributable. The
 cost is a fixed `window_bytes` that must be large enough for the largest single
 fetch, and `window_count` bounds how many retrieves' data can stay resident.
 
-**The window range is one registration, and the client keeps each request in
-its window.** An Aerospike server holds one `(rkey, addr, size)` per
-`kv-sink-register`, and each registration costs it a queue pair. It also
-allows only 16 registrations in total, across all clients (`MAX_REGIONS` in
-`as/src/base/kv_sink.c` on the server branch). A registration per window would
-use half of a node's 16 with 8 windows. So `register_l1` registers
-`[0, window_count × window_bytes)` of the slab as one memory region, and every
-node gets that range once.
+**The window range is one sink, and the client keeps each request in its
+window.** `initialize` registers `[0, window_count × window_bytes)` of the
+slab as one sink, so every node gets that range once. A sink per window would
+cost each node a registration and, on RC, a queue pair per window.
 
 The bound moves to the client and to L1:
 
-- L1 allocates nothing but window objects in the range, so the server's own
-  bounds check keeps every write out of general L1.
-- `PipelinedFetchSession` refuses a request whose slots don't all fall inside
+- L1 allocates nothing but window objects in the range, and the server
+  bounds-checks every row against the sink's size, so no write reaches
+  general L1.
+- `SinkFetchTable::begin` refuses a request whose slots don't all fall inside
   one window: the window of its first slot. Plan offsets are slab offsets,
   which equal `memory_obj.meta.address`.
 - A late write from an abandoned fetch still targets that fetch's own window,
   which the leaser quarantines.
 
-Compared with a registration per window, what's lost is protection against a
-*server* bug that writes outside the offsets it was sent. A per-window server
-check (`kv-sink-add-window` plus `window=<i>` on fetch) can restore that
-without a queue pair per window.
+What's lost against a sink per window is protection against a *server* bug
+that writes outside the offsets it was sent.
 
-Either way, registration happens **exactly once, at initialization**.
-`ibv_reg_mr` is expensive enough to erase the entire benefit of the RDMA path,
-so `register_l1()` refuses a second call rather than silently re-registering
-and invalidating rkeys already published to nodes.
+Registration happens **exactly once, at initialization**: `ibv_reg_mr` is
+expensive enough to erase the benefit of the RDMA path.
 
 ## The write-lock TTL invariant (enforced at startup)
 
@@ -199,44 +165,40 @@ for the whole round trip.** From `lmcache/v1/distributed/l1_manager.py`:
    `finish_write_and_reserve_read(read_locks=...)`.
 
 So the whole Aerospike round trip, DMA included, already sits inside the
-write-locked window. No new lock and no separate window lifetime are needed for
-the non-pipelined path. Sriram holding the *record* lock across the DMA is the
-mirror of the same guarantee at the other end.
+write-locked window. The server holding the *record* lock while it copies the
+value into its staging slot is the mirror of the same guarantee at the other
+end.
 
 **But `write_lock` is a `TTLLock`, not a plain lock.** It is constructed as
 `TTLLock(self._write_ttl_seconds)`, and `write_ttl_seconds` defaults to **600s**
 (`lmcache/v1/distributed/config.py`), operator-settable via
 `--l1-write-ttl-seconds`. If a fetch outlives that TTL the write lock expires
 **silently** and the buffer becomes readable and evictable while a remote node
-may still be writing into it. L1Manager only warns — *"potential inconsistent
-data might be read"* / *"potential inconsistent data might be written"*.
+may still be writing into it. L1Manager only warns.
 
 Hence the invariant:
 
 > **The RDMA fetch timeout must be strictly less than `write_ttl_seconds`, and a
-> window lease must be released or generation-bumped no later than write-lock
+> window lease must be released or quarantined no later than write-lock
 > expiry.**
 
 This is checked **at startup**, not per fetch, by
 `validate_fetch_timeout_against_write_ttl` in `rdma_registration.py`, called
 from `StorageManager._build_l2_adapter` — the one place where both the adapter
 config and `L1ManagerConfig` are in scope. It raises `ValueError` naming both
-knobs and both values. Two config values in two different files having to agree
-is exactly the kind of footgun that should fail loudly on boot.
+knobs and both values.
 
 `rdma.fetch_timeout_seconds` defaults to 30s, comfortably under the 600s TTL.
+It is also every layer batch's total and socket timeout, with no retries, so
+LMCache gives up on a row no later than the quarantine assumes.
 
 ### Allocator constraint
 
 A slab that grows or moves after `ibv_reg_mr` leaves the remote writer holding
-an rkey for memory LMCache no longer owns. Rather than have the adapter
-introspect allocator internals, `L1MemoryDesc` now carries a
+an rkey for memory LMCache no longer owns. `L1MemoryDesc` carries a
 `MemoryGrowthPolicy`: `FIXED` for `MixedMemoryAllocator`, `GROWABLE` for
 `LazyMemoryAllocator`, which can expand its slab. Enabling RDMA with a
 `GROWABLE` slab raises `ValueError` naming the hazard and the fix.
-
-This replaces the standing `TODO(ApostaC)` in `l1_memory_manager.py` with an
-enforced contract instead of an untested assumption.
 
 ### The windows are reserved outside the general allocator
 
@@ -304,7 +266,10 @@ leaser.release(lease, FetchOutcome.FINISHED)   # or ABANDONED on any other exit
   longest ago whose objects are all unlocked, reclaimed with
   `reclaim_rdma_window`. Reads after the fetch don't refresh that order.
 - **Quarantine.** A window released as `ABANDONED` isn't leased again for
-  `fetch_timeout_seconds`, because writes already on the wire can still land.
+  `fetch_timeout_seconds`. This is what makes an abandoned fetch safe: the
+  server fails a queued sink write once the row's deadline (the batch's
+  `total_timeout`, set to the fetch timeout) has passed, but a write already
+  posted to the NIC by then still lands, shortly after LMCache gave up on it.
   `FINISHED` means every layer became resident, so the window can be reused
   at once.
 - **One lease per window.** The native client runs one fetch per window (W3),
@@ -340,85 +305,138 @@ lease.release(LeaseOutcome.ABANDONED)      # abort_write; window quarantined,
 ```
 
 - **Built by the storage manager.** `StorageManager.pipelined_window_placer`
-  (Track C) builds an `RdmaWindowPlacer` over its own L1, on the pipelined
-  adapter's node, retaining objects as the prefetch policy's
-  `select_l1_retentions` decides, after running `check_window_holds_request`.
-  It raises `LayerwiseContractError` when no adapter enables RDMA reception
-  or none has a ready pipelined path, and retrieve then loads whole objects.
-  Every placer shares the storage manager's one `RdmaWindowLeaser`, because
-  the windows belong to L1: two leasers would hand out the same window
-  twice, and a window quarantined through one placer must stay quarantined
-  for the others. The leaser is built with the first RDMA-enabled adapter's
-  config, so its quarantine is that adapter's `fetch_timeout_seconds`.
+  builds an `RdmaWindowPlacer` over its own L1, retaining objects as the
+  prefetch policy's `select_l1_retentions` decides, after running
+  `check_window_holds_request`. It raises `LayerwiseContractError` when no
+  adapter enables RDMA reception or none has a ready pipelined path, and
+  retrieve then loads whole objects. Every placer shares the storage
+  manager's one `RdmaWindowLeaser`, because the windows belong to L1.
 - **Retention, and no write-back.** Fetched objects follow the prefetch
-  policy, as today's whole-object loads do: the ones it doesn't retain are
-  reserved temporary and freed when the lease finishes. `FINISHED` ends the
-  writes with `finish_write_and_reserve_read` and then `finish_read`, never
-  plain `finish_write`. For a permanent object, `finish_write` would tell the
-  store controller to store it to L2, which is where it just came from.
-  Since the window is reusable at once, release only after the reader's
-  copies out of it have completed.
+  policy, as whole-object loads do. `FINISHED` ends the writes with
+  `finish_write_and_reserve_read` and then `finish_read`, never plain
+  `finish_write`, which would store the object back to L2. Release only after
+  the reader's copies out of the window have completed.
 - **Size check.** Each object is rounded up to the L1 alignment, as the
   window allocator does, and a total over `window_bytes` raises
-  `PlanTooLargeError` before anything is leased. An object larger than its
-  group's L1 layout raises `ValueError`, since its writes would overrun the
-  object.
-- **Window size at registration.** The windows are carved out of L1 before
-  any layout is known, so `rdma_window_bytes` stays in config.
-  `check_window_holds_request(window_bytes, model, max_pipelined_chunks,
-  align_bytes)` compares it with
-  `model.request_bytes(max_pipelined_chunks, align_bytes)` and raises
-  `ValueError` stating the size needed (L4). The registration wiring calls it.
-  The native driver's own check, that one chunk fits (see
+  `PlanTooLargeError` before anything is leased.
+- **Window size at registration.** `check_window_holds_request(window_bytes,
+  model, max_pipelined_chunks, align_bytes)` raises `ValueError` stating the
+  size needed (L4). The native driver's own check, that one chunk fits (see
   [Sizing `window_bytes`](#sizing-window_bytes)), still decides whether the
   pipelined path is ready at all.
-- **All or nothing.** If L1 refuses any key, for example because it's
-  already cached, every reservation is aborted and the lease is released
-  as `FINISHED`, since no fetch was issued. It then raises
+- **All or nothing.** If L1 refuses any key, every reservation is aborted,
+  the lease is released as `FINISHED` (no fetch was issued), and it raises
   `LayerwiseContractError`.
-- **Offsets are slab offsets** (`memory_obj.meta.address`), because every
-  window is published as one registration starting at slab offset 0. See
-  "P1" in the
-  [questions doc](../../layerwise/track-a-questions-for-track-c.md#p1-every-window-is-published-as-one-registration-decided).
-
-- **Single node only.** `locate` returns the one node the placer was built
-  with. That is correct only on a single-node cluster: an object's records
-  are spread over the nodes by their own digests (N1 in the questions doc).
-  So the native driver refuses to initialize pipelined fetches when the
-  cluster has more than one node. The refusal becomes
-  `pipelined_fetch_init_error`, every fetch falls back, and nothing is
-  registered with any node. The node count is checked only at init.
-  `StorageManager.pipelined_fetch_node_name()` returns that one node, and
-  `pipelined_window_placer` builds the placer with it. It raises
-  `LayerwiseContractError`, carrying the init error, when no adapter has a
-  ready pipelined path.
+- **Offsets are slab offsets** (`memory_obj.meta.address`), because the sink
+  starts at slab offset 0 ("P1" in the
+  [questions doc](../../layerwise/track-a-questions-for-track-c.md#p1-every-window-is-published-as-one-registration-decided)).
+- **The node name is nominal.** `locate` returns the node the placer was built
+  with, `StorageManager.pipelined_fetch_node_name()`: the first node of the
+  cluster. The client routes each row by its own record's digest, so an
+  object whose records are spread over several nodes is still served (N1 in
+  the questions doc is resolved by the transport, not the planner).
 - **The slot limit is known before the fetch.**
-  `StorageManager.pipelined_max_slots_per_request()` returns one window's
-  share of the device's notification depth, the most slots `begin_fetch`
-  accepts before it raises `PlanTooLargeError`. A lookup-time eligibility
-  check compares the request's slot count against it, so an oversized
-  request skips the pipelined path instead of failing at retrieve (F4).
-  It raises `LayerwiseContractError` in the same cases as the node name,
-  and never returns 0: the native client's 0 means "not ready", not
-  "no limit".
-- **A slot lands at its plan offset and nowhere else.** The plan's
-  `SlotPlacement.offset` goes to the wire unchanged as `<digest>@<offset>:<length>`
-  (`kv_sink_client.cpp`), and the session refuses a plan whose slots leave
-  the first slot's window (`validate_slots_in_one_window`). The mock server
-  writes at `client_addr + offset` and refuses anything outside the window,
-  and `rdma_equivalence_test` checks that no bytes land outside the requested
-  offsets. The real server's side is checked by A8
-  (`test_aerospike_pipelined_rdma_integration.py`): every object a real
-  server lands through the placer reads back byte-exact; see
-  [Running A8](#running-a8-against-a-real-server).
+  `StorageManager.pipelined_max_slots_per_request()` returns the most slots
+  `begin_fetch` accepts (`kMaxSlotsPerRequest`, 65 536) before it raises
+  `PlanTooLargeError`, so a lookup-time eligibility check can skip the
+  pipelined path up front (F4). It never returns 0: the native client's 0
+  means "not ready", not "no limit".
 
-Every window is reachable: each node's `kv-sink-register` publishes the whole
-window range, and the session keeps each request inside its window. See
-[Registration scope](#registration-scope-bounded-windows).
+## Pipelined fetch
+
+`AerospikeNativeConnector::issue_pipelined_fetch_by_slots` takes the plan's
+slots as given — `(node_index, record_key, dest_offset, length, layer_id)` —
+and hands them to `AerospikeSinkFetchDriver::issue`. The split between the two
+native classes is deliberate:
+
+| Class | File | Owns |
+|---|---|---|
+| `SinkFetchTable` | `sink_fetch_table.{h,cpp}` | Generations, one fetch per window, per-layer batches, per-slot results, stale-result rejection. No I/O, so it runs in the logic harness. |
+| `AerospikeSinkFetchDriver` | `connector_sink_fetch.{h,cpp}` | The sink, the batch policy, a worker pool issuing the batches, sink refresh, layout validation. |
+
+```text
+issue(slots)
+  └─ table.begin(slots)            validate, pick window, allocate generation
+       -> one LayerBatch per layer, in order of first appearance:
+          {generation, token, layer_id, priority = ordinal, slot_indices}
+  └─ queue the batches, return the generation     (no I/O on this thread)
+
+worker (16 threads)
+  └─ skip the batch if table.is_active(generation, token) is false
+  └─ aerospike_batch_read(rows of that layer, sink fields set)
+  └─ table.on_slot_result(generation, slot, row == AEROSPIKE_OK, token)
+
+poll_layer -> table.is_layer_ready / unservable_layers
+```
+
+- **One batch per layer.** A layer's readiness is decided by its own batch,
+  so the loader can consume layer 0 as soon as its batch returns. Batches run
+  concurrently on the worker pool, and the server places them by priority.
+- **Generations and tokens.** The table allocates a non-zero 16-bit
+  generation per fetch, skipping any still active in another window, and a
+  64-bit token per batch that never repeats. A result must name an active
+  generation *and* a token of that fetch, so a batch still running after its
+  fetch was abandoned can't be credited to the window's next fetch, even
+  after the generation wraps.
+- **Abandon.** `abandon_pipelined_fetch` drops the fetch from the table at
+  once. Its queued batches are skipped; batches already sent run to their
+  timeout and their results are dropped. The server may still write their
+  rows, which is what the leaser's quarantine covers.
+- **Rows are never retried** (`max_retries = 0`), except once after a sink
+  refresh. A retried row could be written after LMCache gave up on it.
+- **Row results are pre-set to `AEROSPIKE_NO_RESPONSE`.** Reserved rows are
+  zeroed and zero is `AEROSPIKE_OK`, so a batch that fails before the client
+  resets its rows must not read as landed.
+
+### Sink refresh
+
+A node that restarts, reclaims a sink unused for its idle timeout
+(`KV_SINK_IDLE_SEC`, default 600 s), never registered it, or dropped it after
+one of its RDMA writes failed, answers that node's rows with
+`AEROSPIKE_ERR_SINK_UNKNOWN_REGION`. Those rows' bytes are not complete, and a
+resend rewrites the same destination. The worker calls `aerospike_sink_refresh`, which re-registers only where the sink
+is missing, and resends those rows once. Concurrent workers share one refresh
+through an epoch counter. A row that fails with 220 again fails its slot.
+
+### Records a sink can read
+
+The server places only single-blob-bin records of at most 2 MiB. LMCache's
+segment records (`<key>|s|<i>`, one bin `b`) qualify, and layer-aligned
+writes cut them per plane under the record cap, so every slot of a sharded
+object is readable. An object small enough to be stored inline in its meta
+record (`<key>|m`, 8+ bins) is refused with `AEROSPIKE_ERR_INCOMPATIBLE_TYPE`,
+its layer is unservable, and the retrieve falls back to a whole-object load.
+With a layout registered this happens only when a whole object group fits
+in one record.
+
+The server applies read-touch to sink rows as to any read. The driver sends
+them with `read_touch_ttl_percent = -1`: a sink fetch reads segments without
+their meta record, and extending only the segments would leave them alive
+after the meta record that indexes them expires.
+
+### Readiness
+
+`is_ready()` requires the sink to exist, layouts to be set, one chunk of each
+layout to fit a window, and the connector not to be closed. When it is false,
+`pipelined_fetch_init_error` says why, and every retrieve loads whole
+objects.
+
+### Close
+
+`AerospikeNativeConnector::close()` calls `shutdown()` before the workers
+stop, because deregistering needs the connected client:
+
+```text
+close()
+  └─ shutdown()
+       ├─ stop the batch workers (queued batches dropped, in-flight ones finish)
+       └─ aerospike_sink_destroy(sink)      deregisters from every node
+  └─ ConnectorBase::close()                 workers stop, client closes
+```
 
 ## Transport-agnostic registration handle
 
-`L1MemoryDesc` gained a `registration: MemoryRegistration` field.
+`L1MemoryDesc` has a `registration: MemoryRegistration` field.
 `MemoryRegistration` carries an opaque `handle` plus a
 `MemoryRegistrationTransport` discriminator (`UNREGISTERED`, `IB_VERBS`,
 `MOONCAKE`, `NIXL`), deliberately **not** named `ib_rkey`, because the same
@@ -428,37 +446,44 @@ struct is published to the Mooncake and NIXL paths. Consumers must check
 `UNREGISTERED_MEMORY` is an explicit sentinel rather than `Optional`/`None`,
 per `docs/coding_standards.md`, so callers never branch on `None`.
 
-Note the direction of travel: LMCache registers memory **locally** and
-publishes the resulting rkey **outward** to the Aerospike server. This is the
-opposite of the Mooncake/NIXL flow, where LMCache hands a base and size to a
-transfer engine that does its own registration.
-
 ## Build profile
 
-Two independent opt-ins, both **default off**, modelled on the Mooncake gating
-in `setup_extensions/storage_backend_profiles/`:
+One opt-in, **default off**, on top of the Aerospike backend:
 
 ```bash
-# Portable RC path. Needs rdma-core / libibverbs-dev headers.
-BUILD_WITH_AEROSPIKE=1 BUILD_WITH_AEROSPIKE_RDMA=1 \
-  pip install -e . --no-build-isolation
+# Build the kv-sink client into .deps/ (needs rdma-core headers, including
+# infiniband/efadv.h) and point the build at it.
+.deps/build_aerospike_client_kvsink.sh
+source .deps/aerospike-client-c.env
 
-# Additionally compile the EFA/SRD path (AWS EFA only; needs libefa).
-BUILD_WITH_AEROSPIKE=1 BUILD_WITH_AEROSPIKE_EFA=1 \
+BUILD_WITH_AEROSPIKE=1 BUILD_WITH_AEROSPIKE_RDMA=1 \
   pip install -e . --no-build-isolation
 ```
 
-`BUILD_WITH_AEROSPIKE_EFA=1` implies RDMA. Optional overrides
-`RDMA_CORE_INCLUDE_DIR` / `RDMA_CORE_LIBRARY_DIR` point at an out-of-tree
-rdma-core.
+The script clones `sriram588/aerospike-client-c-kvsink` at
+`sriram/kv-sink-batch-prio` (override with `AEROSPIKE_CLIENT_REPO` /
+`AEROSPIKE_CLIENT_REF`, or pass an existing checkout), builds it without an
+event library, since the connector uses only the synchronous API, and writes
+`AEROSPIKE_INCLUDE_DIR`, `AEROSPIKE_LIBRARY_DIR`,
+`AEROSPIKE_EVENT_LIB=none` and `LD_LIBRARY_PATH` into the env file.
+
+- The build profile refuses `BUILD_WITH_AEROSPIKE_RDMA=1` when no
+  `aerospike/as_sink.h` is under `AEROSPIKE_INCLUDE_DIR`, naming the script.
+- The extension links `ibverbs` and `efa`, because the client's verbs
+  transport calls both and `libaerospike` does not declare them. The client
+  compiles that transport only when `efadv.h` is present; without it only the
+  same-host `local` transport exists, which LMCache refuses.
+- RC and SRD are chosen at run time by `rdma.transport`, so the legacy
+  `BUILD_WITH_AEROSPIKE_EFA=1` is only a synonym for the RDMA flag.
+- `RDMA_CORE_INCLUDE_DIR` / `RDMA_CORE_LIBRARY_DIR` point at an out-of-tree
+  rdma-core.
 
 A default `pip install -e . --no-build-isolation` adds no `libibverbs`
-dependency, compiles no verbs source, and defines no RDMA macro, so a machine
-with no RDMA hardware is unaffected. `L1RdmaRegistration` is still exported to
-Python on such a build, but with **none of its fields bound** — which is how
+dependency, compiles no sink source, defines no RDMA macro, and works against
+the stock client. `L1RdmaRegistration` is still exported to Python on such a
+build, but with **none of its fields bound** — which is how
 `_build_native_rdma_registration` detects a non-RDMA build and raises a
-`RuntimeError` naming the rebuild flag, instead of failing with an opaque
-`ImportError`.
+`RuntimeError` naming the rebuild flag.
 
 ## Configuration
 
@@ -472,7 +497,7 @@ RDMA is off unless the adapter config asks for it:
     "rdma": {
         "transport": "RC",      # DISABLED (default) | RC | SRD
         "device_name": "rxe0",  # empty selects the first device
-        "gid_index": 0,
+        "gid_index": 1,         # RC: the GID the node addresses us by
         "window_count": 8,      # max concurrent RDMA fetches
         "window_bytes": 8388608,
         "fetch_timeout_seconds": 30.0,  # must be < --l1-write-ttl-seconds
@@ -480,12 +505,13 @@ RDMA is off unless the adapter config asks for it:
 }
 ```
 
-`gid_index` defaults to 0, which is correct on EFA but **not** on Soft-RoCE
-bound to `lo`; see [the GID index trap](#the-gid-index-trap).
+The server must run the same transport, on a device configured with
+`KV_SINK_RDMA_DEVICE` and, where the automatic choice is wrong,
+`KV_SINK_GID_INDEX`. `gid_index` defaults to 0, which is **not** right on
+Soft-RoCE bound to `lo`; see [the GID index trap](#the-gid-index-trap).
 
 `RC` is the portable transport and is the only one Soft-RoCE supports. `SRD`
-exists only on AWS EFA. `fetch_timeout_seconds` is checked against the L1
-write-lock TTL at startup.
+exists only on AWS EFA.
 
 ### Sizing `window_bytes`
 
@@ -514,643 +540,22 @@ The 8 MiB default is too small for either. The windows come out of L1
 (`window_count x window_bytes`), so eight 32 MiB windows take 256 MiB of the
 slab away from general L1.
 
-## Per-node registration fanout
+## Testing
 
-`register_all_nodes` in `kv_sink_fanout.{h,cpp}` registers LMCache on every
-cluster node and records each node's own `region` handle in a `NodeRegistry`.
+### Without a device
 
-**Multi-node queue pairs.** A pipelined request pulls chunks from several
-Aerospike nodes, but every `RDMA_WRITE_WITH_IMM` must land in one readiness
-table on the client. That requires a **shared completion queue** and **one RC
-(or SRD) queue pair per node**, each with its own `qpn`/`psn` published in
-that node's `kv-sink-register` command. Broadcasting a single `qpn` to every
-node leaves at most one remote writer connected; the others fail at the fabric
-with missing immediates and the request hangs. The RdmaContext overload that
-takes `RdmaContext*` creates a dedicated queue pair per node before issuing
-`aerospike_info_node` with that node's endpoint.
-
-**One range per node.** Registration publishes the whole window range, not a
-window, so the register command takes no window index. Which window a request
-uses is decided by its slot offsets, which the session checks against one
-window.
-
-The legacy overload that accepts a single `LocalEndpoint` remains for baseline
-tests that exercise one mock node with `create_queue_pair()` /
-`connect_peer()`.
-
-It is a separate translation unit from `kv_sink_client.{h,cpp}` so the codec
-stays free of any Aerospike SDK dependency and remains trivially unit-testable;
-only the fanout needs `libaerospike`.
-
-Two things the fanout callback forces, both easy to get wrong:
-
-- **The reply string must not be freed.** The SDK documents that for
-  `aerospike_info_foreach` "the caller should not free this string", which is
-  the *opposite* of `aerospike_info_node()` / `aerospike_info_any()`, whose
-  responses the caller does free — as `discover_record_cap()` does. Copying the
-  existing idiom verbatim would have introduced a double free.
-- **The callback crosses a C boundary**, so no exception may escape it. The
-  callback catches everything and reports failures through its `udata`.
-
-Partial success is a real state and is reported rather than thrown: a single
-unreachable node should not disable RDMA cluster-wide, so
-`ClusterRegistrationResult` carries a per-node failure list and the caller
-decides. A cluster-wide failure (for example, a disconnected client) still
-throws.
-
-## Pipelined fetch: signaling and chunking
-
-The baseline protocol above is all-or-nothing. This section covers the
-pipelined variant, which is **prototyped and passing over Soft-RoCE**. The
-aerospike-server branch `feat/kv-sink-fetch-pipelined` implements the command,
-but it still reaps its send completions before replying; see
-[What the prototype proves](#what-the-prototype-proves-and-what-it-does-not).
-
-### EFA actually supports the primitive we need
-
-This was the open question, and the answer is better than expected. Verified
-against `rdma-core`'s EFA provider and the `efadv_query_device` man page:
-
-| Capability | Flag | State |
-|---|---|---|
-| RDMA write | `EFADV_DEVICE_ATTR_CAPS_RDMA_WRITE` (1<<3) | Supported |
-| Write **with immediate** | `ibv_wr_rdma_write_imm`, `IBV_QP_EX_WITH_RDMA_WRITE_WITH_IMM` | Supported |
-| Unsolicited write recv | `EFADV_DEVICE_ATTR_CAPS_UNSOLICITED_WRITE_RECV` (1<<4) | Supported |
-| Atomics | — | **Not** supported |
-| In-order delivery | — | **Not** provided |
-
-Two consequences worth calling out.
-
-**Unsolicited receive is a gift for this design.** Normally each incoming
-write-with-immediate consumes a receive work request, so a pure target has to
-pre-post one per expected notification. EFA can create a queue pair with
-`EFA_CREATE_QP_WITH_UNSOLICITED_WRITE_RECV`, where notifications consume no
-receive work request and the completion is flagged unsolicited. That removes
-the need to size a receive queue against the fetch's slot count. It requires
-an extended CQ, and **peers must set the same QP feature**: A7 measured that
-a mismatch fails every write with `remote invalid request error` after its
-bytes land (see [the SRD result](#a7-result-on-efa-srd)). So it is a joint
-decision with the server.
-
-**EFA exposes write-with-immediate only through the extended verbs API**
-(`ibv_qp_ex` / `ibv_wr_rdma_write_imm`), not through `ibv_post_send` with
-`IBV_WR_RDMA_WRITE_WITH_IMM`. The prototype here uses the legacy path because
-that is what `rxe` supports; the EFA path needs the extended API. This is a
-real porting step, not a flag change.
-
-### Why arrival order cannot be trusted
-
-SRD provides reliable but **out-of-order** delivery. AWS's own `SRD.txt` is
-explicit — "SRD QPs provide out-of-order delivery without segmentation
-support" — and there is no ordering guarantee between any two operations even
-on a single queue pair, because packets are sprayed across up to 64 paths to
-cut tail latency.
-
-So the two obvious tricks are both unsafe on EFA:
-
-- **Write data, then write a completion flag** — the flag can land first.
-- **Write data, then SEND a notification** — the SEND can overtake the writes.
-
-Both work perfectly on Soft-RoCE, which is RC and therefore ordered. That is
-the trap: an ordering-dependent design passes every local test and corrupts
-data on EFA.
-
-The design consequence is that **readiness is a set, not a high-water mark**.
-Layer 5 can complete before layer 2. `LayerReadiness` in
-`csrc/storage_backends/aerospike/layer_pipeline.h` models it that way, and
-`rdma_pipeline_test` asserts it by pushing layers 3, 2, 1 in that order and
-requiring that layer 3 reports ready while layer 1 does not. vLLM consumes
-layers in order and asks "is layer *i* ready?", which a set answers directly.
-
-### The two levels of chunking
-
-"How do we chunk keys for the layers" is really two questions with different
-owners.
-
-**Level 1: layers to Aerospike records.** This is Aerospike-side sharding
-policy. Today a chunk is one logical payload split into `|s|<i>` segments
-sized to the record cap, and those boundaries are *arbitrary* with respect to
-layers. For pipelining, segment boundaries should **align to layer
-boundaries**, so a record holds whole layers or a layer spans an integral
-number of records. Otherwise one record straddles two layers, neither layer
-completes until it lands, and the first layer is gated on data belonging to
-the second.
-
-This is where the layout derivation from `lmcache/v1/kv_layer_groups.py`
-(`group_layers_by_identity`, `_detect_object_groups`) is genuinely needed —
-not as an addition to the L2 interface, which is why AIE-89 was deferred, but
-as input to sharding and offset computation.
-
-**Implemented**, as plane-aligned sharding: a record is sized from the K/V
-plane rather than from the record cap, so it belongs to exactly one layer. See
-*The alignment hazard* in
-[`layerwise_transfer_data_model.md`](layerwise_transfer_data_model.md). One
-consequence is worth noting here, because it retires a tuning exercise: since
-the record size is now derived from the plane, the record cap stops being a
-knob for any payload whose planes already fit under it, so the M0 crossover
-around 8 MiB no longer needs to be traded off against alignment. The two are
-not in tension after all — and M0 measured smaller records as *faster* at a
-fixed object size, so the extra records this rule produces may be a small gain
-rather than a cost.
-
-**Level 2: a layer to RDMA writes ("slots").** A layer can exceed one RDMA
-write. `efadv_query_device` reports `max_rdma_size`, and the leased window
-bounds it further, so a layer becomes N writes. Each write is a *slot* — one
-piece of one layer — and each carries its own immediate. A layer is ready only
-when every one of its slots has landed, which the harness checks with
-two-piece layers rather than the trivial one-piece case.
-
-### What the 32 bits carry
-
-RDMA immediate data is exactly 32 bits, split as:
-
-```text
- 31            16 15             0
-+----------------+----------------+
-|   generation   |   slot index   |
-+----------------+----------------+
-```
-
-The immediate names a **slot index into a plan LMCache built itself**, not a
-layer id. Because LMCache chooses every destination offset, a slot index
-recovers the layer, offset, and length without the server knowing anything
-about transformer layers — which preserves the property that makes this
-protocol pleasant: the server never reasons about model structure.
-
-The **generation** exists because a write from a fetch that already timed out
-can land after its window has been leased to a different request. The rkey is
-still valid, so the NIC will perform that write. Tagging each fetch and
-rejecting mismatched immediates stops LMCache from *acting* on a late writer.
-It does not prevent the stray write itself — only re-registration does that —
-and that gap is still open. See `ArrivalStatus::kStaleGeneration`.
-
-Generation `0` is reserved and never allocated to a live request
-(`kNoGeneration` in `pipelined_fetch_session.h`, matching `NO_GENERATION` in
-`lmcache/v1/layerwise/contract.py`). A zero-initialised or defaulted
-generation therefore fails to match any fetch instead of aliasing one — and
-`is_layer_ready`'s `request_generation = 0` "skip the check" default stays
-unambiguous, which it would not be if the first request of a process were
-handed generation 0. The counter skips 0 on wrap for the same reason.
-
-16 bits of slot index caps a request at 65536 slots. That is per *request* and
-not per fetch command, since a request spans every participating chunk:
-`chunks × layers × kv_size × pieces_per_plane`. An 80-layer model over 100
-chunks at `kv_size = 2` and one piece per plane is 16,000 — comfortable, but a
-4× margin rather than a 4000× one.
-
-### Wire format for a pipelined fetch
-
-**Status: the client side is implemented; the server side is implemented on
-`feat/kv-sink-fetch-pipelined` except requirement 3 (it fences before
-replying).** The
-command builder, reply parser and declined-write handling live in
-`kv_sink_client.h` and `layer_pipeline.h`. `PipelinedFetchSession` in
-`pipelined_fetch_session.{h,cpp}` is the **implemented** driver that ties
-them together: it allocates a per-request generation, builds a `RequestPlan`
-from the caller's slots (`begin_request_from_slots`), fans out one or more `kv-sink-fetch-pipelined` commands per
-node (each carrying at most that node's advertised `max_sinks`), feeds declined
-slots from each reply into `LayerReadiness::note_unservable`, and drains
-`RdmaContext::poll_notifications` into the same tracker. It performs no I/O
-itself — the connector issues the info calls and forwards reply strings.
-The connector holds a `PipelinedFetchPool` (`pipelined_fetch_pool.{h,cpp}`)
-of one session per RDMA window, so up to `window_count` fetches run at once;
-see [Concurrent fetches](#concurrent-fetches). `AerospikeNativeConnector` exposes this path only when
-`BUILD_WITH_AEROSPIKE_RDMA` is enabled and `kv-sink-register` has succeeded;
-the TCP get/set path is unchanged otherwise. Python reaches this path only
-through `StorageManager.layer_arrival_source()`: each call returns a new
-`AerospikeLayerArrivalSource` over the native adapter's client, one per
-retrieve, and retrieve runs `LayerArrivalPump(source, sink).run(plan)` over
-it. The pump begins, polls
-and releases the fetch, so the storage manager and the adapters have no
-begin or readiness methods of their own. When no adapter has the pipelined
-path, the accessor raises `LayerwiseContractError`, and retrieve falls back
-to a whole-object load as it does for a failed fetch. The test mock implements a server-shaped
-`handle_pipelined_fetch` so the codec is exercised over a real fabric; the
-format below is still the contract to agree with the Aerospike server team.
-
-The existing `kv-sink-fetch` cannot express this, because it has no per-write
-identifier and its reply *is* the completion.
-
-A new command rather than a flag on the old one, so a server that does not
-implement it fails the command outright instead of silently performing an
-all-or-nothing fetch that LMCache would then wait on forever:
-
-```text
-kv-sink-fetch-pipelined:namespace=<ns>;region=<id>;gen=<generation>;
-  sinks=<digest>@<off>:<len>#<slot>,...
-```
-
-The only addition per sink is `#<slot>`. The generation is sent **once for the
-command**, not per sink, and the server forms the immediate itself:
-
-```text
-immediate = (gen << 16) | slot
-```
-
-That is deliberate. Every fetch command issued for one request carries the
-same generation, so making it a single field means a server cannot get it
-wrong for an individual write, and it makes the request-scoped invariant
-visible on the wire.
-
-Reply:
-
-```text
-n=64;accepted=62;failed=17,42;bytes=32505856
-```
-
-`accepted` is a count of writes the server has undertaken to perform. **It is
-not a completion.** Completion arrives only as immediates on LMCache's receive
-queue.
-
-Nine requirements, each of which exists because violating it produces a hang
-or bad data rather than an error:
-
-1. **One write per sink, one immediate per write.** The server must not
-   coalesce adjacent sinks into a single larger write, however tempting when
-   their offsets happen to abut. A coalesced write raises one immediate, the
-   other slot never completes, and its layer hangs forever.
-2. **`failed` must name every slot the server will not write**, by slot index.
-   A missing record or a read error that is merely *omitted* from the reply is
-   indistinguishable from a write still in flight, so the layer never reaches
-   its expected count and the request hangs until the deadline. With the slot
-   named, LMCache calls `LayerReadiness::note_unservable`, which marks the slot
-   so its layer can never be reported ready — the layer becomes a recompute,
-   and every other layer of the request still completes and is still
-   pipelined. Note the layer is *not* served from the pieces that did arrive:
-   the rest of its buffer holds whatever the window's previous tenant left
-   there.
-3. **Do not fence.** The point of the command is to reply before the writes
-   complete. A server that polls its send queue to completion first has
-   implemented the old command with extra steps. `feat/kv-sink-fetch-pipelined`
-   currently does this: `imm_finish` drains every write of the command before
-   the reply is built.
-4. **Serve in the order given, best effort.** The schedule is layer-major, so
-   the sinks arrive ordered layer 0 first. This is a hint and not a
-   correctness requirement — SRD reorders in flight and independent nodes
-   interleave regardless — but the entire benefit of pipelining is that the
-   earliest layers land first, so a server that reorders freely (by record
-   locality, say) can erase the gain while still being correct.
-5. **Release the record lock per piece**, not across the whole transfer, or
-   concurrent requests for a popular chunk serialise behind each other.
-6. **Never write outside `<off>:<len>`.** LMCache chose every destination and
-   guarantees no two slots of a request overlap; the server must not round,
-   coalesce, or pad. A write past the end lands in another slot's bytes, or
-   outside the registered window.
-7. **Duplicate immediates are safe; missing ones are not.** LMCache
-   distinguishes a duplicate and ignores it, so a retransmit costs nothing. It
-   cannot recover a dropped immediate for a write that did land.
-8. **Do not exceed the slot count in immediates.** LMCache sizes its receive
-   queue from the schedule it built. Extra notifications can exhaust it.
-9. **One sink is one record is one write.** A sink names a record digest, a
-   destination and a length, and nothing else — there is no record-relative
-   source offset — so a sink can only mean "this whole record, there". LMCache
-   therefore sizes slots from the record, not from the device's write limit:
-   the piece size is `plane_segment_bytes(plane, record_cap)`, the same
-   arithmetic the store path used to cut the plane up. A server should never
-   need to split or combine a sink; if a record will not fit in one RDMA
-   write, LMCache refuses to plan the request rather than emitting sinks no
-   server could serve. (The device limit binds only in a pathological config:
-   Aerospike caps a record at 8 MiB, and EFA's `max_rdma_size` is three orders
-   of magnitude above that.)
-
-   Should the format ever need sub-record writes, the extension is a
-   record-relative source offset — `<digest>+<src>@<dst>:<len>#<slot>` — and
-   not silent splitting on either side.
-
-On the LMCache side the schedule comes from the Python `LayerFetchPlan`
-(`lmcache/v1/layerwise/`). It walks (chunk, layer, K/V plane, record) and
-produces exactly these sinks, layer-major, with the offsets already resolved
-against the leased window. `SlotPlanner` in `slot_planner.h` does the same
-arithmetic in C++. Nothing in the fetch path uses it, but
-`test_slot_plan_parity.py` diffs the two planners and resolves each slot
-against the writer's shard plan, so a drift between them fails a test. Each
-slot names its own node, so the session sends each node only the slots whose
-records it holds, while the slot indices stay in the request's numbering.
-Sinks for one node are sorted by slot (layer-major order from the plan) and sliced into
-segments of at most `max_sinks_per_command`; the first command holds the
-earliest slots so the server still sees low layers first across the sequence.
-`build_pipelined_fetch_command` refuses a sink list with a repeated slot index,
-which is the mistake that per-fetch numbering would produce.
-
-#### Multiple commands per node vs splitting a request
-
-**Status: implemented in the client.**
-
-When a node owns more sinks than its advertised `max_sinks`, the session emits
-`ceil(count / max_sinks)` pipelined commands for that node alone. This is safe
-in a way that splitting the **request** would not be: slot indices and the
-generation in each immediate are scoped to one request, so every command for
-that request carries the **same** `gen`, and `LayerReadiness` cannot tell — and
-does not need to know — how many commands delivered the slots that filled a
-layer. Splitting a request would require several generations, several readiness
-tables, and a cross-request rule before a layer may be consumed; none of that
-exists on the wire or in the vLLM integration, and reporting a layer ready while
-part of it is still in flight on another sub-request is exactly the failure this
-design exists to prevent.
-
-Reply accounting is **per command**: each acknowledgement is checked against the
-sinks that specific command carried (`accepted + failed == n`, and `n` matches
-the command), not against every sink the node owns in the request. A partial
-failure across commands for one node — the first command accepted, the second
-rejected outright — marks the second command's slots via `note_unservable` so
-the request reaches a defined state instead of waiting forever on writes nobody
-will perform.
-
-#### Receive queue depth and device limits
-
-**Status: implemented in the client. On EFA/SRD, A7 measured that immediates
-consume receives as on RC (see [the SRD result](#a7-result-on-efa-srd)); the
-client's queue pair has not run on EFA yet.**
-
-On the RC path each `RDMA_WRITE_WITH_IMM` consumes one posted receive work
-request, so the queue pair's `max_recv_wr` must be at least the slot count of
-the largest request LMCache will plan. `RdmaContext` queries `ibv_query_device`
-when the device is opened and records `max_qp_wr` and `max_cqe` (entries per
-completion queue; `max_cq` is the number of queues, and Soft-RoCE reports
-1,048,576 of those but only 32,767 entries each). At init,
-`desired_notification_depth` asks for `kMaxSlotsPerRequest` (65536, the
-16-bit slot index) per window, or the window's byte count when that is
-smaller, and `enable_layer_notifications()` clamps it to those limits, logs
-the device-reported numbers next to the requested and effective depths, and
-sizes both the completion queue and the receive queue to the effective value.
-The window and record cap are not a bound: a slot is one plane piece of one
-layer, often far smaller than the record cap (the A8 test's 64 KiB window
-holds 28 slots of 2–4 KiB each under a 960 KiB cap), and the model's layout
-arrives only after the queue pair exists. Receives carry no buffer, so the
-extra depth costs only queue and completion entries. That depth is shared by every window
-(see [Concurrent fetches](#concurrent-fetches)), so each fetch gets
-`effective / window_count` slots.
-`PipelinedFetchSession::begin_request_from_slots` rejects a plan whose `slot_count()` exceeds its share with an error
-that names both counts and tells the operator to use fewer chunks per request,
-raise the record cap so each plane needs fewer pieces, or choose hardware with a
-higher `max_recv_wr`.
-
-A request whose plan exceeds the device-derived limit is **not** split into
-several smaller requests. Slot indices and the generation in each immediate are
-scoped to one request; `LayerReadiness` counts arrivals against a single plan.
-Splitting would require several generations, several readiness tables, and a
-rule that a layer is consumable only when every sub-request's pieces have
-landed — none of which exists in the wire contract or the vLLM integration
-today. Reporting a layer ready while part of it is still in flight on another
-sub-request is exactly the failure this design exists to prevent, so oversize
-plans fail loudly at `begin_request_from_slots` instead.
-
-**How to measure it (A7):** `tests/v1/distributed/rdma/csrc/efa_imm_probe.cpp`
-is a standalone probe that needs only libibverbs. What an EFA instance needs
-before it can run is in [rdma_testing_on_efa.md](rdma_testing_on_efa.md). A sender and a receiver
-queue pair on one device run these scenarios:
-
-- `fits`: 8 receives posted for 8 write-with-immediates, as a sanity check.
-- `starved`: 4 receives posted for 8 writes, with infinite RNR retry. After
-  `--wait-ms` (default 1000) the probe posts the 4 missing receives and
-  watches again. This is the A7 question.
-- `starved_no_retry`: 0 receives, 1 write, `rnr_retry 0`. It shows what the
-  writer sees.
-- With `--unsolicited` only: `unsolicited`, 0 receives and 8 writes with the
-  unsolicited-write-receive flag on both queue pairs; and
-  `unsolicited_receiver_only`, the same with the flag on the receiver only.
-
-For each scenario it reports receive completions before and after the
-repost, sender errors, and which slots' bytes landed. On an EFA instance
-with RDMA write:
+| Test | Covers |
+|---|---|
+| `tests/v1/distributed/rdma/test_sink_fetch_table.py` | `SinkFetchTable`: batches per layer in plan order, readiness, unservable layers, one fetch per window, malformed plans, stale results after generation wrap. |
+| `tests/v1/distributed/rdma/test_slot_plan_parity.py` | The Python planner and `slot_planner.h` produce the same slots in the same order. |
+| `tests/v1/layerwise/test_arrival_source_conformance.py` and the other `aerospike_harness` users | `AerospikeLayerArrivalSource` and `NativePlanIssuer` over the real table, through the fabric-free `FabricFreeConnector` (`make -C tests/v1/distributed/rdma pyharness`). |
 
 ```bash
-make -C tests/v1/distributed/rdma efa-probe EFA=1
-tests/v1/distributed/rdma/build/efa_imm_probe_efa <efa-device> 0 --transport srd
-# with rdma-core new enough to declare the unsolicited write-receive API:
-tests/v1/distributed/rdma/build/efa_imm_probe_efa <efa-device> 0 --transport srd --unsolicited
+make -C tests/v1/distributed/rdma logic-test
+pytest -xvs tests/v1/distributed/rdma tests/v1/layerwise
 ```
 
-The RC baseline over Soft-RoCE, which `make test` also runs with
-`--expect-consumes`:
-
-```text
-RESULT transport=rc scenario=starved posted=4 writes=8 rnr_retry=7 recv_before_repost=4 recv_after_repost=4 ... send_error=0 ... landed_before_repost=4 landed_final=8
-RESULT transport=rc scenario=starved_no_retry posted=0 writes=1 rnr_retry=0 ... send_error=1 first_send_error="RNR retry counter exceeded" ... landed_final=0
-VERDICT transport=rc consumes_recv_wr=yes data_without_notification=no unsolicited_works=untested fits_clean=1
-```
-
-So on RC each immediate consumes a receive. A write with no receive posted
-stalls, lands no bytes, and resumes once a receive is posted; with a finite
-retry count it fails the writer. Reading the SRD run:
-
-| VERDICT | Meaning for the client |
-|---|---|
-| `consumes_recv_wr=yes` | Same as RC: the depth derived from the plan and clamped to `max_qp_wr` stays binding. |
-| `consumes_recv_wr=no` | Immediates need no posted receive. The clamp becomes a conservative no-op. |
-| `data_without_notification=yes` | Bytes landed with no completion. A starved slot would never report and its layer would wait for the fetch timeout. The receive queue must never run short, or the wire contract needs a handshake. |
-| `consumes_recv_wr=unclear` | Read the RESULT lines. For example, an out-of-range or repeated immediate sets `bad_immediate=1`. |
-| `unsolicited_works=yes` | With the flag on both queue pairs, every immediate completed with no receive posted. |
-
-The probe exits 2 when the device can't run it: not an EFA device, no RDMA
-write capability, or `--unsolicited` on a build whose `efadv.h` lacks that
-API. rdma-core 50, as shipped with Ubuntu 24.04, lacks it.
-
-##### A7 result on EFA (SRD)
-
-Measured on 2026-09-29 on a `g6.8xlarge` in `us-west-2b`. The device is EFA
-v2 (PCI ID `1d0f:efa1`, the generation `p5` uses), with EFA driver 3.3.0,
-rdma-core 64 from the AWS EFA installer, and kernel 7.0.0-1013-aws. The
-device reports `device_caps=0x3f rdma_write=1 rnr_retry=1
-unsolicited_write_recv=1 max_rq_wr=32768`. Two runs gave identical output:
-
-```text
-RESULT transport=srd scenario=starved posted=4 writes=8 rnr_retry=7 recv_before_repost=4 recv_after_repost=4 ... send_ok=8 send_error=0 ... landed_before_repost=8 landed_final=8
-RESULT transport=srd scenario=starved_no_retry posted=0 writes=1 rnr_retry=0 ... send_error=1 first_send_error="RNR retry counter exceeded" ... landed_final=1
-RESULT transport=srd scenario=unsolicited posted=0 writes=8 rnr_retry=7 recv_before_repost=8 ... recv_unsolicited=8 send_ok=8 send_error=0 ... landed_final=8
-RESULT transport=srd scenario=unsolicited_receiver_only posted=0 writes=8 rnr_retry=7 recv_before_repost=0 recv_after_repost=0 ... send_error=8 first_send_error="remote invalid request error" ... landed_final=8
-VERDICT transport=srd consumes_recv_wr=yes data_without_notification=yes unsolicited_works=yes fits_clean=1
-```
-
-What it means:
-
-- **Each immediate consumes one posted receive, as on RC.** The depth sizing
-  and the per-fetch slot share above stay binding on SRD, and no wire change
-  is needed.
-- **SRD lands the bytes before a receive exists; RC does not.** With
-  infinite retry, the notification waits for a receive and then arrives, so
-  nothing is lost. With a finite retry count, the bytes stay in the window,
-  the writer fails, and no notification ever arrives. The server uses
-  `rnr_retry 6`, so a client that ran short of receives would see that slot
-  never arrive and fall back after the fetch timeout. The client never lets
-  its receive queue run short (the plan is rejected above its share), and
-  bytes that land late go into a quarantined window, so this needs no new
-  mechanism. It is why the receive queue must never run short.
-- **Unsolicited write-receive works, but only when both ends set it.** With
-  the flag on both queue pairs, 8 immediates complete with no receive
-  posted. With the flag on one side only, the bytes land and every write
-  fails with `remote invalid request error`. Neither the client nor the
-  server sets it today, so they agree. Adopting it would remove receive
-  sizing, but it needs a coordinated change: the server's queue pair, the
-  client's queue pair and completion queue, and a field in
-  `kv-sink-register` so both sides agree.
-
-Not yet covered: the client's own SRD queue pair (`efadv_create_qp_ex`, the
-qkey, the address handle) has not run on EFA. `RdmaContext` clamps the depth
-to `ibv_query_device`'s `max_qp_wr` and does not read EFA's
-`max_rq_wr` (32768 here). Whether the two differ on EFA was not captured.
-Both need the end-to-end step in
-[rdma_testing_on_efa.md](rdma_testing_on_efa.md).
-
-**Device-free verification:** `notification_depth_test` (via `make -C
-tests/v1/distributed/rdma logic-test`) injects device caps and checks clamping,
-the derived slot limit, and `begin_request_from_slots` acceptance/rejection — without
-libibverbs.
-
-**Device-free verification:** `pipelined_fetch_session_test` and
-`pipelined_fetch_issue_test` (via `make -C tests/v1/distributed/rdma
-logic-test`) cover multi-node slot numbering, declined-slot handling, stale
-generations, abandon, transport-level node failures, and layout conversion —
-without libibverbs or a cluster. That is **implemented** logic, not fabric
-proof.
-
-#### Concurrent fetches
-
-**Status: implemented; verified over Soft-RoCE (`rdma_pipeline_test` stage 6).**
-
-`PipelinedFetchPool` holds one `PipelinedFetchSession` per RDMA window, so
-each window runs at most one fetch and up to `window_count` run at once. All
-of them share the node queue pairs and one completion queue of
-`notification_depth` entries.
-
-- **Which window.** A begin goes to the window holding its first slot's
-  offset (`offset / window_bytes`). Python's `RdmaWindowLeaser` has already
-  leased that window to the retrieve, so the session is idle. A busy window
-  refuses the begin, and the source reports it as `LayerwiseContractError`.
-- **Routing arrivals by generation.** Window `w` allocates only generations
-  `g` with `(g - 1) % window_count == w`: it starts at `w + 1`, steps by
-  `window_count`, and wraps back to `w + 1` past 65535, never reaching 0. An
-  immediate `(generation << 16) | slot` therefore names its window without a
-  lookup. Every later call (poll, finish, abandon, unservable) names the
-  fetch by generation. With 8 windows, each window's generations repeat
-  after about 8,192 fetches rather than 65,535; a late write has to survive
-  that many fetches in the same window to be miscounted.
-- **Static split of the completion queue.** Each window's fetch may use at
-  most `notification_depth / window_count` slots, and
-  `desired_notification_depth` asks the device for
-  `window_count ×` one window's slots. A completion queue overflow is fatal
-  to the queue pair, so the split must hold even when every window is busy
-  and a quarantined window's late writes are still arriving. A shared budget
-  would let one large fetch use more, but then the pool would have to know
-  how many late writes an abandoned fetch still has in flight, which it
-  cannot. The quarantined window keeps its share, so its late writes always
-  fit.
-- **Layout changes.** `set_object_group_layouts` rebuilds the pool, so it is
-  refused while any fetch is active. Each window's generation counter
-  carries over, so a rebuilt pool never reissues a generation a late write
-  might still carry.
-
-A retrieve takes its own `AerospikeLayerArrivalSource` from
-`StorageManager.layer_arrival_source()`. A source holds one fetch, and
-several sources share the native client:
-
-```python
-source = storage_manager.layer_arrival_source()   # one per retrieve
-lease = leaser.lease(request_bytes)               # one window per retrieve
-...                                               # place objects in the lease
-LayerArrivalPump(source, sink).run(plan)          # plan offsets in lease window
-```
-
-**Device-free verification:** `pipelined_fetch_pool_test` covers the window
-limits, routing, generation classes and their wrap, the per-window share, a
-late write after abandon, and carrying counters over a rebuild.
-`tests/v1/layerwise/test_aerospike_concurrent_fetches.py` runs two sources
-over one fabric-free native pool with two windows.
-
-#### Beginning a request
-
-`begin_request_from_slots(slots)` is the only way to begin a request. It takes
-a caller-planned list: `slots[i]` is notification slot `i` and names its own
-node, digest, layer and window range. A slot names its node, rather than
-inheriting its chunk's, because Aerospike places every record by its own
-digest, so one chunk's records usually sit on several nodes. The session used
-to plan slots itself and bind each chunk to one node; that path was removed.
-
-
-
-```text
-slot 0: node-a  <digest k-0>  layer 0  offset 0    length 64
-slot 1: node-b  <digest k-1>  layer 0  offset 64   length 64
-slot 2: node-a  <digest k-2>  layer 1  offset 128  length 64
--> node-a: gen=G;sinks=<k-0>@0:64#0,<k-2>@128:64#2
-   node-b: gen=G;sinks=<k-1>@64:64#1
-```
-
-Nothing is re-ordered, so the slot numbers on the wire are the caller's. This
-is what the layerwise `LayerFetchPlan` uses (Python:
-`NativePlanIssuer` → `issue_pipelined_fetch_by_slots`). The caller learns
-each record's node from `record_node(user_key)`, which reads the client's
-partition map. The session enforces the device slot cap and throws
-`PlanTooLargeError` (pybind: `PipelinedPlanTooLargeError`) when a plan exceeds
-it, so callers can tell that case apart from other failures.
-
-Two things this format does **not** yet settle, both needing the server
-team's input:
-
-- **Whether a node can report progress it has not been asked for.** If a
-  server reads a record covering more than the requested slot, may it write
-  and signal the extra? Currently no: an unknown slot index is a protocol
-  violation (`ArrivalStatus::kUnknownSlot`).
-- **What happens to in-flight writes when a request is abandoned.** The
-  generation stops LMCache acting on them, but the writes still land in a
-  window that may have been re-leased. Only re-registration truly prevents
-  that, and its cost is unmeasured. See the open question on registration
-  lifecycle.
-
-### What the prototype proves, and what it does not
-
-Passing (`make -C tests/v1/distributed/rdma test`):
-
-- a layer is reported ready only once *every* piece has landed,
-- its bytes are correct at the moment it is reported ready,
-- **the destination regions of unsent layers are still untouched**, which is
-  what makes early consumption meaningful rather than a race,
-- a later layer can be ready while an earlier one is not,
-- stale generations, unknown slots, and duplicate immediates are each
-  distinguished rather than silently counted,
-- the whole sequence again driven through the wire format rather than by
-  staged calls: the client builds `kv-sink-fetch-pipelined` from its plan, the
-  mock parses it and pushes without fencing, and a sink naming a record the
-  server does not hold comes back in `failed` so its layer becomes a recompute
-  while every other layer still lands and is still pipelined.
-
-Not proven:
-
-- **Out-of-order arrival on EFA/SRD.** A8 passes over SRD on EFA (see
-  [A8 on EFA](#a8-on-efa-srd)), but the server drains its writes before it
-  replies, so SRD's reordering never reaches a layer the client is already
-  consuming. The unsolicited-receive negotiation is still untested.
-- **A server that replies before its writes complete.** The mock's
-  `handle_pipelined_fetch` pushes without fencing; the real server does not.
-  `as_kv_sink_fetch_pipelined_cmd` on `feat/kv-sink-fetch-pipelined` issues
-  one signaled write-with-immediate per sink and releases each record after
-  posting its write, so per-slot signaling works (A8, [below](#running-a8-against-a-real-server)).
-  But it then calls `imm_finish`, which polls its send CQ until every write of
-  the command completes (bounded by `FENCE_DEADLINE_NS`, 30 s), and only then
-  replies once. That is a fence under another name, and it violates
-  requirement 3. Correctness survives, because readiness still comes from the
-  immediates, but the overlap does not: the client sends its commands one at
-  a time and `begin_fetch` returns only after the last reply, so every write
-  has landed before `LayerArrivalPump` waits on the first layer. Against this
-  server a "pipelined" retrieve is an all-or-nothing fetch with per-slot
-  failure reporting.
-- **That storage-level pipelining is possible at all.** Slicing an
-  already-read record into signaled pieces buys compute overlap. Overlapping
-  the *disk read* of layer 1 with the network send of layer 0 needs
-  independently readable layers, which is level-1 chunking above and a much
-  larger change.
-- **Anything about real layers *over the fabric*.** The fabric harness still
-  moves synthetic pieces at fabricated offsets. The mapping from actual KV
-  layout onto slots is implemented in `LayerFetchPlan`, and
-  `test_slot_plan_parity.py` checks it against `slot_planner.h` and the
-  writer's shard plan; `PipelinedFetchSession` is covered by
-  `pipelined_fetch_session_test` without a device. What remains **unverified
-  over a fabric** is an end-to-end load that builds digests and placements from
-  a real prefetch, issues commands through `AerospikeNativeConnector`, and
-  consumes layers while bytes are still landing. See
-  [`layerwise_transfer_data_model.md`](layerwise_transfer_data_model.md).
-
-## Reproducing the Soft-RoCE test setup
+### Reproducing the Soft-RoCE test setup
 
 Soft-RoCE (`rdma_rxe`) presents a functional RDMA device over ordinary
 Ethernet or loopback, so the data path can be exercised without RDMA NICs. It
@@ -1158,30 +563,8 @@ supports RC but **not** SRD, which is why RC is the portable path.
 
 On a Windows workstation this needs a Linux VM, because `rdma_rxe` is a kernel
 module and neither WSL2 nor Docker Desktop ships one that has it. See
-[`rdma_testing_on_windows.md`](rdma_testing_on_windows.md).
-
-All of the following needs **root**.
-
-If you have Docker but not an interactive `sudo` — a common state on a shared
-or managed workstation — a privileged container is enough, because both steps
-act on the host kernel rather than on the container. `rdma_rxe` is a kernel
-module, so loading it inside the container loads it for the machine, and with
-`--network host` the RDMA link is created in the host's namespace and shows up
-in `ibv_devinfo` outside the container:
-
-```bash
-docker run --rm --privileged -v /lib/modules:/lib/modules:ro ubuntu:22.04 \
-  sh -c "apt-get update -qq && apt-get install -y -qq kmod && modprobe rdma_rxe"
-
-docker run --rm --privileged --network host ubuntu:22.04 \
-  sh -c "apt-get update -qq && apt-get install -y -qq rdma-core && \
-         rdma link add rxe0 type rxe netdev lo"
-```
-
-The device does not survive a reboot, so expect to redo this. Note that being
-able to run privileged containers is equivalent to root on the host; this is a
-convenience on a machine you already administer, not a way around a restriction
-someone else imposed.
+[`rdma_testing_on_windows.md`](rdma_testing_on_windows.md). All of the
+following needs **root**.
 
 ```bash
 # 1. Install userspace tooling and headers.
@@ -1207,26 +590,33 @@ ibv_rc_pingpong -d rxe0 -g 1 &   # server
 ibv_rc_pingpong -d rxe0 -g 1 localhost
 ```
 
-`ibv_reg_mr` fails if the pinned slab exceeds `RLIMIT_MEMLOCK`. Check it with
-`ulimit -l`. A plain `ulimit -l unlimited` only works if the *hard* limit
-allows it; otherwise set `memlock` in `/etc/security/limits.conf` and log in
-again. Many desktop distributions already ship a multi-gigabyte limit, which is
-ample for a test slab.
+If you have Docker but not an interactive `sudo`, a privileged container can
+load the module and create the link, because both act on the host kernel:
 
-Then build with RDMA enabled and point the adapter at `device_name: "rxe0"` and
-the `gid_index` chosen in step 5.
+```bash
+docker run --rm --privileged -v /lib/modules:/lib/modules:ro ubuntu:22.04 \
+  sh -c "apt-get update -qq && apt-get install -y -qq kmod && modprobe rdma_rxe"
+
+docker run --rm --privileged --network host ubuntu:22.04 \
+  sh -c "apt-get update -qq && apt-get install -y -qq rdma-core && \
+         rdma link add rxe0 type rxe netdev lo"
+```
+
+The device does not survive a reboot. Being able to run privileged containers
+is equivalent to root on the host.
+
+`ibv_reg_mr` fails if the pinned slab exceeds `RLIMIT_MEMLOCK`. Check it with
+`ulimit -l`, and raise `memlock` in `/etc/security/limits.conf` if the hard
+limit is too low.
 
 ### The GID index trap
 
-**`gid_index` is not always 0**, and getting it wrong fails late and
-confusingly: `ibv_modify_qp` returns `ENETUNREACH` ("Network is unreachable")
-at the **RTR** step, after registration has already succeeded.
+**`gid_index` is not always 0**, and getting it wrong fails late: the RC
+queue pair never reaches RTR (`ENETUNREACH`), so `aerospike_sink_create`
+fails and pipelined fetch reports it through `pipelined_fetch_init_error`.
 
 `rxe` derives GID 0 from the netdev's MAC as an `fe80::` link-local address.
-Loopback's MAC is all zeros, so GID 0 becomes
-`fe80:0000:0000:0000:0200:00ff:fe00:0000`, which has no route — the kernel
-cannot resolve a path from it, so the QP never reaches RTR. The table on `lo`
-looks like this:
+Loopback's MAC is all zeros, so GID 0 has no route. The table on `lo`:
 
 | Index | GID | Usable |
 |---|---|---|
@@ -1234,311 +624,88 @@ looks like this:
 | 1 | `::ffff:7f00:0001` (IPv4-mapped `127.0.0.1`) | **Yes** |
 | 2 | `::1` | Yes |
 
-So Soft-RoCE on `lo` wants **index 1**. EFA wants index 0, which is why the
-reference client snippet uses `ibv_query_gid(ctx, IB_PORT, 0, &gid)` — correct
-there, wrong here. This is exactly the class of divergence that makes "it
-passes on Soft-RoCE" a weak signal for EFA.
-
-### Equivalence test
-
-The deliverable that matters is that a payload delivered by RDMA write into L1
-is **byte-identical** to the same payload fetched through the normal non-RDMA
-Aerospike path.
-
-The harness lives at `tests/v1/distributed/rdma/`. `KvSinkMockWriter` stands in
-for the Aerospike server: it accepts the same `kv-sink-register` /
-`kv-sink-fetch` command strings, performs real `ibv_post_send` RDMA writes into
-the registered windows at the requested offsets, fences on its own send CQ
-before replying, and replies in the same `key=value;` format.
-
-The sink side uses the **production** `RdmaContext` and the production codec
-(`build_register_command`, `parse_register_reply`, `parse_fetch_reply`) rather
-than reimplementing them, so a regression in either fails this test. Only the
-Aerospike info-command control plane is faked; the data path is a genuine RDMA
-write across the fabric.
-
-Once a device exists, it is one command:
-
-```bash
-make -C tests/v1/distributed/rdma test RDMA_DEVICE=rxe0 RDMA_GID_INDEX=1
-```
-
-or through pytest, which builds it for you:
-
-```bash
-RDMA_DEVICE=rxe0 RDMA_GID_INDEX=1 \
-  pytest -xvs tests/v1/distributed/rdma/test_rdma_equivalence.py
-```
-
-Both default to GID index 0, which is right for EFA and wrong for Soft-RoCE on
-`lo`; see [the GID index trap](#the-gid-index-trap). The device and index are
-positional, so `RDMA_GID_INDEX` requires `RDMA_DEVICE`.
-
-Both skip cleanly with no device — the binary exits 77 (the automake "skip"
-convention) and the wrapper turns that into a pytest skip. If your rdma-core
-lives outside the default prefix, set `RDMA_CORE_INCLUDE_DIR` and
-`RDMA_CORE_LIBRARY_DIR`.
-
-The harness asserts five things, not just the memcmp:
-
-1. both chunks landed byte-identical to the source payload,
-2. the fetch reply reports every chunk ok, with the expected byte count,
-3. **nothing landed outside the requested offsets** (the rest of the slab is
-   still zero),
-4. a sink targeting an offset past the registered window is **refused** rather
-   than written, which is the bounded-window guarantee actually being exercised,
-5. the region handle is held per node, via `NodeRegistry`.
+So Soft-RoCE on `lo` wants **index 1**, on both sides: `rdma.gid_index` for
+LMCache and `KV_SINK_GID_INDEX=1` for the server. SRD ignores the GID for
+routing, so EFA works with the default.
 
 ### Running A8 against a real server
 
 `tests/v1/distributed/test_aerospike_pipelined_rdma_integration.py` runs a
 layerwise retrieve through a real `StorageManager` whose Aerospike adapter
-has RDMA reception on, against a server built from the aerospike-server
-branch `feat/kv-sink-fetch-pipelined`. Nothing is mocked: registration, the
-placer, the plan, `kv-sink-fetch-pipelined`, the server's writes with
-immediate and the completions are all production code. It checks that:
+has RDMA reception on. Nothing is mocked. It checks that:
 
 1. a clean fetch completes `PIPELINED`, every layer reaches the sink, and
    every object left in L1 holds exactly the bytes that were stored;
-2. with one segment record deleted, the server reports that slot failed, the
-   retrieve falls back, and a real whole reload returns every other object
-   byte-exact.
+2. with one segment record deleted, that row fails, the retrieve falls back,
+   and a real whole reload returns every other object byte-exact;
+3. three client lifetimes in a row each create a sink, fetch byte-exact, and
+   deregister on close.
 
-It proves that the wire format, immediates and failure reporting are correct.
-It does not show layers being consumed while bytes are still landing: this
-server drains each command's writes before it replies (see
-[What the prototype proves](#what-the-prototype-proves-and-what-it-does-not)).
-
-Stock CE has no `kv-sink-*` commands, so it also needs `RDMA_DEVICE` and
-skips without it; CI's Docker server does not run it.
-
-On the Soft-RoCE VM, build the server from a checkout of that branch and its
-submodules (`bin/install-dependencies.sh`, then `make -j2`; the build reads
-its version from `git describe --tags`, so an exported tree needs a local
-commit and a bare `x.y.z.w` tag). Run it as a normal user with a config like
-the CI template, sized for a small VM:
+Build the server from `sriram/kv-sink-batch-prio` and its submodules
+(`bin/install-dependencies.sh`, then `make -j2`; the build reads its version
+from `git describe --tags`). Run it as a normal user with a small namespace:
 
 ```text
-service { run-as-daemon false; work-directory /home/vk/as-run/work; ... }
 namespace lmcache {
     replication-factor 1
     nsup-period 120
     max-record-size 1048576
-    stop-writes-sys-memory-pct 100   # 1.8 GB RAM would stop every write
-    storage-engine memory { data-size 512M }   # the minimum
+    stop-writes-sys-memory-pct 100
+    storage-engine memory { data-size 512M }
 }
 ```
 
-The work directory needs `smd/` created beforehand. The server registers its
-64 MiB data stripes for RDMA on first use, so raise its locked-memory limit
-once it is up, or every write fails `Cannot allocate memory` and the fetch
-falls back:
-
 ```bash
+KV_SINK_RDMA_DEVICE=rxe0 KV_SINK_GID_INDEX=1 asd --config-file ...
 sudo prlimit --pid "$(pgrep -x asd)" --memlock=unlimited:unlimited
+
 RUN_AEROSPIKE_INTEGRATION=1 AEROSPIKE_TEST_HOST=127.0.0.1 \
 AEROSPIKE_TEST_PORT=3000 AEROSPIKE_TEST_NAMESPACE=lmcache \
 RDMA_DEVICE=rxe0 RDMA_GID_INDEX=1 \
   pytest tests/v1/distributed/test_aerospike_pipelined_rdma_integration.py
 ```
 
-The two existing integration suites pass against the same server.
+On EFA, run with `RDMA_TRANSPORT=SRD RDMA_DEVICE=<efa device>`. Stock CE has
+no kv-sink, so CI's Docker server does not run this suite.
 
-Even with the limit raised, a freshly started server can fail the first
-registration of a stripe with `cannot register {lmcache} stripe N ...
-Cannot allocate memory` and then succeed on the next fetch that touches it.
-The records in that stripe are not written, so that fetch falls back.
-`test_a_pipelined_fetch_lands_every_stored_byte_in_l1` then fails with
-`FELL_BACK`, but only on the first run after a restart. This is on the
-server side (`stripe_mr_get` in `kv_sink_verbs.c` does not retry), and the
-client's fallback is the intended response.
-
-The first runs found three client bugs that the mock writer could not show:
-
-- **The register reply was read from our own echoed command.**
-  `aerospike_info_node()` returns `<command>\t<response>`, and the command
-  carries our `qpn`, `psn` and `gid`. `find_info_field` took the first match,
-  so our queue pair was connected to itself and every server write arrived
-  out of sequence and was retried until the server gave up. It now searches
-  only after the tab. `rdma res show qp` shows it directly: the client's QP
-  had `rqpn` equal to its own `lqpn`.
-- **The notification depth assumed full-cap records.** See
-  [Receive queue depth](#receive-queue-depth-and-device-limits).
-- **The completion queue was clamped by `max_cq` (a queue count) rather than
-  `max_cqe`** (entries per queue), so a deep queue failed `ibv_create_cq`
-  with `EINVAL`. The fanout error now also names each node's reason.
-
-#### A8 on EFA (SRD)
-
-On a `g6.8xlarge` (EFA v2, device `rdmap47s0`), with LMCache built with
-`BUILD_WITH_AEROSPIKE_EFA=1` and the same server branch, the three A8 tests and
-the two other Aerospike integration suites pass (15 tests), both on a freshly
-started server and on a warm one:
-
-```bash
-RUN_AEROSPIKE_INTEGRATION=1 AEROSPIKE_TEST_HOST=127.0.0.1 \
-AEROSPIKE_TEST_PORT=3000 AEROSPIKE_TEST_NAMESPACE=lmcache \
-RDMA_TRANSPORT=SRD RDMA_DEVICE=rdmap47s0 RDMA_GID_INDEX=0 \
-  pytest tests/v1/distributed/test_aerospike_*integration*.py
-```
-
-The clean fetch lands 28 writes (48 KiB) and the missing-record fetch 27. The
-run found one client bug and two server bugs (all server issues are tracked in
-[`aerospike_server_issues.md`](aerospike_server_issues.md)):
-
-- **Client: a receive with no scatter entry.** Notification receives were
-  posted with `num_sge = 0`, since a write-with-immediate scatters nothing into
-  them. Soft-RoCE accepts that; EFA does not. On SRD the data landed but no
-  receive completed, the server's writes were retried until the client
-  destroyed its queue pair, and then failed `remote invalid RD request
-  (vendor 0x9)`, EFA's bad-destination-QPN status. The probe reproduces it
-  when its receives are made zero-entry. Each receive now carries one entry
-  over a shared 64-byte registered scratch buffer.
-- **Server: EFA write support is never detected.** `kv_sink_verbs.c` guards
-  `EFADV_DEVICE_ATTR_CAPS_RDMA_WRITE` with `#ifndef ... #define ... 0`, but it
-  is an enum constant, not a macro, so the guard always redefines it to 0 and
-  every EFA device reports `rdma write no`. Deleting the three lines fixes it.
-- **Server: a crash after that refusal.** `dev_get()` leaves `g_dev.ctx` set
-  with a NULL protection domain, and the next `kv-sink-register` crashes in
-  `efadv_create_qp_ex` (`make_qp`).
-
-One timing risk remains. The client sends `kv-sink-fetch-pipelined` with the
-Aerospike C client's default info timeout, 1000 ms, and the server only
-replies after all of the command's writes complete. On a cold server, the
-first fetch also registers every data stripe it touches: eight 256 MiB stripes
-took about a second on EFA. That run passed, but with little margin. A timeout
-declines every slot of the command, and the retrieve falls back.
-
-## What is not proven yet
-
-Being precise about this, because the gap matters:
+## What is proven, and what is not
 
 | Piece | State |
 |---|---|
-| Build profile, default-off | **Verified.** Default native build compiles and links with no libibverbs. |
-| `rdma_context.{h,cpp}` | **Verified on RC and SRD.** The data path executes over Soft-RoCE (RC) and over EFA v2 (SRD) against a real server. |
-| `kv_sink_client.{h,cpp}` codec | **Verified.** Register and fetch commands round-trip against the mock writer. |
-| Per-node `kv-sink-register` / `kv-sink-deregister` fanout | **Verified against one real node** (A8), including 17 client lifetimes in a row against the server's 16 region slots. Never run against a multi-node cluster, which pipelined fetches refuse anyway. |
-| `PipelinedFetchSession` driver | **Implemented** and covered by `pipelined_fetch_session_test` (no device). |
-| `PipelinedFetchPool`, one fetch per window | **Verified on RC.** Two fetches in different windows complete from one completion queue over Soft-RoCE, and a late write for an abandoned fetch is not credited to its window's next fetch. |
-| Connector + Python pipelined path | **Implemented (device-free).** `AerospikeNativeConnector::issue_pipelined_fetch_by_slots` is the only issue entry point: it takes the plan's slots as given (Option 1), then begins, sends each node's `aerospike_info_node` command and feeds the replies without holding the driver lock across I/O. The chunk-level `issue_pipelined_fetch` and `issue_pipelined_fetch_by_keys` are removed. `set_object_group_layouts` converts registered `MemoryLayoutDesc` shapes in C++; `finish_pipelined_fetch` / `abandon_pipelined_fetch` and `pipelined_fetch_init_error` are bound through pybind and reached through `AerospikeLayerArrivalSource`. Python hands over record user keys, and the connector derives each sink's digest with `record_digest_hex` (verified against the reference client on a real server). Covered by `pipelined_fetch_issue_test` and Python adapter tests. **Verified over Soft-RoCE against a real server** (A8): a retrieve through `StorageManager` lands every stored byte. |
-| Adapter plumbing, descriptor, window plan | **Implemented and unit-tested.** |
-| Write-lock TTL invariant | **Implemented and unit-tested** (startup check). |
-| Windows reserved outside general L1; `delete_if_none_locked`, `abort_write` | **Implemented and unit-tested** on pinned CPU memory. No lease yet, so nothing allocates in a window in production. |
-| Mock RDMA writer | **Verified.** Posts real `ibv_post_send` writes and fences on its own send CQ. |
-| Real RDMA write landing in L1 | **Verified** over Soft-RoCE (`rxe0` on `lo`, GID index 1). |
-| Byte-equivalence assertion | **Verified.** Both chunks byte-identical, nothing outside the requested offsets, out-of-window write refused. |
-| A7: does an SRD immediate consume a receive? | **Answered on EFA v2** (`g6.8xlarge`): yes, as on RC; unsolicited write-receive works when both queue pairs set it. See [the SRD result](#a7-result-on-efa-srd). |
-| Same fetch path over EFA/SRD | **Verified on EFA v2 (A8)** against a real server with two local fixes (see [A8 on EFA](#a8-on-efa-srd)). Like the RC run, it proves no overlap. |
-| Against a real Aerospike server | **Verified over Soft-RoCE (A8)** with a server built from `feat/kv-sink-fetch-pipelined`: a clean pipelined fetch and a missing-record fallback, both byte-exact. The server fences before replying, so this proves no overlap. |
-
-The remaining gaps are overlap, which needs a server that replies before its
-writes finish, and a multi-node fetch.
-
-**EFA/SRD needed a real device, not a formality.** Soft-RoCE passed a client
-whose receives EFA silently never matches, and the GID index differs between
-the two fabrics (1 on Soft-RoCE, 0 on EFA), with a wrong value surfacing
-several calls later as `ENETUNREACH`. Re-run A8 on EFA after any change to
-queue-pair setup or receive posting.
-
-**The mock writer is a mock of a protocol, not of an implementation.** It
-implements the `kv-sink-*` command strings as specified, so it proves our side
-of the contract. It cannot catch a divergence between that specification and
-what the server actually does, nor what the Aerospike client does to a reply:
-its replies have no echoed command, which is how the register-reply bug above
-passed every mock test. A8 is the check for both.
+| Build profile, default-off | Unchanged for a default build: no libibverbs, no kv-sink client needed. The RDMA build compiles and links against the fork (Ubuntu 24.04, 2026-09-30). |
+| `SinkFetchTable` | **Covered** by `sink_fetch_table_test` and, through the fabric-free module, by the layerwise conformance suite. |
+| `AerospikeSinkFetchDriver` | **Proven on Soft-RoCE (RC) and EFA v2 (SRD)**: A8 passes against `sriram/kv-sink-batch-prio` (3/3 on each). Needs a client built by the script; see [client issue 11](aerospike_server_issues.md#11-libaerospikeso-is-not-linked-against-libibverbs). |
+| Python layerwise path | **Unchanged and covered** device-free; only docstrings moved with the protocol. |
+| Windows, leaser, placer, TTL invariant | **Implemented and unit-tested**, independent of the transport. |
+| Byte-exact landing against a real server | **Proven on Soft-RoCE and on EFA v2** (`g6.8xlarge`, `us-west-2`, 2026-10-01) on this protocol. |
+| Overlap: layer 0 consumed while later layers land | **Not proven.** Possible now, because each layer's batch returns on its own; A8 does not measure it. |
+| Multi-node cluster | **Not run.** Allowed now, since rows are routed by partition. |
 
 ## Open questions
 
-### Resolved: L1 locking across the DMA
-
-The existing write lock already provides the needed guarantee — no new lock,
-and no separate window lifetime for the non-pipelined path. See
-[The write-lock TTL invariant](#the-write-lock-ttl-invariant-enforced-at-startup)
-for the mechanism, the TTL hazard it creates, and the startup check that now
-enforces it.
-
-### Resolved: regions are deregistered on close
-
-The server holds at most 16 regions (`MAX_REGIONS` in `kv_sink.c`) and
-refuses the next registration with `too many regions`. Without a deregister
-every client lifetime leaked one, so the 17th client start fell back to
-whole-object loads until the server restarted.
-
-`AerospikeNativeConnector::close()` now calls
-`AerospikePipelinedRdmaDriver::shutdown()` before the workers stop, because
-the deregister needs the shared Aerospike client and the workers' shutdown
-closes it:
-
-```
-close()
-  └─ shutdown(&as_)                      under the driver lock
-       ├─ deregister_all_nodes()          kv-sink-deregister:region=<id> per node
-       │                                  (reply writes=<n>;bytes=<n>)
-       └─ drop the pool, invalidate the registry, mark the driver closed
-  └─ ConnectorBase::close()              workers stop, client closes
-```
-
-`shutdown()` never throws: a node that refuses or has left the cluster is
-logged to stderr and keeps its region until the server reaps it. The RDMA
-context outlives `shutdown()`, because the completion pollers use it outside
-the driver lock. A fetch issued after close reports "the connector is
-closed" through `pipelined_fetch_init_error`.
-`test_closing_releases_the_servers_region` opens and closes 17 storage
-managers in a row, and the server logs `kv-sink: deregistered region N` for
-each.
-
-### Still open: registration lifecycle on node restart
-
-`region` is per-node and connection-lifetime. Detecting a node restart and
-re-registering means re-publishing rkeys while fetches may be in flight against
-the old region.
-
-**This is intentionally left conservative**: `register_l1()` refuses a second
-call and `NodeRegistry::invalidate_all()` drops every handle at once. Proper
-drain-then-reregister semantics need the Aerospike side to specify whether
-in-flight fetches against a stale `region` are **dropped or completed**, and
-that is not knowable from the LMCache side. **Blocked on a protocol answer from
-Aerospike**; no policy has been invented here.
-
-## Where the protocol and LMCache fight each other
-
-- **No per-layer signal.** Property 2 above (the info reply is the completion)
-  makes a fetch all-or-nothing. Layer-by-layer pipelining needs per-layer
-  completion, which this protocol cannot express. The LMCache side of the fix
-  is now prototyped and passing — see
-  [Pipelined fetch](#pipelined-fetch-signaling-and-chunking). On the server,
-  `feat/kv-sink-fetch-pipelined` already signals each piece with
-  write-with-immediate; what remains is to stop reaping send completions
-  before the reply.
-- **Synchronous completion vs. an async adapter.** The fetch blocks a thread
-  for the entire round trip including the DMA. LMCache's MP request path is
-  future-based and expects to poll, so the blocking info call has to be run on
-  a worker thread and bridged back, which is what the existing
-  `ConnectorBase` worker pool already does for the non-RDMA path.
-- **Registration is per-node, but `L1MemoryDesc` is per-process.** One slab
-  must be registered with, and have its rkeys published to, every node
-  independently. The descriptor has no notion of a per-peer handle, which is
-  why `MemoryRegistration` is carried as a value rather than being assumed
-  unique.
-- **`aerospike_info_any` is the wrong primitive** for a per-node control
-  plane, despite being the idiom already present in the connector.
+- **Late writes after abandon.** The server now fails a queued write past its
+  row's deadline, so only writes already on the wire at the deadline can land
+  late, within one network round trip. The leaser's quarantine of
+  `fetch_timeout_seconds` covers that with a wide margin; it has not been
+  measured under heavy queuing.
+- **Sink ownership.** The server trusts the region id a row carries
+  ([server issue 4](aerospike_server_issues.md)), so the window bound is only
+  as strong as the ids are unguessable.
+- **Partial registration.** `aerospike_sink_create` succeeds when at least
+  one node registers. The driver logs how many did; rows for the others fail
+  with 220, are retried once after a refresh, and otherwise reload whole
+  objects. Not yet exercised on a multi-node cluster.
 
 ## Related
 
 - [`aerospike_concurrent_writes.md`](aerospike_concurrent_writes.md) — D-14
   decision record: per-write segment keys and create-only metadata, and what
   that means for the pipelined fetch's record keys.
-- [`aerospike_server_issues.md`](aerospike_server_issues.md) — server-side
-  defects and contract gaps found while running this client against
-  `feat/kv-sink-fetch-pipelined`, for hand-off to the server team.
+- [`aerospike_server_issues.md`](aerospike_server_issues.md) — server- and
+  client-side defects and contract gaps on the kv-sink branches.
 - [`layerwise_transfer_data_model.md`](layerwise_transfer_data_model.md) — how
-  real KV layout maps onto the slots this document signals about, with an
-  interactive walkthrough in
-  [`layerwise-transfer-data-model.html`](layerwise-transfer-data-model.html).
+  real KV layout maps onto the slots this document fetches.
 - [`rdma_testing_on_windows.md`](rdma_testing_on_windows.md) — standing up an
   Ubuntu VM on a Windows workstation and running these suites in it.
-- `docs/design/v1/multiprocess/transport/request_transport.md` — the MP request
-  transport, relevant to any future per-layer delivery.
 - `lmcache/v1/distributed/l2_adapters/mooncake_store_l2_adapter.py` — the
   reference L1-registration factory this adapter mirrors.

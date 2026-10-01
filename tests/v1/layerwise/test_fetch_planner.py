@@ -1015,8 +1015,8 @@ def test_a_request_exceeding_the_slot_space_is_rejected_not_truncated() -> None:
         )
 
 
-def test_the_slot_space_matches_the_immediate_encoding() -> None:
-    """The ceiling is the 16 bits the RDMA immediate reserves for a slot."""
+def test_the_slot_space_matches_the_native_fetch_table() -> None:
+    """The ceiling is the native table's ``kMaxSlotsPerRequest``."""
     assert MAX_SLOTS_PER_REQUEST == 0x10000
 
 

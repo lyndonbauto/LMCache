@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Conformance harness for :class:`AerospikeLayerArrivalSource`.
 
-Runs the real native ``PipelinedFetchPool`` behind the source, with no
-fabric, device, or cluster. ``fabric_free_session.FabricFreeConnector`` is a
+Runs the real native ``SinkFetchTable`` behind the source, with no fabric,
+device, or cluster. ``fabric_free_session.FabricFreeConnector`` is a
 test-only pybind module built from
 ``tests/v1/distributed/rdma/csrc/fabric_free_session_pybind.cpp``. It plays
 the native client's part for the source, and the :class:`ArrivalDriver`'s
-part for the suite: a landed slot is an encoded immediate, a declined slot is
-a node reply naming it as failed.
+part for the suite: a landed slot is a sink batch row that returned OK, a
+declined slot is one that failed.
 """
 
 # Standard
@@ -106,11 +106,10 @@ class FabricFreeClient(
         ...
 
     def pipelined_fetch_node_name(self) -> str:
-        """Return the one registered node, which the placer is built with.
+        """Return the first node, which the placer is built with.
 
         Raises:
-            RuntimeError: Unless exactly one node is registered, as the
-                production client refuses a larger cluster.
+            RuntimeError: If the cluster has no nodes.
         """
         ...
 
@@ -121,12 +120,12 @@ def fabric_free_connector(
     """Build a fabric-free native client over ``window_count`` windows.
 
     Window ``w`` covers offsets ``[w * WINDOW_BYTES, (w + 1) * WINDOW_BYTES)``
-    and runs one fetch; each window gets ``_MAX_SLOTS`` notification slots.
+    and runs one fetch of at most ``_MAX_SLOTS`` slots.
 
     Args:
         window_count: How many fetches may run at once.
-        node_names: The nodes registered for kv-sink fetches. Plans name
-            nodes by index into this list.
+        node_names: The cluster's nodes. Plans name nodes by index into
+            this list.
 
     Returns:
         The connector. It is both the native client a source runs over and

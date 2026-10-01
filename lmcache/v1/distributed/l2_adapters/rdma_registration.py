@@ -53,7 +53,8 @@ class RdmaTransport(enum.Enum):
 
     ``RC`` is the portable path: it works on InfiniBand, RoCE, and the
     Soft-RoCE (``rdma_rxe``) software device used for local testing. ``SRD`` is
-    available only on AWS EFA and is compiled in optionally.
+    available only on AWS EFA. Both are transports of the kv-sink Aerospike
+    C client, chosen at run time; the server must run the same one.
     """
 
     DISABLED = enum.auto()
@@ -70,11 +71,10 @@ class RdmaTransport(enum.Enum):
 class RdmaWindowPlan:
     """A pool of equally sized registration windows inside the L1 slab.
 
-    The whole range is registered once at initialization with
-    ``LOCAL_WRITE | REMOTE_WRITE`` and published to every node as one region,
-    because a server allows only a few registrations in total. Each window is
-    leased to at most one request at a time, and the native session refuses a
-    request whose writes leave its window.
+    The whole range is registered once at initialization as one kv-sink with
+    every node, because a server allows only a few registrations in total.
+    Each window is leased to at most one request at a time, and the native
+    driver refuses a request whose writes leave its window.
 
     Attributes:
         window_count: Number of windows. Also how many pipelined retrieves'
@@ -177,11 +177,12 @@ class L1RdmaConfig:
         transport: Queue-pair type to use, or ``DISABLED`` to turn RDMA off.
         device_name: libibverbs device to open, e.g. ``rxe0``. Empty selects
             the first device the driver reports.
-        gid_index: Port GID index passed to ``ibv_query_gid``. Index 0 is the
-            link-local GID, which is what Soft-RoCE exposes.
+        gid_index: Port GID index the RC transport addresses the node by.
+            Soft-RoCE on ``lo`` needs the IPv4-mapped entry, usually 1.
         window_plan: The bounded registration windows to pre-register at init.
-        fetch_timeout_seconds: Deadline for one ``kv-sink-fetch`` round trip,
-            DMA included. Must stay strictly below the L1 write-lock TTL; see
+        fetch_timeout_seconds: Deadline for one layer's batch read, RDMA
+            write included; rows are never retried. Must stay strictly below
+            the L1 write-lock TTL; see
             :func:`validate_fetch_timeout_against_write_ttl`.
     """
 

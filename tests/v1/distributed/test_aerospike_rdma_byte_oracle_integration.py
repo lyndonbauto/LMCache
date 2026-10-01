@@ -17,7 +17,7 @@ of server memory. ``RDMA_ORACLE_CORPUS`` names a built corpus
 without it the prompts are synthetic token runs of the same lengths.
 ``RDMA_ORACLE_MODEL_NAME`` sets the model name in the keys (vLLM sends the
 model path it loaded). A second test fetches the same keys in fetches of at
-most 4 chunks, the most the kv-sink server sends in one command. With
+most 4 chunks. With
 ``RDMA_ORACLE_STORED_SET`` naming the set vLLM stored P-exact into, a third
 test reads those production records (written by LMCache from real KV
 caches) both ways, without writing anything. On the Soft-RoCE VM::
@@ -484,11 +484,13 @@ def test_pipelined_rdma_fetches_equal_plain_gets_for_100_p_exact_keys(
 def test_rdma_equals_plain_gets_for_100_p_exact_keys_in_fetches_of_4_chunks(
     set_name: str,
 ) -> None:
-    """The same 100 keys, each fetch at most 4 chunks (one server command).
+    """The same 100 keys, each fetch at most 4 chunks.
 
-    With Llama-3.1-8B's 64 slots per chunk, 4 chunks is 256 slots, which the
-    kv-sink server sends as a single ``kv-sink-fetch-pipelined`` command;
-    the 64-chunk prompts' keys are fetched 4 at a time, in order.
+    With Llama-3.1-8B's 64 slots per chunk, 4 chunks is 256 slots per fetch;
+    the 64-chunk prompts' keys are fetched 4 at a time, in order. The split
+    dates from the info-command protocol, where it kept each fetch to one
+    server command; on sink batch reads it checks small fetches alongside
+    the whole-prompt ones above.
     """
     fetches = _split(_prompts(), 4)
     _fetch_and_compare(set_name, fetches, _test_payloads(fetches))

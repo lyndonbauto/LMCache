@@ -123,13 +123,15 @@ in that window is a clean miss (unchanged). Orphans expire by the same TTL.
 | Delete / client LRU | 0 | Already reads the metadata record for `nseg` |
 | Store, no conflict | 0 | Create-only instead of ignore on the same put |
 | Store, lost race | +1 meta select, up to `nseg` header reads, `nseg` deletes | Loser checks the winner is intact, then removes its own segments |
-| Whole-object `kv-sink-fetch` | 0 | No product caller (`build_fetch_command` is used only by `rdma_equivalence_test.cpp`) |
+| Whole-object `kv-sink-fetch` | 0 | Removed with the info-command protocol; no caller |
 | Pipelined fetch | +1 batch read | Reads every planned object's `wid` before planning (below) |
 
 **Pipelined path (sub-option A, implemented).** `RecordKeys.record_key_for`
 in `lmcache/v1/layerwise/planner.py` used to build `f"{cache_key}|s|{index}"`
-from the layout alone; the keys become digests in `kv-sink-fetch-pipelined`,
-so the planner must know each object's `wid` first. Now:
+from the layout alone. Each plan slot's record key is used verbatim as the key
+of a kv-sink batch-read row (`AerospikeSinkFetchDriver` in
+`connector_sink_fetch.cpp`, one batch per layer), so the planner must know each
+object's `wid` before the first layer is issued. Now:
 
 1. `build_request_fetch` calls `source.read_write_ids(sorted(cache_keys))`
    once. On Aerospike that is the native `read_write_ids`: one

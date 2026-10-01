@@ -18,9 +18,9 @@ deliverable, not a nicety on top of it.
 
 You own:
 
-- `csrc/storage_backends/aerospike/`: `rdma_context`, `kv_sink_client`,
-  `kv_sink_fanout`, `pipelined_fetch_session`, `pipelined_fetch_issue`,
-  `notification_depth`, `connector_pipelined_rdma`, `l1_rdma_registration`
+- `csrc/storage_backends/aerospike/`: `sink_fetch_table`,
+  `connector_sink_fetch`, `l1_rdma_registration` (the files named here
+  before the kv-sink batch-read rework are gone)
 - `lmcache/v1/distributed/l2_adapters/` where the adapter exposes the above
 - The `kv-sink` wire protocol on both sides, including the Aerospike server
   branch

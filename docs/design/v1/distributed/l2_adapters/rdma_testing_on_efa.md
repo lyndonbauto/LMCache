@@ -5,20 +5,20 @@ run once it is. The Soft-RoCE VM
 ([rdma_testing_on_windows.md](rdma_testing_on_windows.md)) covers everything
 except SRD, because Soft-RoCE supports only RC queue pairs.
 
-**What this answers:**
+**What this answers:** A8 over SRD --- the kv-sink client's SRD transport
+against a real server, through LMCache's pipelined fetch. On the previous
+protocol all 15 Aerospike integration tests passed over SRD on EFA v2
+(2026-09-29). On the kv-sink batch-read protocol (server `24357d20d`, client
+`061f79b7`), A8 passed 3/3 over SRD and the layerwise, RDMA and Aerospike
+suites passed 578/578 (2026-10-01): `g6.8xlarge`, `us-west-2b`, Ubuntu 24.04,
+kernel 7.0.0-1013-aws, EFA installer 1.50.0 (driver 3.3.0g), PCI ID
+`1d0f:efa1`, device `rdmap47s0`.
 
-1. **A7** ([track-a-acceptance.md](../../../layerwise/track-a-acceptance.md#a7-the-efa-question-is-answered-with-hardware)):
-   does an SRD write-with-immediate consume a posted receive, and what
-   happens when more immediates arrive than there are receives? This decides
-   whether the wire contract needs a handshake, which would change Track C's
-   plan format. It is the required part. **Done on 2026-09-29 on EFA v2:
-   yes, as on RC, and no handshake is needed.** See
-   [the SRD result](aerospike_rdma.md#a7-result-on-efa-srd).
-2. **SRD end to end** (optional, A8 over EFA): the client's SRD queue pair
-   setup (`efadv_create_qp_ex`, the qkey at INIT, the address handle) against
-   a real server. **Done on 2026-09-29: all 15 Aerospike integration tests
-   pass over SRD**, after one client fix and a local server patch. See
-   [A8 on EFA](aerospike_rdma.md#a8-on-efa-srd).
+**A7** ([track-a-acceptance.md](../../../layerwise/track-a-acceptance.md#a7-the-efa-question-is-answered-with-hardware))
+asked whether an SRD write-with-immediate consumes a posted receive. It was
+answered on EFA v2 (yes, as on RC), and no longer applies: on kv-sink batch
+reads a row's reply is its completion, so LMCache posts no receives and the
+probe that answered it has been removed.
 
 ## What is needed
 
@@ -26,18 +26,15 @@ except SRD, because Soft-RoCE supports only RC queue pairs.
 
 | Item | Why |
 |---|---|
-| One EC2 instance with **EFA and RDMA write** (see below) | The probe exits 2 on a device without RDMA write |
+| One EC2 instance with **EFA and RDMA write** (see below) | The server writes into L1 with RDMA write |
 | vCPU quota for that family in the region | These sizes are large (32 to 64 vCPUs); the default quota often blocks the launch |
 | A subnet in one Availability Zone | EFA traffic cannot cross AZs and is not routable |
 | A security group with an inbound **and** outbound rule allowing all traffic from itself | AWS requires it for EFA traffic |
 | The network interface attached as **EFA with ENA** at launch | "EFA-only" has no IP, so no SSH over it |
 | SSH access: a key pair and a public IP or bastion | To build and run |
 
-One instance is enough. The probe runs its sender and receiver queue pairs
-on the same device, and the Aerospike server can run on the same host as the
-client. A second instance is needed only if the device refuses writes to its
-own address. The probe would then have to exchange queue-pair details over
-TCP, which it does not do today.
+One instance is enough: the Aerospike server can run on the same host as the
+client, and EFA accepts writes to its own address.
 
 **Instance type.** RDMA write needs Nitro v4 or later, with exceptions. From
 the [EFA supported-instance table](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa.html),
@@ -46,10 +43,10 @@ the smallest suitable sizes are:
 | Instance | CPU | Note |
 |---|---|---|
 | `g6.8xlarge` | x86 | Smallest widely available x86 option; its L4 GPU is unused |
-| `c7g.16xlarge`, `m7g.16xlarge` | Graviton (arm64) | The probe needs only libibverbs, so arm64 is fine |
+| `c7g.16xlarge`, `m7g.16xlarge` | Graviton (arm64) | Untested; the server and client build on arm64 |
 | `hpc7a.12xlarge` | x86 | Only in a few regions |
 
-The A7 run used `g6.8xlarge` on demand in `us-west-2` ($2.01/h). Spot capacity
+The earlier runs used `g6.8xlarge` on demand in `us-west-2` ($2.01/h). Spot capacity
 for it was unavailable in all four zones at the time; on-demand launched at
 once.
 
@@ -67,12 +64,12 @@ aws ec2 describe-instance-types \
 | Item | Why |
 |---|---|
 | Ubuntu 22.04 or 24.04 | Matches the VM setup |
-| The [AWS EFA installer](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa-start.html), not Ubuntu's rdma-core | Ubuntu 24.04's rdma-core 50 lacks the unsolicited write-receive API, so `--unsolicited` exits 2 against it |
-| `build-essential`, `git`, `python3` and `uv` | Building the probe and LMCache |
-| No Soft-RoCE device | The server opens the first RDMA device in the list, so an `rxe0` could be picked instead of EFA |
+| The [AWS EFA installer](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/efa-start.html) | The EFA kernel module, and an rdma-core with `efadv.h`, which both the server and the kv-sink client need to compile their verbs transport |
+| `build-essential`, `git`, `python3` and `uv` | Building the server, the client and LMCache |
+| No Soft-RoCE device | Server and client open the first RDMA device unless told otherwise, so an `rxe0` could be picked instead of EFA |
 
-The installer's `--minimal` mode is enough for the probe. It installs the EFA
-kernel module and rdma-core but not libfabric, so `fi_info` is absent:
+The installer's `--minimal` mode is enough. It installs the EFA kernel module
+and rdma-core but not libfabric, so `fi_info` is absent:
 
 ```bash
 curl -sSfO https://efa-installer.amazonaws.com/aws-efa-installer-latest.tar.gz
@@ -84,7 +81,7 @@ Check the device before anything else:
 
 ```bash
 ibv_devices  # an EFA device, e.g. rdmap47s0
-grep -c UNSOLICITED_WRITE_RECV /usr/include/infiniband/efadv.h  # > 0 for --unsolicited
+ls /usr/include/infiniband/efadv.h
 lspci -n | grep 1d0f:efa  # efa1 is EFA v2, efa2 is EFA v3
 ```
 
@@ -92,73 +89,49 @@ The device name changes when the installer reloads the kernel module: it was
 `efa_0` at boot and `rdmap47s0` afterwards. Take it from `ibv_devices` after
 the install.
 
-Use **GID index 0** on EFA, not 1 as on the Soft-RoCE VM; see
-[the GID index trap](aerospike_rdma.md#the-gid-index-trap).
+SRD does not route by GID, so the default `gid_index` works on EFA; see
+[the GID index trap](aerospike_rdma.md#the-gid-index-trap) for why it matters
+on the Soft-RoCE VM.
 
-### From the repository
+### From the repositories
 
-- Branch `track/a-transport`, with the A8 and deregistration commits.
-- For the end-to-end step only: the Aerospike server source,
-  `feat/kv-sink-fetch-pipelined` (`512b0c20`). The server needs `efadv.h`
-  from rdma-core 46 or later at build time, and detects EFA at runtime; its
-  log must show `kv-sink: EFA - rdma read yes, rdma write yes`. At `512b0c20`
-  it shows `rdma write no` on every device, and the next register crashes
-  the server. Delete the `#ifndef EFADV_DEVICE_ATTR_CAPS_RDMA_WRITE` block
-  near the top of `as/src/base/kv_sink_verbs.c` before building; see
-  [A8 on EFA](aerospike_rdma.md#a8-on-efa-srd).
+- The Aerospike server, branch `sriram/kv-sink-batch-prio`. Its log must show
+  the EFA device with RDMA write support at the first sink registration.
+- The kv-sink C client, built by `.deps/build_aerospike_client_kvsink.sh`
+  (branch `sriram/kv-sink-batch-prio` of `aerospike-client-c-kvsink`).
 
 ## What to run
-
-### 1. A7: the receive-consumption probe (required)
-
-```bash
-make -C tests/v1/distributed/rdma efa-probe EFA=1
-DEV=$(ibv_devices | awk 'NR>2 {print $1; exit}')
-tests/v1/distributed/rdma/build/efa_imm_probe_efa "$DEV" 0 --transport srd
-tests/v1/distributed/rdma/build/efa_imm_probe_efa "$DEV" 0 --transport srd --unsolicited
-```
-
-Each run prints one `RESULT` line per scenario and a `VERDICT` line. How to
-read them is in
-[Receive queue depth](aerospike_rdma.md#receive-queue-depth-and-device-limits).
-In short:
-
-| VERDICT | Consequence |
-|---|---|
-| `consumes_recv_wr=yes` | Same as RC. The current depth logic stays binding, and nothing changes |
-| `consumes_recv_wr=no` | The receive-depth clamp becomes a conservative no-op |
-| `data_without_notification=yes` | Bytes land before their receive exists. EFA v2 shows this, and the client already covers it by never letting its receive queue run short |
-| `unsolicited_works=yes` | With the flag on both queue pairs, immediates complete with no receive posted |
-
-Exit code 2 means the device cannot run the probe: not EFA, no RDMA write, or
-`--unsolicited` without the API.
-
-The first A7 run found a probe bug: `--unsolicited` set the flag on the
-receiver only, and SRD fails every write when the two queue pairs disagree.
-The probe now sets it on both, and runs the receiver-only case as
-`unsolicited_receiver_only` to record the mismatch.
-
-### 2. SRD end to end (optional)
 
 Follow
 [Running A8 against a real server](aerospike_rdma.md#running-a8-against-a-real-server),
 with these differences:
 
-- build LMCache with `BUILD_WITH_AEROSPIKE=1 BUILD_WITH_AEROSPIKE_EFA=1`;
-- run with `RDMA_TRANSPORT=SRD RDMA_DEVICE=$DEV RDMA_GID_INDEX=0`;
+- start the server with `KV_SINK_RDMA_DEVICE=$DEV`, where
+  `DEV=$(ibv_devices | awk 'NR>2 {print $1; exit}')`;
+- run the tests with `RDMA_TRANSPORT=SRD RDMA_DEVICE=$DEV`;
 - raise the server's locked-memory limit with `prlimit` as on the VM;
-- install the Python `aerospike` package (`uv pip install aerospike`). It is
-  not in `requirements/test.txt`, and without it the integration tests skip
-  rather than fail.
-
-The client logs its receive depth, for example `device 'rdmap47s0' reports
-max_recv_wr=4096 ... effective=4096`. On EFA v2, ibv's `max_qp_wr` was 4096
-and efadv's `max_rq_wr` 32768; `RdmaContext` clamps to the smaller.
+- install the Python `aerospike` and `pybind11` packages
+  (`uv pip install aerospike pybind11`). Neither is in
+  `requirements/test.txt`; without them the integration tests and the
+  fabric-free harness tests skip rather than fail;
+- this server branch refuses a config without `cluster-name`, and an asd run
+  from the build tree needs `mod-lua { user-path ... }` pointing at an
+  existing directory and a `proto-fd-max` under the host's file limit.
 
 Pitfalls when the source is copied rather than cloned:
 
+- On Windows, `git archive` converts files marked `text` in
+  `.gitattributes` to CRLF (ICU marks all of them), and `configure` then
+  fails with `not found`. Archive with
+  `git -c core.autocrlf=false -c core.eol=lf archive`.
 - A tree without `.git` fails the LMCache build in setuptools-scm. Set
   `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_LMCACHE=0.0.0`.
+- The server's `pcre2lib` target runs `git submodule update` in
+  `modules/pcre2`. Ship `deps/sljit` with it and `git init` the directory.
+- Without `.git` the server builds with an empty `build` version, and the
+  Python `aerospike` client then fails to connect (`Failed to connect`), so
+  the integration tests skip. Write the version to `/work/VERSION` (e.g.
+  `8.1.3.0`), delete `target/Linux-x86_64/gen/version.c`, and rebuild.
 - A server tree already built elsewhere keeps that host's absolute paths in
   its CMake caches, and excluding `*.a` from the copy drops the prebuilt
   `libbacktrace.a` and `libjansson.a`. Copy the source only and build it on
@@ -168,13 +141,10 @@ Pitfalls when the source is copied rather than cloned:
 
 - the instance type, region, EFA installer version, kernel, and the PCI ID
   from `lspci -n`;
-- all `RESULT` and `VERDICT` lines from both probe runs;
-- for step 2, the pytest summary and the server's `kv-sink` log lines.
+- the pytest summary and the server's `kv-sink` log lines.
 
-They go into
-[Receive queue depth](aerospike_rdma.md#receive-queue-depth-and-device-limits)
-and the status table in `aerospike_rdma.md`, and into A7 in
-[track-a-questions-for-track-c.md](../../../layerwise/track-a-questions-for-track-c.md).
+They go into the status table in
+[`aerospike_rdma.md`](aerospike_rdma.md#what-is-proven-and-what-is-not).
 
 If EFA access cannot be obtained, record that instead. Per
 [track-a-acceptance.md](../../../layerwise/track-a-acceptance.md#done), it is

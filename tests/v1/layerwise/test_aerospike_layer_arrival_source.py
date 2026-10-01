@@ -195,8 +195,8 @@ def test_begin_fetch_reports_an_unavailable_backend_as_a_contract_error() -> Non
     """An unready backend raises, naming why, instead of looking merely slow."""
     source, connector, issuer = _make_source()
     connector.ready = False
-    connector.init_error = "kv-sink-register failed on every node"
-    with pytest.raises(LayerwiseContractError, match="kv-sink-register failed"):
+    connector.init_error = "aerospike_sink_create failed"
+    with pytest.raises(LayerwiseContractError, match="aerospike_sink_create failed"):
         source.begin_fetch(make_plan({0: 1}))
     assert issuer.issued == []
 

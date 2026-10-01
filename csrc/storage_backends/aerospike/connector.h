@@ -18,7 +18,7 @@
 #include <vector>
 
 #ifdef LMCACHE_AEROSPIKE_RDMA
-  #include "connector_pipelined_rdma.h"
+  #include "connector_sink_fetch.h"
   #include "memory_layout_conversion.h"
 #endif
 
@@ -138,8 +138,7 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
   //
   // Records of one chunk hash to independent partitions, so a planner must
   // ask per record rather than per chunk. The answer is a snapshot: a
-  // migration may move the record before it is fetched, in which case the
-  // named node declines the slot and the layer reports unservable.
+  // migration may move the record before it is fetched.
   //
   // Thread safety: safe to call concurrently; the client guards its
   // partition map.
@@ -176,9 +175,9 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
       const std::vector<std::string>& keys);
 
 #ifdef LMCACHE_AEROSPIKE_RDMA
-  // Report whether pipelined kv-sink-fetch is initialized and at least one
-  // node registered. False when RDMA was not enabled at build time or in
-  // config, or when kv-sink-register has not succeeded.
+  // Report whether pipelined fetch is ready: the L1 windows are registered
+  // as a kv-sink with every node and layouts fit a window. False when RDMA
+  // was not enabled at build time or in config, or the sink was not created.
   //
   // Thread safety: safe to call concurrently.
   bool pipelined_fetch_ready() const;
@@ -189,7 +188,9 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
   // Thread safety: safe to call concurrently.
   std::string pipelined_fetch_init_error() const;
 
-  // The cluster's one node, which every pipelined fetch reads from.
+  // A node of the cluster, for placers that name a node per slot. Sink rows
+  // are routed by the client's partition map, so the name does not choose
+  // which node serves a slot.
   //
   // Thread safety: safe to call concurrently. Throws std::runtime_error if
   // pipelined fetch was not enabled or did not initialize.
@@ -204,19 +205,22 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
   // Begin a pipelined fetch whose slots the caller has already planned, and
   // return its generation.
   //
-  // `slots[i]` is notification slot i: its record (by user key, hashed with
-  // record_digest_hex()) is written by node `node_names[slots[i].node_index]`
-  // to `dest_offset` in the registered window, and it counts toward
-  // `layer_id`'s readiness. Nothing is re-planned or re-ordered here.
+  // `slots[i]`'s record (by user key) is read with a kv-sink batch row that
+  // places its `length`-byte value at `dest_offset` from the registration
+  // base, and it counts toward `layer_id`'s readiness. Each layer goes out
+  // as one batch, prioritized by the order its first slot appears. Returns
+  // once the batches are queued; slots land asynchronously.
   //
-  // Thread safety: info round trips run without the driver lock; see
-  // AerospikePipelinedRdmaDriver::issue_planned_fetch.
+  // `node_index` must name an entry of `node_names` but does not route the
+  // row: the client sends each row to its partition's master.
+  //
+  // Thread safety: safe to call concurrently.
   //
   // Throws std::invalid_argument if a node index is out of range, a key is
-  // empty, a node has no kv-sink registration, or a slot leaves the window;
-  // rdma::PlanTooLargeError if there are more slots than
-  // pipelined_max_slots_per_request(); std::runtime_error if the RDMA path is
-  // not enabled or the window of the first slot already has a fetch.
+  // empty, a length is zero, or a slot leaves the first slot's window;
+  // sink::PlanTooLargeError if there are more slots than
+  // pipelined_max_slots_per_request(); std::runtime_error if pipelined fetch
+  // is not ready or the window of the first slot already has a fetch.
   //
   // Up to one fetch per window runs at a time; every later call about this
   // fetch quotes the returned generation.
@@ -224,8 +228,8 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
       const std::vector<std::string>& node_names,
       const std::vector<PlannedSlotKey>& slots);
 
-  // Most slots one pipelined fetch may carry: one window's share of the
-  // device's notification depth, or 0 when pipelined fetch is not ready.
+  // Most slots one pipelined fetch may carry, or 0 when pipelined fetch is
+  // not ready.
   //
   // Thread safety: safe to call concurrently.
   uint32_t pipelined_max_slots_per_request() const;
@@ -238,8 +242,9 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
   bool is_pipelined_layer_ready(uint32_t layer_id,
                                 uint16_t request_generation) const;
 
-  // Layers of fetch `generation` that a node declined or lost. Empty when
-  // pipelined fetch is not ready or that fetch is not active.
+  // Layers of fetch `generation` with a row that failed: record missing or
+  // not a single-blob record, timeout, or a node that lost the sink twice.
+  // Empty when pipelined fetch is not ready or that fetch is not active.
   //
   // A caller cannot distinguish "still in flight" from "will never arrive"
   // with is_pipelined_layer_ready alone: both report false. Without this the
@@ -252,19 +257,15 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
   // Finish fetch `generation` after it completed. Throws std::runtime_error
   // if it is not active.
   //
-  // Thread safety: safe to call concurrently; serialized on the driver lock.
+  // Thread safety: safe to call concurrently.
   void finish_pipelined_fetch(uint16_t generation);
 
   // Abandon fetch `generation` without waiting; no-op if it is not active.
+  // Rows already sent may still be written until the fetch timeout, so the
+  // caller must not reuse the window before then.
   //
-  // Thread safety: safe to call concurrently; serialized on the driver lock.
+  // Thread safety: safe to call concurrently.
   void abandon_pipelined_fetch(uint16_t generation);
-
-  // Drain RDMA write-with-immediate notifications into the active fetches.
-  //
-  // Thread safety: safe to call concurrently; serialized with other pipelined
-  // methods on the internal driver lock.
-  void poll_pipelined_fetch_notifications();
 #endif
 
  protected:
@@ -368,7 +369,7 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
 
 #ifdef LMCACHE_AEROSPIKE_RDMA
   void try_initialize_pipelined_rdma();
-  std::unique_ptr<AerospikePipelinedRdmaDriver> pipelined_rdma_;
+  std::unique_ptr<AerospikeSinkFetchDriver> pipelined_rdma_;
   std::string pipelined_init_error_;
 #endif
 

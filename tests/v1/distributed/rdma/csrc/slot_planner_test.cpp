@@ -4,7 +4,7 @@
 //
 // Needs no RDMA device: this is the arithmetic that decides which writes are
 // expected and where each one lands. The fabric is exercised by
-// rdma_pipeline_test.cpp.
+// tests/v1/distributed/test_aerospike_pipelined_rdma_integration.py.
 //
 // The central assertion, and the reason this file exists, is that a layer
 // occupies `kv_size` **disjoint** byte ranges rather than one. In the

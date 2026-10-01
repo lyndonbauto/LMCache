@@ -9,7 +9,7 @@ the other to exist, and either can be swapped for a fake in tests.
 The data flows in one direction::
 
     Aerospike cluster
-        | RDMA writes, one immediate per slot
+        | RDMA writes, one kv-sink batch-read row per slot
         v
     LayerArrivalSource      "layer N has fully landed in host memory"
         | polled by
@@ -52,11 +52,10 @@ import types
 #: :meth:`LayerArrivalSource.begin_fetch` for a fetch that actually started.
 NO_GENERATION = 0
 
-#: Slots addressable by one request. The RDMA immediate carries 32 bits, split
-#: as ``(generation << 16) | slot``, so a request has 16 bits of slot index.
+#: Slots addressable by one request, which bounds the native fetch table.
 #: Mirrors ``kMaxSlotsPerRequest`` in
-#: ``csrc/storage_backends/aerospike/layer_pipeline.h``; the two must agree,
-#: because the transport decodes what the plan numbers.
+#: ``csrc/storage_backends/aerospike/sink_fetch_table.h``; the two must agree,
+#: because the transport accounts for slots by the plan's numbering.
 MAX_SLOTS_PER_REQUEST = 0x10000
 
 
@@ -92,11 +91,11 @@ class LayerArrivalTimeoutError(LayerwiseContractError):
 class PlanTooLargeError(LayerwiseContractError):
     """A request is more than one fetch can carry.
 
-    Raised by :class:`LayerFetchPlan` for more slots than the RDMA immediate
-    can number (:data:`MAX_SLOTS_PER_REQUEST`), and for limits only the
-    transport knows: by :meth:`LayerArrivalSource.begin_fetch`, e.g. more
-    slots than the device can post receives for, or by the transport's chunk
-    placer, e.g. a request larger than any RDMA window. Distinct from its
+    Raised by :class:`LayerFetchPlan` for more slots than one request may
+    carry (:data:`MAX_SLOTS_PER_REQUEST`), and for limits only the transport
+    knows: by :meth:`LayerArrivalSource.begin_fetch`, e.g. more slots than
+    its fetch table allows, or by the transport's chunk placer, e.g. a
+    request larger than any RDMA window. Distinct from its
     base class because the caller has a response other than falling back: it
     can split the request into smaller ones. A refusal that splitting would
     not fix, such as no window being free right now, is a plain
@@ -202,13 +201,12 @@ class LayerFetchPlan:
 
     Attributes:
         slots: Every slot the fetch will request. **Order is significant**: a
-            slot's index -- the value the RDMA immediate carries in its low 16
-            bits -- is its position in this tuple. That numbering therefore
-            spans the whole request rather than restarting per node, which is
-            what keeps two nodes' notifications distinguishable when they land
-            on one queue pair. Producers must be deterministic; consumers must
-            not reorder. Layer order is given separately by :meth:`layer_ids`,
-            so nothing needs to infer it from this order.
+            slot's index -- the number the transport accounts its result
+            under -- is its position in this tuple. That numbering spans the
+            whole request rather than restarting per node, so two nodes'
+            results never share an index. Producers must be deterministic;
+            consumers must not reorder. Layer order is given separately by
+            :meth:`layer_ids`, so nothing needs to infer it from this order.
         node_names: The cluster nodes this fetch talks to, in the order
             :attr:`SlotPlacement.node_index` numbers them. Carried on the
             plan so the transport can resolve a slot to a node without
@@ -217,10 +215,10 @@ class LayerFetchPlan:
 
     Raises:
         PlanTooLargeError: If ``slots`` holds more than
-            :data:`MAX_SLOTS_PER_REQUEST` slots. The plan is refused rather
-            than truncated: the extra slots would reuse the low 16 bits of
-            earlier ones, and their arrivals would be credited to the wrong
-            slot. Fetching fewer chunks per request fixes it.
+            :data:`MAX_SLOTS_PER_REQUEST` slots, the most the transport's
+            fetch table accepts. The plan is refused rather than truncated,
+            since a truncated plan would silently leave bytes unfetched.
+            Fetching fewer chunks per request fixes it.
         ValueError: If ``slots`` is empty, if any slot has a non-positive
             length, if ``node_names`` is empty or repeats a name, or if a
             slot names a node outside ``node_names`` -- the last of which

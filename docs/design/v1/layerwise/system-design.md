@@ -22,9 +22,9 @@ attention computing on it:
    |     csrc/storage_backends/aerospike/{slot_planner,shard_plan}.*
    |     produces a LayerFetchPlan: every byte range, per layer, per node
    v
- PipelinedFetchSession -> kv-sink wire -> Aerospike nodes    [Track A]
-   |     csrc/storage_backends/aerospike/{pipelined_fetch_session,kv_sink_client}.*
-   |     one RDMA_WRITE_WITH_IMM per slot, immediate = (generation << 16) | slot
+ AerospikeSinkFetchDriver -> kv-sink batch read -> nodes    [Track A]
+   |     csrc/storage_backends/aerospike/{connector_sink_fetch,sink_fetch_table}.*
+   |     one batch row per slot; the row's OK reply means its RDMA write landed
    v
  L1 pinned host buffer
    |  (2) "layer N is complete in host memory"               <-- CONTRACT 1
@@ -178,9 +178,9 @@ contract without touching private state -- copy its style.
 
 ### Track A -- Transport
 
-`csrc/storage_backends/aerospike/`: `rdma_context`, `kv_sink_client`,
-`kv_sink_fanout`, `pipelined_fetch_session`, `pipelined_fetch_issue`,
-`notification_depth`, `connector_pipelined_rdma`.
+`csrc/storage_backends/aerospike/`: `sink_fetch_table`,
+`connector_sink_fetch`, `l1_rdma_registration`, over the kv-sink Aerospike C
+client.
 Plus `lmcache/v1/distributed/l2_adapters/` where the adapter surfaces it.
 
 Implements `LayerArrivalSource`. Tests on Soft-RoCE plus a real Aerospike
@@ -230,7 +230,7 @@ times and change at different rates:
 
 Record keys are looked up rather than passed in. A slot is exactly one stored
 record, identified by `(chunk_id, layer_id, plane, piece)` -- the same key the
-native `pipelined_fetch_session` joins records on. The caller cannot enumerate
+native connector joins records on. The caller cannot enumerate
 those records before planning, because which pieces exist depends on how the
 planner cuts planes, so the planner asks a `RecordKeySource` as it goes.
 Note that the key has no object-group field: a layer belongs to exactly one
@@ -664,7 +664,8 @@ Each of these was a real bug. Losing one reintroduces it.
 These are open questions, not tasks anyone has been assigned to wish away.
 
 **Does EFA consume a receive work request per `RDMA_WRITE_WITH_IMM`?**
-If it does, the client must size its receive queue to the number of immediates
+(Answered: yes, as on RC. Moot since the kv-sink batch-read protocol, which
+signals completion by the row reply and posts no receives.) If it does, the client must size its receive queue to the number of immediates
 the server will send, and on RC with `rnr_retry = 7` a shortfall is infinite
 retry -- a permanently wedged region rather than an error. The client can size
 from its own plan, since it knows how many slots it asked for, and

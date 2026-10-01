@@ -3,33 +3,37 @@
 
 A real ``StorageManager`` holds a real Aerospike adapter with RDMA reception
 on a real device, so every step of a layerwise retrieve is production code:
-the window registration (``kv-sink-register``), the placer, the plan, the
-``kv-sink-fetch-pipelined`` commands, the server's RDMA writes with
-immediate, and the completions. The objects are stored first through a
-plain adapter on the same set, then fetched, and every byte the fetch left
-in L1 is compared with what was stored.
+the window registration (``aerospike_sink_create``), the placer, the plan,
+the per-layer kv-sink batch reads, the server's RDMA writes, and the row
+results. The objects are stored first through a plain adapter on the same
+set, then fetched, and every byte the fetch left in L1 is compared with what
+was stored.
 
-Requires a server with the kv-sink commands (aerospike-server branch
-``feat/kv-sink-fetch-pipelined``), an RDMA device the server also opens
-(Soft-RoCE is enough), and the ``BUILD_AEROSPIKE=1`` extension built with
-RDMA support. Skipped otherwise; stock CE has no kv-sink commands, so CI's
-Docker server does not run these. On the Soft-RoCE VM::
+Requires a server with kv-sink batch reads (aerospike-server branch
+``sriram/kv-sink-batch-prio``) configured for the same transport, an RDMA
+device the server also opens (Soft-RoCE is enough for RC), and the extension
+built with ``BUILD_WITH_AEROSPIKE_RDMA=1`` against the kv-sink client (see
+``.deps/build_aerospike_client_kvsink.sh``). Skipped otherwise; stock CE has
+no kv-sink, so CI's Docker server does not run these. On the Soft-RoCE VM::
 
     RUN_AEROSPIKE_INTEGRATION=1 AEROSPIKE_TEST_HOST=127.0.0.1 \\
     AEROSPIKE_TEST_PORT=3000 AEROSPIKE_TEST_NAMESPACE=lmcache \\
     RDMA_DEVICE=rxe0 RDMA_GID_INDEX=1 \\
     pytest tests/v1/distributed/test_aerospike_pipelined_rdma_integration.py
 
-On AWS EFA, build with ``BUILD_WITH_AEROSPIKE_EFA=1`` and run with
-``RDMA_TRANSPORT=SRD RDMA_DEVICE=<efa device> RDMA_GID_INDEX=0``.
+On AWS EFA, run with ``RDMA_TRANSPORT=SRD RDMA_DEVICE=<efa device>``.
+``RUN_AEROSPIKE_SLOW_INTEGRATION=1`` also runs the region-release test, which
+opens more client lifetimes than the server has region slots (about 17
+minutes on EFA).
 """
 
 # Standard
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
-from multiprocessing import shared_memory
+from multiprocessing import resource_tracker, shared_memory
 import os
 import select
+import sys
 import time
 import uuid
 
@@ -96,6 +100,7 @@ AEROSPIKE_HOST = os.environ.get("AEROSPIKE_TEST_HOST", "127.0.0.1")
 AEROSPIKE_PORT = int(os.environ.get("AEROSPIKE_TEST_PORT", "3000"))
 AEROSPIKE_NAMESPACE = os.environ.get("AEROSPIKE_TEST_NAMESPACE", "lmcache")
 RUN_AEROSPIKE_IT = os.environ.get("RUN_AEROSPIKE_INTEGRATION") == "1"
+RUN_SLOW_IT = os.environ.get("RUN_AEROSPIKE_SLOW_INTEGRATION") == "1"
 RDMA_DEVICE = os.environ.get("RDMA_DEVICE", "")
 RDMA_GID_INDEX = int(os.environ.get("RDMA_GID_INDEX", "0"))
 #: ``RC`` (Soft-RoCE, the default) or ``SRD`` (AWS EFA).
@@ -106,11 +111,35 @@ RDMA_TRANSPORT = RdmaTransport[os.environ.get("RDMA_TRANSPORT", "RC").upper()]
 WINDOW_BYTES = 1 << 16
 FETCH_TIMEOUT = 30.0
 STORE_TIMEOUT = 30.0
+#: Enough client lifetimes that a sink left registered, or a node's stale
+#: registration not refreshed, would surface.
+REOPEN_LIFETIMES = 3
 #: How long to watch the window for writes after ``close()``. A cold
 #: server's late writes land about 0.5 s after the close.
 LATE_WRITE_WATCH_SECONDS = 5.0
 #: ``MAX_REGIONS`` in the server's ``as/src/base/kv_sink.c``.
-SERVER_MAX_REGIONS = 16
+SERVER_MAX_REGIONS = 1024
+
+
+def _attach_shared_memory(name: str) -> shared_memory.SharedMemory:
+    """Map an existing shared-memory segment without taking ownership of it.
+
+    Args:
+        name: The segment's name, without the leading slash.
+
+    Returns:
+        A mapping that this process will not unlink when it exits.
+
+    Note:
+        Before Python 3.13 an attached segment is registered with the
+        resource tracker, which unlinks it at exit and warns; unregistering
+        it leaves the segment to its creator, as ``track=False`` does on 3.13.
+    """
+    if sys.version_info >= (3, 13):
+        return shared_memory.SharedMemory(name=name, track=False)
+    segment = shared_memory.SharedMemory(name=name)
+    resource_tracker.unregister(f"/{name}", "shared_memory")
+    return segment
 
 
 def _aerospike_available() -> bool:
@@ -399,7 +428,7 @@ def test_a_missing_record_falls_back_to_a_whole_reload(
 ) -> None:
     """A slot the server cannot serve fails the fetch, not the retrieve.
 
-    The server reports the slot whose record is gone as failed; the retrieve
+    The row whose record is gone comes back not-found; the retrieve
     reloads every object whole, and all but the damaged one read back intact.
     """
     # Third Party
@@ -429,28 +458,31 @@ def test_no_server_write_reaches_l1_after_close(
 ) -> None:
     """Once ``close()`` returns, the server cannot write into the L1 slab.
 
-    A fetch the client gave up on can still be in flight at the server: on a
-    cold server the first fetch registers its stripes inside the command
-    (server issue 5), the client's info call times out and the retrieve falls
-    back, and the server posts its writes afterwards. ``kv-sink-deregister``
-    does not wait for them, so ``close()`` must revoke the remote's access
-    before L1 frees the slab; otherwise those writes land in freed memory.
+    A fetch the client gave up on can still have writes in flight at the
+    server: the server fails queued writes past their deadline, but not one
+    already posted, and the deregistration ``close()`` sends does not wait for
+    them, so ``close()`` must revoke the remote's access before L1 frees the
+    slab; otherwise those writes land in freed memory.
 
     L1 is a named shared-memory segment that the test maps too, so the pages
     outlive ``close()`` and any later write is visible instead of corrupting
-    the heap. Needs a fetch the server finishes late, which a cold server
-    gives: run it first after starting the server, or it skips.
+    the heap. Needs a fetch the server finishes late, after the client fell
+    back; when the fetch completes pipelined there is nothing to watch, and
+    the test skips.
     """
     shm_name = f"lmcache_l1_pool_it_{uuid.uuid4().hex[:12]}"
     built = _build_manager(set_name, shm_name=shm_name)
-    l1_pages = shared_memory.SharedMemory(name=shm_name, track=False)
+    l1_pages = _attach_shared_memory(shm_name)
     try:
         try:
             retrieved = _retrieve(built)
         finally:
             built.close()
         if retrieved.completion is RetrieveCompletion.PIPELINED:
-            pytest.skip("the fetch did not fall back; needs a cold kv-sink server")
+            pytest.skip(
+                "the fetch did not fall back, so no server write was left "
+                "outstanding at close()"
+            )
         window = l1_pages.buf[:WINDOW_BYTES]
         window[:] = b"\xab" * WINDOW_BYTES
         time.sleep(LATE_WRITE_WATCH_SECONDS)
@@ -463,6 +495,11 @@ def test_no_server_write_reaches_l1_after_close(
         l1_pages.close()
 
 
+@pytest.mark.skipif(
+    not RUN_SLOW_IT,
+    reason="opens SERVER_MAX_REGIONS + 1 client lifetimes "
+    "(set RUN_AEROSPIKE_SLOW_INTEGRATION=1)",
+)
 def test_closing_releases_the_servers_region(set_name: str) -> None:
     """More client lifetimes than the server has region slots all register.
 
@@ -476,5 +513,29 @@ def test_closing_releases_the_servers_region(set_name: str) -> None:
             assert built.pipelined_fetch_node_name(), (
                 f"client lifetime {lifetime} could not register"
             )
+        finally:
+            built.close()
+
+
+def test_each_client_lifetime_registers_and_fetches(
+    stored: dict[ObjectKey, bytes], set_name: str
+) -> None:
+    """Closing deregisters the sink, and the next manager fetches afresh.
+
+    Each lifetime creates its own sink over the same L1 window range, so a
+    close that left the old registration behind, or a new one the server
+    confused with it, would land the wrong bytes or fail the fetch.
+    """
+    for lifetime in range(REOPEN_LIFETIMES):
+        built = _build_manager(set_name)
+        try:
+            retrieved = _retrieve(built)
+            assert retrieved.completion is RetrieveCompletion.PIPELINED, (
+                f"client lifetime {lifetime} did not fetch pipelined"
+            )
+            for key, payload in stored.items():
+                assert retrieved.l1_bytes[key] == payload, (
+                    f"lifetime {lifetime}: {key} holds other bytes"
+                )
         finally:
             built.close()
