@@ -1,0 +1,53 @@
+# Aerospike CE 8.2 node @NODE@ of the 3-node E4 cluster (functional test plan
+# section 3). Rendered by functional/harness/cluster.sh, which fills the @...@
+# fields. All three nodes run on this host with host networking, so every
+# port is distinct and every address is 127.0.0.1; heartbeats mesh over
+# loopback. Node n1 = 3300-3303, n2 = 3310-3313, n3 = 3320-3323
+# (service, fabric, heartbeat, info). aerospike-ce keeps 3000-3003.
+service {
+    proto-fd-max 15000
+    cluster-name lmcache-e4
+    node-id @NODE_ID@
+}
+logging {
+    console {
+        context any info
+    }
+}
+network {
+    service {
+        address 127.0.0.1
+        port @SVC@
+        access-address 127.0.0.1
+        access-port @SVC@
+    }
+    heartbeat {
+        mode mesh
+        address 127.0.0.1
+        port @HB@
+@SEEDS@
+        interval 150
+        timeout 10
+    }
+    fabric {
+        address 127.0.0.1
+        port @FAB@
+    }
+    info {
+        address 127.0.0.1
+        port @INFO@
+    }
+}
+# The 5 TiB scratch disk is not mounted, so each node's device is a sparse
+# file on the boot disk under /root/lmc-work/aero-cluster/n@N@/.
+namespace lmcache {
+    replication-factor @RF@
+    nsup-period 120
+    default-ttl 0
+    max-record-size 1048576
+    storage-engine device {
+        file /opt/aerospike/data/lmcache.dat
+        filesize 16G
+        max-write-cache 1G
+    }
+}
