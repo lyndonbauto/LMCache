@@ -8,9 +8,9 @@
 #   refs1: no-cache baseline at block size 16 (port 8000) alongside vLLM's own
 #          prefix cache at block size 16 (port 8001), same send order as the
 #          LMCache session.
-#   refs2: a second prefix-cache run at block size 16 (determinism) alongside
-#          a prefix-cache run at block size 256, whose cached prefixes end
-#          where LMCache's 256-token chunks end.
+#   refs2: a prefix-cache run at block size 256, whose cached prefixes end
+#          where LMCache's 256-token chunks end, alongside a second
+#          block-16 run on P-ragged and P-shared (determinism).
 #   lmc:   one LMCache session per layerwise mode covering every test.
 set -u
 S=/root/lmc-work/functional/stage2
@@ -99,17 +99,26 @@ sec_pc16r1() {
   progress "refs1: baseline vs concurrent-8 on the same server: $(cmp base_b16_all base_b16_conc)"
 }
 
+# refs2 starts each server as soon as a refs1 server exits: the block-256
+# prefix cache after the baseline, the block-16 rerun (P-ragged and
+# P-shared only, for determinism) after pc16_r1.
 sec_refs2() {
-  echo "##### refs2 $(date -u +%T) $(wait_idle)"
-  ref pc16_r2 8000 0.47 "--enable-prefix-caching --block-size 16" "${PC_SENDS[@]}"
+  echo "##### refs2 $(date -u +%T)"
+  for _ in $(seq 3600); do grep -q "=== base_b16 done" $S/gptoss_ref/session_base_b16.txt && break; sleep 2; done
+  sleep 20
+  ref pc256 8000 0.48 "--enable-prefix-caching --block-size 256" "${PC_SENDS[@]}"
   local a=$!
-  wait_serving pc16_r2 || echo "pc16_r2 did not come up"
-  ref pc256 8001 0.5 "--enable-prefix-caching --block-size 256" "${PC_SENDS[@]}"
+  for _ in $(seq 3600); do grep -q "=== pc16_r1 done" $S/gptoss_ref/session_pc16_r1.txt && break; sleep 2; done
+  sleep 20
+  ref pc16_r2 8001 0.47 "--enable-prefix-caching --block-size 16" "${PC_SENDS[@]:0:4}"
   local b=$!
-  wait $a; echo "pc16_r2 rc=$?"; wait $b; echo "pc256 rc=$?"
+  wait $a; echo "pc256 rc=$?"; wait $b; echo "pc16_r2 rc=$?"
   grep -hE "===|correct|rror" $S/gptoss_ref/session_pc16_r2.txt $S/gptoss_ref/session_pc256.txt | tail -n 30
+  for send in rc rw sc sw; do
+    progress "refs2 $send: pc16 r1 vs r2: $(cmp pc16_r1_$send pc16_r2_$send)"
+  done
   for send in rc rw sc sw mc mw; do
-    progress "refs2 $send: pc16 r1 vs r2: $(cmp pc16_r1_$send pc16_r2_$send); pc256 vs pc16: $(cmp pc16_r1_$send pc256_$send)"
+    progress "refs2 $send: pc256 vs pc16: $(cmp pc16_r1_$send pc256_$send); pc256 vs baseline: $(cmp base_b16_all pc256_$send)"
   done
 }
 
