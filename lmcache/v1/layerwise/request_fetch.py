@@ -73,8 +73,7 @@ class ChunkLocation:
     """Where one chunk's object is fetched from and delivered to.
 
     Attributes:
-        node_name: Cluster node every record of the object is fetched from;
-            only correct on a single-node cluster (see
+        node_name: Cluster node every record of the object names (see
             :attr:`~lmcache.v1.layerwise.planner.ChunkPlacement.node_index`).
         dest_offset: Byte offset of the object from the start of the
             registered memory the nodes write into -- the L1 slab, since one

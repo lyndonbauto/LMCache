@@ -791,7 +791,7 @@ all. Regions must be enumerated per kernel group and per plane.
   in flight together, so the slots of a layer land in no particular order and
   neighbouring layers overlap at the frontier. Count arrivals; do not infer
   completion from the last one. See
-  [`aerospike_rdma.md`](aerospike_rdma.md#why-arrival-order-cannot-be-trusted).
+  [`aerospike_rdma.md`](aerospike_rdma.md#pipelined-fetch).
 - **All chunks participate in every group.** False for sliding-window groups.
 - **Slot indices are unique per fetch.** They must be unique per *request*.
 - **That readiness can be counted over every object group.** Under CacheBlend

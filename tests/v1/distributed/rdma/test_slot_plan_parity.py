@@ -287,9 +287,9 @@ def test_every_fixture_case_plans_identically_in_both_languages(
     """The two planners produce the same slots, in the same order.
 
     Order is compared, not just the set of slots, because a slot's index is
-    its position: the RDMA immediate carries that position and nothing else,
-    so two planners that agree on the bytes but disagree on the ordering
-    would still misattribute every arrival.
+    its position: the native table accounts for results by that position
+    alone, so two planners that agree on the bytes but disagree on the
+    ordering would still misattribute every arrival.
 
     Args:
         logic_harness_with_fixture: Fixture that builds and runs a harness

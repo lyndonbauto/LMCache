@@ -67,8 +67,7 @@ void set_object_group_layouts(AerospikeNativeConnector& connector,
   connector.set_object_group_layouts(parse_object_group_layouts(groups));
 }
 
-// Each slot is (node_index, record_key, dest_offset, length, layer_id); its
-// position in `slots` is its notification slot.
+// Each slot is (node_index, record_key, dest_offset, length, layer_id).
 uint16_t issue_pipelined_fetch_by_slots(
     AerospikeNativeConnector& connector,
     const std::vector<std::string>& node_names,
@@ -90,8 +89,8 @@ uint16_t issue_pipelined_fetch_by_slots(
 void bind_pipelined_fetch(py::module& module,
                           py::class_<AerospikeNativeConnector>& connector) {
   // Subclassing the contract's error lets callers catch one type whether the
-  // adapter's pre-check or the native session refused the plan.
-  py::register_exception<rdma::PlanTooLargeError>(
+  // adapter's pre-check or the native driver refused the plan.
+  py::register_exception<sink::PlanTooLargeError>(
       module, "PipelinedPlanTooLargeError",
       py::module_::import("lmcache.v1.layerwise.contract")
           .attr("PlanTooLargeError"));

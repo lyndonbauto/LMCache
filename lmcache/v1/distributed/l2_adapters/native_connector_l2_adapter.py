@@ -312,12 +312,13 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
         return str(getter())
 
     def pipelined_fetch_node_name(self) -> str:
-        """Return the cluster's one node, which pipelined fetches read from.
+        """Return a node of the cluster, for placers that name one per slot.
 
-        Pipelined fetches run on single-node clusters only; the native
-        client refuses to initialize them on a larger one. The name is what
+        The name is what
         :class:`~lmcache.v1.distributed.l2_adapters.rdma_window_placer.RdmaWindowPlacer`
-        is built with.
+        is built with. It does not choose which node serves a slot: the
+        native client routes each kv-sink row to its record's partition
+        master, on a cluster of any size.
 
         Returns:
             The node name.
@@ -343,8 +344,7 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
     def pipelined_max_slots_per_request(self) -> int:
         """Return the most slots one pipelined fetch may carry.
 
-        The limit is one RDMA window's share of the device's notification
-        depth. ``begin_fetch`` refuses a plan with more slots with
+        ``begin_fetch`` refuses a plan with more slots with
         :class:`~lmcache.v1.layerwise.contract.PlanTooLargeError`, so a
         lookup-time eligibility check can compare a request's slot count
         against this and skip the pipelined path up front.

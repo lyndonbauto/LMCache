@@ -125,8 +125,8 @@ AerospikeNativeConnector::AerospikeNativeConnector(
 
 #ifdef LMCACHE_AEROSPIKE_RDMA
     if (l1_rdma_registration_.is_enabled()) {
-      pipelined_rdma_ = std::make_unique<AerospikePipelinedRdmaDriver>(
-          l1_rdma_registration_, ns_);
+      pipelined_rdma_ = std::make_unique<AerospikeSinkFetchDriver>(
+          l1_rdma_registration_, ns_, set_name_);
       try_initialize_pipelined_rdma();
     }
 #endif
@@ -157,7 +157,7 @@ void AerospikeNativeConnector::close() {
 #ifdef LMCACHE_AEROSPIKE_RDMA
   // The shared client closes once the workers stop, and deregistering needs it.
   if (pipelined_rdma_ && connected_) {
-    pipelined_rdma_->shutdown(&as_);
+    pipelined_rdma_->shutdown();
   }
 #endif
   ConnectorBase<WorkerAerospikeConn>::close();
@@ -583,54 +583,6 @@ std::string AerospikeNativeConnector::record_node(
 
 #ifdef LMCACHE_AEROSPIKE_RDMA
 
-namespace {
-
-// The C client offers no public lookup from a node name to an as_node, so we
-// hold the cluster's node array for the duration of the call and search it.
-// The reservation is what keeps the node alive: a cluster tend that drops the
-// node mid-call would otherwise free it under aerospike_info_node().
-std::string send_pipelined_info_command(aerospike* client,
-                                        const std::string& node_name,
-                                        const std::string& command) {
-  as_nodes* nodes = as_nodes_reserve(client->cluster);
-  if (nodes == nullptr) {
-    throw std::runtime_error("Aerospike pipelined fetch: cluster has no nodes");
-  }
-
-  as_node* node = nullptr;
-  for (uint32_t i = 0; i < nodes->size; ++i) {
-    if (node_name == nodes->array[i]->name) {
-      node = nodes->array[i];
-      break;
-    }
-  }
-
-  if (node == nullptr) {
-    as_nodes_release(nodes);
-    throw std::runtime_error("Aerospike pipelined fetch: unknown node '" +
-                             node_name + "'");
-  }
-
-  as_error err;
-  char* response = nullptr;
-  const as_status status = aerospike_info_node(client, &err, nullptr, node,
-                                               command.c_str(), &response);
-  as_nodes_release(nodes);
-
-  if (status != AEROSPIKE_OK || response == nullptr) {
-    if (response != nullptr) {
-      std::free(response);
-    }
-    throw std::runtime_error(std::string("Aerospike pipelined fetch info: ") +
-                             err.message);
-  }
-  std::string reply(response);
-  std::free(response);
-  return reply;
-}
-
-}  // namespace
-
 void AerospikeNativeConnector::try_initialize_pipelined_rdma() {
   if (!pipelined_rdma_) {
     return;
@@ -686,7 +638,7 @@ uint16_t AerospikeNativeConnector::issue_pipelined_fetch_by_slots(
     throw std::runtime_error(
         "Aerospike pipelined fetch: RDMA path is not enabled");
   }
-  std::vector<rdma::PlannedSlot> planned;
+  std::vector<sink::SinkSlot> planned;
   planned.reserve(slots.size());
   for (size_t i = 0; i < slots.size(); ++i) {
     const PlannedSlotKey& slot = slots[i];
@@ -697,15 +649,10 @@ uint16_t AerospikeNativeConnector::issue_pipelined_fetch_by_slots(
           " but only " + std::to_string(node_names.size()) +
           " nodes were given");
     }
-    planned.push_back({node_names[slot.node_index],
-                       record_digest_hex(slot.record_key), slot.layer_id,
-                       slot.dest_offset, slot.length});
+    planned.push_back(
+        {slot.record_key, slot.layer_id, slot.dest_offset, slot.length});
   }
-  return pipelined_rdma_->issue_planned_fetch(
-      [this](const std::string& node_name, const std::string& command) {
-        return send_pipelined_info_command(&as_, node_name, command);
-      },
-      planned);
+  return pipelined_rdma_->issue(std::move(planned));
 }
 
 uint32_t AerospikeNativeConnector::pipelined_max_slots_per_request() const {
@@ -744,13 +691,6 @@ void AerospikeNativeConnector::abandon_pipelined_fetch(uint16_t generation) {
     return;
   }
   pipelined_rdma_->abandon_request(generation);
-}
-
-void AerospikeNativeConnector::poll_pipelined_fetch_notifications() {
-  if (!pipelined_rdma_) {
-    return;
-  }
-  pipelined_rdma_->poll_notifications();
 }
 #endif
 

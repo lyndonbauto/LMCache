@@ -657,6 +657,11 @@ Setting ``AEROSPIKE_INCLUDE_DIR`` is enough to enable the extension, so
 ``BUILD_AEROSPIKE=1`` is optional once the env file is sourced. Multiple include
 or library directories can be passed as ``;``-separated lists.
 
+The experimental RDMA pipelined fetch (``BUILD_WITH_AEROSPIKE_RDMA=1``) needs
+the kv-sink fork of the C client instead. ``.deps/build_aerospike_client_kvsink.sh``
+builds it into ``.deps/aerospike-kvsink-install`` and writes the same
+``.deps/aerospike-client-c.env`` pointing at it.
+
 **MP mode:**
 
 .. code-block:: bash

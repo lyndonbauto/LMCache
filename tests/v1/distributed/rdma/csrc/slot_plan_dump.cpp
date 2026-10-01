@@ -20,9 +20,9 @@
 //   record <slot_index> <segment_index>|none
 //   ...
 //
-// Digests and nodes are deliberately absent. They are joined onto the plan
-// later, by pipelined_fetch_session on this side, so they are not something
-// the two planners could disagree about.
+// Record keys and nodes are deliberately absent. Keys are joined onto the
+// plan later by the connector, and the client routes rows by partition, so
+// they are not something the two planners could disagree about.
 //
 // == Why the record lines are here ==
 //

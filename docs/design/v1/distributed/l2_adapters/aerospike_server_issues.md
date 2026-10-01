@@ -4,8 +4,9 @@ Defects and contract gaps in the aerospike-server branch
 `sriram/kv-sink-batch-prio` (checked at `24357d20d`) and the matching C client
 branch `sriram/kv-sink-batch-prio` of `aerospike-client-c` (checked at
 `769304f7`, based on 7.5.0), found by reading both against the LMCache
-Aerospike connector. The code was reviewed, not yet run: none of these have
-been reproduced on Soft-RoCE or EFA. The earlier test setups are in
+Aerospike connector and by running LMCache's A8 suite against them on
+Soft-RoCE (RC, 2026-09-30). Issues 3 and 11 were reproduced there; the rest
+are from review. EFA has not been run yet. The test setups are in
 [`rdma_testing_on_windows.md`](rdma_testing_on_windows.md) and
 [`rdma_testing_on_efa.md`](rdma_testing_on_efa.md).
 
@@ -26,11 +27,10 @@ regions, missing read-touch) are fixed on this branch. Issues 3 and 9 below
 are what remains of the old "failed write disables the region" and "busy-spin"
 entries.
 
-**This is a protocol change for LMCache.** `kv-sink-fetch-pipelined` no longer
-exists and writes carry no immediate, so LMCache's current pipelined path
-fails the command and falls back to whole-object loads against this server.
-Using the branch means moving LMCache to batch reads with sink rows through
-the patched client.
+**This was a protocol change for LMCache.** `kv-sink-fetch-pipelined` no
+longer exists and writes carry no immediate. LMCache now issues batch reads
+with sink rows through the patched client; see
+[`aerospike_rdma.md`](aerospike_rdma.md).
 
 | # | Issue | Severity | Where | Status |
 |---|---|---|---|---|
@@ -44,6 +44,7 @@ the patched client.
 | 8 | [RoCE hop limit is 1](#8-roce-hop-limit-is-1) | No routed RoCEv2 | Server and client | Open |
 | 9 | [The poller never sleeps when idle](#9-the-poller-never-sleeps-when-idle) | CPU | Server | Open |
 | 10 | [One registration failure fails the whole sink](#10-one-registration-failure-fails-the-whole-sink) | Availability | Client | Open |
+| 11 | [`libaerospike.so` is not linked against libibverbs](#11-libaerospikeso-is-not-linked-against-libibverbs) | RDMA unusable through the shared library | Client | Open; worked around in LMCache's build script |
 
 Smaller items are under [Minor](#minor).
 
@@ -147,6 +148,10 @@ whole-object loads with no error telling it to register again.
 take the region out of the registry (`region_remove`). Queued ops then fail
 with 220, the next read gets 220, and the client's refresh re-registers it.
 `kv-sink-touch` should also fail on a region whose queue pair is not in RTS.
+
+**Reproduced** on Soft-RoCE while chasing issue 11: one remote access error,
+then every later write on the region `Work Request Flushed Error`, until the
+client closed.
 
 ## 4. Region ownership is self-declared
 
@@ -276,6 +281,43 @@ the whole cluster, and repeated attempts leave server-side regions behind.
 **Expected fix:** let `aerospike_sink_create` succeed with a per-node result
 (rows sent to an unregistered node already fail with 220, which the caller
 handles), and deregister on the server when the client-side connect fails.
+
+## 11. `libaerospike.so` is not linked against libibverbs
+
+**Where:** the `library` rule in the client's `project/settings.mk`, and the
+`AS_SINK_VERBS` block of its `Makefile`.
+
+With `AS_SINK_VERBS` on, the shared library calls `ibv_*` but is linked with
+plain `cc -shared` and no `-libverbs -lefa`. Its `ibv_*` references therefore
+carry no symbol version:
+
+```text
+$ objdump -T libaerospike.so | grep ' ibv_reg_mr$'
+0000000000000000      D  *UND*  0000000000000000  Base        ibv_reg_mr
+```
+
+At runtime the dynamic linker binds an unversioned reference to
+libibverbs' oldest version, `ibv_reg_mr@IBVERBS_1.0`, a compatibility entry
+point that returns the legacy `struct ibv_mr_1_0`. `as_sink_verbs.c` reads it
+as a current `struct ibv_mr`, so the descriptor sent in `kv-sink-register`
+carries a garbage rkey. Traced on Soft-RoCE: the kernel registered the buffer
+as rkey 7248, the client advertised 961, `lookup_mr` found nothing, and the
+server's first write failed with a remote access error (then issue 3).
+
+The examples do not see this because they link the static `libaerospike.a`
+together with `-libverbs`. Any application that links the shared library
+does, whatever it links itself.
+
+**What LMCache sees:** every pipelined fetch falls back to whole-object
+loads; `aerospike_sink_create` and registration report success.
+
+**Expected fix:** add `-libverbs -lefa` to the shared-library link when
+`AS_SINK_VERBS` is set, after the objects or under `-Wl,--no-as-needed`,
+since the rule places `LDFLAGS` before the objects and Ubuntu links
+`--as-needed` by default. The result must show
+`(IBVERBS_1.1) ibv_reg_mr` and `NEEDED libibverbs.so.1`.
+`.deps/build_aerospike_client_kvsink.sh` does this from the outside and
+refuses a library that lacks the versioned binding.
 
 ## Minor
 

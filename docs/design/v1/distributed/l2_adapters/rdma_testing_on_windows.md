@@ -5,14 +5,13 @@ RDMA and layerwise test suites in it. The protocol and design rationale are in
 [`aerospike_rdma.md`](aerospike_rdma.md); this document is only the
 environment.
 
-**What this environment proves:** Track A criteria A1--A6 and A9 from
-[`track-a-acceptance.md`](../../layerwise/track-a-acceptance.md) --- the
-device-free logic harnesses, the Soft-RoCE fabric harnesses against the mock
-`kv-sink` server, and the layerwise contract suite.
+**What this environment proves:** the device-free logic harnesses, the
+layerwise contract suite, and --- with an Aerospike server built from the
+kv-sink branch in the same VM --- A8 over Soft-RoCE (RC). Criteria are in
+[`track-a-acceptance.md`](../../layerwise/track-a-acceptance.md).
 
-**What it cannot prove:** A7 needs real EFA hardware, and A8 needs an Aerospike
-server built from branch `sriram/kv-rdma-poc`. Neither is reachable from a
-Windows workstation. See [What this VM cannot cover](#what-this-vm-cannot-cover).
+**What it cannot prove:** anything SRD-specific, which needs real EFA
+hardware. See [What this VM cannot cover](#what-this-vm-cannot-cover).
 
 ## Why a VM and not WSL2 or Docker Desktop
 
@@ -163,9 +162,23 @@ Three of those are easy to miss and each fails confusingly:
 The Aerospike native connector (`lmcache_aerospike`) is a further opt-in. You
 need it for the adapter itself, the pybind entry points, and
 `tests/v1/distributed/test_pipelined_layer_readiness.py`. The harnesses don't
-need it. It links against the Aerospike C client. These steps unpack the same
+need it. It links against the Aerospike C client.
+
+**With RDMA** (`BUILD_WITH_AEROSPIKE_RDMA=1`) it needs the kv-sink fork of the
+client, which the tracked script builds into `.deps/`:
+
+```bash
+sudo apt-get install -y libssl-dev libyaml-dev libibverbs-dev zlib1g-dev
+.deps/build_aerospike_client_kvsink.sh
+source .deps/aerospike-client-c.env
+MAX_JOBS=2 NO_GPU_EXT=1 BUILD_WITH_AEROSPIKE=1 BUILD_WITH_AEROSPIKE_RDMA=1 \
+  uv pip install -e . --no-build-isolation
+```
+
+**Without RDMA** the stock client is enough. These steps unpack the same
 prebuilt 7.3.0 packages `.github/workflows/aerospike_integration.yml` uses into
-`.deps/`, which is git-ignored, so nothing is installed system-wide:
+`.deps/`, which is git-ignored apart from the script, so nothing is installed
+system-wide:
 
 ```bash
 sudo apt-get install -y libssl-dev libuv1-dev libyaml-dev
@@ -187,7 +200,7 @@ export LD_LIBRARY_PATH=$INSTALL/usr/lib:\${LD_LIBRARY_PATH:-}
 EOF
 source "$DEPS/aerospike-client-c.env"
 
-MAX_JOBS=2 NO_GPU_EXT=1 BUILD_WITH_AEROSPIKE=1 BUILD_WITH_AEROSPIKE_RDMA=1 \
+MAX_JOBS=2 NO_GPU_EXT=1 BUILD_WITH_AEROSPIKE=1 \
   uv pip install -e . --no-build-isolation
 ```
 
@@ -197,7 +210,7 @@ every new shell before building or running tests. The build needs
 `AEROSPIKE_INCLUDE_DIR` to find the headers, and the import needs
 `LD_LIBRARY_PATH` to find `libaerospike.so`.
 
-Confirm the RDMA path was compiled in:
+Confirm the RDMA path was compiled in (RDMA build only):
 
 ```bash
 python -c "from lmcache.lmcache_aerospike import LMCacheAerospikeClient as C; \
@@ -280,7 +293,7 @@ is exactly what a silently failed unit looks like.
 
 ### If the host cannot spare the RAM
 
-The `make` targets in step 6.1 and 6.2 bypass pytest entirely, so they run
+The `make` targets in step 6.1 bypass pytest entirely, so they run
 happily in under 2 GB. Only the pytest tiers need the 5 GB session allocator. On
 a host too busy to back a large guest, grow the guest's swap instead of fighting
 for physical memory:
@@ -307,38 +320,24 @@ explicitly.
 
 ### 6.1 Device-free C++ harnesses
 
-Sharding, slot planning, the wire codec, the pipelined-fetch session, and the
-notification-depth clamp. These link neither `libibverbs` nor the Aerospike
-client, so they run before you have a device --- and in WSL2.
+Sharding, slot planning, request readiness, and the kv-sink fetch table.
+These link neither `libibverbs` nor the Aerospike client, so they run before
+you have a device --- and in WSL2.
 
 ```bash
 make -C tests/v1/distributed/rdma logic-test
 # or through pytest, which builds them for you:
-pytest -xvs tests/v1/distributed/rdma/test_shard_plan.py \
-            tests/v1/distributed/rdma/test_slot_planner.py \
-            tests/v1/distributed/rdma/test_request_plan.py \
-            tests/v1/distributed/rdma/test_pipelined_fetch.py \
-            tests/v1/distributed/rdma/test_pipelined_fetch_session.py \
-            tests/v1/distributed/rdma/test_pipelined_fetch_issue.py \
-            tests/v1/distributed/rdma/test_notification_depth.py
+pytest -xvs tests/v1/distributed/rdma/
 ```
 
-### 6.2 Fabric harnesses (needs step 5)
+### 6.2 A8 against a kv-sink server (needs step 5)
 
-Byte-equivalence and layer pipelining, driven through the production
-`RdmaContext` and codec against `KvSinkMockWriter`.
-
-```bash
-make -C tests/v1/distributed/rdma test RDMA_DEVICE=rxe0 RDMA_GID_INDEX=1
-# or:
-RDMA_DEVICE=rxe0 RDMA_GID_INDEX=1 pytest -xvs \
-    tests/v1/distributed/rdma/test_rdma_equivalence.py \
-    tests/v1/distributed/rdma/test_rdma_pipeline.py
-```
-
-These **skip** rather than fail without a device: the binaries exit 77, the
-automake "skip" convention, and the pytest wrapper turns that into a skip. A
-skipped run means step 5 did not take effect.
+There is no mock server any more: the data path is tested against a real
+server built from `sriram/kv-sink-batch-prio`, in the same VM. Build and
+start it, then run the suite, as in
+[Running A8](aerospike_rdma.md#running-a8-against-a-real-server). Start the
+server with `KV_SINK_RDMA_DEVICE=rxe0 KV_SINK_GID_INDEX=1`, since GID 0 on
+`lo` is unroutable for it too.
 
 ### 6.3 Python: contract and configuration
 
@@ -349,19 +348,17 @@ pytest -xvs tests/v1/distributed/test_aerospike_l2_adapter_config.py
 ```
 
 `tests/v1/layerwise/` includes the conformance suite and
-`AerospikeLayerArrivalSource`'s own tests, which run against a fake native
-client. Once `lmcache_aerospike` is built with RDMA (step 4), also run the
+`AerospikeLayerArrivalSource`'s own tests. The suite's `aerospike` entry runs
+the source over the real native fetch table. On first use it builds a test-only
+module with `make -C tests/v1/distributed/rdma pyharness`, which needs `make`,
+`g++` and the `pybind11` installed in step 4, but no device and no Aerospike
+client. Without them those tests skip. Once `lmcache_aerospike` is built with RDMA (step 4), also run the
 readiness tests that go through the real extension:
 
 ```bash
 source .deps/aerospike-client-c.env
 pytest -xvs tests/v1/distributed/test_pipelined_layer_readiness.py
 ```
-
-If you run all of `tests/v1/distributed/rdma/` through pytest, export
-`RDMA_DEVICE=rxe0 RDMA_GID_INDEX=1` first. Otherwise the two fabric tests fail
-with `ENETUNREACH` rather than skipping, because the device exists but GID 0 on
-`lo` is unroutable.
 
 ### 6.4 Aerospike CE integration (non-RDMA)
 
@@ -386,16 +383,12 @@ without them the Rust hooks fail even on Python-only changes.
 
 ## What this VM cannot cover
 
-**A7 --- the EFA receive-WR question.** Soft-RoCE is RC-only and ordered, so the
-out-of-order and unsolicited-receive behaviour the design guards against cannot
-be reproduced here. Answering it needs an EFA-enabled EC2 instance; note the GID
-index flips back to 0 there.
+**SRD.** Soft-RoCE is RC-only and ordered, so the SRD transport of the
+kv-sink client and server cannot be exercised here. That needs an
+EFA-enabled EC2 instance; see [`rdma_testing_on_efa.md`](rdma_testing_on_efa.md).
 
-**A8 --- a real Aerospike server.** The stock `aerospike/aerospike-server` image
-used in step 6.4 does not speak `kv-sink-register` or `kv-sink-fetch`. That
-lives on branch `sriram/kv-rdma-poc`. Until it is deployed, every fabric result
-above is your side of the contract validated against a mock of the protocol, not
-against the server's implementation of it.
+**Stock servers.** The `aerospike/aerospike-server` image used in step 6.4
+has no kv-sink, so A8 needs the server built from the kv-sink branch.
 
 ## Troubleshooting
 
@@ -407,12 +400,11 @@ against the server's implementation of it.
 | `ModuleNotFoundError: No module named 'numpy'` at collection | `numpy` is a test-collection dependency; `uv pip install numpy`. |
 | `uv: command not found` over SSH | `~/.local/bin` is not on a non-interactive `PATH`. Export it in the command. |
 | `Start-VM`: `Insufficient system resources` | Host lacks that much *available* physical RAM with dynamic memory off. Free host memory or enable dynamic memory. |
-| `ibv_modify_qp` fails `ENETUNREACH` at RTR | Wrong GID index. On `lo` use `RDMA_GID_INDEX=1`. |
-| Fabric test exits 77 / pytest skips it | No RDMA device visible. Re-run step 5; `rxe0` does not survive a reboot. |
+| `pipelined_fetch_init_error` names `aerospike_sink_create` | The sink could not be registered with every node: usually a wrong GID index (on `lo` use `RDMA_GID_INDEX=1` and `KV_SINK_GID_INDEX=1`), no `rxe0` after a reboot, or a server without kv-sink. |
+| Build fails: `BUILD_WITH_AEROSPIKE_RDMA=1 needs the kv-sink Aerospike C client` | `AEROSPIKE_INCLUDE_DIR` points at the stock client. Run `.deps/build_aerospike_client_kvsink.sh` and source its env file. |
 | `rdma link show` empty after a reboot | The boot unit failed. Check `systemctl status soft-roce.service`; `status=203/EXEC` means a wrong `ExecStart` path. |
 | SSH stops working after a host reboot | The Default Switch reassigned the guest's NAT address. Use the `.local` name, or find it with `Get-NetNeighbor` filtered to the Hyper-V MAC prefix `00-15-5D`. |
 | `ibv_reg_mr` fails | `RLIMIT_MEMLOCK` too low. Check `ulimit -l` and raise `memlock` in `/etc/security/limits.conf`. |
-| pytest skips with "libibverbs development headers not found" | Install `libibverbs-dev`, or point `RDMA_CORE_INCLUDE_DIR` and `RDMA_CORE_LIBRARY_DIR` at an out-of-tree rdma-core. |
 | pytest skips with "make is not available" or "no C++ compiler" | `sudo apt-get install -y build-essential`. |
 | `ld: cannot find -lssl` / `-lcrypto` building `lmcache_aerospike` | Every object compiled; only the link failed. `sudo apt-get install -y libssl-dev` and rebuild. |
 | Build succeeds but `lmcache.lmcache_aerospike` does not exist | Neither `BUILD_WITH_AEROSPIKE=1` nor `AEROSPIKE_INCLUDE_DIR` was set in that shell. `source .deps/aerospike-client-c.env` and rebuild. |

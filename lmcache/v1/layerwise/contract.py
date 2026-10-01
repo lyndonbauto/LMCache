@@ -9,7 +9,7 @@ the other to exist, and either can be swapped for a fake in tests.
 The data flows in one direction::
 
     Aerospike cluster
-        | RDMA writes, one immediate per slot
+        | RDMA writes, one kv-sink batch-read row per slot
         v
     LayerArrivalSource      "layer N has fully landed in host memory"
         | polled by
@@ -52,11 +52,10 @@ import types
 #: :meth:`LayerArrivalSource.begin_fetch` for a fetch that actually started.
 NO_GENERATION = 0
 
-#: Slots addressable by one request. The RDMA immediate carries 32 bits, split
-#: as ``(generation << 16) | slot``, so a request has 16 bits of slot index.
+#: Slots addressable by one request, which bounds the native fetch table.
 #: Mirrors ``kMaxSlotsPerRequest`` in
-#: ``csrc/storage_backends/aerospike/layer_pipeline.h``; the two must agree,
-#: because the transport decodes what the plan numbers.
+#: ``csrc/storage_backends/aerospike/sink_fetch_table.h``; the two must agree,
+#: because the transport accounts for slots by the plan's numbering.
 MAX_SLOTS_PER_REQUEST = 0x10000
 
 

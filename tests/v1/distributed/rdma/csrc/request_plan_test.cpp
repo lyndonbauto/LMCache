@@ -2,9 +2,7 @@
 //
 // Request-scoped readiness tests for the RDMA layer pipeline.
 //
-// Needs no RDMA device: this is the bookkeeping, not the data path. The
-// fabric is exercised by rdma_pipeline_test.cpp, which pushes real
-// RDMA_WRITE_WITH_IMM traffic but only for a single chunk.
+// Needs no RDMA device: this is the bookkeeping, not the data path.
 //
 // What is being defended here is the difference between per-fetch and
 // per-request scope, which is the most dangerous mistake available in this

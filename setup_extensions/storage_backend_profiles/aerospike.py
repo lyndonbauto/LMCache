@@ -7,13 +7,14 @@ development install.  Enabled via ``BUILD_WITH_AEROSPIKE=1`` (or the legacy
 
 RDMA reception (the Aerospike server writing KV payloads straight into
 LMCache's pinned L1 slab) is a second, independent opt-in on top of that:
+``BUILD_WITH_AEROSPIKE_RDMA=1`` compiles the pipelined kv-sink fetch. It
+needs the kv-sink fork of the Aerospike C client (``aerospike/as_sink.h``),
+built by ``.deps/build_aerospike_client_kvsink.sh``, and links ``libibverbs``
+and ``libefa`` because that client's verbs transport does. The legacy
+``BUILD_WITH_AEROSPIKE_EFA=1`` is accepted as a synonym: RC and SRD are both
+chosen at run time now.
 
-* ``BUILD_WITH_AEROSPIKE_RDMA=1`` links ``libibverbs`` and compiles the
-  Reliable Connected path, which is portable and works on Soft-RoCE.
-* ``BUILD_WITH_AEROSPIKE_EFA=1`` additionally compiles the EFA/SRD path,
-  which needs ``libefa`` and only exists on AWS EFA hardware.
-
-Both default to off.  A machine with no RDMA hardware and no ``rdma-core``
+It defaults to off.  A machine with no RDMA hardware and no ``rdma-core``
 development headers builds exactly as it did before.
 """
 
@@ -41,9 +42,6 @@ EFA_ENV_VAR = "BUILD_WITH_AEROSPIKE_EFA"
 def is_rdma_requested() -> bool:
     """Return True when the RDMA reception path was explicitly requested.
 
-    Enabling EFA/SRD implies RDMA, since the SRD path is a variant of the
-    same verbs foundation.
-
     Returns:
         True if either ``BUILD_WITH_AEROSPIKE_RDMA`` or
         ``BUILD_WITH_AEROSPIKE_EFA`` is set to ``1``.
@@ -70,13 +68,29 @@ def _system_yaml_soname() -> str:
     return ""
 
 
-def is_efa_requested() -> bool:
-    """Return True when the EFA/SRD queue-pair path was requested.
+def _require_kv_sink_client(include_dirs: str) -> None:
+    """Refuse an RDMA build against a stock Aerospike C client.
 
-    Returns:
-        True if ``BUILD_WITH_AEROSPIKE_EFA`` is set to ``1``.
+    The pipelined fetch calls ``aerospike_sink_create`` and sets the sink
+    fields of batch-read rows, which only the kv-sink fork of the client has.
+    Checking the header up front turns a wall of compiler errors into one
+    actionable message.
+
+    Args:
+        include_dirs: ``AEROSPIKE_INCLUDE_DIR``, ``;``-separated.
+
+    Raises:
+        RuntimeError: If no directory holds ``aerospike/as_sink.h``.
     """
-    return os.environ.get(EFA_ENV_VAR, "0") == "1"
+    candidates = [Path(d) for d in include_dirs.split(";") if d]
+    if any((d / "aerospike" / "as_sink.h").exists() for d in candidates):
+        return
+    raise RuntimeError(
+        f"{RDMA_ENV_VAR}=1 needs the kv-sink Aerospike C client, but no "
+        "aerospike/as_sink.h was found under AEROSPIKE_INCLUDE_DIR. Build it "
+        "with .deps/build_aerospike_client_kvsink.sh and source the "
+        "aerospike-client-c.env it writes."
+    )
 
 
 class AerospikeStorageBackend(StorageBackendProfile):
@@ -146,32 +160,21 @@ class AerospikeStorageBackend(StorageBackendProfile):
         macros: list[tuple[str, str]] = []
 
         if is_rdma_requested():
-            # Only now do we take a hard dependency on rdma-core. Everything
-            # above must keep working on a host without libibverbs.
-            sources.append("csrc/storage_backends/aerospike/rdma_context.cpp")
-            sources.append("csrc/storage_backends/aerospike/notification_depth.cpp")
-            sources.append("csrc/storage_backends/aerospike/kv_sink_client.cpp")
-            sources.append("csrc/storage_backends/aerospike/kv_sink_fanout.cpp")
-            # No verbs dependency of its own, but built here so a break in the
-            # pipelining model fails the RDMA build rather than only the test
-            # harness. Not yet exposed through pybind.
-            sources.append("csrc/storage_backends/aerospike/layer_pipeline.cpp")
-            sources.append("csrc/storage_backends/aerospike/slot_planner.cpp")
-            sources.append(
-                "csrc/storage_backends/aerospike/pipelined_fetch_session.cpp"
-            )
-            sources.append("csrc/storage_backends/aerospike/pipelined_fetch_pool.cpp")
-            sources.append(
-                "csrc/storage_backends/aerospike/connector_pipelined_rdma.cpp"
-            )
-            sources.append("csrc/storage_backends/aerospike/pipelined_fetch_issue.cpp")
-            sources.append(
-                "csrc/storage_backends/aerospike/memory_layout_conversion.cpp"
-            )
-            sources.append(
-                "csrc/storage_backends/aerospike/aerospike_pipelined_pybind.cpp"
-            )
-            libraries.append("ibverbs")
+            # Only now do we take a hard dependency on the kv-sink client and
+            # rdma-core. Everything above must keep working without them.
+            _require_kv_sink_client(as_include)
+            for source in (
+                "sink_fetch_table.cpp",
+                "connector_sink_fetch.cpp",
+                "layer_pipeline.cpp",
+                "slot_planner.cpp",
+                "memory_layout_conversion.cpp",
+                "aerospike_pipelined_pybind.cpp",
+            ):
+                sources.append(f"csrc/storage_backends/aerospike/{source}")
+            # The client's as_sink verbs transport calls into both; libaerospike
+            # does not declare them, so this extension must.
+            libraries.extend(["ibverbs", "efa"])
             macros.append(("LMCACHE_AEROSPIKE_RDMA", "1"))
             rdma_include = os.environ.get("RDMA_CORE_INCLUDE_DIR", "")
             if rdma_include:
@@ -179,9 +182,6 @@ class AerospikeStorageBackend(StorageBackendProfile):
             rdma_lib = os.environ.get("RDMA_CORE_LIBRARY_DIR", "")
             if rdma_lib:
                 library_dirs.extend(rdma_lib.split(";"))
-            if is_efa_requested():
-                libraries.append("efa")
-                macros.append(("LMCACHE_AEROSPIKE_EFA", "1"))
 
         runtime_library_dirs = list(library_dirs)
 

@@ -71,8 +71,23 @@ and die together:
   that alone would leave a meta record whose segments have expired: a lookup
   hit that cannot be loaded.
 
-Objects loaded through the RDMA pipelined path are read by the server itself,
-which does not apply read-touch, so those loads do not extend a TTL.
+Objects loaded through the RDMA pipelined path read their segments but not
+their meta record, so those loads never touch and do not extend a TTL.
+
+**RDMA pipelined loads (experimental).**  With ``BUILD_WITH_AEROSPIKE_RDMA=1``
+the server writes object segments straight into LMCache's L1 buffer over RDMA
+(RoCE, InfiniBand or AWS EFA).  This needs the kv-sink Aerospike server and C
+client (branch ``sriram/kv-sink-batch-prio``); a stock client fails the build.
+Build the client and LMCache with:
+
+.. code-block:: bash
+
+    .deps/build_aerospike_client_kvsink.sh
+    source .deps/aerospike-client-c.env
+    BUILD_WITH_AEROSPIKE=1 BUILD_WITH_AEROSPIKE_RDMA=1 pip install -e . --no-build-isolation
+
+The design and test procedure are in
+``docs/design/v1/distributed/l2_adapters/aerospike_rdma.md``.
 
 **Environment variable fallbacks.**  When the corresponding config value is
 empty, these environment variables are used: ``LMCACHE_AEROSPIKE_HOSTS``,

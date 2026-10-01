@@ -5,15 +5,14 @@
 :class:`~lmcache.v1.layerwise.request_fetch.ChunkPlacer` and
 :class:`WindowPlacement` implements
 :class:`~lmcache.v1.layerwise.request_fetch.WindowLease`: a retrieve's
-objects are reserved in L1 inside one leased window, and each is fetched
-from the one node of the cluster. Pipelined fetches run on single-node
-clusters only (N1 in
-``docs/design/v1/layerwise/track-a-questions-for-track-c.md``); the
-connector refuses to initialize them on a larger one.
+objects are reserved in L1 inside one leased window, and every slot names
+the adapter's node. The name is nominal: the native client sends each
+kv-sink row to its record's partition master, so a cluster of any size is
+served.
 
-Every window is published to the nodes as one registration covering the
-whole window range, which starts at slab offset 0. So an object's destination
-offset is its slab offset, ``memory_obj.meta.address``.
+The whole window range is registered with the nodes as one kv-sink, which
+starts at slab offset 0. So an object's destination offset is its slab
+offset, ``memory_obj.meta.address``.
 """
 
 # Standard
@@ -276,7 +275,7 @@ class RdmaWindowPlacer:
         node_name: str,
         select_retentions: Callable[[list[ObjectKey]], list[bool]] = retain_none,
     ) -> None:
-        """Create a placer for one registered model on a single-node cluster.
+        """Create a placer for one registered model.
 
         Args:
             l1_manager: The L1 whose windows ``leaser`` hands out.
@@ -284,8 +283,9 @@ class RdmaWindowPlacer:
             layouts: ``{object_group_id: layout}``, the L1 memory layout of
                 each object group, as a retrieve would reserve it in general
                 L1.
-            node_name: The cluster's one node, which every object is fetched
-                from.
+            node_name: The node every slot names, from
+                ``pipelined_fetch_node_name()``. Rows are routed by
+                partition, not by this name.
             select_retentions: Given the keys of one lease's objects, in
                 order, returns whether to keep each in L1 after its fetch
                 finishes, as the prefetch policy's ``select_l1_retentions``

@@ -5,7 +5,7 @@
 
   #include "connector.h"
   #include "memory_layout_conversion.h"
-  #include "pipelined_fetch_session.h"
+  #include "sink_fetch_table.h"
 
   #include <pybind11/pybind11.h>
 

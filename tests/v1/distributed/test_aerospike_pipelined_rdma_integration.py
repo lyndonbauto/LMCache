@@ -3,25 +3,25 @@
 
 A real ``StorageManager`` holds a real Aerospike adapter with RDMA reception
 on a real device, so every step of a layerwise retrieve is production code:
-the window registration (``kv-sink-register``), the placer, the plan, the
-``kv-sink-fetch-pipelined`` commands, the server's RDMA writes with
-immediate, and the completions. The objects are stored first through a
-plain adapter on the same set, then fetched, and every byte the fetch left
-in L1 is compared with what was stored.
+the window registration (``aerospike_sink_create``), the placer, the plan,
+the per-layer kv-sink batch reads, the server's RDMA writes, and the row
+results. The objects are stored first through a plain adapter on the same
+set, then fetched, and every byte the fetch left in L1 is compared with what
+was stored.
 
-Requires a server with the kv-sink commands (aerospike-server branch
-``feat/kv-sink-fetch-pipelined``), an RDMA device the server also opens
-(Soft-RoCE is enough), and the ``BUILD_AEROSPIKE=1`` extension built with
-RDMA support. Skipped otherwise; stock CE has no kv-sink commands, so CI's
-Docker server does not run these. On the Soft-RoCE VM::
+Requires a server with kv-sink batch reads (aerospike-server branch
+``sriram/kv-sink-batch-prio``) configured for the same transport, an RDMA
+device the server also opens (Soft-RoCE is enough for RC), and the extension
+built with ``BUILD_WITH_AEROSPIKE_RDMA=1`` against the kv-sink client (see
+``.deps/build_aerospike_client_kvsink.sh``). Skipped otherwise; stock CE has
+no kv-sink, so CI's Docker server does not run these. On the Soft-RoCE VM::
 
     RUN_AEROSPIKE_INTEGRATION=1 AEROSPIKE_TEST_HOST=127.0.0.1 \\
     AEROSPIKE_TEST_PORT=3000 AEROSPIKE_TEST_NAMESPACE=lmcache \\
     RDMA_DEVICE=rxe0 RDMA_GID_INDEX=1 \\
     pytest tests/v1/distributed/test_aerospike_pipelined_rdma_integration.py
 
-On AWS EFA, build with ``BUILD_WITH_AEROSPIKE_EFA=1`` and run with
-``RDMA_TRANSPORT=SRD RDMA_DEVICE=<efa device> RDMA_GID_INDEX=0``.
+On AWS EFA, run with ``RDMA_TRANSPORT=SRD RDMA_DEVICE=<efa device>``.
 """
 
 # Standard
@@ -104,8 +104,9 @@ RDMA_TRANSPORT = RdmaTransport[os.environ.get("RDMA_TRANSPORT", "RC").upper()]
 WINDOW_BYTES = 1 << 16
 FETCH_TIMEOUT = 30.0
 STORE_TIMEOUT = 30.0
-#: ``MAX_REGIONS`` in the server's ``as/src/base/kv_sink.c``.
-SERVER_MAX_REGIONS = 16
+#: Enough client lifetimes that a sink left registered, or a node's stale
+#: registration not refreshed, would surface.
+REOPEN_LIFETIMES = 3
 
 
 def _aerospike_available() -> bool:
@@ -390,7 +391,7 @@ def test_a_missing_record_falls_back_to_a_whole_reload(
 ) -> None:
     """A slot the server cannot serve fails the fetch, not the retrieve.
 
-    The server reports the slot whose record is gone as failed; the retrieve
+    The row whose record is gone comes back not-found; the retrieve
     reloads every object whole, and all but the damaged one read back intact.
     """
     # Third Party
@@ -415,18 +416,25 @@ def test_a_missing_record_falls_back_to_a_whole_reload(
         assert payload == stored[key], f"{key} reloaded other bytes"
 
 
-def test_closing_releases_the_servers_region(set_name: str) -> None:
-    """More client lifetimes than the server has region slots all register.
+def test_each_client_lifetime_registers_and_fetches(
+    stored: dict[ObjectKey, bytes], set_name: str
+) -> None:
+    """Closing deregisters the sink, and the next manager fetches afresh.
 
-    The server holds at most ``SERVER_MAX_REGIONS`` regions and refuses the
-    next registration, so this passes only if each close gives its region
-    back.
+    Each lifetime creates its own sink over the same L1 window range, so a
+    close that left the old registration behind, or a new one the server
+    confused with it, would land the wrong bytes or fail the fetch.
     """
-    for lifetime in range(SERVER_MAX_REGIONS + 1):
+    for lifetime in range(REOPEN_LIFETIMES):
         built = _build_manager(set_name)
         try:
-            assert built.pipelined_fetch_node_name(), (
-                f"client lifetime {lifetime} could not register"
+            retrieved = _retrieve(built)
+            assert retrieved.completion is RetrieveCompletion.PIPELINED, (
+                f"client lifetime {lifetime} did not fetch pipelined"
             )
+            for key, payload in stored.items():
+                assert retrieved.l1_bytes[key] == payload, (
+                    f"lifetime {lifetime}: {key} holds other bytes"
+                )
         finally:
             built.close()

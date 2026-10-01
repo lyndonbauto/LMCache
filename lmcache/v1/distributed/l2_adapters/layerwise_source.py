@@ -4,9 +4,9 @@
 :class:`AerospikeLayerArrivalSource` presents the native pipelined fetch in
 ``csrc/storage_backends/aerospike/`` as a
 :class:`~lmcache.v1.layerwise.contract.LayerArrivalSource`. The native side
-already does the accounting that matters -- per-slot arrival, stale-generation
-rejection, command chunking, receive-queue sizing. This module translates its
-answers into the contract's terms:
+already does the accounting that matters -- per-slot results, one batch per
+layer, stale-generation rejection. This module translates its answers into
+the contract's terms:
 
 - two native answers (ready, and the unservable-layer list) become the
   three-valued :class:`~lmcache.v1.layerwise.contract.LayerArrivalStatus`,
@@ -16,9 +16,9 @@ answers into the contract's terms:
   :class:`~lmcache.v1.layerwise.contract.LayerwiseContractError`.
 
 :class:`NativePlanIssuer` issues a
-:class:`~lmcache.v1.layerwise.contract.LayerFetchPlan` slot for slot: each
-slot goes to the node the plan names, and its position in the plan is its
-notification slot. Issuing sits behind :class:`PlanIssuer` so the arrival
+:class:`~lmcache.v1.layerwise.contract.LayerFetchPlan` slot for slot, at the
+offsets the plan gives, and its position in the plan is its slot index.
+Issuing sits behind :class:`PlanIssuer` so the arrival
 accounting can be tested without a native client.
 """
 
@@ -92,11 +92,11 @@ class PipelinedFetchConnector(Protocol):
         ...
 
     def is_pipelined_layer_ready(self, layer_id: int, request_generation: int) -> bool:
-        """Drain arrivals, then return whether every slot of a layer landed."""
+        """Return whether every slot of a layer landed."""
         ...
 
     def pipelined_unservable_layers(self, generation: int) -> list[int]:
-        """Return layers of fetch ``generation`` that were declined or lost."""
+        """Return layers of fetch ``generation`` with a slot that failed."""
         ...
 
     def finish_pipelined_fetch(self, generation: int) -> None:
@@ -125,7 +125,7 @@ class PlannedFetchConnector(Protocol):
     ) -> int:
         """Begin a fetch of exactly ``slots`` and return its generation.
 
-        ``slots[i]`` is notification slot ``i`` and reads
+        ``slots[i]`` is slot ``i`` and reads
         ``(node_index, record_key, dest_offset, length, layer_id)``.
         """
         ...
@@ -153,8 +153,8 @@ class PlanIssuer(Protocol):
             The generation the native session allocated.
 
         Raises:
-            PlanTooLargeError: If the plan is larger than the device's
-                receive queue can accept.
+            PlanTooLargeError: If the plan has more slots than one fetch
+                may carry.
             RuntimeError, ValueError, IndexError: Other native failures.
         """
         ...
@@ -163,10 +163,9 @@ class PlanIssuer(Protocol):
 class NativePlanIssuer:
     """Issues a contract plan through the native client, slot for slot.
 
-    The plan is the only source of truth: each slot is sent to the node the
-    plan names, at the offset the plan gives, as the notification slot its
-    position gives. Nothing is re-planned natively, so the slot numbers on
-    the wire are the plan's.
+    The plan is the only source of truth: each slot is read into the offset
+    the plan gives, as the slot its position gives. Nothing is re-planned
+    natively, so the slot numbers the native side reports are the plan's.
     """
 
     def __init__(self, connector: PlannedFetchConnector) -> None:
@@ -181,27 +180,25 @@ class NativePlanIssuer:
         """Flatten ``plan`` and issue it.
 
         Args:
-            plan: The slots to fetch. ``plan.slots[i]`` becomes notification
-                slot ``i``; offsets are slab offsets, all inside one window.
+            plan: The slots to fetch. ``plan.slots[i]`` becomes slot ``i``;
+                offsets are slab offsets, all inside one window.
 
         Returns:
             The native generation.
 
         Raises:
-            PlanTooLargeError: If the plan has more slots than one window's
-                share of the device's receives. Checked before anything is
-                sent, because on RC with ``rnr_retry = 7`` a shortfall is an
-                infinite retry rather than an error. The native session's own
-                refusal is bound as a subclass of the same error.
+            PlanTooLargeError: If the plan has more slots than one fetch may
+                carry. Checked before anything is sent; the native driver's
+                own refusal is bound as a subclass of the same error.
             RuntimeError, ValueError, IndexError: Native failures, e.g. a
-                node with no kv-sink registration, a slot outside the
-                window, or a window that already has a fetch.
+                slot outside the window, or a window that already has a
+                fetch.
         """
         max_slots = self._connector.pipelined_max_slots_per_request()
         if max_slots and len(plan.slots) > max_slots:
             raise PlanTooLargeError(
-                f"fetch plan has {len(plan.slots)} slots but the device accepts "
-                f"at most {max_slots} per request; split the fetch"
+                f"fetch plan has {len(plan.slots)} slots but one fetch carries "
+                f"at most {max_slots}; split the fetch"
             )
         arguments = pipelined_fetch_arguments(plan)
         return self._connector.issue_pipelined_fetch_by_slots(
@@ -216,12 +213,11 @@ class AerospikeLayerArrivalSource:
     that protocol for the full contract; the notes here are the parts specific
     to this transport.
 
-    A layer is resident once every slot carrying part of it has landed. The
-    server writes each slot with ``RDMA_WRITE_WITH_IMM`` and the immediate
-    encodes ``(generation << 16) | slot``, so arrivals are counted per slot
-    and attributed to a generation. The generation returned by
-    :meth:`begin_fetch` is the native one, so it matches what appears on the
-    wire.
+    A layer is resident once every slot carrying part of it has landed. Each
+    layer is one kv-sink batch read; the server RDMA-writes a row's value
+    into the window and answers the row only once the write completed, so a
+    successful row is a landed slot. The generation returned by
+    :meth:`begin_fetch` is the native one, which tags every batch.
 
     Instances hold at most one active fetch. Several instances may share one
     native client, one per concurrent retrieve: the client runs one fetch per
@@ -247,11 +243,8 @@ class AerospikeLayerArrivalSource:
     def begin_fetch(self, plan: LayerFetchPlan) -> int:
         """Issue every slot in ``plan`` to the nodes that hold it.
 
-        The native side rejects a plan with more slots than the device can
-        post receives for, rather than letting it deadlock: on RC with
-        ``rnr_retry = 7`` a shortfall is infinite retry. It also splits each
-        node's sinks into commands no larger than that node's advertised
-        ``max_sinks``.
+        Returns once the per-layer batches are queued; slots land
+        asynchronously, and the server places lower layers first.
 
         Args:
             plan: The slots to fetch.
@@ -260,8 +253,8 @@ class AerospikeLayerArrivalSource:
             A non-zero generation for this fetch.
 
         Raises:
-            PlanTooLargeError: If the plan exceeds what the device can
-                accept. Nothing was issued, and a smaller plan may succeed.
+            PlanTooLargeError: If the plan has more slots than one fetch may
+                carry. Nothing was issued, and a smaller plan may succeed.
             LayerwiseContractError: If a fetch is already active, if the
                 backend has no pipelined path, or if issuing fails.
         """
@@ -292,10 +285,10 @@ class AerospikeLayerArrivalSource:
         """Report whether every slot of ``layer_id`` has landed.
 
         Returns ``RESIDENT`` only when the layer is wholly present, and
-        promptly once it is: each call drains pending arrivals before
-        answering. A write belonging to an abandoned generation cannot move
-        this fetch's accounting, because the native session discards
-        immediates whose generation is not the active one.
+        promptly once it is: row results are recorded as each batch returns.
+        A result belonging to an abandoned fetch cannot move this fetch's
+        accounting, because the native table drops results for batches that
+        are not the active fetch's.
 
         Args:
             layer_id: Global layer index in the model.
@@ -345,8 +338,9 @@ class AerospikeLayerArrivalSource:
 
         Tolerates a generation that has already been finished or abandoned,
         so error paths can unwind without first working out how far the
-        fetch got. Writes still in flight for the abandoned generation may
-        land later; the native session ignores them.
+        fetch got. Rows already sent may still be written into the window
+        until the fetch timeout; the native table ignores their results, and
+        the caller must not reuse the window before then.
 
         Args:
             generation: The generation returned by :meth:`begin_fetch`.

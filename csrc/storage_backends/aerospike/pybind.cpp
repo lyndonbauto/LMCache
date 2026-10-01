@@ -99,10 +99,7 @@ PYBIND11_MODULE(lmcache_aerospike, m) {
       .def("is_pipelined_layer_ready",
            &lmcache::connector::AerospikeNativeConnector::
                is_pipelined_layer_ready,
-           py::arg("layer_id"), py::arg("request_generation"))
-      .def("poll_pipelined_fetch_notifications",
-           &lmcache::connector::AerospikeNativeConnector::
-               poll_pipelined_fetch_notifications);
+           py::arg("layer_id"), py::arg("request_generation"));
   lmcache::connector::aerospike_pipelined_pybind::bind_pipelined_fetch(
       m, aerospike_client);
 #endif
