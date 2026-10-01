@@ -21,6 +21,9 @@
 # Node N: service 33N0, fabric 33N1, heartbeat 33N2, info 33N3 (N-1 in the
 # tens digit: n1 = 3300-3303, n2 = 3310-3313, n3 = 3320-3323), all 127.0.0.1.
 # Data: /root/lmc-work/aero-cluster/nN/lmcache.dat (sparse, 16 GiB).
+# A private cluster beside this one (dry runs): AERO_CLUSTER_PORT_BASE (default
+# 3300), AERO_CLUSTER_PREFIX (container names, default aero-n) and
+# AERO_CLUSTER_BASE (data and configs, default /root/lmc-work/aero-cluster).
 set -u
 IMAGE=aerospike/aerospike-server:latest
 BASE=${AERO_CLUSTER_BASE:-/root/lmc-work/aero-cluster}
@@ -29,8 +32,10 @@ TEMPLATE=${AERO_CLUSTER_TEMPLATE:-$HERE/../configs/cluster/aerospike-node.conf.t
 WAIT_S=${AERO_CLUSTER_WAIT_S:-180}
 NODES="1 2 3"
 
-svc_port() { echo $((3300 + ($1 - 1) * 10)); }
-ctr() { echo "aero-n$1"; }
+PORT_BASE=${AERO_CLUSTER_PORT_BASE:-3300}
+PREFIX=${AERO_CLUSTER_PREFIX:-aero-n}
+svc_port() { echo $((PORT_BASE + ($1 - 1) * 10)); }
+ctr() { echo "$PREFIX$1"; }
 
 running() {
   [ "$(docker inspect -f '{{.State.Running}}' "$(ctr "$1")" 2>/dev/null)" = true ]

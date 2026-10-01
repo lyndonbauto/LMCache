@@ -97,21 +97,27 @@ group() {
 }
 
 # session <dir> <tag> <policy> <step>...: one run_steps.sh session.
-# SERVER_FLAGS, SERVER_FLAGS_ALT, VLLM_EXTRA and CORPUS_S come from the caller.
+# SERVER_FLAGS, SERVER_FLAGS_ALT, VLLM_EXTRA and CORPUS_S come from the caller;
+# so do (Stage 6) SERVER2_FLAGS (host B's server, default SERVER_FLAGS),
+# L2_PORT_S (the L2 port the steps' tools use, default 3100) and L1_GB_S /
+# L1_GB2_S (L1 sizes, default 40).
 session() {
   local dir=$1 tag=$2 policy=$3; shift 3
   mkdir -p $S/$dir
   echo "##### $tag $(date -u +%T) $(wait_idle) policy=$policy"
   watch_host $S/$dir & local watcher=$!
   timeout 7200 docker exec -e VLLM_BATCH_INVARIANT=1 -e LMCACHE_SERVER_EXTRA="$SERVER_FLAGS" \
-    -e LMCACHE_SERVER_EXTRA_ALT="${SERVER_FLAGS_ALT:-}" -e L2_PORT=3100 \
+    -e LMCACHE_SERVER_EXTRA_ALT="${SERVER_FLAGS_ALT:-}" -e L2_PORT=${L2_PORT_S:-3100} \
+    -e LMCACHE_SERVER2_EXTRA="${SERVER2_FLAGS:-}" -e L1_SIZE_GB=${L1_GB_S:-40} \
+    -e L1_SIZE_GB2=${L1_GB2_S:-${L1_GB_S:-40}} \
     -e CORPUS="${CORPUS_S:-$CB}" -e KV_LOAD_FAILURE_POLICY="$policy" \
     -e SEND_TIMEOUT=${SEND_TIMEOUT:-900} -e VLLM_EXTRA="${VLLM_EXTRA:-}" lmc-c \
     bash $H/run_steps.sh $W/$dir $tag true "$@" > $S/$dir/session_$tag.txt 2>&1
   local rc=$?
   kill $watcher 2>/dev/null
   echo "rc=$rc"; grep -E "===|correct|exited|did not|FAILED|warning" $S/$dir/session_$tag.txt | tail -n 40
-  echo "-- error lines: $(grep -cE 'Traceback|ERROR|Error' $S/$dir/lmcache_$tag.log $S/$dir/vllm_${tag}_*.log | paste -sd' ')"
+  echo "-- error lines: $(grep -cE 'Traceback|ERROR|Error' $S/$dir/lmcache_$tag.log $S/$dir/vllm_${tag}_*.log \
+    $(ls $S/$dir/lmcache2_$tag.log $S/$dir/vllm2_${tag}_*.log 2>/dev/null) | paste -sd' ')"
   echo "-- registration: $(grep -hoE '[^ ]+ fetches layer by layer from L2 adapter [0-9]+, reading records of at most [0-9]+ bytes|Cannot fetch [^ ]+ layer by layer|No pipelined sink is installed|serves world size 1 only' $S/$dir/lmcache_$tag.log | sort | uniq -c | sed 's/^ *//' | paste -sd';')"
   echo "-- outcomes: $(grep -oE 'pipelined_outcome=[a-z_]+' $S/$dir/lmcache_$tag.log | sort | uniq -c | sed 's/^ *//' | paste -sd' ')"
   echo "-- kv-sink: late completions $(grep -c 'late completion' $KVDIR/asd-kvsink.log 2>/dev/null), region error lines $(grep -c 'in error state' $KVDIR/asd-kvsink.log 2>/dev/null)"

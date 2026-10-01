@@ -13,6 +13,11 @@ name whose chunk 0 is present.
 
 T-PIPE-05 needs one slot the server declines while the lookup still sees
 the chunk: ``delete`` removes one segment record and leaves the meta.
+T-EVT-04 stands in for an eviction during a fetch: ``evict`` removes every
+segment record of one chunk and leaves the meta. With ``--when <path>`` it
+first names the records, prints ``armed``, and deletes only once ``path``
+exists, so the delete lands milliseconds after a trigger instead of after
+this tool's imports.
 
 Usage::
 
@@ -20,19 +25,23 @@ Usage::
         --model-url http://localhost:8000 model prompt=P-exact-10
     python l2_segments.py ... check prompt=P-exact-10
     python l2_segments.py ... delete prompt=P-exact-10 chunk=1 seg=5
+    python l2_segments.py ... evict prompt=P-exact-10 chunk=3
 
 ``model`` prints the model name the keys use; ``check`` prints, per chunk,
 whether its meta is present and its segment count; ``delete`` removes one
-segment and prints its key. Exits 1 if no candidate model name matches or
+segment and prints its key; ``evict`` removes every segment of the chunk
+and prints how many. Exits 1 if no candidate model name matches or
 the record is absent.
 """
 
 # Standard
 from pathlib import Path
 import argparse
+import datetime
 import json
 import os
 import sys
+import time
 import urllib.request
 
 # Third Party
@@ -111,7 +120,9 @@ def main() -> None:
     parser.add_argument("--set", dest="set_name", default="kv_chunks")
     parser.add_argument("--corpus", required=True)
     parser.add_argument("--model-url", default="")
-    parser.add_argument("command", choices=["model", "check", "delete"])
+    parser.add_argument("--when", default="", help="evict: wait for this file first")
+    parser.add_argument("--when-timeout", type=float, default=600.0)
+    parser.add_argument("command", choices=["model", "check", "delete", "evict"])
     parser.add_argument("params", nargs="*", help="prompt=<id> [chunk=<c> seg=<s>]")
     args = parser.parse_args()
     params = dict(p.split("=", 1) for p in args.params)
@@ -147,7 +158,7 @@ def main() -> None:
                     nseg = int(bins.get("nseg", 0))
                 print(f"chunk {i}: meta={'yes' if meta else 'no'} nseg={nseg}")
             return
-        chunk, seg = int(params["chunk"]), int(params["seg"])
+        chunk = int(params["chunk"])
         meta_key = (args.namespace, args.set_name, keys[chunk] + "|m")
         _, meta = client.exists(meta_key)
         if meta is None:
@@ -155,8 +166,37 @@ def main() -> None:
             sys.exit(1)
         # Since D-14 each store names its own segments by the write ID in
         # the meta record's wid bin; records without it use the old layout.
-        _, _, bins = client.select(meta_key, ["wid"])
+        _, _, bins = client.select(meta_key, ["wid", "nseg"])
         wid = bins.get("wid", "")
+        if args.command == "evict":
+            names = [
+                f"{keys[chunk]}|s|{wid}|{i}" if wid else f"{keys[chunk]}|s|{i}"
+                for i in range(int(bins.get("nseg", 0)))
+            ]
+            if args.when:
+                print(f"armed: {len(names)} segment(s) of chunk {chunk}", flush=True)
+                deadline = time.monotonic() + args.when_timeout
+                while not os.path.exists(args.when):
+                    if time.monotonic() > deadline:
+                        print(f"not released within {args.when_timeout} s; nothing deleted")
+                        sys.exit(1)
+                    time.sleep(0.002)
+            start = datetime.datetime.now(datetime.timezone.utc)
+            removed = 0
+            for name in names:
+                try:
+                    client.remove((args.namespace, args.set_name, name))
+                    removed += 1
+                except aerospike.exception.RecordNotFound:
+                    pass
+            end = datetime.datetime.now(datetime.timezone.utc)
+            print(
+                f"evicted {removed} of {len(names)} segment(s) of chunk {chunk} "
+                f"(meta kept, model name {chosen}) from {start:%H:%M:%S.%f} "
+                f"to {end:%H:%M:%S.%f}"
+            )
+            sys.exit(0 if removed else 1)
+        seg = int(params["seg"])
         name = f"{keys[chunk]}|s|{wid}|{seg}" if wid else f"{keys[chunk]}|s|{seg}"
         target = (args.namespace, args.set_name, name)
         _, meta = client.exists(target)

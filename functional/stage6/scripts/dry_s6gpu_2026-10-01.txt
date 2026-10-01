@@ -1,0 +1,111 @@
+21:11:16 == 0. lmc-d
+lmcache /work/LMCache/lmcache/__init__.py gpus 0
+21:11:18 == 1. script syntax, netem plan (read-only)
+21:11:18 syntax ok: harness/run_steps.sh
+21:11:18 syntax ok: harness/host_actions.sh
+21:11:18 syntax ok: harness/cluster.sh
+21:11:18 syntax ok: stage3/stage3.sh
+21:11:18 syntax ok: stage6/stage6gpu.sh
+21:11:18 syntax ok: stage6/flt08_netem.sh
+21:11:18 syntax ok: stage6/scripts/dry_s6gpu.sh
+21:11:18 python compiles
+# FLT08_MODE=rdma loss=5%
+# apply:
+  tc qdisc add dev lo root handle 1: prio bands 4
+  tc qdisc add dev lo parent 1:4 handle 40: netem loss 5%
+  tc filter add dev lo parent 1: protocol ip prio 1 u32 match ip protocol 17 0xff match ip dport 4791 0xffff flowid 1:4
+# remove (after the window, and on any abort):
+  tc qdisc del dev lo root
+# loads modules on first use: sch_prio, sch_netem, cls_u32 (rdma) or sch_netem (all)
+# apply:
+  tc qdisc add dev lo root handle 1: netem loss 5%
+lo qdiscs:
+  qdisc noqueue 0: root refcnt 2 
+   Sent 0 bytes 0 pkt (dropped 0, overlimits 0 requeues 0) 
+   backlog 0b 0p requeues 0
+lo filters:
+modules loaded: 
+refused: netem on lo is a host change; set FLT08_APPROVED=1 after approval
+21:11:18 netem apply refused without approval (expected)
+21:11:18 == 2. adapter configs (stage6gpu.sh's specs)
+config ok: hosts 127.0.0.1:3300,127.0.0.1:3310,127.0.0.1:3320 capacity_gb 0.0 rdma windows None eviction None
+config ok: hosts 127.0.0.1:3300,127.0.0.1:3310,127.0.0.1:3320 capacity_gb 0.5 rdma windows None eviction ('LRU', 0.5, 0.5)
+config ok: hosts 127.0.0.1:3100 capacity_gb 0.0 rdma windows (2, 134217728) eviction None
+config ok: hosts 127.0.0.1:3100 capacity_gb 0.0 rdma windows (2, 83886080) eviction None
+config ok: hosts 127.0.0.1:3100 capacity_gb 0.0 rdma windows (2, 167772160) eviction None
+21:11:34 == 3. 70B model facts and corpus
+70B: layers=80 kv_heads=8 head_dim=128 dtype=bfloat16 vocab=128256
+70B chunk = 83886080 bytes (80 MiB); K or V plane per layer = 512 KiB; slots per chunk at 512 KiB records = 160; chunks per 256-slot command = 1
+KV per token = 327680 bytes; 17408-token max-model-len = 5.31 GiB
+build exit=0
+P-exact: 20/20 prompts token-identical between the Llama-3.1-8B corpus and one built with the 70B tokenizer
+P-ragged: 20/20 prompts token-identical between the Llama-3.1-8B corpus and one built with the 70B tokenizer
+P-shared: 10/10 prompts token-identical between the Llama-3.1-8B corpus and one built with the 70B tokenizer
+P-multi: 50/50 prompts token-identical between the Llama-3.1-8B corpus and one built with the 70B tokenizer
+P-long: 10/10 prompts token-identical between the Llama-3.1-8B corpus and one built with the 70B tokenizer
+21:11:39 == 4. private CE cluster s6p-n1..3 (3600/3610/3620), rf 2
+21:11:39 guard ok for private CE cluster: lmc-d aero-kvsink lmc-c aerospike-ce lmc-b up; ports 3600|3601|3602|3610|3611|3612|3620|3621|3622 free
+cluster size 3 on nodes [1 2 3], migrations done (3s)
+rf=2
+n1 s6p-n1 running service=127.0.0.1:3600 cluster_size=3 migrate_partitions_remaining=0 master_objects=0 prole_objects=0
+n2 s6p-n2 running service=127.0.0.1:3610 cluster_size=3 migrate_partitions_remaining=0 master_objects=0 prole_objects=0
+n3 s6p-n3 running service=127.0.0.1:3620 cluster_size=3 migrate_partitions_remaining=0 master_objects=0 prole_objects=0
+21:11:59 == 5. two LMCache servers at once in lmc-d (run_steps.sh server/server2/restart2/kill9_2/server2_up) on the cluster
+21:11:59 guard ok for LMCache servers: s6p-n3 s6p-n2 s6p-n1 lmc-d aero-kvsink lmc-c aerospike-ce lmc-b up; ports 6755|6756|8280|8281|9290|9291 free
+21:13:24 run_steps exit=0 ; 8 step lines
+=== dry2 start 21:11:59 layerwise=true policy=fail server_extra='--l2-adapter {"type":"aerospike","hosts":"127.0.0.1:3600,127.0.0.1:3610,127.0.0.1:3620","namespace":"lmcache","set_name":"kv_chunks"}' 
+=== dry2 second LMCache server on 6756 (pid 487) 21:12:07
+=== dry2 restarting LMCache server 2 (its L1 is lost)  21:12:27
+=== dry2 second LMCache server on 6756 (pid 678) 21:12:36
+=== dry2 SIGKILL to LMCache server 2 (pid 678) 21:12:36.727
+=== dry2 second LMCache server on 6756 (pid 811) 21:12:42
+=== dry2 restarting the LMCache server (L1 is lost)  21:12:52
+=== dry2 done 21:13:01
+21:13:24 lmcache_dry2.log: adapters 4, starts 4, Traceback/ERROR 0
+21:13:24 lmcache2_dry2.log: adapters 6, starts 6, Traceback/ERROR 0
+Created Aerospike L2 adapter: hosts=127.0.0.1:3600,127.0.0.1:3610,127.0.0.1:3620 namespace=lmcache set=kv_chunks (workers=8, rdma=DISABLED)
+21:13:25 l2stats (summed over 3 nodes): objects 0
+21:13:25 == 6. l2_integrity.py, l2_segments.py evict --when, settle/stats sums, on synthetic D-14 objects (cluster)
+wrote 8 objects of 4 records
+whole, clean: PASS: 8 chunk objects, 0 not whole, set holds 32 records, 32 expected, 0 orphan(s), 0 expected record(s) missing, model name dry-model
+whole, one orphan added (want FAIL, 1 orphan): FAIL: 8 chunk objects, 0 not whole, set holds 33 records, 32 expected, 1 orphan(s), 0 expected record(s) missing, model name dry-model
+21:13:35 released at 21:13:35.125; evicted 3 of 3 segment(s) of chunk 3 (meta kept, model name dry-model) from 21:13:35.125362 to 21:13:35.126119
+present after evict: P-exact-10: chunks=4 whole=3 partial=1 (missing segments 3) absent=0
+present after evict: P-exact-11: chunks=4 whole=4 partial=0 (missing segments 0) absent=0
+present after evict: FAIL: 1 chunk object(s) not whole, model name dry-model
+settle (sum of nodes): L2 settled at 60 objects
+n1 objects=25 n2 objects=15 n3 objects=20 
+21:13:41 == 7. host actions: cluster_kill armed on lookup_start, cluster_restart (private cluster)
+21:13:42 answer: armed: cluster_kill secs=0 at the next 'MP lookup/prefetch start:'
+21:13:54 trigger at 21:13:42.599; fault: cluster_kill n3 at 21:13:42.599: killed n3 (SIGKILL) cluster size 2 on nodes [1 2], migrations done (5s), done 21:13:54.735
+21:14:10 restart answer: cluster_restart n3 at 21:13:54.895: started n3 cluster size 3 on nodes [1 2 3], migrations done (5s), done 21:14:10.360
+rf=2
+n1 s6p-n1 running service=127.0.0.1:3600 cluster_size=3 migrate_partitions_remaining=0 master_objects=15 prole_objects=11
+n2 s6p-n2 running service=127.0.0.1:3610 cluster_size=3 migrate_partitions_remaining=0 master_objects=9 prole_objects=7
+n3 s6p-n3 running service=127.0.0.1:3620 cluster_size=3 migrate_partitions_remaining=0 master_objects=8 prole_objects=14
+21:14:16 == 8. private kv-sink (kvsink-s6p, 3500-3503) and two RDMA LMCache servers at once
+21:14:16 guard ok for kvsink-s6p: s6p-n3 s6p-n2 s6p-n1 lmc-d aero-kvsink lmc-c aerospike-ce lmc-b up; ports 3500|3501|3502|3503 free
+  conf 2:# Runs beside aerospike-ce (3000-3003), so every port is 3100-3103 and every
+  conf 9:    cluster-name s6p-kvsink
+  conf 10:    work-directory /root/lmc-work/s6prep/kvsink/work
+  conf 18:    user-path /root/lmc-work/s6prep/kvsink/work/usr/udf/lua
+  conf 21:network {
+  conf 24:        port 3500
+  conf 26:        access-port 3500
+  conf 31:        port 3502
+  conf 37:        port 3501
+  conf 42:        port 3503
+  conf 55:        data-size 4G
+21:14:18 kvsink-s6p: 8.1.3.0-112-g512b0c207 4 ports
+21:14:19 guard ok for RDMA LMCache servers: kvsink-s6p s6p-n3 s6p-n2 s6p-n1 lmc-d aero-kvsink lmc-c aerospike-ce lmc-b up; ports 6755|6756|8280|8281|9290|9291 free
+21:15:09 llama_cap4: exit=0; A: Created Aerospike L2 adapter: hosts=127.0.0.1:3500 namespace=lmcache set=kv_chunks (workers=8, rdma=RC); B: Created Aerospike L2 adapter: hosts=127.0.0.1:3500 namespace=lmcache set=kv_chunks (workers=8, rdma=RC); errors A/B 0/0; warnings: 
+21:15:59 l70_cap1: exit=0; A: Created Aerospike L2 adapter: hosts=127.0.0.1:3500 namespace=lmcache set=kv_chunks (workers=8, rdma=RC); B: Created Aerospike L2 adapter: hosts=127.0.0.1:3500 namespace=lmcache set=kv_chunks (workers=8, rdma=RC); errors A/B 0/0; warnings: 
+21:15:59 == 9. cleanup
+21:16:02 removed kvsink-s6p
+stopped n1
+stopped n2
+stopped n3
+wiped data files under /root/lmc-work/s6prep/aero-cluster/n{1,2,3} and removed the containers
+21:16:08 stopped lmc-d
+21:16:08 private ports closed
+21:16:08 dry run rc=0

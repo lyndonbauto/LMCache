@@ -36,14 +36,23 @@ def namespace_stats(host: str, port: int, namespace: str) -> dict[str, str]:
     """
     client = aerospike.client({"hosts": [(host, port)]}).connect()
     try:
-        info = client.info_random_node(f"namespace/{namespace}")
+        replies = client.info_all(f"namespace/{namespace}")
     finally:
         client.close()
+    # On a cluster, integer statistics are summed over the nodes; any other
+    # value is the first node's.
     stats: dict[str, str] = {}
-    for field in info.split("\t")[-1].strip().split(";"):
-        name, _, value = field.partition("=")
-        if name:
-            stats[name] = value
+    for _, (error, info) in sorted(replies.items()):
+        if error or not info:
+            continue
+        for field in info.split("\t")[-1].strip().split(";"):
+            name, _, value = field.partition("=")
+            if not name:
+                continue
+            if name in stats and value.isdigit() and stats[name].isdigit():
+                stats[name] = str(int(stats[name]) + int(value))
+            elif name not in stats:
+                stats[name] = value
     return stats
 
 

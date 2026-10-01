@@ -21,13 +21,23 @@ import aerospike
 
 
 def namespace_objects(client: "aerospike.Client", namespace: str) -> int:
-    """Return the namespace's ``objects`` statistic on one node."""
-    info = client.info_random_node(f"namespace/{namespace}")
-    for field in info.split("\t")[-1].strip().split(";"):
-        name, _, value = field.partition("=")
-        if name == "objects":
-            return int(value)
-    raise RuntimeError(f"no objects statistic for namespace {namespace}")
+    """Return the namespace's ``objects`` statistic summed over every node.
+
+    A single random node would do for one server, but on a cluster each
+    call could ask a different node, so the count would never look settled.
+    """
+    total, seen = 0, False
+    for _, (error, info) in client.info_all(f"namespace/{namespace}").items():
+        if error or not info:
+            continue
+        for field in info.split("\t")[-1].strip().split(";"):
+            name, _, value = field.partition("=")
+            if name == "objects":
+                total += int(value)
+                seen = True
+    if not seen:
+        raise RuntimeError(f"no objects statistic for namespace {namespace}")
+    return total
 
 
 def main() -> None:
