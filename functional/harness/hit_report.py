@@ -82,6 +82,18 @@ def expected_hit(tokens: list[int], stored: set[tuple[int, ...]], chunk: int) ->
     return min(hit, len(tokens) - 1)
 
 
+def remember(stored: set[tuple[int, ...]], tokens: list[int], chunk: int) -> None:
+    """Add every full-chunk prefix of ``tokens`` to the cache model.
+
+    Args:
+        stored: Token prefixes in cache, updated in place.
+        tokens: Prompt token IDs of a request that was just served.
+        chunk: Chunk size in tokens.
+    """
+    for end in range(chunk, len(tokens) + 1, chunk):
+        stored.add(tuple(tokens[:end]))
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--corpus", required=True)
@@ -187,10 +199,12 @@ def main() -> None:
                 f"{ext_hit} | {lmc_hit} ({l1}/{l2}) | {deferred} | {retrieve_text} "
                 f"| {'yes' if ok else 'NO'} |"
             )
-        for pid in run["results"]:
-            tokens = prompts[pid]["token_ids"]
-            for end in range(chunk, len(tokens) + 1, chunk):
-                stored[scope].add(tuple(tokens[:end]))
+            if not concurrent_run:
+                remember(stored[scope], tokens, chunk)
+        if concurrent_run:
+            # Requests in one concurrent batch cannot hit each other's stores.
+            for pid in run["results"]:
+                remember(stored[scope], prompts[pid]["token_ids"], chunk)
         batch: dict[str, Any] = {}
         if concurrent_run:
             delta = meta.get("batch_metrics_delta", {})
