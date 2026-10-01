@@ -1526,6 +1526,9 @@ Aerospike**; no policy has been invented here.
 
 ## Related
 
+- [`aerospike_concurrent_writes.md`](aerospike_concurrent_writes.md) — D-14
+  decision record: per-write segment keys and create-only metadata, and what
+  that means for the pipelined fetch's record keys.
 - [`aerospike_server_issues.md`](aerospike_server_issues.md) — server-side
   defects and contract gaps found while running this client against
   `feat/kv-sink-fetch-pipelined`, for hand-off to the server team.
