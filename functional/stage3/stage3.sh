@@ -34,8 +34,11 @@
 #               client.py output covering P-exact (pipe11 refuses without it)
 #   GPT_SERVER_FLAGS  extra LMCache flags for gpt-oss (default --separate-object-groups,
 #               which T-PIPE-11 needs so sliding-window layers get their own group)
-# Every fault test runs under kv_load_failure_policy recompute (plan section 7);
-# the others under fail, so a bad load errors instead of recomputing silently.
+#   FAULT_POLICY  kv_load_failure_policy for pipe05/pipe06 (default fail: under
+#               recompute a mid-forward layerwise failure hits D-17, vllm#49250,
+#               so the recompute half is recorded as blocked by D-17)
+# The other sections run under fail, so a bad load errors instead of
+# recomputing silently.
 # The kv-sink server is restarted (and warmed) before every group: it keeps
 # data in memory only, and every LMCache kill -9 leaks a region (issue 9).
 set -u
@@ -53,6 +56,9 @@ BASE2=/work/functional/stage2/base2b/bi_run1.json
 GPT_BASE=${GPT_BASE:-}
 GPT_SERVER_FLAGS=${GPT_SERVER_FLAGS:---separate-object-groups}
 CAPS=${CAPS:-64 4}
+FAULT_POLICY=${FAULT_POLICY:-fail}
+# rxe0's rcvd_pkts counts about 1 KiB packets (a 128 MiB fetch: 133,120).
+RXE_PKT=1024
 export PY314=/root/.local/share/uv/python/cpython-3.14.7-linux-x86_64-gnu/bin/python3.14
 # One 256-token chunk, all layers, K and V, bf16.
 LLAMA_CHUNK=$((32 * 2 * 8 * 128 * 256 * 2))   # 32 MiB
@@ -162,7 +168,7 @@ sec_cfg08() {
   report cfg08 $tag all --outcomes=${tag}_l2hit=pipelined --require=${tag}_l2hit=pipelined store l2hit
   local line; line=$(grep -c "fetches layer by layer from L2 adapter 0" $S/cfg08/lmcache_$tag.log)
   progress "T-CFG-08: registration line seen $line time(s) (want >= 1, one per registration); \
-rxe0 packets during the L2 hit: $(rxe_delta cfg08 $tag b a) (4 chunks = $((4 * LLAMA_CHUNK / 4096)) data packets); \
+rxe0 packets during the L2 hit: $(rxe_delta cfg08 $tag b a) (4 chunks = $((4 * LLAMA_CHUNK / RXE_PKT)) data packets); \
 metrics: $(grep -E 'lmcache_mp_num_deferred_retrieves_total\{.*pipelined' $S/cfg08/metrics_$tag.txt | head -n 1)"
 }
 
@@ -213,11 +219,14 @@ sec_pipe05() {
   SERVER_FLAGS=$(server_flags 4 $LLAMA_CHUNK)
   tag=pipe05
   group pipe05 $tag
-  session pipe05 $tag recompute server "vllm model=$LLAMA" \
+  session pipe05 $tag "$FAULT_POLICY" server "vllm model=$LLAMA" \
     "send name=store sets=P-exact ids=P-exact-10" settle restart \
     "l2seg prompt=P-exact-10 chunk=1 seg=5" \
-    "send name=probe sets=P-exact ids=P-exact-10 stats=1" "send name=again sets=P-exact ids=P-exact-10"
-  report pipe05 $tag all --outcomes=${tag}_probe=fell_back,failed --require=${tag}_probe=fell_back \
+    "send name=probe sets=P-exact ids=P-exact-10 stats=1 errors=1" \
+    "send name=again sets=P-exact ids=P-exact-10 errors=1" "vllm_check name=end"
+  report pipe05 $tag all "--allow-error=${tag}_probe" "--allow-error=${tag}_again" \
+    "--no-hit-check=${tag}_probe" "--no-hit-check=${tag}_again" \
+    --outcomes=${tag}_probe=fell_back,failed --require=${tag}_probe=fell_back \
     --outcomes=${tag}_again=pipelined,fell_back,not_deferred store probe again
   progress "pipe05: $(grep -c 'Pipelined fetch failed on layer' $S/pipe05/lmcache_$tag.log) 'Pipelined fetch failed' warning(s)"
 }
@@ -235,8 +244,9 @@ sec_pipe06() {
   done
   steps+=("send name=after13 sets=P-exact ids=P-exact-13" "send name=after14 sets=P-exact ids=P-exact-14"
           "vllm_check name=end")
-  session pipe06 $tag recompute "${steps[@]}"
-  report pipe06 $tag all "--allow-error=*" \
+  session pipe06 $tag "$FAULT_POLICY" "${steps[@]}"
+  report pipe06 $tag all "--allow-error=*" "--no-hit-check=${tag}_stall10" \
+    "--no-hit-check=${tag}_stall11" "--no-hit-check=${tag}_stall12" \
     --outcomes=${tag}_stall10=fell_back,failed,pipelined --outcomes=${tag}_stall11=fell_back,failed,pipelined \
     --outcomes=${tag}_stall12=fell_back,failed,pipelined \
     --outcomes=${tag}_after13=pipelined --require=${tag}_after13=pipelined \
@@ -277,9 +287,9 @@ sec_pipe11() {
     "rxe name=b" "send name=l2hit sets=P-exact ids=P-exact-10 stats=1" "rxe name=a"
   CORPUS_S=$CG BASES=$GPT_BASE report pipe11 $tag all --outcomes=${tag}_l2hit=pipelined \
     --require=${tag}_l2hit=pipelined store l2hit
-  local half=$((GPT_CHUNK / 2 / 4096))   # packets per chunk for half the layers
+  local half=$((GPT_CHUNK / 2 / RXE_PKT))   # packets per chunk for half the layers
   progress "pipe11: $(grep -hoE 'Per-layer staging matches the pipelined fetch plan for all [0-9]+ layers' $S/pipe11/lmcache_$tag.log | head -n 1); \
-rxe0 packets during the L2 hit: $(rxe_delta pipe11 $tag b a); full 4-chunk fetch $((4 * GPT_CHUNK / 4096)), \
+rxe0 packets during the L2 hit: $(rxe_delta pipe11 $tag b a); full 4-chunk fetch $((4 * GPT_CHUNK / RXE_PKT)), \
 sliding-window layers limited to 1 or 2 chunks: $((4 * half + half)) or $((4 * half + 2 * half)) (data packets, plus acks and smaller writes)"
 }
 

@@ -330,7 +330,10 @@ vllm_check() {
   {
     if curl -sf "http://localhost:$port/health" >/dev/null; then echo "vllm=alive"; else echo "vllm=dead"; fi
     echo "generation_timeout_errors=$(grep -c LayerProgressRetrieveGenerationTimeoutError "$vlog" 2>/dev/null)"
-    echo "engine_dead_errors=$(grep -cE 'EngineDeadError|EngineCore.*(died|failed)' "$vlog" 2>/dev/null)"
+    # LMCache's own warnings carry the "(EngineCore pid=N)" prefix and may say
+    # "load failed"; they are not engine deaths.
+    echo "engine_dead_errors=$(grep -E 'EngineDeadError|EngineCore.*(died|failed)' "$vlog" 2>/dev/null \
+      | grep -vcE 'LMCache (DEBUG|INFO|WARNING|ERROR)')"
     echo "tracebacks=$(grep -c Traceback "$vlog" 2>/dev/null)"
     echo "last_error: $(grep -E 'Error' "$vlog" 2>/dev/null | tail -n 1 | cut -c1-300)"
   } > "$f"

@@ -36,8 +36,10 @@ kv-sink log of every group.
   `"64 4"`). Rows from the cap-64 run that cover prompts over 4 chunks are
   expected to fall back (D-12). Report those as "blocked by D-12", not as a
   pass or a fail.
-- Policy: the fault sections use `kv_load_failure_policy` recompute; every
-  other section uses fail.
+- Policy: every section uses `kv_load_failure_policy` fail. pipe05 and pipe06
+  take `FAULT_POLICY` (default fail since gpu-stage3b): under recompute a
+  mid-forward layerwise failure hits D-17 (vLLM bug vllm#49250), so their
+  recompute half is recorded as blocked by D-17 (decision 2026-10-01).
 - `hit_report.py` checks the outcomes. `--require TAG=pipelined` checks that
   every modelled hit in that send has `pipelined_outcome=pipelined`.
 - Every pipelined row is "pass on a fencing server" and is rerun when a
@@ -50,10 +52,10 @@ kv-sink log of every group.
 | stage3 cfg08 | c9 stage 3, T-CFG-08 | none | registration and staging lines present; the 4-chunk pure L2 hit is `pipelined` and equal to the oracle |
 | stage3 e2e04 | T-E2E-04 | none; P-exact + P-ragged cold, restart, warm | outputs equal; prompts within the cap `pipelined`, prompts over it `not_deferred` |
 | stage3 e2e05 | T-E2E-05 (pipelined half) | none; at the cap and one chunk over | at the cap: `pipelined`; over: plain path, equal |
-| stage3 pipe05 | T-PIPE-05 | `l2seg` deletes segment 5 of chunk 1 of P-exact-10 (meta kept) | `fell_back`, output equal, no error |
-| stage3 pipe06 | T-PIPE-06, T-PIPE-07 (partial) | kv-sink SIGSTOP 2.5 s, armed on `MP lookup/prefetch end:`, 3 times; then after13/after14 | stalled requests recompute (equal); later fetches `pipelined` (window leased again) |
+| stage3 pipe05 | T-PIPE-05 | `l2seg` deletes segment 5 of chunk 1 of P-exact-10 (meta kept) | `fell_back`, output equal, no error; under fail, a failed load must be a clean error with no wrong tokens |
+| stage3 pipe06 | T-PIPE-06, T-PIPE-07 (partial) | kv-sink SIGSTOP 2.5 s, armed on `MP lookup/prefetch end:`, 3 times; then after13/after14 | stalled requests: under fail a clean error (under recompute, equal); later fetches `pipelined` (window leased again) |
 | stage3 pipe12 | T-PIPE-12 | stored with `max_record_bytes` 262144, read with discovery (1 MiB), and the reverse | under fail: a clean fallback or error, never wrong output |
-| stage3 pipe11 | T-PIPE-11 | gpt-oss pure L2 hit, `--separate-object-groups` | rxe0 data packets match the sliding-window-limited size (11520 or 13824), not the full size (18432) |
+| stage3 pipe11 | T-PIPE-11 | gpt-oss pure L2 hit, `--separate-object-groups` | rxe0 received packets (about 1 KiB each) match the sliding-window-limited size (46080 or 55296), not the full size (73728) |
 | stage3 rdma06gpu | T-RDMA-06 GPU half | vLLM stores P-exact-00..16; the byte-oracle pytest reads them back (`RDMA_ORACLE_STORED_SET`) | 100/100 records equal, RDMA vs plain get |
 | stage5 flt01 | T-FLT-01 | `fault_inject` `gap_tail_ratios [0.5]` wrapping the Aerospike adapter (pipelining is off: the wrapper does not forward it) | leading run served, the rest recomputed, outputs equal |
 | stage5 flt05 | T-FLT-05 | `kill9` of LMCache after `MP retrieve start:`, under recompute and fail | vLLM alive; recompute: equal; fail: a clean error; requests succeed after `server_up` |
