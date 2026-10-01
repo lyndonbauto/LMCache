@@ -719,7 +719,9 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                                 else:
                                     keys_stored.append(key)
                                     sizes_stored.append(0)
-                        self._completed_stores[task_id] = L2StoreResult(ok, task_bytes)
+                        self._completed_stores[task_id] = L2StoreResult(
+                            ok, task_bytes, failure_reason=str(error)
+                        )
                         self._store_efd.notify()
 
                     elif op_type == self._OP_LOOKUP:

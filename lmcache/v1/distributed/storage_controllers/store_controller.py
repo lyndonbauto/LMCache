@@ -189,6 +189,10 @@ class InFlightStoreTask:
     l2_bytes_transferred: int = 0
     """Bytes actually transferred by the adapter for this task."""
 
+    l2_failure_reason: str = ""
+    """Why the adapter reports the store failed; empty on success or when
+    the adapter gave no reason."""
+
 
 # Main class
 
@@ -715,6 +719,7 @@ class StoreController(StorageControllerInterface):
                     continue
                 task.l2_store_result = result.is_successful()
                 task.l2_bytes_transferred = result.bytes_transferred()
+                task.l2_failure_reason = result.failure_reason()
 
     def _advance_request(
         self,
@@ -772,6 +777,7 @@ class StoreController(StorageControllerInterface):
             if delete_keys:
                 l1_mgr.delete(delete_keys)
         else:
+            reason = task.l2_failure_reason or "the adapter gave no reason"
             self._event_bus.publish(
                 Event(
                     event_type=EventType.L2_STORE_COMPLETED,
@@ -779,15 +785,19 @@ class StoreController(StorageControllerInterface):
                         **completion_meta,
                         "succeeded_count": 0,
                         "failed_count": len(task.keys),
+                        "failure_reason": reason,
                     },
                 )
             )
             logger.warning(
-                "Store task %d to adapter %d failed for keys: %s",
+                "Store task %d to adapter %d (%s) failed for %d key(s): %s",
                 task_id,
                 adapter_index,
-                task.keys,
+                l2_name,
+                len(task.keys),
+                reason,
             )
+            logger.debug("Keys of failed store task %d: %s", task_id, task.keys)
 
     def _cleanup_in_flight_tasks(self) -> None:
         """
