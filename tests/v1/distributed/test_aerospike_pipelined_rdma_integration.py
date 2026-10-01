@@ -27,8 +27,10 @@ On AWS EFA, build with ``BUILD_WITH_AEROSPIKE_EFA=1`` and run with
 # Standard
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
+from multiprocessing import shared_memory
 import os
 import select
+import time
 import uuid
 
 # Third Party
@@ -104,6 +106,9 @@ RDMA_TRANSPORT = RdmaTransport[os.environ.get("RDMA_TRANSPORT", "RC").upper()]
 WINDOW_BYTES = 1 << 16
 FETCH_TIMEOUT = 30.0
 STORE_TIMEOUT = 30.0
+#: How long to watch the window for writes after ``close()``. A cold
+#: server's late writes land about 0.5 s after the close.
+LATE_WRITE_WATCH_SECONDS = 5.0
 #: ``MAX_REGIONS`` in the server's ``as/src/base/kv_sink.c``.
 SERVER_MAX_REGIONS = 16
 
@@ -279,14 +284,11 @@ def stored(set_name: str) -> dict[ObjectKey, bytes]:
     Returns:
         ``{key: payload}`` for each stored object.
     """
-    adapter = create_l2_adapter_from_registry(
-        _adapter_config(set_name, L1RdmaConfig())
-    )
+    adapter = create_l2_adapter_from_registry(_adapter_config(set_name, L1RdmaConfig()))
     try:
         adapter.set_object_group_layouts(dict(GROUP_LAYOUTS), KERNEL_LAYERS)
         payloads = {
-            o.key: _payload(index, o.object_bytes)
-            for index, o in enumerate(_objects())
+            o.key: _payload(index, o.object_bytes) for index, o in enumerate(_objects())
         }
         for key, payload in payloads.items():
             _store(adapter, key, payload)
@@ -295,11 +297,16 @@ def stored(set_name: str) -> dict[ObjectKey, bytes]:
     return payloads
 
 
-def _build_manager(set_name: str) -> StorageManager:
+def _build_manager(set_name: str, shm_name: str = "") -> StorageManager:
     """A storage manager whose one RDMA window is registered with the server.
 
     The ``retain`` prefetch policy keeps every fetched object in L1, so a
     test can read back what a fetch landed.
+
+    Args:
+        set_name: The Aerospike set the adapter reads.
+        shm_name: Name of the POSIX shared-memory segment backing L1, or
+            empty for a private allocation.
     """
     rdma = L1RdmaConfig(
         transport=RDMA_TRANSPORT,
@@ -315,7 +322,7 @@ def _build_manager(set_name: str) -> StorageManager:
                     size_in_bytes=4 * 1024 * 1024,
                     use_lazy=False,
                     align_bytes=4096,
-                    shm_name="",
+                    shm_name=shm_name,
                     rdma_window_count=1,
                     rdma_window_bytes=WINDOW_BYTES,
                 ),
@@ -361,8 +368,7 @@ def _retrieve(manager: StorageManager) -> _Retrieved:
     sizes = {o.key: o.object_bytes for o in _objects()}
     resident = manager.lock_resident_keys(list(sizes))
     l1_bytes = {
-        key: bytes(obj.byte_array[: sizes[key]])
-        for key, obj in resident.locked.items()
+        key: bytes(obj.byte_array[: sizes[key]]) for key, obj in resident.locked.items()
     }
     manager.finish_read_prefetched(list(resident.locked))
     return _Retrieved(result.completion, tap.plan, loader, l1_bytes)
@@ -413,6 +419,45 @@ def test_a_missing_record_falls_back_to_a_whole_reload(
     assert set(reloaded) == set(stored) - {damaged}
     for key, payload in reloaded.items():
         assert payload == stored[key], f"{key} reloaded other bytes"
+
+
+def test_no_server_write_reaches_l1_after_close(
+    stored: dict[ObjectKey, bytes], set_name: str
+) -> None:
+    """Once ``close()`` returns, the server cannot write into the L1 slab.
+
+    A fetch the client gave up on can still be in flight at the server: on a
+    cold server the first fetch registers its stripes inside the command
+    (server issue 5), the client's info call times out and the retrieve falls
+    back, and the server posts its writes afterwards. ``kv-sink-deregister``
+    does not wait for them, so ``close()`` must revoke the remote's access
+    before L1 frees the slab; otherwise those writes land in freed memory.
+
+    L1 is a named shared-memory segment that the test maps too, so the pages
+    outlive ``close()`` and any later write is visible instead of corrupting
+    the heap. Needs a fetch the server finishes late, which a cold server
+    gives: run it first after starting the server, or it skips.
+    """
+    shm_name = f"lmcache_l1_pool_it_{uuid.uuid4().hex[:12]}"
+    built = _build_manager(set_name, shm_name=shm_name)
+    l1_pages = shared_memory.SharedMemory(name=shm_name, track=False)
+    try:
+        try:
+            retrieved = _retrieve(built)
+        finally:
+            built.close()
+        if retrieved.completion is RetrieveCompletion.PIPELINED:
+            pytest.skip("the fetch did not fall back; needs a cold kv-sink server")
+        window = l1_pages.buf[:WINDOW_BYTES]
+        window[:] = b"\xab" * WINDOW_BYTES
+        time.sleep(LATE_WRITE_WATCH_SECONDS)
+        overwritten = WINDOW_BYTES - bytes(window).count(0xAB)
+        window.release()
+        assert overwritten == 0, (
+            f"{overwritten} window bytes were written after close() returned"
+        )
+    finally:
+        l1_pages.close()
 
 
 def test_closing_releases_the_servers_region(set_name: str) -> None:
