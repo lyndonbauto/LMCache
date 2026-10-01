@@ -50,6 +50,14 @@
 #   rxe name=<n>                   snapshot rxe0's port counters (packets of
 #                                  4096 bytes) -> $OUT/rxe_<tag>_<n>.txt
 #   sleep secs=<s>
+# Second vLLM instance (Stage 4: retrieves from one vLLM run one at a time on
+# its LMCache affinity thread, so concurrent retrieves need two clients and
+# the server's --max-gpu-workers 2):
+#   vllm2 model=<id>               start a second vLLM on 127.0.0.1:8001 against
+#                                  the same LMCache server (log vllm2_<tag>_*.log)
+#   vllm2_stop                     stop it
+#   send ... port=8001             send to the second instance (default 8000)
+# With both running, restart and server_up wait for both to re-register.
 # Environment: CORPUS (default corpus for send), LMCACHE_SERVER_EXTRA,
 # LMCACHE_SERVER_EXTRA_ALT, VLLM_EXTRA, KV_EXTRA, KV_LOAD_FAILURE_POLICY
 # (default fail), L2_NAMESPACE (default lmcache), L2_PORT (default 3000),
@@ -68,9 +76,7 @@ NS=${L2_NAMESPACE:-lmcache}
 L2_ARGS="--port ${L2_PORT:-3000} --namespace $NS"
 if [ "$LW" = true ]; then SFLAG=--use-layerwise; else SFLAG=--no-use-layerwise; fi
 LOG=$OUT/lmcache_$TAG.log
-METRICS_URLS=http://localhost:8000/metrics,http://localhost:8080/metrics
-
-SERVER_PID=0; VLLM_PID=0
+SERVER_PID=0; VLLM_PID=0; VLLM2_PID=0
 SERVER_EXTRA=${LMCACHE_SERVER_EXTRA:-}
 BG_PIDS=""; BG_MARK=0; HOST_SEQ=0
 stop_server() {
@@ -100,38 +106,58 @@ stop_vllm() {
   VLLM_PID=0
   sleep 10
 }
+stop_vllm2() {
+  [ "$VLLM2_PID" -gt 0 ] || return 0
+  kill "$VLLM2_PID" 2>/dev/null
+  for _ in $(seq 30); do kill -0 "$VLLM2_PID" 2>/dev/null || break; sleep 1; done
+  kill -9 "$VLLM2_PID" 2>/dev/null
+  VLLM2_PID=0
+  sleep 10
+}
+# vLLM instances that must re-register after an LMCache restart.
+n_vllm() { echo $(( (VLLM_PID > 0) + (VLLM2_PID > 0) )); }
 start_vllm() {
-  local model=$1 log=$OUT/vllm_${TAG}_$(basename "$1").log
+  start_vllm_on "$1" 8000 vllm || return 1
+  VLLM_PID=$LAUNCHED_PID
+}
+start_vllm2() {
+  start_vllm_on "$1" 8001 vllm2 || return 1
+  VLLM2_PID=$LAUNCHED_PID
+}
+# start_vllm_on <model> <port> <log-prefix>: sets LAUNCHED_PID.
+LAUNCHED_PID=0
+start_vllm_on() {
+  local model=$1 port=$2 log=$OUT/${3}_${TAG}_$(basename "$1").log
   local kv="{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\
 \"kv_connector_module_path\":\"lmcache.integration.vllm.lmcache_mp_connector\",\
 \"kv_load_failure_policy\":\"$POLICY\",\"kv_connector_extra_config\":{\
 \"lmcache.mp.host\":\"tcp://localhost\",\"lmcache.mp.port\":6555,\
 \"lmcache.mp.use_layerwise\":$LW${KV_EXTRA:+,$KV_EXTRA}}}"
   local before; before=$(grep -c "Registered KV cache" "$LOG")
-  vllm serve "$model" --host 127.0.0.1 --port 8000 --seed 0 --no-enable-prefix-caching \
+  vllm serve "$model" --host 127.0.0.1 --port "$port" --seed 0 --no-enable-prefix-caching \
     --max-model-len 17408 --gpu-memory-utilization 0.6 ${VLLM_EXTRA:-} \
     --kv-transfer-config "$kv" >> "$log" 2>&1 &
-  VLLM_PID=$!
+  LAUNCHED_PID=$!
   for _ in $(seq 1800); do
-    curl -sf http://localhost:8000/health >/dev/null && break
-    kill -0 "$VLLM_PID" 2>/dev/null || { echo "vLLM exited during startup"; tail -n 30 "$log"; return 1; }
+    curl -sf "http://localhost:$port/health" >/dev/null && break
+    kill -0 "$LAUNCHED_PID" 2>/dev/null || { echo "vLLM exited during startup"; tail -n 30 "$log"; return 1; }
     sleep 1
   done
-  curl -sf http://localhost:8000/health >/dev/null || { echo "vLLM did not come up"; return 1; }
+  curl -sf "http://localhost:$port/health" >/dev/null || { echo "vLLM did not come up"; return 1; }
   [ "$(grep -c "Registered KV cache" "$LOG")" -gt "$before" ] \
     || echo "warning: no new KV cache registration in the LMCache log"
-  echo "=== $TAG vLLM serving $model $(date -u +%T)"
+  echo "=== $TAG vLLM serving $model on port $port $(date -u +%T)"
 }
 wait_reregistered() {
-  local registrations=$1
-  [ "$VLLM_PID" -gt 0 ] || return 0
+  local registrations=$1 want; want=$(( $1 + $(n_vllm) ))
+  [ "$(n_vllm)" -gt 0 ] || return 0
   local restarted_at; restarted_at=$(date +%s)
   for _ in $(seq 120); do
-    [ "$(grep -c "Registered KV cache" "$LOG")" -gt "$registrations" ] && break
+    [ "$(grep -c "Registered KV cache" "$LOG")" -ge "$want" ] && break
     sleep 1
   done
-  [ "$(grep -c "Registered KV cache" "$LOG")" -gt "$registrations" ] \
-    || { echo "vLLM did not re-register with the restarted server"; return 1; }
+  [ "$(grep -c "Registered KV cache" "$LOG")" -ge "$want" ] \
+    || { echo "vLLM did not re-register with the restarted server ($(n_vllm) instance(s))"; return 1; }
   echo "=== $TAG vLLM re-registered $(date -u +%T), $(( $(date +%s) - restarted_at )) s after the server came back"
   sleep 5
 }
@@ -208,8 +234,10 @@ vllm_check() {
 }
 cleanup() {
   [ "$VLLM_PID" -gt 0 ] && kill "$VLLM_PID" 2>/dev/null
+  [ "$VLLM2_PID" -gt 0 ] && kill "$VLLM2_PID" 2>/dev/null
   sleep 10
   [ "$VLLM_PID" -gt 0 ] && kill -9 "$VLLM_PID" 2>/dev/null
+  [ "$VLLM2_PID" -gt 0 ] && kill -9 "$VLLM2_PID" 2>/dev/null
   pkill -9 -f "VLLM::" 2>/dev/null
   stop_server
   sleep 3
@@ -217,32 +245,34 @@ cleanup() {
 trap cleanup EXIT
 
 send() {
-  local name="" sets="" ids="" salt="" conc=1 corpus=${CORPUS:-} stats=0 bg=0 errors=0 kv
+  local name="" sets="" ids="" salt="" conc=1 corpus=${CORPUS:-} stats=0 bg=0 errors=0 port=8000 kv
   for kv in "$@"; do
     case $kv in
       name=*) name=${kv#name=};; sets=*) sets=${kv#sets=};; ids=*) ids=${kv#ids=};;
       salt=*) salt=${kv#salt=};; conc=*) conc=${kv#conc=};; corpus=*) corpus=${kv#corpus=};;
       stats=*) stats=${kv#stats=};; bg=*) bg=${kv#bg=};; errors=*) errors=${kv#errors=};;
+      port=*) port=${kv#port=};;
       *) echo "send: unknown argument $kv"; return 1;;
     esac
   done
   local run=${TAG}_$name
   local err_flag=""; [ "$errors" = 1 ] && err_flag=--allow-errors
+  local url=http://localhost:$port metrics=http://localhost:$port/metrics,http://localhost:8080/metrics
   [ "$stats" = 1 ] && python "$HERE/l2_stats.py" dump $L2_ARGS --out "$OUT/l2stats_${run}_before.json"
-  echo "=== $TAG send $name sets=$sets ids=${ids:--} salt=${salt:--} conc=$conc bg=$bg errors=$errors $(date -u +%T)"
+  echo "=== $TAG send $name sets=$sets ids=${ids:--} salt=${salt:--} conc=$conc bg=$bg errors=$errors port=$port $(date -u +%T)"
   if [ "$bg" = 1 ]; then
     BG_MARK=$(wc -l < "$LOG")
     python "$HERE/client.py" --corpus "$corpus" --out "$OUT/$run.json" --tag "$run" --sets "$sets" \
       --ids "$ids" --salt "$salt" --concurrency "$conc" --timeout "${SEND_TIMEOUT:-900}" \
-      --metrics-urls "$METRICS_URLS" $err_flag > "$OUT/client_$run.txt" 2>&1 &
+      --url "$url" --metrics-urls "$metrics" $err_flag > "$OUT/client_$run.txt" 2>&1 &
     BG_PIDS="$BG_PIDS $!"
     return 0
   fi
   if ! python "$HERE/client.py" --corpus "$corpus" --out "$OUT/$run.json" --tag "$run" --sets "$sets" \
       --ids "$ids" --salt "$salt" --concurrency "$conc" --timeout "${SEND_TIMEOUT:-900}" \
-      --metrics-urls "$METRICS_URLS" $err_flag; then
+      --url "$url" --metrics-urls "$metrics" $err_flag; then
     echo "=== $TAG send $name FAILED $(date -u +%T)"
-    echo "server_pid=$SERVER_PID vllm_pid=$VLLM_PID engine_pids=$(pgrep -f 'VLLM::' | paste -sd,)" > "$OUT/HANG_$run"
+    echo "server_pid=$SERVER_PID vllm_pid=$VLLM_PID vllm2_pid=$VLLM2_PID engine_pids=$(pgrep -f 'VLLM::' | paste -sd,)" > "$OUT/HANG_$run"
     for _ in $(seq 300); do [ -f "$OUT/STACKS_DONE_$run" ] && break; sleep 1; done
     return 1
   fi
@@ -273,6 +303,8 @@ for step in "$@"; do
     server) start_server || exit 1;;
     vllm) start_vllm "${rest#model=}" || exit 1;;
     vllm_stop) stop_vllm; echo "=== $TAG vLLM stopped $(date -u +%T)";;
+    vllm2) start_vllm2 "${rest#model=}" || exit 1;;
+    vllm2_stop) stop_vllm2; echo "=== $TAG second vLLM stopped $(date -u +%T)";;
     send) # shellcheck disable=SC2086
       send $rest || exit 1;;
     settle) settle;;
