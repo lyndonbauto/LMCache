@@ -181,7 +181,22 @@ sec_lkp05() {
   done
 }
 
-for sec in ${*:-corpus base e2e01 lkp03 lkp04 conc lkp05}; do
+# Rebuild every per-request report from the recorded sends (no GPU).
+sec_reports() {
+  for lw in false true; do
+    report e2e01v2 e2e01v2_lw_$lw all cold warm
+    report lkp03 lkp03_lw_$lw all --expect=lkp03_lw_${lw}_gapprobe:P-prefix-05=512 \
+      store probe gtwo gthree gfull gapprobe healed
+    report lkp04 lkp04_lw_$lw l1 aone bone atwo
+    report lkp04 lkp04_lw_$lw l2 athree btwo afour
+    report lkp05 lkp05_lw_$lw all llama gptlone gptltwo llamaback
+  done
+  report conc conc_lw_true all cold lone ltwo lthree rone rtwo rthree
+  docker exec lmc-c python /work/LMCache/functional/stage2/metrics_table.py $W e2e01v2 lkp03 lkp04 conc lkp05 \
+    > $S/metrics_table_2b.md
+}
+
+for sec in ${*:-corpus base e2e01 lkp03 lkp04 conc lkp05 reports}; do
   progress "section $sec started"
   sec_$sec
   progress "section $sec finished"

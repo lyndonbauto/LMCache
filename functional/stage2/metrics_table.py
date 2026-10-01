@@ -9,12 +9,12 @@ how many requests matched the expected hit. The session's final
 ``/metrics`` scrape is checked for any deferred-retrieve sample.
 
 Concurrent sends (``meta.concurrency`` > 1) use the batch counter delta.
-The optional second argument selects the session folders (default
+Further arguments are glob patterns selecting the session folders (default
 ``e2e*``).
 
 Usage::
 
-    python metrics_table.py /root/lmc-work/functional/stage2 ['lkp*']
+    python metrics_table.py /root/lmc-work/functional/stage2 [lkp03 conc ...]
 """
 
 # Standard
@@ -27,14 +27,19 @@ import sys
 
 def main() -> None:
     root = sys.argv[1]
-    pattern = sys.argv[2] if len(sys.argv) > 2 else "e2e*"
+    patterns = sys.argv[2:] or ["e2e*"]
     print(
         "| Session | Send | Requests | Hit as expected | Exact | Retrieves by "
         "outcome | Deferred counter delta | vLLM external hit rate | "
         "LMCache hit tokens L1 / L2 |"
     )
     print("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
-    for report_path in sorted(glob.glob(os.path.join(root, pattern, "report_*.json"))):
+    report_paths = [
+        path
+        for pattern in patterns
+        for path in sorted(glob.glob(os.path.join(root, pattern, "report_*.json")))
+    ]
+    for report_path in report_paths:
         session = os.path.basename(report_path)[len("report_") : -len(".json")]
         with open(report_path) as f:
             report = json.load(f)
@@ -73,7 +78,12 @@ def main() -> None:
                 f"{int(sums['lmcache_mp_lookup_hit_l2_tokens_total'])} |"
             )
     print()
-    for metrics_path in sorted(glob.glob(os.path.join(root, pattern, "metrics_*.txt"))):
+    metrics_paths = [
+        path
+        for pattern in patterns
+        for path in sorted(glob.glob(os.path.join(root, pattern, "metrics_*.txt")))
+    ]
+    for metrics_path in metrics_paths:
         with open(metrics_path) as f:
             deferred = [
                 line.strip()
