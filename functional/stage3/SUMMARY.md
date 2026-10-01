@@ -4,7 +4,128 @@ Server under test: the kv-sink server `512b0c207`. It is a fencing build
 (issue 4), so every pipelined row is "pass on a fencing server" and is rerun
 when a no-fence build lands. Runbook: [HARNESS.md](HARNESS.md).
 
-## GPU half (gpu-stage3, 2026-10-01 20:02-20:48Z): stopped on S1
+The table in "Stage 3 final table" supersedes the partial one from the first
+GPU run, which is kept below under "History".
+
+## Stage 3 final table (gpu-stage3b, 2026-10-01 21:47-23:39Z)
+
+**Outcome.** Every Stage 3 test has now run. No request anywhere in Stage 3
+returned wrong tokens except the D-17 rows of the first run, which used the
+`recompute` policy (a known vLLM bug). This run: Llama 160/160 (e2e04), 8/8
+(e2e05), 2/2 (pipe12), the 4-chunk gpt-oss hit, gpt-oss 360/360 (e2e08p) plus
+120/120 (its L2 tail), and every fault request either matched or failed with a
+clean HTTP 500. The failing criterion is the same everywhere: on the kv-sink
+server, D-12's `late completion for slot N` puts the client region in error
+after 7 to 24 fetches, and every later fetch falls back to whole objects or is
+refused. Those rows fail (S2, D-12) even though their outputs are exact.
+
+Tree: box `/root/lmc-work/LMCache` at `a3504150` at start. That build already
+contains the D-14 fix `e9cd0689` (rebuilt by gpu-d17-narrow); the commits
+after it are `functional/` only, so there was no rebuild. Harness commits used:
+`d10a376f`, `b6b9d76f`, `4c7a3df3`. During this run, origin received the
+newstack product merge (`e4701b9a`..`e6d35a0c`). The box tree was held at
+`d10a376f` product code so that every row in this table ran the same build;
+see VERSIONS.md.
+
+Decisions in force (humans, recorded here):
+- Lyndon (Slack, 2026-10-01 21:00Z): no fixes for D-17 or D-12. The RDMA
+  server and the LMCache client code will be replaced. Every relevant test
+  runs without the fixes, and a known defect is recorded, not retried or
+  worked around.
+- Fencing (mitigation 3): the kv-sink build still fences, so passing rows are
+  "pass on a fencing server".
+- D-12, default 2+4: run the default cap (64) and `--pipelined-max-chunks 4`.
+  Judge output correctness, and record the pipelined, refused and fell_back
+  counts. D-12 is also known to fail single-command fetches on a reused region
+  after 6 to 8 fetches.
+- D-17 (vLLM bug [vllm#49250](https://github.com/vllm-project/vllm/issues/49250)):
+  recompute-after-mid-forward-failure tests run under the `fail` policy
+  (expected: a clean error and no wrong tokens). The `recompute` half is
+  recorded as "blocked by D-17 (vLLM)". The scratch vLLM was not used.
+- gpt-oss oracle: prefix hits are judged against vLLM's prefix cache at block
+  256 (`pc256_*`), and block 16 (`pc16_r1_*`) is reported. Sends run at
+  concurrency 1 (D-16). The T-E2E-08 pipelined half uses Stage 2c's server
+  flags, and T-PIPE-11 uses `--separate-object-groups`.
+- kv-sink hygiene: the server is restarted and warmed (`kvsink_smoke.sh`)
+  before every group.
+- Harness fixes allowed: `vllm_check`'s engine-death pattern (it counted
+  LMCache's "load failed" warnings), and the rxe0 packet math (packets are
+  about 1 KiB).
+
+| Test | What | Result | Evidence (box `/root/lmc-work/functional/stage3/`) |
+|---|---|---|---|
+| T-CFG-08 | Registration line; one 4-chunk pure L2 hit, pipelined | **pass on a fencing server** (gpu-d17-narrow rerun on the D-14 build: line at both registrations, hit `pipelined`, exact). This run also logged the line at every Llama and gpt-oss registration (`... fetches layer by layer from L2 adapter 0, reading records of at most 983040 bytes`) | `cfg08/`, `stage3b_*.txt` (`-- registration:`) |
+| T-E2E-04 (cap 4) | P-exact + P-ragged cold, LMCache restart, warm from L2 | **fail (S2, D-12)**: outputs 80/80 exact. Over the cap: 14/14 `not_deferred`. Eligible: 24 of 26 `pipelined`. The 25th fetch on the region (P-ragged, 4 chunks, one command) got `late completion for slot 0`, then 2 `fell_back`, 0 `refused`. First run (before D-14): 7/26 pipelined, 2 fell_back, 17 refused, error at the 8th fetch | `e2e04/report_e2e04_c4_*`; first run `e2e04_r1/` |
+| T-E2E-04 (cap 64) | Same at the default cap | D-12 reproduction (not judged): outputs 80/80 exact. short: 9 `pipelined`, 4 `fell_back`, 22 `refused` (first run: 5/4/26). long1/long2 (64+ chunks): all fell back or were refused, in both runs. One late completion per group | `e2e04/report_e2e04_c64_*`; `e2e04_r1/` |
+| T-E2E-05 (cap 4) | At the cap and one chunk over | **pass on a fencing server**, same in both runs: P-exact-10 (4 chunks) `pipelined` and exact; P-multi-03 (5 chunks) `not_deferred` and exact | `e2e05/report_e2e05_c4_all.md`; `e2e05_r1/` |
+| T-E2E-05 (cap 64) | P-long-00 at 64 chunks, P-long-05 over | D-12 reproduction, same in both runs: at the cap `fell_back` (late completion for slot 1536), exact; over the cap `not_deferred`, exact | `e2e05/report_e2e05_c64_all.md`; `e2e05_r1/` |
+| T-PIPE-05 | Segment 5 of chunk 1 of P-exact-10 deleted (meta kept) | **partial**. `fail` half passes: probe and repeat were both `failed` (layer 2 never arrives, and the whole-object fallback cannot load the deleted record). vLLM logged `Failing 1 request(s) due to KV load failure`, returned HTTP 500 twice, and stayed alive (0 engine deaths, 0 generation timeouts). No wrong tokens. The `recompute` half is **blocked by D-17 (vLLM)**. `fell_back` with a correct output is out of reach with this fault: the record is gone, so the fallback cannot succeed either | `pipe05/`; recompute run `pipe05_r1_recompute/`, `pipe05_noasync/` |
+| T-PIPE-06 | kv-sink SIGSTOP 2.5 s at lookup end, 3 times; then after13/after14 | **partial**. `fail` half: stall10/11 hit the layer-0 deadline (`failed`) and returned clean HTTP 500s; vLLM stayed alive. stall12 was `refused` (both windows quarantined), loaded whole, exact. After the 30 s quarantine, the window **was leased again**: after13 started a pipelined fetch. But kv-sink logged `late completion for slot 0` (D-12 on a reused region), so after13/14 `fell_back`, exact. `recompute` half: **blocked by D-17**. The first attempt in this run (`pipe06_r2_fail_nowait/`) sent after13 5 s after the stalls, inside the quarantine. That gave `refused`, as in the first run: a harness timing gap, now fixed (`4c7a3df3`) | `pipe06/`; `pipe06_r2_fail_nowait/`, `pipe06_r1_recompute/` |
+| T-PIPE-07 | Late write from an abandoned fetch | partial, as decided. In `pipe06/`, the first fetch after the abandoned ones got a server late completion and fell back, with exact output, so nothing late was credited to it. E3 cannot delay RDMA alone (HARNESS.md) | `pipe06/kvsink_pipe06/asd-kvsink.log` |
+| T-PIPE-12 | Records under one `max_record_bytes`, read under another | **pass on a fencing server**: stored at 256 KiB and read with discovery (1 MiB), and the reverse. Both reads `fell_back`, exact, no error | `pipe12/report_pipe12_*` |
+| T-PIPE-11 | gpt-oss sliding-window layers fetch only their window (`--separate-object-groups`) | **partial**. The 4-chunk pure L2 hit was `pipelined` and exact; staging matches the plan for all 36 layers. At the object level the window limit holds: 8 keys looked up, 5 retained (4 full-attention + 1 sliding-window chunk), `retrieved_count=5`. The rxe0 byte check does not match: 100,360 packets received, against 46,080 (window-limited) or 73,728 (full) expected at 1 KiB per packet. With one object group (e2e08p, below), the count matches the per-layer window-limited plan. Unexplained; needs the per-layer fetch plan logged (HARNESS.md missing hook 3) | `pipe11/` |
+| T-E2E-08 pipelined half | gpt-oss through T-E2E-02..07, `--pipelined-fetch` cap 4, Stage 2c flags | **fail (S2, D-12)**; outputs pass. 360/360 exact against `pc256` (block 16: 352/360; the 8 are the P-ragged prompts where vLLM alone differs at block 16 and 256, as in Stage 2c). L2 send within the cap: 7 of 26 `pipelined`, then a late completion at the 8th fetch, then 8 `fell_back` and 11 `refused`. The full sequence stores about 17 GB, more than kv-sink's 16 GiB `data-size`, so the last P-shared/P-multi stores got `AEROSPIKE_ERR_SERVER_FULL` and l2sh/l2mu found nothing in L2 (harness capacity, not judged). The tail rerun on a fresh server (`e2e08pl2`) was 120/120 exact, every hit the expected length from L2. l2mu: 19 `pipelined`, then a late completion, then 8 `fell_back`, 3 `refused`. l2sh is over the cap (8+ chunks), so `not_deferred`. rxe0 during the within-cap send: 150,800 packets, which matches the per-layer window-limited plan for 5×1 + 2×2 pipelined chunks (147,456 data packets plus about 2% acks), not the full size (165,888) | `gpt_e2e08p/report_e2e08p_pc256.md`, `_pc16_r1.md`; `gpt_e2e08pl2/` |
+| T-RDMA-06 GPU half | vLLM stores P-exact-00..16; the byte oracle reads 100 production records by RDMA and by plain get | **pass on a fencing server**: `test_rdma_equals_plain_gets_for_100_keys_stored_by_vllm` 1 passed; no late completions | `rdma06gpu/rdma06gpu.txt`, `rdma06gpu.junit.xml` |
+
+### D-12 in this run (S2, server; not fixed by decision)
+
+Each kv-sink group logged exactly one `late completion` at most, then the
+region stayed in error until LMCache restarted:
+
+| Group | Fetch that hit it | After it |
+|---|---|---|
+| e2e04 c4 short | 25th (slot 0) | 2 fell_back |
+| e2e04 c64 short / long1 / long2 | slot 0 / 2048 / 1024 | fell_back, refused |
+| e2e05 c64 | P-long-00 (slot 1536) | fell_back |
+| gpt_e2e08p | 8th (slot 0) | 8 fell_back, 11 refused |
+| gpt_e2e08pl2 | about the 20th (slot 0) | 8 fell_back, 3 refused |
+| pipe06 | first fetch after the abandoned ones (slot 0) | 2 fell_back |
+| e2e04 c4 long1/long2, e2e05 c4, pipe05, pipe12, pipe11, rdma06gpu | none (at most 2 fetches each) | |
+
+At cap 4 the error came later than in the first run (25th fetch, against the
+8th). With one run of each, that difference is not attributable to the D-14
+fix: the gpt-oss groups on the same build hit it at the 8th fetch.
+
+### Other findings
+
+- **kv-sink capacity (Info, harness).** The full T-E2E-08 sequence fills the
+  kv-sink namespace (16 GiB; `breached stop-writes limit`). LMCache logged
+  `Store task N ... failed: AEROSPIKE_ERR_SERVER_FULL` warnings and carried on.
+  No crash, and outputs stayed exact. `stage3_gpt.sh e2e08pl2` reruns the tail
+  on a fresh server.
+- **pipe11 byte count (S3, open).** See the T-PIPE-11 row. The one-group
+  control is consistent with per-layer window limiting. The separate-groups
+  count is 2.2 times the expected size, and nothing logged explains it.
+- **Harness fixes** (`d10a376f`, `b6b9d76f`, `4c7a3df3`):
+  - pipe05/pipe06 run under `FAULT_POLICY` (default `fail`), with `errors=1`
+    and `--allow-error`/`--no-hit-check` on the faulted sends;
+  - rxe0 packet math uses 1 KiB packets;
+  - `vllm_check` no longer counts LMCache's own `(EngineCore pid=N) ... load
+    failed` warnings as engine deaths (all `engine_dead_errors` were 0 in this
+    run);
+  - `e2e08pl2` reruns the P-shared/P-multi L2 tail;
+  - pipe06 waits 32 s (`PIPE06_REUSE_WAIT`) for the window quarantine
+    (`fetch_timeout_seconds`, 30 s) before after13/after14.
+
+### Next steps
+
+1. D-12: a server fix (or the replacement server), then rerun e2e04, e2e05
+   cap 64, e2e08p, pipe06 and the cap-64 rows. The harness is ready
+   (`stage3.sh`, `stage3_gpt.sh e2e08p e2e08pl2`).
+2. D-17: once the ROCm vLLM carries the vllm#49250 fix, rerun pipe05 and
+   pipe06 with `FAULT_POLICY=recompute`.
+3. T-PIPE-11: log the per-layer fetch plan (slots and bytes), or count kv-sink
+   write bytes, so the byte check can be closed under
+   `--separate-object-groups`.
+4. On the newstack (batch-read server `046e8558d`), the same drivers apply via
+   `newstack/kvsink_bp_env.sh`. The box tree must be pulled and rebuilt first.
+
+## History: first GPU run (gpu-stage3, 2026-10-01 20:02-20:48Z), stopped on S1
+
+Superseded by the final table above: e2e04/e2e05 were rerun on the D-14
+build, and pipe05/pipe06 were rerun under `fail`. This run's directories were
+renamed `e2e04_r1/`, `e2e05_r1/`, `pipe05_r1_recompute/` and
+`pipe06_r1_recompute/`; the paths below refer to them by their old names.
 
 **Outcome.** The stage stopped after pipe06 because of an **S1, D-17**. When a
 layerwise pipelined load fails partway through the forward pass under

@@ -1,5 +1,19 @@
 # Stage 3: host changes
 
+## gpu-stage3b (2026-10-01 21:45-23:45Z)
+
+No host change. No packages, and no ufw, sshd, rdma_rxe or rxe0 changes.
+`lmc-b`, `lmc-d`, `lmc-newstack`, `aero-kvsink-bp` and `/root/lmc-work/LMCache-1a`
+were not touched. Every service listened on 127.0.0.1.
+
+| Change | Where | Approved by | State left |
+|---|---|---|---|
+| Box tree `/root/lmc-work/LMCache`: fast-forwarded `a3504150` → `d10a376f` (functional only). A later `git pull` reached `b6b9d76f`, which carries origin's newstack product merge. The tree was reset (`git reset --hard d10a376f`) before anything ran, so the build and the code match. `stage3_gpt.sh` from `b6b9d76f` and the pipe06 wait (`4c7a3df3`) were applied as working-tree changes | host | Work brief (pull harness; no rebuild without product changes) | At `d10a376f` plus those 2 modified files. It is behind origin, which needs a rebuild for the newstack code |
+| First-run result directories renamed: `e2e04` → `e2e04_r1`, `e2e05` → `e2e05_r1`, `pipe05` → `pipe05_r1_recompute`, `pipe06` → `pipe06_r1_recompute`; this run's first pipe06 → `pipe06_r2_fail_nowait` | `/root/lmc-work/functional/stage3/` | n/a (files under /root/lmc-work) | Kept |
+| kv-sink restarted and warmed before every group (e2e04 ×6, e2e05 ×2, pipe05, pipe06 ×2, pipe12 ×2, pipe11, gpt_e2e08p, gpt_e2e08pl2, rdma06gpu), SIGSTOPped 3 × 2.5 s in each pipe06 | `aero-kvsink`, 127.0.0.1:3100-3103 | Work brief | Stopped |
+| vLLM (8000) and LMCache (6555, HTTP 8080) sessions, Llama-3.1-8B and gpt-oss-120b | `lmc-c` | Work brief | Stopped; USED_VRAM 285 MB |
+| Scripts `s3b_chain.sh`, `s3b_l2.sh`, `s3b_pipe06.sh`, `s3b_collect.sh`, `pipe06wait.patch` | `/root/lmc-work/functional/stage3/` | n/a | Kept |
+
 ## gpu-stage3 (2026-10-01 20:00-20:50Z)
 
 No host change. No packages, and no ufw, sshd, rdma_rxe or rxe0 changes.

@@ -1,6 +1,23 @@
 # Stage 3: versions
 
-## GPU runs (gpu-stage3, 2026-10-01 20:00Z onward)
+## GPU runs (gpu-stage3b, 2026-10-01 21:47-23:39Z): the final table
+
+| Component | Version |
+|---|---|
+| Host | DigitalOcean gpu-mi300x1-192gb, 1x MI300X (gfx942), Ubuntu 24.04, kernel 6.8.0-138-generic |
+| ROCm / HIP | ROCm 10.0.0 / HIP 7.15.26333 (unchanged) |
+| Container image | `lmcache-rocm:day1` (`sha256:50c62263906e…`), container `lmc-c`; kv-sink in `aero-kvsink` |
+| torch / vLLM | 2.12.0+rocm10.0.0 / 0.27.1.dev5+gf46a9dfe2.d20260827 (installed copy, unpatched; V2 model runner, async scheduling on) |
+| LMCache (product code) | box tree `/root/lmc-work/LMCache` HEAD `a3504150` at start; product code = `e9cd0689` (D-14 fix) on top of `00cd3eee`, native extensions rebuilt by gpu-d17-narrow (`BUILD_WITH_HIP=1 BUILD_WITH_AEROSPIKE=1 BUILD_WITH_AEROSPIKE_RDMA=1`). No rebuild in this run |
+| LMCache (harness) | fast-forwarded to `d10a376f` (functional only) for every Llama section, pipe11, e2e08p and rdma06gpu. Then `git pull` brought origin's newstack product merge (`e4701b9a`..`e6d35a0c`, not built). The tree was reset to `d10a376f` before anything ran on it; `stage3_gpt.sh` from `b6b9d76f` (e2e08pl2) and the `4c7a3df3` pipe06 change were applied on top, as uncommitted working-tree changes. Left that way: see CHANGES.md |
+| kv-sink server (`asd` in `aero-kvsink`, 127.0.0.1:3100-3103) | `feat/kv-sink-fetch-pipelined` @ `512b0c2079eb`, build `8.1.3.0-112-g512b0c207` (fencing, server issue 4); namespace `lmcache` `data-size 16G` |
+| Aerospike C client (LMCache's extension) | stock aerospike-client-c-libuv 7.3.0 |
+| Aerospike CE (`aerospike-ce`, 127.0.0.1:3000) | 8.2.0.0; not used by Stage 3 sessions |
+| RDMA | Soft-RoCE `rxe0` on `lo`, RC, GID index 1; counters count about 1 KiB packets |
+| Models | Llama-3.1-8B-Instruct (`0e9e39f249a1…`); gpt-oss-120b (`b5c939de8f75…`) |
+| Oracle | `VLLM_BATCH_INVARIANT=1`, temperature 0, concurrency 1. Llama: `day1/step4/bi_run1.json`, `stage2/base2b/bi_run1.json`. gpt-oss: `stage2/gptoss_ref/base_b16_all.json`, `pc256_*` (verdict), `pc16_r1_*` (reported) |
+
+## GPU runs (gpu-stage3, 2026-10-01 20:00Z onward): first run, superseded
 
 | Component | Version |
 |---|---|
