@@ -545,6 +545,49 @@ def test_a_pipelined_setup_storage_refuses_does_not_fail_registration(
     module.unregister_kv_cache(1)
 
 
+def test_a_window_too_small_for_the_chunk_cap_warns_and_loads_whole_objects(
+    monkeypatch: pytest.MonkeyPatch,
+    stub_lmcache_native: Any,
+) -> None:
+    """T-CFG-05: storage refuses a placer whose RDMA window cannot hold
+    ``--pipelined-max-chunks`` chunks (a ``ValueError`` naming
+    ``rdma_window_bytes``). Registration warns, naming the model, and the
+    model is not pipelined.
+
+    LMCache loggers set ``propagate = False``, so the module logger is
+    patched rather than read through ``caplog``.
+    """
+    # First Party
+    from lmcache.utils import EngineType
+    from lmcache.v1.multiprocess.modules import (
+        lmcache_driven_transfer as lmcache_driven_transfer_mod,
+    )
+
+    ctx = _pipelined_ctx()
+    refusal = ValueError(
+        "rdma_window_bytes holds 4 chunks, fewer than --pipelined-max-chunks 8"
+    )
+    ctx.storage_manager.pipelined_window_placer.side_effect = refusal
+    module = _registration_module(monkeypatch, ctx, _pipelined_layout(), _SinkFactory())
+    with patch.object(lmcache_driven_transfer_mod, "logger") as logger:
+        module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [], [])
+
+    warnings = [
+        call
+        for call in logger.warning.call_args_list
+        if "layer by layer" in call.args[0]
+    ]
+    assert len(warnings) == 1
+    assert warnings[0].args[1] == "model"
+    assert warnings[0].kwargs.get("exc_info") is True
+    assert not any(
+        "fetches layer by layer" in call.args[0] for call in logger.info.call_args_list
+    )
+    with pytest.raises(KeyError):
+        ctx.pipelined_models.find("model", 1)
+    module.unregister_kv_cache(1)
+
+
 def test_staging_that_disagrees_with_the_plan_keeps_the_pipelined_fetch_off(
     monkeypatch: pytest.MonkeyPatch,
     stub_lmcache_native: Any,

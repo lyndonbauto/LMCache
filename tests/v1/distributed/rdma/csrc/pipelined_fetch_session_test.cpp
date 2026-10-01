@@ -790,6 +790,62 @@ void test_planned_request_stays_in_one_window() {
         "with one window, window 1 does not exist");
 }
 
+// The error a reply raises, or "" when it is accepted.
+std::string reply_error(PipelinedFetchSession& session,
+                        const std::string& node_name,
+                        const std::string& command, const std::string& reply,
+                        uint16_t generation) {
+  try {
+    session.on_node_reply(node_name, command, reply, generation);
+  } catch (const std::runtime_error& e) {
+    return e.what();
+  }
+  return "";
+}
+
+// T-FLT-11: a reply that declines a slot the command never carried, or one
+// another node owns, is a protocol violation. It is reported (the caller
+// abandons the request and loads whole objects) and credits no layer.
+void test_a_reply_naming_a_slot_it_was_not_asked_for_is_a_violation() {
+  std::cout << "a reply naming a slot it was not asked for is a violation\n";
+
+  const ObjectGroupLayout layout = single_group_layout(2);
+  const SlotPlanner planner({layout});
+  const size_t object_bytes = object_group_bytes(layout);
+  NodeRegistry registry;
+  register_node(registry, "node-a", 10);
+  register_node(registry, "node-b", 20);
+  PipelinedFetchSession session = make_session(registry);
+
+  const uint16_t gen = session.begin_request_from_slots(
+      plan_slots(planner, {ChunkPlacement{0, 0, 0}, {1, 0, object_bytes}},
+                 {{0, "node-a"}, {1, "node-b"}}, "ff"));
+  const std::vector<std::pair<std::string, std::string>> commands =
+      session.pipelined_fetch_commands();
+  const std::string command_a = commands_for_node(commands, "node-a").at(0);
+  check(slot_indices_in_command(command_a) == std::vector<uint16_t>({0, 2}),
+        "node-a was sent slots 0 and 2");
+
+  const std::string unsent = reply_error(
+      session, "node-a", command_a, "n=2;accepted=1;failed=1;bytes=1", gen);
+  check(unsent.find("declined slot 1") != std::string::npos &&
+            unsent.find("not listed in the pipelined command") !=
+                std::string::npos,
+        "declining a slot the command did not carry is reported: " + unsent);
+
+  const std::string unowned = reply_error(
+      session, "node-b", command_a, "n=2;accepted=1;failed=0;bytes=1", gen);
+  check(unowned.find("declined slot 0") != std::string::npos &&
+            unowned.find("does not own") != std::string::npos,
+        "declining a slot another node owns is reported: " + unowned);
+
+  check(session.unservable_layers().empty(),
+        "neither violation marks a layer unservable");
+  check(!session.is_layer_ready(0) && !session.is_layer_ready(1),
+        "neither violation makes a layer ready");
+  session.abandon_request();
+}
+
 }  // namespace
 
 int main() {
@@ -814,6 +870,7 @@ int main() {
     test_planned_late_write_from_abandoned_request_is_ignored();
     test_planned_request_rejects_bad_input();
     test_planned_request_stays_in_one_window();
+    test_a_reply_naming_a_slot_it_was_not_asked_for_is_a_violation();
   } catch (const std::exception& e) {
     std::cerr << "EXCEPTION: " << e.what() << "\n";
     return 1;
