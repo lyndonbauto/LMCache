@@ -4,7 +4,9 @@
 The keys are derived the way the LMCache server derives them
 (``TokenHasher`` over 256-token chunks, then ``ipc_key_to_object_keys`` for
 world size 1, worker 0, no salt). Each object is a meta record ``<key>|m``
-and, when sharded, segment records ``<key>|s|<i>``. The model name in the
+and, when sharded, segment records ``<key>|s|<wid>|<i>``, where ``wid`` is
+the meta record's write-ID bin (``<key>|s|<i>`` for objects stored before
+D-14). The model name in the
 key is what vLLM sent; ``--model-url`` reads vLLM's served name, and the
 tool also tries each local snapshot path of that model, keeping the first
 name whose chunk 0 is present.
@@ -146,7 +148,17 @@ def main() -> None:
                 print(f"chunk {i}: meta={'yes' if meta else 'no'} nseg={nseg}")
             return
         chunk, seg = int(params["chunk"]), int(params["seg"])
-        target = (args.namespace, args.set_name, f"{keys[chunk]}|s|{seg}")
+        meta_key = (args.namespace, args.set_name, keys[chunk] + "|m")
+        _, meta = client.exists(meta_key)
+        if meta is None:
+            print(f"absent: {meta_key[2]}")
+            sys.exit(1)
+        # Since D-14 each store names its own segments by the write ID in
+        # the meta record's wid bin; records without it use the old layout.
+        _, _, bins = client.select(meta_key, ["wid"])
+        wid = bins.get("wid", "")
+        name = f"{keys[chunk]}|s|{wid}|{seg}" if wid else f"{keys[chunk]}|s|{seg}"
+        target = (args.namespace, args.set_name, name)
         _, meta = client.exists(target)
         if meta is None:
             print(f"absent: {target[2]}")
