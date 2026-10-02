@@ -41,7 +41,10 @@
 #           needs the dedicated link (flt07_rdma_down.sh), not set up
 #   sec7    plan section 7: freeze the LMCache server 8 s (past the worker's 5 s
 #           per-layer wait) right after a lookup, pipe and plain; record how the
-#           engine stops. recompute
+#           engine stops. recompute. A stopped engine's KV cache stays mapped
+#           by the LMCache server until it reaps the worker (missed heartbeats,
+#           worker_reap_timeout_seconds 120), so a new vLLM on the same server
+#           starts only after SEC7_REAP_WAIT (default 130) s
 #   count7  count the section-7 errors (generation timeout, progress timeout,
 #           stale generation) in every Stage 3 (old and new stack), Stage 4 and
 #           Stage 5 vLLM log; any outside a deliberate fault is S1
@@ -226,7 +229,8 @@ sec_sec7() {
     session sec7 $tag recompute server "vllm model=$LLAMA" \
       "send name=store sets=P-exact ids=P-exact-10,P-exact-11" settle restart \
       "send name=victim sets=P-exact ids=P-exact-10 bg=1 errors=1" "wait_log what=lookup_end timeout=120" \
-      "freeze_server secs=8" wait_bg "vllm_check name=stalled" "vllm_ensure model=$LLAMA" \
+      "freeze_server secs=8" wait_bg "vllm_check name=stalled" "sleep secs=${SEC7_REAP_WAIT:-130}" \
+      "vllm_ensure model=$LLAMA" \
       "send name=after sets=P-exact ids=P-exact-11 errors=1" "vllm_check name=end"
     local rargs=("--allow-error=${tag}_victim" "--no-hit-check=${tag}_victim")
     [ $path = pipe ] && rargs+=("--outcomes=${tag}_after=pipelined,not_deferred")
