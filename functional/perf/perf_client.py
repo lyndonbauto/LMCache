@@ -197,7 +197,14 @@ async def run(args: argparse.Namespace) -> dict:
     conn = aiohttp.TCPConnector(limit=0)
     async with aiohttp.ClientSession(connector=conn) as session:
         if args.warmup:
-            res = await one_request(session, args.url, args.warmup, 16, args.timeout)
+            prompt: list[int] | str = args.warmup
+            if args.warmup_tokens:
+                # Fixed and unrelated to every sweep prompt (first token 900).
+                rng = np.random.default_rng(7)
+                toks = rng.integers(1000, 128000, size=args.warmup_tokens)
+                toks[0] = 900
+                prompt = [int(t) for t in toks]
+            res = await one_request(session, args.url, prompt, 16, args.timeout)
             return {"tag": args.tag, "warmup": args.warmup, "requests": [res]}
         ids = parse_ids(args.ids)
         prompts = {i: prompt_tokens(args.length, i) for i in ids}
@@ -254,6 +261,12 @@ def main() -> None:
     p.add_argument("--tag", default="")
     p.add_argument(
         "--warmup", default="", help="send this short text prompt once instead"
+    )
+    p.add_argument(
+        "--warmup-tokens",
+        type=int,
+        default=0,
+        help="with --warmup: send a fixed prompt of this many token IDs instead",
     )
     p.add_argument("--out", required=True)
     args = p.parse_args()

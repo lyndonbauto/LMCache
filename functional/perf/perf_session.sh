@@ -111,28 +111,31 @@ cleanup() { stop_vllm; stop_server; }
 trap cleanup EXIT
 
 registrations() { grep -c "Registered KV cache" "$LOG" 2>/dev/null; }
-# warm <why>: one short unrelated text prompt (excluded from metrics).
+# warm <why> [tokens]: one unrelated prompt (excluded from metrics): short
+# text, or a fixed prompt of <tokens> token IDs.
 warm() {
   WARM_SEQ=$((WARM_SEQ + 1))
   python "$HERE/perf_client.py" --warmup "Warm-up request $WARM_SEQ of session $TAG ($1). Say hello." \
-    --tag "${TAG}_warm$WARM_SEQ" --out "$OUT/warm_${TAG}_$WARM_SEQ.json"
+    --warmup-tokens "${2:-0}" --tag "${TAG}_warm$WARM_SEQ" --out "$OUT/warm_${TAG}_$WARM_SEQ.json"
 }
-# restart_server: an idle vLLM re-registers with a restarted LMCache server
-# only once it sends traffic (its PING then finds itself unregistered), and
-# lookups before that fail with "No GPU context found". So prime with short
-# unrelated prompts until the registration line appears, then prime once more.
+# restart_server: vLLM re-registers with a restarted LMCache server when its
+# worker's heartbeat PING finds itself unregistered (every 10 s); lookups
+# before that fail with "No GPU context found". The worker heartbeat starts
+# on its first store or retrieve, which a prompt under one chunk never
+# causes with layerwise on, so the warm-up after the vLLM start is a fixed
+# 600-token prompt (two chunks). Short primes are sent while waiting.
 restart_server() {
   local before; before=$(registrations)
   stop_server
   start_server || return 1
-  local t0 attempt; t0=$(date +%s)
-  for attempt in 1 2 3 4 5 6; do
-    [ "$(registrations)" -gt "$before" ] && break
-    warm "prime $attempt after LMCache restart" || return 1
+  local t0 primes=0; t0=$(date +%s)
+  while [ "$primes" -lt 6 ] && [ "$(registrations)" -le "$before" ]; do
+    primes=$((primes + 1))
+    warm "prime $primes after LMCache restart" || return 1
     for _ in $(seq 20); do [ "$(registrations)" -gt "$before" ] && break; sleep 1; done
   done
   if [ "$(registrations)" -gt "$before" ]; then
-    say "vLLM re-registered $(( $(date +%s) - t0 )) s after the restart (primes: $attempt)"
+    say "vLLM re-registered $(( $(date +%s) - t0 )) s after the restart (short primes sent: $primes)"
   else
     say "error: vLLM did not re-register within 6 primes"; return 1
   fi
@@ -165,7 +168,7 @@ send() {
 say "start mode=$MODE layerwise=$LW L1=${L1_GB}GB extra='${LMC_EXTRA:-}'"
 start_server || exit 1
 start_vllm || exit 1
-warm "after vLLM start" || exit 1
+warm "after vLLM start" 600 || exit 1
 for step in "$@"; do
   read -r verb rest <<< "$step"
   len=8192; ids=0-31; conc=8; c=1; n=""
