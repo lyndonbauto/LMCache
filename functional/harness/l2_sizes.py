@@ -28,7 +28,7 @@ import aerospike
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-# Local
+# Third Party
 from l2_segments import candidate_names, chunk_keys  # noqa: E402
 
 

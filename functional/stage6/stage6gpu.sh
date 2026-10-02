@@ -411,8 +411,9 @@ sec_e2e11() {
     progress "base70: $(tail -n 1 $S/base70/session_base70.txt); KV cache: $(grep -m1 -oE 'GPU KV cache size: [0-9,]+ tokens' $S/base70/vllm_bi70.log)"
   fi
   local tag elig over steps sends rargs
-  elig=$( { ids P-exact 1 "$CAP70"; ids P-ragged 1 "$CAP70"; } | paste -sd,)
-  over=$( { ids P-exact $((CAP70 + 1)) 999; ids P-ragged $((CAP70 + 1)) 999; } | paste -sd,)
+  # grep . drops a set with no prompt in range (else the list is ",").
+  elig=$( { ids P-exact 1 "$CAP70"; ids P-ragged 1 "$CAP70"; } | grep . | paste -sd,)
+  over=$( { ids P-exact $((CAP70 + 1)) 999; ids P-ragged $((CAP70 + 1)) 999; } | grep . | paste -sd,)
   SERVER_FLAGS=$(server_flags "$CAP70" $L70_CHUNK)
   tag=e2e11_04_c$CAP70
   KVSINK_CONF_FILE=$KVSINK_CONF_70B group e2e11 $tag
@@ -453,14 +454,26 @@ e2e11_sizes() {
 # 3000, single node, no pipelining): P-exact-10..15 and P-ragged-14/18/19 cold
 # (L1), restart, L2 hits; P-shared cold (later requests hit the prefix in L1),
 # restart, L2 hits. The set is truncated first (reset).
+# aerospike-ce's write cache is 2G, and one 70B store task (32 chunks of
+# 80 MiB) is 2.5 GiB: run 1 lost whole tasks to AEROSPIKE_ERR_DEVICE_OVERLOAD
+# ("queue too deep"), so E2E11P_WRITE_CACHE (default 8 GiB) is set for the
+# session (dynamic set-config) and the old value is restored afterwards.
+ce_write_cache() {
+  docker exec aerospike-ce asinfo -v "set-config:context=namespace;id=lmcache;max-write-cache=$1" >/dev/null
+  docker exec aerospike-ce asinfo -v "get-config:context=namespace;id=lmcache" -l | grep 'storage-engine.max-write-cache='
+}
 sec_e2e11p() {
-  local tag=e2e11p ids
+  local tag=e2e11p ids old_wc
   ids="$P4,P-exact-15,P-ragged-14,P-ragged-18,P-ragged-19"
   SERVER_FLAGS=$CE_L2_70
+  old_wc=$(docker exec aerospike-ce asinfo -v "get-config:context=namespace;id=lmcache" -l | grep -oP 'storage-engine.max-write-cache=\K[0-9]+')
+  progress "e2e11p: aerospike-ce $(ce_write_cache "${E2E11P_WRITE_CACHE:-8589934592}") (was $old_wc)"
   BASES=$BASE70 VLLM_EXTRA="--gpu-memory-utilization $UTIL70" SEND_TIMEOUT=1800 L2_PORT_S=3000 \
     L1_GB_S=$L70_L1_GB session e2e11 $tag fail server reset "vllm model=$LLAMA70" \
     "send name=cold sets=P-exact,P-ragged ids=$ids stats=1" "send name=sh_cold sets=P-shared" restart \
     "send name=warm sets=P-exact,P-ragged ids=$ids stats=1" "send name=sh_warm sets=P-shared stats=1"
+  progress "e2e11p: aerospike-ce $(ce_write_cache "$old_wc") (restored); DEVICE_OVERLOAD store failures: \
+$(grep -c 'AEROSPIKE_ERR_DEVICE_OVERLOAD' $S/e2e11/lmcache_$tag.log)"
   BASES=$BASE70 report e2e11 $tag all "--outcomes=${tag}_warm=not_deferred" "--outcomes=${tag}_sh_warm=not_deferred" \
     cold sh_cold warm sh_warm
   e2e11_sizes $tag 3000
