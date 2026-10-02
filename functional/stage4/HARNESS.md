@@ -21,6 +21,38 @@ the session outputs, the vLLM and LMCache logs (`vllm2_*` for the second
 instance), `report_*.md` from `hit_report.py`, `agree_*.md` from
 `logprob_agree.py`, and the kv-sink log of every group.
 
+## On the new kv-sink stack (batch-read server, 127.0.0.1:3700)
+
+```bash
+bash /root/lmc-work/LMCache/functional/stage4/launch.sh s4 precheck pipe08s pipe08 pipe10 ref16 e2e09 idle
+```
+
+`launch.sh` sources `newstack/kvsink_bp_env.sh`, so `KVSINK_PORT=3700`
+reaches the adapter specs and the precheck, and every group restarts
+`aero-kvsink-bp` (no warm-up). Changes from the old-protocol harness:
+
+- **T-PIPE-08's limit is the same.** The sink-fetch driver registers the
+  window range once and runs each layer's batch read on a 16-thread pool,
+  but concurrency between retrieves is still bounded by the windows:
+  `RdmaWindowLeaser` grants one lease per window, the native
+  `SinkFetchTable::begin` accepts one fetch per window, and a retrieve that
+  finds no free window is `refused` and loads whole objects
+  (`pipelined_loading.py`, `aerospike_rdma.md` "Leasing a window"). The
+  16 threads are per-layer batches of the fetches already admitted, not
+  extra retrieves.
+- **`--pipelined-shared-keys` is unchanged** in 1a (`recompute` | `wait`,
+  `--pipelined-shared-wait-seconds` 1.0).
+- **pipe10 runs under `fail`** (`P10_POLICY`). A `shared_keys_busy`
+  retrieve fails mid-forward, and recomputing that hits D-17
+  (vllm#49250, wrong tokens). Under `fail` the busy request ends in a clean
+  HTTP 500 and its partner must be exact. `P10_POLICY=recompute` records
+  the D-17 case under a `_recompute` tag.
+- **`STOP_GRACE=60`**: restarts SIGTERM LMCache and wait up to 60 s (a
+  clean shutdown takes 14-17 s, D-18) instead of kill -9 after 5 s.
+- **e2e09 plain** adds `--no-l1-use-lazy`: the adapter enables RDMA, which
+  needs a fixed L1 slab.
+- `TWO_VLLM_UTIL` (0.3) may drop to 0.25 if two instances don't fit.
+
 ## Why T-PIPE-08 and T-PIPE-10 need two vLLM instances
 
 LMCache handles `RETRIEVE` as a blocking handler on its affinity thread pool.

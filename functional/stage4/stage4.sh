@@ -1,8 +1,8 @@
 #!/bin/bash
 # Stage 4: concurrency (functional-test-plan.md 5.5 and 5.6): T-PIPE-08,
 # T-PIPE-10 and T-E2E-09 on the Stage 3 setup. Llama-3.1-8B, LMCache with the
-# Aerospike RDMA adapter against the kv-sink server (127.0.0.1:3100, RC on
-# rxe0 GID 1), --use-layerwise, vLLM async scheduling on (vLLM's default; the
+# Aerospike RDMA adapter against the kv-sink server (127.0.0.1:$KVSINK_PORT,
+# 3100 old / 3700 new, RC on rxe0 GID 1), --use-layerwise, vLLM async scheduling on (vLLM's default; the
 # harness never passes --no-async-scheduling), VLLM_BATCH_INVARIANT=1.
 # Runs on the host; each session is a run_steps.sh session in lmc-c. Uses
 # stage3.sh's helpers (session, report, group, ids, wait_idle).
@@ -46,9 +46,20 @@
 # Environment: TREE_HOST / TREE_CTR (default /root/lmc-work/LMCache, /work/LMCache),
 #   PIPE08_ROUNDS (default 3), TWO_VLLM_UTIL (default 0.3: each of the two
 #   instances' --gpu-memory-utilization).
-# Policies: pipe10 runs under kv_load_failure_policy recompute, because the
-# plan's `shared_keys_busy` outcome makes vLLM recompute; the rest under fail,
-# so a bad load errors instead of recomputing silently.
+#   P10_POLICY (default fail: kv_load_failure_policy of pipe10, see below),
+#   STOP_GRACE (default 60: LMCache SIGTERM grace on restarts, D-18).
+# New kv-sink stack (batch-read server on 3700): source
+# functional/newstack/kvsink_bp_env.sh first; it sets KVSINK_PORT, which the
+# adapter specs, the precheck and stage3.sh's helpers use. On this protocol
+# the window limit is unchanged: RdmaWindowLeaser grants one lease per window
+# (the native SinkFetchTable runs one fetch per window), and a retrieve that
+# finds none is `refused` and loads whole objects (aerospike_rdma.md,
+# "Leasing a window").
+# Policies: every section runs under fail, so a bad load errors instead of
+# recomputing silently. pipe10's `shared_keys_busy` makes vLLM recompute, which
+# under recompute hits D-17 (vllm#49250: a layerwise load that fails mid-forward
+# gives wrong tokens), so the busy request is expected to fail cleanly (HTTP
+# 500) under fail; P10_POLICY=recompute records the D-17 case.
 set -u
 TREE_HOST=${TREE_HOST:-/root/lmc-work/LMCache}
 # shellcheck source=../stage3/stage3.sh
@@ -57,6 +68,8 @@ S=/root/lmc-work/functional/stage4
 W=/work/functional/stage4
 PIPE08_ROUNDS=${PIPE08_ROUNDS:-3}
 TWO_VLLM_UTIL=${TWO_VLLM_UTIL:-0.3}
+P10_POLICY=${P10_POLICY:-fail}
+export STOP_GRACE=${STOP_GRACE:-60}
 # T-PIPE-08 prompts: 8 distinct prompts of at most 4 chunks (D-12).
 P08_A=P-exact-10,P-exact-11,P-exact-12,P-exact-13
 P08_B=P-exact-14,P-ragged-08,P-ragged-09,P-ragged-10
@@ -66,7 +79,7 @@ E2E09_SETS=P-shared,P-multi
 # l2_json_w <windows> <cap> <chunk-bytes>: stage3's adapter spec with
 # window_count <windows>.
 l2_json_w() {
-  echo "{\"type\":\"aerospike\",\"hosts\":\"127.0.0.1:3100\",\"namespace\":\"lmcache\",\"set_name\":\"kv_chunks\",\"rdma\":{\"transport\":\"RC\",\"device_name\":\"rxe0\",\"gid_index\":1,\"window_count\":$1,\"window_bytes\":$(($2 * $3))}}"
+  echo "{\"type\":\"aerospike\",\"hosts\":\"127.0.0.1:$KVSINK_PORT\",\"namespace\":\"lmcache\",\"set_name\":\"kv_chunks\",\"rdma\":{\"transport\":\"RC\",\"device_name\":\"rxe0\",\"gid_index\":1,\"window_count\":$1,\"window_bytes\":$(($2 * $3))}}"
 }
 # outcome_counts <dir> <tag>: "N outcome" pairs of the session's LMCache log.
 outcome_counts() {
@@ -92,9 +105,9 @@ two_vllm_errors() {
 }
 
 sec_precheck() {
-  local busy; busy=$(ss -ltn | grep -E '127.0.0.1:(8000|8001|6555|8080|3100) ')
+  local busy; busy=$(ss -ltn | grep -E "127.0.0.1:(8000|8001|6555|6556|8080|$KVSINK_PORT) ")
   [ -z "$busy" ] || { echo "ports in use (another session?):"; echo "$busy"; exit 1; }
-  echo "ports 8000/8001/6555/8080/3100 free; $(wait_idle)"
+  echo "ports 8000/8001/6555/6556/8080/$KVSINK_PORT free; $(wait_idle)"
 }
 
 sec_pipe08s() {
@@ -140,17 +153,24 @@ pipe10_mode() {
   local mode=$1 p
   SERVER_FLAGS="--max-gpu-workers 2 --pipelined-shared-keys $mode $(server_flags 4 $LLAMA_CHUNK)"
   tag=pipe10_$mode
+  [ "$P10_POLICY" = fail ] || tag=${tag}_$P10_POLICY
   group pipe10 $tag
   local ids5; ids5=$(for p in $P10_PROMPTS; do printf 'P-exact-%s,' "$p"; done | sed 's/,$//')
   local steps=(server "vllm model=$LLAMA" "vllm2 model=$LLAMA" "send name=store sets=P-exact ids=$ids5" settle restart)
   local sends=(store) rargs=("--outcomes=*=pipelined,reused,shared_keys_busy,not_deferred")
+  # A busy request fails under fail (no recompute), so recompute mode allows
+  # errors on its pair sends; wait mode must have none.
+  local err=""
+  [ "$mode" = recompute ] && err=" errors=1"
   for p in $P10_PROMPTS; do
-    steps+=("send name=a$p sets=P-exact ids=P-exact-$p bg=1"
-            "send name=b$p sets=P-exact ids=P-exact-$p bg=1 port=8001" wait_bg)
+    steps+=("send name=a$p sets=P-exact ids=P-exact-$p bg=1$err"
+            "send name=b$p sets=P-exact ids=P-exact-$p bg=1 port=8001$err" wait_bg)
     sends+=("a$p" "b$p")
     rargs+=("--no-hit-check=${tag}_a$p" "--no-hit-check=${tag}_b$p")
+    [ -n "$err" ] && rargs+=("--allow-error=${tag}_a$p" "--allow-error=${tag}_b$p")
   done
-  VLLM_EXTRA="--gpu-memory-utilization $TWO_VLLM_UTIL" session pipe10 $tag recompute "${steps[@]}"
+  steps+=("vllm_check name=end" "vllm_check name=end2 port=8001")
+  VLLM_EXTRA="--gpu-memory-utilization $TWO_VLLM_UTIL" session pipe10 $tag "$P10_POLICY" "${steps[@]}"
   two_vllm_errors pipe10 $tag
   report pipe10 $tag all "${rargs[@]}" "${sends[@]}"
   local pairs="" a b busy_pair=0 reused_pair=0
@@ -204,7 +224,8 @@ token equality is T-E2E-09's oracle only if a and b are 60/60 exact"
 e2e09_variant() {
   local v=$1 rargs=()
   if [ "$v" = plain ]; then
-    SERVER_FLAGS="--l2-adapter $(l2_json 4 $LLAMA_CHUNK)"
+    # The adapter enables RDMA, which needs a fixed L1 slab (lazy off).
+    SERVER_FLAGS="--no-l1-use-lazy --l2-adapter $(l2_json 4 $LLAMA_CHUNK)"
   else
     SERVER_FLAGS=$(server_flags 4 $LLAMA_CHUNK)
     rargs=("--outcomes=*=pipelined,not_deferred")

@@ -32,7 +32,8 @@
 #                                  LMCACHE_SERVER_EXTRA_ALT instead (and keeps it
 #                                  for later restarts until extra=main)
 #   term [grace=<s>]               SIGTERM the LMCache server (clean shutdown, no
-#                                  restart), SIGKILL after s seconds (default 5);
+#                                  restart), SIGKILL after s seconds (default
+#                                  STOP_GRACE, else 5; also used by restart);
 #                                  its exit status is logged
 #   kill9                          SIGKILL the LMCache server (no restart)
 #   server_up                      start the server again after kill9 and wait
@@ -122,12 +123,13 @@ P1=${LMC1_PORT:-6555}; H1=${LMC1_HTTP:-8080}; P2=${LMC2_PORT:-6556}; H2=${LMC2_H
 PROM1=${LMC1_PROM:+--prometheus-port $LMC1_PROM}; PROM2="--prometheus-port ${LMC2_PROM:-9091}"
 BG_PIDS=""; BG_MARK=0; BG_MARK2=0; HOST_SEQ=0
 # stop_server [grace]: SIGTERM (a clean shutdown), SIGKILL after grace s
-# (default 5; a clean exit polls out early); logs the exit status (143 =
-# exited after TERM, 134/139 = abort/segfault during shutdown, 137 = needed
-# the kill -9). A clean shutdown takes about 14 s while the usage-telemetry
-# flush to stats.lmcache.ai times out, so the default ends in kill -9.
+# (default STOP_GRACE, else 5; a clean exit polls out early); logs the exit
+# status (143 = exited after TERM, 134/139 = abort/segfault during shutdown,
+# 137 = needed the kill -9). A clean shutdown takes about 14 s while the
+# usage-telemetry flush to stats.lmcache.ai times out (D-18), so a 5 s grace
+# ends in kill -9; STOP_GRACE=60 lets restarts shut down cleanly.
 stop_server() {
-  local grace=${1:-5}
+  local grace=${1:-${STOP_GRACE:-5}}
   [ "$SERVER_PID" -gt 0 ] && kill "$SERVER_PID" 2>/dev/null
   if [ "$grace" -gt 5 ]; then
     for _ in $(seq $((grace * 10))); do kill -0 "$SERVER_PID" 2>/dev/null || break; sleep 0.1; done
@@ -496,7 +498,7 @@ for step in "$@"; do
     wait_log) # shellcheck disable=SC2086
       wait_log $rest || exit 1;;
     term) echo "=== $TAG SIGTERM to the LMCache server (pid $SERVER_PID) $(date -u +%T.%N | cut -c1-12)"
-      g=${rest#grace=}; stop_server "${g:-5}";;
+      g=${rest#grace=}; stop_server "${g:-${STOP_GRACE:-5}}";;
     kill9) echo "=== $TAG SIGKILL to the LMCache server (pid $SERVER_PID) $(date -u +%T.%N | cut -c1-12)"
       [ "$SERVER_PID" -gt 0 ] && kill -9 "$SERVER_PID"; SERVER_PID=0;;
     server_up) registrations=$(grep -c "Registered KV cache" "$LOG")

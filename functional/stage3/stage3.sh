@@ -47,6 +47,8 @@
 # data in memory only, and every LMCache kill -9 leaks a region (issue 9).
 #   STAGE_DIR   results directory under functional/ (default stage3)
 #   LW_S        layerwise flag of every session (default true)
+#   STOP_GRACE  seconds run_steps.sh waits after SIGTERM before kill -9 on an
+#               LMCache restart (default 5; a clean shutdown needs ~14 s, D-18)
 set -u
 S=/root/lmc-work/functional/${STAGE_DIR:-stage3}
 W=/work/functional/${STAGE_DIR:-stage3}
@@ -126,7 +128,8 @@ session() {
     -e LMCACHE_SERVER2_EXTRA="${SERVER2_FLAGS:-}" -e L1_SIZE_GB=${L1_GB_S:-40} \
     -e L1_SIZE_GB2=${L1_GB2_S:-${L1_GB_S:-40}} \
     -e CORPUS="${CORPUS_S:-$CB}" -e KV_LOAD_FAILURE_POLICY="$policy" \
-    -e SEND_TIMEOUT=${SEND_TIMEOUT:-900} -e VLLM_EXTRA="${VLLM_EXTRA:-}" lmc-c \
+    -e SEND_TIMEOUT=${SEND_TIMEOUT:-900} -e VLLM_EXTRA="${VLLM_EXTRA:-}" \
+    -e STOP_GRACE=${STOP_GRACE:-5} lmc-c \
     bash $H/run_steps.sh $W/$dir $tag "${LW_S:-true}" "$@" > $S/$dir/session_$tag.txt 2>&1
   local rc=$?
   kill $watcher 2>/dev/null
