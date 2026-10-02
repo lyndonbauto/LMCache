@@ -8,6 +8,25 @@ each section is one or more `run_steps.sh` sessions in `lmc-c` with results unde
 
 **Run it after Stages 4-5, on a tree that has the D-14 fix (e9cd0689) built in `lmc-c`.**
 
+## New kv-sink stack (gpu-stage6a, 2026-10-02)
+
+The harness was written for the old info-command server. On the batch-read stack:
+
+- `launch.sh <log> <sections...>` sources `functional/newstack/kvsink_bp_env.sh`, so the
+  kv-sink L2 is `aero-kvsink-bp` on 127.0.0.1:3700 (`KVSINK_PORT`, 16 GiB namespace) and
+  `group` restarts it without a warm-up. `kvsink_smoke.sh`, `kvsink_warm.py` and
+  `kvsink_cluster.sh` are old-stack only and are not used; multi-node tests stay on the CE
+  cluster.
+- Cap: D-12 does not reproduce on this server, so kv-sink sessions use LMCache's default
+  `--pipelined-max-chunks 64` (`S6_CAP`). The two RDMA windows (2 × 2 GiB) are reserved at
+  the start of the L1 slab, so `evt04` and `flt04k` add them to their small L1
+  (`EVT04_L1_GB` / `FLT04K_L1_GB` are the general part).
+- `STOP_GRACE=60` for both servers (`stop_server2` now honours it, D-18), and
+  `vllm_ensure ... reap=130` waits for LMCache to reap a dead engine's worker before a new
+  vLLM starts on the same server (D-23).
+- `evt04`, `evt04l2` and `flt04k` can fail a pipelined load mid-forward, so they run under
+  `fail` (D-17); `evt04` primes vLLM 2 before the first restart.
+
 ```bash
 # on the box, nothing else on the GPU or on ports 8000/8001/6555/6556/8080/8081/3100/3300-3323
 cd /root/lmc-work/LMCache && git log -1 --oneline        # contains e9cd0689

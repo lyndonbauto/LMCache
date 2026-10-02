@@ -11,17 +11,22 @@
 # server on 127.0.0.1:6556 (HTTP 8081) and a second vLLM on 8001 attached to
 # it, on the same MI300X (run_steps.sh server2 / vllm2 ... lmc=2). Both hosts
 # share one L2:
-#   kvsink   the single-node kv-sink server (127.0.0.1:3100, RC on rxe0 GID
-#            1), pipelined fetches on, cap 4 (D-12). Multi-node pipelined
-#            plans are refused (N1), so this is the only pipelined L2.
+#   kvsink   the single-node batch-read kv-sink server (aero-kvsink-bp,
+#            127.0.0.1:$KVSINK_PORT = 3700, RC on rxe0 GID 1; launch.sh sources
+#            functional/newstack/kvsink_bp_env.sh), pipelined fetches on at
+#            cap S6_CAP (default 64, LMCache's default; D-12 does not reproduce
+#            on this server). Multi-node pipelined plans are refused (N1), so
+#            this is the only pipelined L2.
 #   cluster  the 3-node CE 8.2 cluster from functional/harness/cluster.sh
 #            (127.0.0.1:3300/3310/3320), plain path (no RDMA).
+# Two RDMA windows of cap chunks are reserved at the start of the L1 slab
+# (2 x 2 GiB at cap 64), so the L1 sizes below add that reservation.
 #
 # Usage: stage6gpu.sh [section ...]
 # Sections (default: precheck shr01 shr01c shr02 shr02c shr03 evt06 flt02
 #   flt03 flt04 flt04k evt04 evt04l2 idle; e2e11 and flt08 run only when named):
-#   precheck  refuse to run if 8000/8001/6555/6556/8080/8081/3100/3300-3320
-#             are taken or the GPU is busy
+#   precheck  refuse to run if 8000/8001/6555/6556/8080/8081/$KVSINK_PORT/
+#             3300-3320 are taken or the GPU is busy
 #   shr01     T-SHR-01 on kvsink: host A stores P-exact-10..14 (4 chunks) and
 #             P-shared; host B (empty L1) sends them: every output equal, B's
 #             hits are the full prefix from L2, 4-chunk ones `pipelined`
@@ -47,9 +52,10 @@
 #             under a running LMCache (data and registration gone); a later L2
 #             read with the stale registration must fall back and be correct;
 #             after an LMCache restart (re-registration) it is `pipelined` again
-#   evt04     T-EVT-04, L1 pressure: small L1 (EVT04_L1_GB, default 3), one
-#             server with --max-gpu-workers 2; vLLM 1 reads 4-chunk L2 hits
-#             (pipelined) while vLLM 2 stores 64-chunk prompts, 3 rounds
+#   evt04     T-EVT-04, L1 pressure: small L1 (EVT04_L1_GB, default 3, plus
+#             the RDMA windows), one server with --max-gpu-workers 2; vLLM 1
+#             reads 4-chunk L2 hits (pipelined) while vLLM 2 stores 64-chunk
+#             prompts, 3 rounds
 #   evt04l2   T-EVT-04, L2 records gone mid-fetch: every segment of chunk 3 of
 #             the prompt being fetched is deleted at `MP retrieve start`
 #   e2e11     T-E2E-11: Llama-3.3-70B, TP=1, util UTIL70 (0.92): base70 (the
@@ -64,10 +70,16 @@
 # T-FLT-05 (LMCache server killed mid-retrieve, recompute and fail) is
 # stage5.sh flt05; it needs no second host and is not repeated here.
 # Environment: TREE_HOST / TREE_CTR, TWO_VLLM_UTIL (0.3), SHR02_ROUNDS (3),
-#   SHR02_RF (2), EVT04_L1_GB (3), CAP70 (1), UTIL70 (0.92), BASE70 (70B
-#   baseline JSON; default $W/base70/bi70.json), FLT08_MODE (rdma).
-# Policies: fault tests (flt*, evt04*) run under kv_load_failure_policy
-# recompute (plan section 7); the rest under fail.
+#   SHR02_RF (2), EVT04_L1_GB (3), S6_CAP (64), CAP70 (1), UTIL70 (0.92),
+#   BASE70 (70B baseline JSON; default $W/base70/bi70.json), FLT08_MODE
+#   (rdma), STOP_GRACE (60, D-18: both servers shut down cleanly),
+#   REAP_WAIT (130, D-23: wait before a new vLLM on a server whose engine died).
+# Policies: the cluster fault tests (flt02/03/04) run under
+# kv_load_failure_policy recompute (plan section 7): the node dies during the
+# lookup/prefetch, before the forward pass. evt04, evt04l2 and flt04k can fail
+# a pipelined load mid-forward, where recompute gives wrong tokens (D-17,
+# vllm#49250), so they run under fail and their recompute half is blocked by
+# D-17. The rest run under fail.
 set -u
 TREE_HOST=${TREE_HOST:-/root/lmc-work/LMCache}
 # shellcheck source=../stage3/stage3.sh
@@ -75,10 +87,16 @@ source "$TREE_HOST/functional/stage3/stage3.sh"
 S=/root/lmc-work/functional/stage6/gpu
 W=/work/functional/stage6/gpu
 CL=$TREE_HOST/functional/harness/cluster.sh
+export STOP_GRACE=${STOP_GRACE:-60}
+REAP_WAIT=${REAP_WAIT:-130}
+S6_CAP=${S6_CAP:-64}
+# GB of L1 the two RDMA windows take at S6_CAP (rounded up).
+WIN_GB=$(( (2 * S6_CAP * LLAMA_CHUNK + (1 << 30) - 1) >> 30 ))
 TWO_VLLM_UTIL=${TWO_VLLM_UTIL:-0.3}
 SHR02_ROUNDS=${SHR02_ROUNDS:-3}
 SHR02_RF=${SHR02_RF:-2}
 EVT04_L1_GB=${EVT04_L1_GB:-3}
+FLT04K_L1_GB=${FLT04K_L1_GB:-4}
 LLAMA70=meta-llama/Llama-3.3-70B-Instruct
 # One 256-token 70B chunk: 80 layers, K and V, 8 KV heads x 128, bf16.
 L70_CHUNK=$((80 * 2 * 8 * 128 * 256 * 2))   # 80 MiB
@@ -103,11 +121,11 @@ cgroup() {
   progress "group $1/$2: $(grep -m1 'cluster size' "$dir/cluster.txt") rf=$rf"
 }
 # use_l2 <kvsink|cluster> <dir> <name> [rf]: fresh L2 for the next session;
-# sets SERVER_FLAGS (cap 4 pipelined on kvsink, plain on the cluster),
+# sets SERVER_FLAGS (cap S6_CAP pipelined on kvsink, plain on the cluster),
 # L2_PORT_S and PIPE (1 when retrieves can be pipelined).
 use_l2() {
   if [ "$1" = kvsink ]; then
-    group "$2" "$3"; L2_PORT_S=3100; PIPE=1; SERVER_FLAGS=$(server_flags 4 $LLAMA_CHUNK)
+    group "$2" "$3"; L2_PORT_S=$KVSINK_PORT; PIPE=1; SERVER_FLAGS=$(server_flags "$S6_CAP" $LLAMA_CHUNK)
   else
     cgroup "$2" "$3" "${4:-1}"; L2_PORT_S=3300; PIPE=0; SERVER_FLAGS="--l2-adapter $(l2_cluster_json)"
   fi
@@ -140,9 +158,10 @@ integrity_lines() {
 lmc2_errors() { echo "host B error lines: $(grep -cE 'Traceback|ERROR' $S/$1/lmcache2_$2.log 2>/dev/null) (LMCache) $(grep -chE 'Traceback|ERROR' $S/$1/vllm2_$2_*.log 2>/dev/null | paste -sd+) (vLLM)"; }
 
 sec_precheck() {
-  local busy; busy=$(ss -ltn | grep -E '127.0.0.1:(8000|8001|6555|6556|8080|8081|3100|3300|3310|3320) ')
+  local busy; busy=$(ss -ltn | grep -E "127.0.0.1:(8000|8001|6555|6556|8080|8081|$KVSINK_PORT|3300|3310|3320) ")
   [ -z "$busy" ] || { echo "ports in use (another session?):"; echo "$busy"; exit 1; }
-  echo "ports 8000/8001/6555/6556/8080/8081/3100/3300-3320 free; $(wait_idle)"
+  echo "ports 8000/8001/6555/6556/8080/8081/$KVSINK_PORT/3300-3320 free; KVSINK_CTR=$KVSINK_CTR cap=$S6_CAP \
+windows=${WIN_GB} GB STOP_GRACE=$STOP_GRACE; $(wait_idle)"
 }
 
 # shr01_on <kvsink|cluster>
@@ -205,7 +224,7 @@ sec_shr03() {
     "send name=a_store sets=P-exact ids=$ids" settle \
     "send name=b_fetch sets=P-exact ids=$ids port=8001 bg=1" "wait_log what=retrieve_start log=2 timeout=120" \
     kill9 "sleep secs=3" server_up wait_bg "vllm_check name=a_after" "vllm_check name=b_after port=8001" \
-    "vllm_ensure model=$LLAMA" \
+    "vllm_ensure model=$LLAMA reap=$REAP_WAIT" \
     "send name=b_again sets=P-exact ids=$ids port=8001" "send name=a_after sets=P-exact ids=$ids stats=1"
   # b_fetch overlaps A's kill; b_again re-reads from L2 (D-13 emptied B's L1
   # copies of L2 hits); a_after is A's first read after its restart.
@@ -259,7 +278,7 @@ flt_cluster() {
     "send name=store sets=P-exact,P-ragged ids=$store,$rag" settle "sleep secs=3" restart \
     "host action=$action node=$node on=lookup_start" \
     "send name=victim sets=P-exact ids=P-exact-15 errors=1" "host_wait timeout=300" \
-    "vllm_check name=afterfault" "vllm_ensure model=$LLAMA" \
+    "vllm_check name=afterfault" "vllm_ensure model=$LLAMA reap=$REAP_WAIT" \
     "send name=after sets=P-exact,P-ragged ids=P-exact-16,$P4,$rag errors=1" \
     "send name=new sets=P-ragged ids=P-ragged-10,P-ragged-11 errors=1" "vllm_check name=end"
   local rargs=("--no-hit-check=${tag}_victim")
@@ -277,18 +296,20 @@ sec_flt04() { flt_cluster flt04 1 cluster_restart 2 1; }
 sec_flt04k() {
   local tag=flt04k
   use_l2 kvsink flt04k $tag
-  L1_GB_S=4 session flt04k $tag recompute server "vllm model=$LLAMA" \
+  L1_GB_S=$((FLT04K_L1_GB + WIN_GB)) session flt04k $tag fail server "vllm model=$LLAMA" \
     "send name=store sets=P-exact ids=P-exact-10" settle restart \
     "host action=restart_kvsink" \
-    "send name=gone sets=P-exact ids=P-exact-10 stats=1" settle \
+    "send name=gone sets=P-exact ids=P-exact-10 stats=1 errors=1" settle \
     "send name=fill sets=P-exact ids=P-exact-15,P-exact-16" settle \
-    "send name=reread sets=P-exact ids=P-exact-10 stats=1" restart \
+    "send name=reread sets=P-exact ids=P-exact-10 stats=1 errors=1" "vllm_check name=reread" \
+    "vllm_ensure model=$LLAMA reap=$REAP_WAIT" restart \
     "send name=rereg sets=P-exact ids=P-exact-10 stats=1" "vllm_check name=end"
   # gone: the restarted server is empty, so nothing hits (hit_report's model
   # does not know that); vLLM recomputes and stores it again. reread: fill
-  # pushed it out of the 4 GB L1, the restarted server holds the re-store,
-  # but LMCache's registration died with the old server process.
-  report flt04k $tag all "--no-hit-check=${tag}_gone" \
+  # pushed it out of the FLT04K_L1_GB (4) GB of general L1, the restarted
+  # server holds the re-store, but LMCache's registration died with the old
+  # server process. Under fail (D-17), a mid-forward failure is a clean 500.
+  report flt04k $tag all "--no-hit-check=${tag}_gone" "--allow-error=${tag}_gone" "--allow-error=${tag}_reread" \
     "--outcomes=${tag}_reread=fell_back,failed,pipelined,not_deferred" \
     "--outcomes=${tag}_rereg=pipelined" "--require=${tag}_rereg=pipelined" store gone fill reread rereg
   progress "flt04k: kv-sink restart: $(cat $S/flt04k/HOSTDONE_* 2>/dev/null | paste -sd'|' | cut -c1-200); \
@@ -298,17 +319,23 @@ reread outcome: $(grep -oE 'pipelined_outcome=[a-z_]+' $S/flt04k/lmcache_$tag.lo
 
 sec_evt04() {
   local tag=evt04 r steps=() sends=(store) rargs=()
-  SERVER_FLAGS="--max-gpu-workers 2 $(server_flags 4 $LLAMA_CHUNK)"
+  SERVER_FLAGS="--max-gpu-workers 2 $(server_flags "$S6_CAP" $LLAMA_CHUNK)"
+  L2_PORT_S=$KVSINK_PORT
   group evt04 $tag
-  steps=(server "vllm model=$LLAMA" "vllm2 model=$LLAMA" "send name=store sets=P-exact ids=$P4" settle restart)
+  # vLLM 2 serves one request before the first restart: a vLLM with no
+  # heartbeat never re-registers (Stage 4).
+  steps=(server "vllm model=$LLAMA" "vllm2 model=$LLAMA" "send name=store sets=P-exact ids=$P4"
+    "send name=prime2 sets=P-exact ids=P-exact-00 port=8001" settle restart)
   for r in 1 2 3; do
     steps+=("send name=fill$r sets=P-long ids=P-long-0$r,P-long-0$((r + 3)) salt=fill$r port=8001 bg=1"
       "sleep secs=2" "send name=victim$r sets=P-exact ids=$P4 errors=1" wait_bg
       "vllm_check name=r$r" "vllm_check name=r${r}b port=8001" restart)
     sends+=("fill$r" "victim$r")
-    rargs+=("--no-hit-check=${tag}_fill$r" "--outcomes=${tag}_victim$r=pipelined,fell_back,refused,failed,not_deferred")
+    rargs+=("--no-hit-check=${tag}_fill$r" "--allow-error=${tag}_victim$r"
+      "--outcomes=${tag}_victim$r=pipelined,fell_back,refused,failed,not_deferred")
   done
-  VLLM_EXTRA="--gpu-memory-utilization $TWO_VLLM_UTIL" L1_GB_S=$EVT04_L1_GB session evt04 $tag recompute "${steps[@]}"
+  VLLM_EXTRA="--gpu-memory-utilization $TWO_VLLM_UTIL" L1_GB_S=$((EVT04_L1_GB + WIN_GB)) \
+    session evt04 $tag fail "${steps[@]}"
   report evt04 $tag all "${rargs[@]}" "${sends[@]}"
   progress "evt04 (L1 $EVT04_L1_GB GB): outcomes $(grep -oE 'pipelined_outcome=[a-z_]+' $S/evt04/lmcache_$tag.log | sort | uniq -c | sed 's/^ *//' | paste -sd' '); \
 L1 eviction lines: $(grep -ciE 'evict' $S/evt04/lmcache_$tag.log); \
@@ -325,11 +352,13 @@ sec_evt04l2() {
     steps+=("l2evict name=e$p prompt=P-exact-$p chunk=3"
       "send name=ev$p sets=P-exact ids=P-exact-$p bg=1 errors=1" "wait_log what=retrieve_start timeout=120"
       "l2evict_go name=e$p" wait_bg)
-    sends+=("ev$p"); rargs+=("--no-hit-check=${tag}_ev$p" "--outcomes=${tag}_ev$p=pipelined,fell_back,failed")
+    sends+=("ev$p"); rargs+=("--no-hit-check=${tag}_ev$p" "--allow-error=${tag}_ev$p"
+      "--outcomes=${tag}_ev$p=pipelined,fell_back,failed")
   done
-  steps+=("send name=after sets=P-exact ids=P-exact-13,P-exact-14" "vllm_check name=end")
+  steps+=("vllm_check name=evs" "vllm_ensure model=$LLAMA reap=$REAP_WAIT"
+    "send name=after sets=P-exact ids=P-exact-13,P-exact-14" "vllm_check name=end")
   rargs+=("--outcomes=${tag}_after=pipelined" "--require=${tag}_after=pipelined")
-  session evt04l2 $tag recompute "${steps[@]}"
+  session evt04l2 $tag fail "${steps[@]}"
   report evt04l2 $tag all "${rargs[@]}" "${sends[@]}" after
   progress "evt04l2: evictions $(tail -qn 1 $S/evt04l2/l2evict_${tag}_*.txt 2>/dev/null | paste -sd'|' | cut -c1-400); \
 retrieve ends: $(grep 'MP retrieve end' $S/evt04l2/lmcache_$tag.log | tail -n 4 | cut -c1-24 | paste -sd' ')"

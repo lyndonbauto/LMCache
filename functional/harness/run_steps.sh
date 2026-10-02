@@ -46,8 +46,12 @@
 #   vllm_check name=<n>            record whether vLLM is alive and its engine
 #                                  error lines -> $OUT/vllm_check_<tag>_<n>.txt;
 #                                  a dead vLLM is cleaned up so `vllm` restarts it
-#   vllm_ensure model=<id>         start vLLM only if none is running (after a
-#                                  vllm_check found it dead)
+#   vllm_ensure model=<id> [reap=<s>]
+#                                  start vLLM only if none is running (after a
+#                                  vllm_check found it dead); reap= waits s
+#                                  seconds first, so the LMCache server has
+#                                  reaped the dead engine's worker and freed
+#                                  its KV memory (D-23, 120 s)
 #   l2seg prompt=<id> chunk=<c> seg=<s>
 #                                  delete record <s> of chunk <c> of a prompt
 #                                  (l2_segments.py); the meta record stays
@@ -146,9 +150,12 @@ stop_server() {
 }
 stop_server2() {
   [ "$SERVER2_PID" -gt 0 ] || return 0
+  local grace=${STOP_GRACE:-5} how=TERM rc
   kill "$SERVER2_PID" 2>/dev/null
-  sleep 5
-  kill -9 "$SERVER2_PID" 2>/dev/null
+  for _ in $(seq $((grace * 10))); do kill -0 "$SERVER2_PID" 2>/dev/null || break; sleep 0.1; done
+  kill -0 "$SERVER2_PID" 2>/dev/null && { how="kill -9"; kill -9 "$SERVER2_PID" 2>/dev/null; }
+  wait "$SERVER2_PID" 2>/dev/null; rc=$?
+  echo "=== $TAG LMCache server 2 pid $SERVER2_PID stopped ($how) exit=$rc $(date -u +%T)"
   SERVER2_PID=0
 }
 # launch_server <zmq-port> <http-port> <log> <l1-gb> <extra flags> [more flags]:
@@ -511,7 +518,12 @@ for step in "$@"; do
       host_action $rest || exit 1;;
     vllm_check) # shellcheck disable=SC2086
       vllm_check $rest;;
-    vllm_ensure) [ "$VLLM_PID" -gt 0 ] || start_vllm "${rest#model=}" || exit 1;;
+    vllm_ensure) read -r m r <<< "$rest"
+      if [ "$VLLM_PID" -eq 0 ]; then
+        r=${r#reap=}
+        [ -n "$r" ] && { echo "=== $TAG waiting $r s for LMCache to reap the dead engine's worker $(date -u +%T)"; sleep "$r"; }
+        start_vllm "${m#model=}" || exit 1
+      fi;;
     l2seg) # shellcheck disable=SC2086
       python "$HERE/l2_segments.py" $L2_ARGS --set "${L2_SET:-kv_chunks}" --corpus "${CORPUS:-}" \
       --model-url http://localhost:8000 delete $rest || exit 1;;
