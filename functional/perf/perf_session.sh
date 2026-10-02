@@ -139,7 +139,10 @@ restart_server() {
   else
     say "error: vLLM did not re-register within 6 primes"; return 1
   fi
-  warm "after re-registration" || return 1
+  # The fixed 600-token prompt is in L2 (stored by the first session's
+  # warm-up), so this exercises the L2 read and GPU retrieve path once
+  # before the measured requests.
+  warm "retrieve warm-up after re-registration" 600 || return 1
   sleep 2
 }
 settle() { python "$HARNESS/wait_l2_settle.py" --port "$L2_PORT" --namespace lmcache || say "warning: L2 writes had not settled"; }

@@ -46,7 +46,10 @@ DATA_FILE=$DATA_DIR/lmcache.dat
 PERF_CONF=$S/aerospike-kvsink-bp-perf.conf
 CONF_TMPL=$TREE_HOST/functional/configs/aerospike-kvsink-bp-perf.conf.in
 CLONE=$TREE_HOST . "$TREE_HOST/functional/newstack/kvsink_bp_env.sh"
-AON_L2="--l2-adapter {\"type\":\"aerospike\",\"hosts\":\"127.0.0.1:$KVSINK_PORT\",\"namespace\":\"lmcache\",\"set_name\":\"kv_chunks\"}"
+# Both cached modes allocate L1 up front (--no-l1-use-lazy, which lw's RDMA
+# windows require): with lazy L1, the first retrieve after a restart took
+# 9.4 s (run 1, superseded/run1_8k_lazyL1), a server cold start, not L2.
+AON_L2="--no-l1-use-lazy --l2-adapter {\"type\":\"aerospike\",\"hosts\":\"127.0.0.1:$KVSINK_PORT\",\"namespace\":\"lmcache\",\"set_name\":\"kv_chunks\"}"
 LW_L2="--no-l1-use-lazy --pipelined-fetch --pipelined-max-chunks $CAP --l2-adapter {\"type\":\"aerospike\",\"hosts\":\"127.0.0.1:$KVSINK_PORT\",\"namespace\":\"lmcache\",\"set_name\":\"kv_chunks\",\"rdma\":{\"transport\":\"RC\",\"device_name\":\"rxe0\",\"gid_index\":1,\"window_count\":$WINDOW_COUNT,\"window_bytes\":$WIN_BYTES}}"
 
 vram() { amd-smi metric --mem-usage 2>/dev/null | grep -m1 USED_VRAM | grep -oE '[0-9]+'; }
