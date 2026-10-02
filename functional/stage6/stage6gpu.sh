@@ -342,13 +342,15 @@ sec_evt04() {
       "--outcomes=${tag}_victim$r=pipelined,fell_back,refused,failed,not_deferred")
   done
   # 4-chunk fetches take about 0.1 s, and the eviction controller runs once a
-  # second, so the rounds above rarely overlap an eviction. These rounds fetch
-  # the 64-chunk P-exact-15 (about 1 s) timed to start as the fill's first
-  # 64-chunk store lands (about 2.8 s after the fill starts).
+  # second, so the rounds above rarely overlap an eviction (run 3: the fill's
+  # second store is refused about 5.2 s after the fill starts, and the
+  # pressure evictions follow at about +6.1 s and +7.1 s). These rounds fetch
+  # the 64-chunk P-exact-15 (about 1.5 s), sent 4.5-5.5 s after the fill
+  # starts, so the fetch spans that eviction.
   local r2 d
   for r2 in 4 5 6; do
-    d=$(( r2 - 2 ))   # sleep 2, 3, 4 s
-    steps+=("send name=fill$r2 sets=P-long ids=P-long-0$((r2 + 3)) salt=fill$r2 port=8001 bg=1"
+    d=$(awk -v r="$r2" 'BEGIN {print 4.5 + (r - 4) * 0.5}')
+    steps+=("send name=fill$r2 sets=P-long ids=P-long-0$((r2 + 3)),P-long-0$(( (r2 + 4) % 10 )) salt=fill$r2 port=8001 bg=1"
       "sleep secs=$d" "send name=victim$r2 sets=P-exact ids=P-exact-15 errors=1" wait_bg
       "vllm_check name=r$r2" "vllm_check name=r${r2}b port=8001" restart)
     sends+=("fill$r2" "victim$r2")
