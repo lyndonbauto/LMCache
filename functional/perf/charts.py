@@ -37,7 +37,12 @@ STYLE = {
     "lw": {
         "color": "#d62728",
         "marker": "^",
-        "label": "Aerospike disk, layer-by-layer (Soft-RoCE)",
+        "label": "Aerospike disk, layer-by-layer (Soft-RoCE, default 5 s wait)",
+    },
+    "lw_wait600": {
+        "color": "#ff7f0e",
+        "marker": "v",
+        "label": "Aerospike disk, layer-by-layer (Soft-RoCE, 600 s wait)",
     },
 }
 LABEL = {8192: "8k", 16384: "16k", 32768: "32k", 65536: "64k", 130816: "128k"}
@@ -65,7 +70,7 @@ def line_chart(
     xticks: dict[int, str],
 ) -> None:
     """Plot ``ykey`` against ``xkey`` per mode and save a small PNG."""
-    fig, ax = plt.subplots(figsize=(6.4, 4.0), dpi=100)
+    fig, ax = plt.subplots(figsize=(6.4, 4.8), dpi=100)
     for mode, st in STYLE.items():
         pts = sorted((r for r in rows if r["mode"] == mode), key=lambda r: r[xkey])
         good = [r for r in pts if r["valid"]]
@@ -97,7 +102,7 @@ def line_chart(
     ax.set_ylabel(f"{what} p50 (s, log scale)")
     ax.set_title(title, fontsize=10)
     ax.grid(True, which="both", alpha=0.3)
-    ax.legend(fontsize=8)
+    ax.legend(fontsize=7, loc="upper center", bbox_to_anchor=(0.5, -0.17), ncol=2)
     fig.tight_layout()
     fig.savefig(path)
     plt.close(fig)
