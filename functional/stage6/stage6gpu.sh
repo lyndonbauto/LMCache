@@ -303,13 +303,16 @@ sec_flt04k() {
     "send name=store sets=P-exact ids=P-exact-10" settle restart \
     "host action=restart_kvsink" \
     "send name=gone sets=P-exact ids=P-exact-10 stats=1 errors=1" settle \
-    "send name=fill sets=P-exact ids=P-exact-15,P-exact-16" settle \
+    "send name=fill sets=P-exact,P-ragged ids=P-exact-15,P-exact-16,P-ragged-15,P-ragged-16" settle "sleep secs=3" \
     "send name=reread sets=P-exact ids=P-exact-10 stats=1 errors=1" "vllm_check name=reread" \
     "vllm_ensure model=$LLAMA reap=$REAP_WAIT" restart \
     "send name=rereg sets=P-exact ids=P-exact-10 stats=1" "vllm_check name=end"
   # gone: the restarted server is empty, so nothing hits (hit_report's model
   # does not know that); vLLM recomputes and stores it again. reread: fill
-  # pushed it out of the FLT04K_L1_GB (4) GB of general L1, the restarted
+  # pushed it out of the FLT04K_L1_GB (4) GB of general L1 (L1 writes that do
+  # not fit are refused, and eviction starts only above the 0.8 watermark, so
+  # the two 64-chunk prompts alone stop at 0.78; the P-ragged ones cross it,
+  # and LRU evicts P-exact-10 first), the restarted
   # server holds the re-store, but LMCache's registration died with the old
   # server process. Under fail (D-17), a mid-forward failure is a clean 500.
   report flt04k $tag all "--no-hit-check=${tag}_gone" "--allow-error=${tag}_gone" "--allow-error=${tag}_reread" \
@@ -327,8 +330,9 @@ sec_evt04() {
   group evt04 $tag
   # vLLM 2 serves one request before the first restart: a vLLM with no
   # heartbeat never re-registers (Stage 4).
-  steps=(server "vllm model=$LLAMA" "vllm2 model=$LLAMA" "send name=store sets=P-exact ids=$P4"
-    "send name=prime2 sets=P-exact ids=P-exact-00 port=8001" settle restart)
+  steps=(server "vllm model=$LLAMA" "vllm2 model=$LLAMA" "send name=store15 sets=P-exact ids=P-exact-15" settle
+    "send name=store sets=P-exact ids=$P4" "send name=prime2 sets=P-exact ids=P-exact-00 port=8001" settle restart)
+  sends+=(store15)
   for r in 1 2 3; do
     steps+=("send name=fill$r sets=P-long ids=P-long-0$r,P-long-0$((r + 3)) salt=fill$r port=8001 bg=1"
       "sleep secs=2" "send name=victim$r sets=P-exact ids=$P4 errors=1" wait_bg
@@ -336,6 +340,20 @@ sec_evt04() {
     sends+=("fill$r" "victim$r")
     rargs+=("--no-hit-check=${tag}_fill$r" "--allow-error=${tag}_victim$r"
       "--outcomes=${tag}_victim$r=pipelined,fell_back,refused,failed,not_deferred")
+  done
+  # 4-chunk fetches take about 0.1 s, and the eviction controller runs once a
+  # second, so the rounds above rarely overlap an eviction. These rounds fetch
+  # the 64-chunk P-exact-15 (about 1 s) timed to start as the fill's first
+  # 64-chunk store lands (about 2.8 s after the fill starts).
+  local r2 d
+  for r2 in 4 5 6; do
+    d=$(( r2 - 2 ))   # sleep 2, 3, 4 s
+    steps+=("send name=fill$r2 sets=P-long ids=P-long-0$((r2 + 3)) salt=fill$r2 port=8001 bg=1"
+      "sleep secs=$d" "send name=victim$r2 sets=P-exact ids=P-exact-15 errors=1" wait_bg
+      "vllm_check name=r$r2" "vllm_check name=r${r2}b port=8001" restart)
+    sends+=("fill$r2" "victim$r2")
+    rargs+=("--no-hit-check=${tag}_fill$r2" "--allow-error=${tag}_victim$r2"
+      "--outcomes=${tag}_victim$r2=pipelined,fell_back,refused,failed,not_deferred")
   done
   VLLM_EXTRA="--gpu-memory-utilization $TWO_VLLM_UTIL" L1_GB_S=$((EVT04_L1_GB + WIN_GB)) \
     session evt04 $tag fail "${steps[@]}"
@@ -351,12 +369,15 @@ sec_evt04l2() {
   steps=(server "vllm model=$LLAMA" "send name=store sets=P-exact ids=$P4" settle restart)
   # The evictor is loaded and armed before the send (importing lmcache takes
   # seconds); the step after `MP retrieve start` only releases it.
+  # A failed fetch's window is quarantined for fetch_timeout_seconds (30 s),
+  # so each round waits 32 s for both windows to be free again (else the next
+  # fetch is `refused` and loads whole objects).
   for p in 10 11 12; do
     steps+=("l2evict name=e$p prompt=P-exact-$p chunk=3"
       "send name=ev$p sets=P-exact ids=P-exact-$p bg=1 errors=1" "wait_log what=retrieve_start timeout=120"
-      "l2evict_go name=e$p" wait_bg)
+      "l2evict_go name=e$p" wait_bg "sleep secs=32")
     sends+=("ev$p"); rargs+=("--no-hit-check=${tag}_ev$p" "--allow-error=${tag}_ev$p"
-      "--outcomes=${tag}_ev$p=pipelined,fell_back,failed")
+      "--outcomes=${tag}_ev$p=pipelined,fell_back,failed,refused")
   done
   steps+=("vllm_check name=evs" "vllm_ensure model=$LLAMA reap=$REAP_WAIT"
     "send name=after sets=P-exact ids=P-exact-13,P-exact-14" "vllm_check name=end")
