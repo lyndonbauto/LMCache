@@ -27,6 +27,9 @@
 #              lw_wait<secs>), then delete the data file. The pipelined cap
 #              is the prompt's chunk count, and window_count windows of
 #              cap x 32 MiB fill LW_WINDOWS_GB (2 to 8 windows)
+#              With AON_ONLY=1, only the store and the aon points.
+#   finish:<L> wait for a driverless L<L>_aon session to exit, then the
+#              store check and data file deletion
 #   fio        O_DIRECT read and write throughput of the data disk(s) with
 #              fio in the kv-sink container (FIO_DIRS)
 #   smoke      a short end-to-end check at 8k (2 prompts): store, aon point,
@@ -235,12 +238,26 @@ sec_cached2() {
   progress "store plan $name: ${#steps[@]} steps ($(printf '%s; ' "${steps[@]}"))"
   session ${name}_aon aon "$AON_L1_GB" "$AON_L2" "${steps[@]}" "${pts[@]}"
   store_check ${name}_aon "$len" 32
+  if [ "${AON_ONLY:-0}" = 1 ]; then
+    progress "$name: AON_ONLY=1, no lw sessions"
+    aero_stop_delete
+    return
+  fi
   progress "lw sizing $name: pipelined-max-chunks $cap, window_count $wc x window_bytes $((cap * LLAMA_CHUNK)) \
 (${wgb} GB of windows), general L1 ${LW_GEN_GB} GB, L1 total $((LW_GEN_GB + wgb)) GB; long wait ${wait} s"
   STOP_ON_ENGINE_STOP=1 session ${name}_lw lw $((LW_GEN_GB + wgb)) "$lw" "${pts[@]}"
   [ -f $S/${name}_lw/engine_stopped_${name}_lw.txt ] && \
     progress "${name}_lw: series stopped, engine stopped at $(cat $S/${name}_lw/engine_stopped_${name}_lw.txt)"
   SESSION_LW_WAIT=$wait session ${name}_lwwait$wait lw $((LW_GEN_GB + wgb)) "$lw" "${pts[@]}"
+  aero_stop_delete
+}
+# finish:<len>: the end of cached2 for an aon session that ran without its
+# driver: wait for the session to exit, check the store, delete the data.
+sec_finish() {
+  local len=$1
+  while pgrep -f "perf_session.sh $W/L${len}_aon " >/dev/null; do sleep 15; done
+  progress "L${len}_aon session ended; $(grep -cE '^point ' $S/L${len}_aon/session_L${len}_aon.txt 2>/dev/null) point lines"
+  store_check L${len}_aon "$len" 32
   aero_stop_delete
 }
 sec_smoke2() {
@@ -279,6 +296,7 @@ mkdir -p $S
 for sec in "$@"; do
   progress "section $sec started"
   case $sec in cached:*) sec_cached "${sec#cached:}";; cached2:*) sec_cached2 "${sec#cached2:}";;
+    finish:*) sec_finish "${sec#finish:}";;
     lwwait:*) sec_lwwait "${sec#lwwait:}";; *) "sec_$sec";; esac
   progress "section $sec finished"
 done
