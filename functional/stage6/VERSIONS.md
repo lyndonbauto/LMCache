@@ -31,3 +31,20 @@ product change since then (`git diff 0f0e0ff9 b5076622` outside `functional/` an
 | E4 CE cluster (plain path) | `aero-n1..3`, Aerospike CE `8.2.0.0` (`aerospike/aerospike-server:latest`), 127.0.0.1:3300/3310/3320, wiped and restarted at the session's RF before every cluster session |
 | Model | `meta-llama/Llama-3.1-8B-Instruct` |
 | Run settings | `VLLM_BATCH_INVARIANT=1`, temperature 0, `--no-enable-prefix-caching`, chunk 256, layerwise on, async scheduling on. Two hosts: `--gpu-memory-utilization 0.3` each (one host: 0.6), L1 20 GB per server. kv-sink sessions: `--no-l1-use-lazy --pipelined-fetch --pipelined-max-chunks 64`, two RDMA windows of 2 GiB (reserved in the L1 slab). `STOP_GRACE=60` |
+
+## T-E2E-11 (gpu-e2e11, 2026-10-02, new kv-sink stack)
+
+Same stack as part A above; no rebuild and no product change (`git diff b6b0caae cfac8984`
+outside `functional/` and `docs/` is empty). Results: [`E2E11.md`](E2E11.md).
+
+| Component | Version |
+|---|---|
+| Host | MI300X droplet, kernel `6.8.0-138-generic`, Ubuntu 24.04.4 LTS, MLNX OFED 24.10 IB core |
+| ROCm / HIP / torch / vLLM | ROCm 10.0.0, HIP `7.15.26333`, torch `2.12.0+rocm10.0.0`, vLLM `0.27.1.dev5+gf46a9dfe2.d20260827` (V2 model runner, async scheduling on) |
+| Container | `lmc-c`, image `lmcache-rocm:day1` (`sha256:50c62263906e…`) |
+| LMCache | `prototype-stage1`, box tree `4534ecce` at the start, then harness `8be431bf`, `cfac8984`; product code `b6b0caae`, version `0.4.6.dev1038` |
+| Aerospike C client | `sriram/kv-sink-batch-prio` `523d51ea` (private, never pushed) |
+| kv-sink server | `Aerospike Community Edition build 8.1.3.0-111-g046e8558d`, `aero-kvsink-bp`, 127.0.0.1:3700-3703, `functional/configs/aerospike-kvsink-bp-70b.conf` (namespace `lmcache` 64G) for the 70B session; the 16G `aerospike-kvsink-bp.conf` restarted afterwards |
+| Plain path L2 | `aerospike-ce`, Aerospike CE `8.2.0.0`, 127.0.0.1:3000, namespace `lmcache` on a 256G file; `max-write-cache` 8 GiB during `e2e11p` run 2, 2G otherwise |
+| Model | `meta-llama/Llama-3.3-70B-Instruct`, snapshot `6f6073b423013f6a7d4d9f39144961bfbfbc386b` (30 shards, 132 GB) |
+| Run settings | `VLLM_BATCH_INVARIANT=1`, temperature 0, `--no-enable-prefix-caching`, `--max-model-len 17408`, `--gpu-memory-utilization 0.9`, chunk 256, layerwise on, policy `fail`. kv-sink: `--no-l1-use-lazy --pipelined-fetch --pipelined-max-chunks 64`, two RC windows of 5 GiB, L1 70 GB. Plain: L1 60 GB. `STOP_GRACE=60` |

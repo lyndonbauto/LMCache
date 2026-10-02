@@ -243,3 +243,8 @@ the 9 deliberate `LayerUnservableError`s in `evt04l2` (and 6 in `run2_evt04l2`).
 3. D-17 still blocks every recompute half that fails mid-forward (T-EVT-04 L2 here).
 4. Amend T-FLT-04's kv-sink expectation (O-5): reads stay pipelined across a server
    restart.
+
+## T-E2E-11 (Llama-3.3-70B, gpu-e2e11)
+
+**Pass**, no wrong token. Results, records and plans at production size and D-26 are in
+[`E2E11.md`](E2E11.md).

@@ -26,3 +26,15 @@ were not touched; `lmc-b`, `lmc-d`, `lmc-newstack` and `aero-kvsink` were not to
 | `aero-n1..3` (CE cluster) wiped and started per session at RF 1 or 2; nodes SIGKILLed / restarted by `flt02/03/04` | `functional/harness/cluster.sh` | Work brief (Aerospike containers on 127.0.0.1) | Stopped |
 | kv-sink `asd` in `aero-kvsink-bp` (127.0.0.1:3700-3703) restarted before each kv-sink session and once inside `flt04k` | `functional/harness/kvsink_server.sh` via `kvsink_bp_env.sh` | Same | asd stopped |
 | Second LMCache server (127.0.0.1:6556, HTTP 8081, Prometheus 9091) and second vLLM (127.0.0.1:8001) in `lmc-c`; every listener check passed | `functional/harness/run_steps.sh` | Work brief (services on 127.0.0.1) | Stopped |
+
+## T-E2E-11 (gpu-e2e11, 2026-10-02)
+
+No host change. No packages were installed; ufw, sshd, `rdma_rxe` and `rxe0` were not
+touched; `lmc-b`, `lmc-d`, `lmc-newstack` and `aero-kvsink` were not touched.
+
+| Change | Where | Approved by | State left |
+|---|---|---|---|
+| kv-sink `asd` in `aero-kvsink-bp` restarted with a 64G namespace for the 70B session (new file `configs/aerospike-kvsink-bp-70b.conf`; the 16G config is unchanged) | `kvsink_server.sh` via `stage6gpu.sh e2e11` | Work brief (Aerospike containers on 127.0.0.1; namespace resize allowed in the item) | Restarted on the 16G config, then asd stopped |
+| `aerospike-ce` set `kv_chunks` truncated twice (`reset` step of `e2e11p`) | `run_steps.sh reset` | Work brief | Holds the 70B plain-path records |
+| `aerospike-ce` `max-write-cache` raised 2G → 8 GiB with a dynamic `set-config` during `e2e11p` run 2 (D-26) | `stage6gpu.sh ce_write_cache` | Work brief (reconfigure Aerospike containers on 127.0.0.1) | Restored to 2147483648; config file unchanged |
+| LMCache server (6555/8080) and vLLM (8000) in `lmc-c`, every listener check passed | `run_steps.sh` | Work brief | Stopped, USED_VRAM 285 MB |
