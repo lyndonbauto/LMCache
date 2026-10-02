@@ -1,0 +1,65 @@
+# Perf-check variant of aerospike-kvsink-bp.conf (kv-sink server 046e8558d on
+# 127.0.0.1:3700-3703): the lmcache namespace keeps its data on a drive, not
+# in RAM. functional/perf/perf.sh fills in @FILE@ (a file on the boot disk)
+# and @FILESIZE@ (sized per prompt length) and writes the result to
+# /root/lmc-work/functional/perf/aerospike-kvsink-bp-perf.conf. The original
+# 16G memory config (aerospike-kvsink-bp.conf) is not changed.
+#
+# Reads come from the device: direct-files opens the file with O_DIRECT (no
+# page cache), read-page-cache is off, and post-write-cache 0 keeps no
+# recently written blocks in memory. Only the primary index is in RAM, as in
+# any Aerospike device namespace. max-write-cache is raised from its 64M
+# default so a burst of LMCache stores is buffered rather than refused with
+# DEVICE_OVERLOAD (D-26).
+service {
+    proto-fd-max 15000
+    cluster-name lmcache-kvsink-bp
+    work-directory /root/lmc-work/aerospike-kvsink-bp-data/work
+}
+logging {
+    console {
+        context any info
+    }
+}
+mod-lua {
+    user-path /root/lmc-work/aerospike-kvsink-bp-data/work/usr/udf/lua
+    allow-unsafe-lua false
+}
+network {
+    service {
+        address 127.0.0.1
+        port 3700
+        access-address 127.0.0.1
+        access-port 3700
+    }
+    heartbeat {
+        mode mesh
+        address 127.0.0.1
+        port 3702
+        interval 150
+        timeout 10
+    }
+    fabric {
+        address 127.0.0.1
+        port 3701
+    }
+    admin {
+        address 127.0.0.1
+        port 3703
+    }
+}
+namespace lmcache {
+    replication-factor 1
+    nsup-period 120
+    default-ttl 0
+    max-record-size 1048576
+    stop-writes-sys-memory-pct 100
+    storage-engine device {
+        file @FILE@
+        filesize @FILESIZE@
+        direct-files true
+        read-page-cache false
+        post-write-cache 0
+        max-write-cache 8G
+    }
+}
