@@ -16,6 +16,8 @@
 #              and lw points (LMCache restarted before every point, so every
 #              hit comes from Aerospike's disk), then stop the server and
 #              delete the data file
+#   lwwait:<L> store again, then lw points with the connector's layerwise
+#              wait timeout raised to LW_WAIT (600 s) (mode lw_wait600)
 #   smoke      a short end-to-end check at 8k (2 prompts): store, aon point,
 #              lw point; validates the device namespace and shared records
 #   idle       wait for the GPU to be idle and print USED_VRAM
@@ -68,6 +70,7 @@ session() {
   local rb0; rb0=$(asd_read_bytes)
   progress "session $name ($mode) started; $(wait_idle); free disk $(free_gb) GB"
   timeout 14400 docker exec -e LMC_EXTRA="$extra" -e L1_GB="$l1" -e STOP_GRACE="$STOP_GRACE" \
+    -e LW_WAIT_TIMEOUT="${SESSION_LW_WAIT:-}" \
     -e L2_PORT="$KVSINK_PORT" lmc-c bash $TREE_CTR/functional/perf/perf_session.sh $W/$name "$name" "$mode" "$@" \
     > $S/$name/session_$name.txt 2>&1
   local rc=$? rb1; rb1=$(asd_read_bytes)
@@ -144,6 +147,21 @@ sec_cached() {
   session ${name}_lw lw $((L1_GEN_GB + WIN_GB)) "$LW_L2" "${steps[@]}"
   aero_stop_delete
 }
+# lwwait:<len>: lw again with lmcache.mp.layerwise_wait_timeout_seconds
+# LW_WAIT (600). With the default 5 s, a retrieve queued behind others on
+# LMCache's one worker thread (about 1 s per 8k prompt on Soft-RoCE) times
+# out and stops vLLM's engine (run phase1c, 8k c=8). The data is stored
+# again by an aon store-only session first.
+sec_lwwait() {
+  local len=$1 name=L$1
+  aero_start "$len" || return 1
+  session ${name}_store aon "$L1_GEN_GB" "$AON_L2" "store len=$len ids=0-31 conc=$STORE_CONC"
+  store_check ${name}_store "$len" 32
+  local steps=()
+  mapfile -t steps < <(point_steps "$len")
+  SESSION_LW_WAIT=${LW_WAIT:-600} session ${name}_lwwait lw $((L1_GEN_GB + WIN_GB)) "$LW_L2" "${steps[@]}"
+  aero_stop_delete
+}
 sec_smoke() {
   aero_start 8192 smoke || return 1
   session smoke_aon aon 20 "$AON_L2" "store len=8192 ids=0-1 conc=2" "point len=8192 c=2 n=2"
@@ -156,7 +174,7 @@ sec_idle() { progress "idle: $(wait_idle)"; }
 mkdir -p $S
 for sec in "$@"; do
   progress "section $sec started"
-  case $sec in cached:*) sec_cached "${sec#cached:}";; *) "sec_$sec";; esac
+  case $sec in cached:*) sec_cached "${sec#cached:}";; lwwait:*) sec_lwwait "${sec#lwwait:}";; *) "sec_$sec";; esac
   progress "section $sec finished"
 done
 echo "##### PERF DONE $(date -u +%T) $(wait_idle)"

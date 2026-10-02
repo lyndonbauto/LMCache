@@ -5,7 +5,9 @@ Reads, under ``--dir`` (``/root/lmc-work/functional/perf`` on the box):
 
 - ``nocache/nocache_L<len>_c<c>.json``          (mode nocache)
 - ``L<len>_aon/L<len>_aon_L<len>_c<c>.json``    (mode aon)
-- ``L<len>_lw/L<len>_lw_L<len>_c<c>.json``      (mode lw)
+- ``L<len>_lw/L<len>_lw_L<len>_c<c>.json``      (mode lw: connector defaults)
+- ``L<len>_lwwait/...``                         (mode lw_wait600: layerwise
+  wait timeout raised to 600 s)
 - ``<session>/outcomes_<session>_L<len>_c<c>.txt`` (``outcome:count,...``)
 
 and writes ``results.csv`` (one row per point) and ``summary_tables.md``
@@ -34,7 +36,7 @@ import re
 # Third Party
 import numpy as np
 
-MODES = ("nocache", "aon", "lw")
+MODES = ("nocache", "aon", "lw", "lw_wait600")
 FIELDS = [
     "length",
     "concurrency",
@@ -66,8 +68,8 @@ def point_files(root: str) -> list[tuple[str, str, str]]:
             continue
         if sess == "nocache":
             mode = "nocache"
-        elif re.fullmatch(r"L\d+_(aon|lw)", sess):
-            mode = sess.split("_")[1]
+        elif re.fullmatch(r"L\d+_(aon|lw|lwwait)", sess):
+            mode = {"lwwait": "lw_wait600"}.get(sess.split("_")[1], sess.split("_")[1])
         else:
             continue
         for f in sorted(os.listdir(d)):
@@ -148,15 +150,19 @@ def tables(rows: list[dict]) -> str:
     out: list[str] = []
     for length in sorted({r["length"] for r in rows}):
         out.append(f"### {length} tokens\n")
-        out.append(
-            "| c | nocache TTFT | aon TTFT | lw TTFT | nocache total | aon total "
-            "| lw total | aon TTFT speedup | lw TTFT speedup |"
-        )
-        out.append("|---|---|---|---|---|---|---|---|---|")
+        modes = [
+            m
+            for m in MODES
+            if any(r["length"] == length and r["mode"] == m for r in rows)
+        ]
+        head = ["c"] + [f"{m} TTFT" for m in modes] + [f"{m} total" for m in modes]
+        head += [f"{m} TTFT speedup" for m in modes if m != "nocache"]
+        out.append("| " + " | ".join(head) + " |")
+        out.append("|" + "---|" * len(head))
         for c in sorted({r["concurrency"] for r in rows if r["length"] == length}):
             cells = [str(c)]
             for key in ("ttft_p50", "total_p50"):
-                for m in MODES:
+                for m in modes:
                     r = by.get((length, c, m))
                     if r is None:
                         cells.append("-")
@@ -165,7 +171,7 @@ def tables(rows: list[dict]) -> str:
                             f"{r[key]:.3f}" + ("" if r["valid"] else " (INVALID)")
                         )
             base = by.get((length, c, "nocache"))
-            for m in ("aon", "lw"):
+            for m in [m for m in modes if m != "nocache"]:
                 r = by.get((length, c, m))
                 if base is None or r is None or not r["valid"] or not base["valid"]:
                     cells.append("-")

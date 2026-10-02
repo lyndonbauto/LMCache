@@ -22,7 +22,10 @@
 #   sleep secs=<s>
 # Environment: LMC_EXTRA (LMCache server flags after the common ones), L1_GB
 # (default 100), VLLM_UTIL (0.9), MAX_LEN (131072), STOP_GRACE (60, D-18),
-# L2_PORT (3700), SEND_TIMEOUT (3600).
+# L2_PORT (3700), SEND_TIMEOUT (3600), LW_WAIT_TIMEOUT (unset: the connector's
+# lmcache.mp.layerwise_wait_timeout_seconds default, 5 s; a timeout stops
+# vLLM's engine, section 7 / D-24).
+# Before each point, a dead vLLM is restarted (with a fresh LMCache server).
 set -u
 OUT=$1; TAG=$2; MODE=$3; shift 3
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -77,12 +80,13 @@ stop_server() {
   SERVER_PID=0
 }
 start_vllm() {
-  local kv=()
+  local kv=() wait_cfg=""
+  [ -n "${LW_WAIT_TIMEOUT:-}" ] && wait_cfg=",\"lmcache.mp.layerwise_wait_timeout_seconds\":$LW_WAIT_TIMEOUT"
   if [ "$CONNECTOR" = 1 ]; then
     kv=(--kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\
 \"kv_connector_module_path\":\"lmcache.integration.vllm.lmcache_mp_connector\",\
 \"kv_load_failure_policy\":\"fail\",\"kv_connector_extra_config\":{\
-\"lmcache.mp.host\":\"tcp://localhost\",\"lmcache.mp.port\":6555,\"lmcache.mp.use_layerwise\":$LW}}")
+\"lmcache.mp.host\":\"tcp://localhost\",\"lmcache.mp.port\":6555,\"lmcache.mp.use_layerwise\":$LW$wait_cfg}}")
   fi
   vllm serve "$MODEL" --host 127.0.0.1 --port 8000 --seed 0 --no-enable-prefix-caching \
     --async-scheduling --max-model-len "${MAX_LEN:-131072}" --gpu-memory-utilization "${VLLM_UTIL:-0.9}" \
@@ -145,6 +149,22 @@ restart_server() {
   warm "retrieve warm-up after re-registration" 600 || return 1
   sleep 2
 }
+# ensure_vllm: if vLLM died (e.g. a layerwise wait timeout stopped its engine),
+# record it, stop it, restart the LMCache server (a fresh server holds no dead
+# engine's memory, so the D-23 reap does not apply) and start vLLM again.
+ensure_vllm() {
+  curl -sf http://127.0.0.1:8000/health >/dev/null && return 0
+  say "vLLM is dead before the next step; restarting it (engine errors: \
+$(grep -cE 'EngineDeadError|LayerProgress[A-Za-z]*TimeoutError' "$VLOG"))"
+  echo "vllm_restart $(date -u +%T)" >> "$OUT/vllm_restarts_$TAG.txt"
+  [ "$VLLM_PID" -gt 0 ] && kill -9 "$VLLM_PID" 2>/dev/null
+  pkill -9 -f "VLLM::" 2>/dev/null
+  VLLM_PID=0; sleep 10
+  stop_server
+  start_server || return 1
+  start_vllm || return 1
+  warm "after vLLM restart" 600
+}
 settle() { python "$HARNESS/wait_l2_settle.py" --port "$L2_PORT" --namespace lmcache || say "warning: L2 writes had not settled"; }
 metrics_urls() {
   if [ "$CONNECTOR" = 1 ]; then echo http://127.0.0.1:8000/metrics,http://127.0.0.1:8080/metrics
@@ -185,6 +205,7 @@ for step in "$@"; do
       python "$HARNESS/as_info.py" "$L2_PORT" namespace/lmcache > "$OUT/l2stat_${TAG}_store_$len.txt"
       say "store done: $(tr ';' '\n' < "$OUT/l2stat_${TAG}_store_$len.txt" | grep -E '^(objects|data_used_bytes)=' | paste -sd' ')";;
     point) [ -n "$n" ] || n=$(( c > 4 ? c : 4 ))
+      ensure_vllm || exit 1
       [ "$CONNECTOR" = 1 ] && { restart_server || exit 1; }
       say "point len=$len c=$c n=$n"
       send "L${len}_c${c}" "$len" "0-$((n - 1))" "$c" || say "point L${len}_c${c} had errors";;
