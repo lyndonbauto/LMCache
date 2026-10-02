@@ -59,7 +59,7 @@ sec_d15() {
   local -A on=([1]=lookup_end [2]=lookup_end [3]=retrieve_start)
   for i in 1 2 3; do
     steps+=("send name=mid$i sets=P-exact ids=$ids4 bg=1 errors=1" "wait_log what=${on[$i]} timeout=120"
-      "term grace=$grace" wait_bg server_up "vllm_check name=mid$i" "vllm_ensure model=$LLAMA")
+      "term grace=$grace" server_up wait_bg "vllm_check name=mid$i" "vllm_ensure model=$LLAMA")
   done
   steps+=("send name=after sets=P-exact ids=$ids4" "vllm_check name=end")
   session d15 $tag fail "${steps[@]}"
