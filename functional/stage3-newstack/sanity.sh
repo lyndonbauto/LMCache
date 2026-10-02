@@ -12,7 +12,8 @@
 #   d15     D-15: clean LMCache shutdowns (SIGTERM) right after pipelined
 #           fetches and three times during one (twice at the lookup's end, when
 #           the fetch is issued, once at retrieve start); the exit status and
-#           any crash lines in its log
+#           any crash lines in its log. D15_GRACE (default 60) is the wait before
+#           SIGKILL: a clean shutdown takes about 14 s (telemetry flush timeouts)
 set -u
 # shellcheck source=../stage3/stage3.sh
 source "$(dirname "$0")/../stage3/stage3.sh"
@@ -49,15 +50,16 @@ $W/e2e123/l2stats_${tag}_shortw_before.json $W/e2e123/l2stats_${tag}_shortw_afte
 
 sec_d15() {
   SERVER_FLAGS=$(server_flags 4 $LLAMA_CHUNK)
-  local tag=d15 ids4 i
+  local grace=${D15_GRACE:-60} tag ids4 i
+  tag=d15_g$grace
   ids4=$(ids P-exact 4 4)
   group d15 $tag
   local steps=(server "vllm model=$LLAMA" "send name=store sets=P-exact ids=$ids4" settle restart
-    "send name=l2a sets=P-exact ids=$ids4 stats=1" term server_up)
+    "send name=l2a sets=P-exact ids=$ids4 stats=1" "term grace=$grace" server_up)
   local -A on=([1]=lookup_end [2]=lookup_end [3]=retrieve_start)
   for i in 1 2 3; do
     steps+=("send name=mid$i sets=P-exact ids=$ids4 bg=1 errors=1" "wait_log what=${on[$i]} timeout=120"
-      term wait_bg server_up "vllm_check name=mid$i" "vllm_ensure model=$LLAMA")
+      "term grace=$grace" wait_bg server_up "vllm_check name=mid$i" "vllm_ensure model=$LLAMA")
   done
   steps+=("send name=after sets=P-exact ids=$ids4" "vllm_check name=end")
   session d15 $tag fail "${steps[@]}"
