@@ -117,18 +117,26 @@ warm() {
   python "$HERE/perf_client.py" --warmup "Warm-up request $WARM_SEQ of session $TAG ($1). Say hello." \
     --tag "${TAG}_warm$WARM_SEQ" --out "$OUT/warm_${TAG}_$WARM_SEQ.json"
 }
+# restart_server: an idle vLLM re-registers with a restarted LMCache server
+# only once it sends traffic (its PING then finds itself unregistered), and
+# lookups before that fail with "No GPU context found". So prime with short
+# unrelated prompts until the registration line appears, then prime once more.
 restart_server() {
   local before; before=$(registrations)
   stop_server
   start_server || return 1
-  local t0; t0=$(date +%s)
-  for _ in $(seq 180); do [ "$(registrations)" -gt "$before" ] && break; sleep 1; done
+  local t0 attempt; t0=$(date +%s)
+  for attempt in 1 2 3 4 5 6; do
+    [ "$(registrations)" -gt "$before" ] && break
+    warm "prime $attempt after LMCache restart" || return 1
+    for _ in $(seq 20); do [ "$(registrations)" -gt "$before" ] && break; sleep 1; done
+  done
   if [ "$(registrations)" -gt "$before" ]; then
-    say "vLLM re-registered $(( $(date +%s) - t0 )) s after the restart"
+    say "vLLM re-registered $(( $(date +%s) - t0 )) s after the restart (primes: $attempt)"
   else
-    say "warning: no re-registration within 180 s; priming"
+    say "error: vLLM did not re-register within 6 primes"; return 1
   fi
-  warm "after LMCache restart" || return 1
+  warm "after re-registration" || return 1
   sleep 2
 }
 settle() { python "$HARNESS/wait_l2_settle.py" --port "$L2_PORT" --namespace lmcache || say "warning: L2 writes had not settled"; }
