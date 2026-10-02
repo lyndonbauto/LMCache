@@ -306,3 +306,8 @@ D-14 (concurrent writers mix segments) has its own decision record:
   several engines or TP ranks.
 - **Owner**: test plan (Track C for the doc note).
 - **Evidence**: `functional/stage4/HARNESS.md`.
+- **Update (Stage 4 GPU, 2026-10-02, new stack)**: true only for distinct
+  keys (`pipe08s`: 0 `refused` at `window_count` 2). In T-E2E-09 one vLLM
+  produced `reused` and `shared_keys_busy` when P-multi turns that share a
+  prefix were in flight together, so same-prefix overlap does not need a
+  second engine (`functional/stage4/SUMMARY.md`).
