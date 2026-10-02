@@ -123,9 +123,11 @@ point_steps() {
 
 aero_start() {
   local len=$1 fs_gb
-  # KV per length: 32 prompts x len/256 chunks x 32 MiB; +40% for record
-  # headers, 1 MiB write blocks and defragmentation headroom.
-  fs_gb=$(( (32 * len / 256 * 32 * 14 / 10 + 1023) / 1024 ))
+  # KV per length: 32 prompts x len/256 chunks x 32 MiB, times FS_PCT/100
+  # (140 in phase 1). Aerospike stops writes at stop-writes-used-pct (default
+  # 70), so the full store must stay under 70% of the file: 140 puts it at
+  # about 71% (the 32k store of run 2b lost 34 chunks); cached2 uses 200.
+  fs_gb=$(( (32 * len / 256 * 32 * ${FS_PCT:-140} / 100 + 1023) / 1024 ))
   [ "${2:-}" = smoke ] && fs_gb=8
   [ "${2:-}" = smoke2 ] && fs_gb=32
   bash $H/kvsink_server.sh stop >/dev/null
@@ -153,10 +155,16 @@ store_check() {
   f=$(ls $S/$name/l2stat_*store*.txt 2>/dev/null | head -n 1)
   objs=$(tr ';' '\n' < "$f" | grep -E '^objects=' | cut -d= -f2)
   used=$(tr ';' '\n' < "$f" | grep -E '^data_used_bytes=' | cut -d= -f2)
+  local sw werr pct
+  sw=$(tr ';' '\n' < "$f" | grep -E '^stop_writes=' | cut -d= -f2)
+  werr=$(tr ';' '\n' < "$f" | grep -E '^client_write_error=' | cut -d= -f2)
+  pct=$(tr ';' '\n' < "$f" | grep -E '^data_used_pct=' | cut -d= -f2)
   want=$(( nprompts * len / 256 * 65 ))
-  echo "objects=$objs want=$want data_used_bytes=$used" > $S/$name/store_check.txt
+  echo "objects=$objs want=$want data_used_bytes=$used stop_writes=$sw client_write_error=$werr data_used_pct=$pct" \
+    > $S/$name/store_check.txt
+  [ "${objs:-0}" -lt "$want" ] && progress "!! store check $name: fewer records than wanted"
   progress "store check $name: objects $objs (want $want = $nprompts prompts x $((len / 256)) chunks x 65 records), \
-data_used_bytes $used; DEVICE_OVERLOAD lines $(grep -c DEVICE_OVERLOAD $S/$name/lmcache_$name.log) (D-26), \
+data_used_bytes $used (${pct}%), stop_writes $sw, client_write_error $werr; DEVICE_OVERLOAD lines $(grep -c DEVICE_OVERLOAD $S/$name/lmcache_$name.log) (D-26), \
 L1 refusals $(grep -ciE 'refus' $S/$name/lmcache_$name.log), \
 'Failed to batched allocate' $(grep -c 'Failed to batched allocate' $S/$name/lmcache_$name.log) (D-25)"
 }
@@ -231,7 +239,7 @@ sec_cached2() {
   wait=${LW_WAIT:-$([ "$len" -le 32768 ] && echo 600 || echo 1800)}
   read -r cap wc wgb < <(lw_sizing "$len")
   lw=$(lw_l2 "$cap" "$wc")
-  aero_start "$len" || return 1
+  FS_PCT=${FS_PCT:-200} aero_start "$len" || return 1
   local steps=() pts=()
   mapfile -t steps < <(store_steps "$len")
   mapfile -t pts < <(point_steps "$len")
