@@ -100,6 +100,17 @@ Notes for the GPU worker:
 
 ## T-E2E-11: Llama-3.3-70B at TP=1
 
+**New stack (gpu-e2e11, 2026-10-02).** The notes after this paragraph were written for
+the old server. On the batch-read server: `CAP70` defaults to `S6_CAP` (64), since D-12
+does not reproduce, so every prompt is eligible and `warmover` is skipped; the namespace
+is `configs/aerospike-kvsink-bp-70b.conf` (the 3700 server with `data-size 64G`, which
+allocates as it fills and pins nothing at start); L1 is `L70_L1_GB` (60) plus the two
+RDMA windows (2 × 64 × 80 MiB = 10 GiB), so the 43 GiB cold send stays under the 0.8
+eviction watermark (D-25); `UTIL70` is 0.9; `l2_sizes.py` records the meta and segment
+records of a 64-chunk, a 48-chunk and a P-shared prompt. `e2e11p` runs T-E2E-03/06 on the
+plain path against aerospike-ce (3000) instead of the CE cluster.
+`bash functional/stage6/launch.sh e2e11 e2e11 e2e11p`.
+
 Facts, checked in the dry run from the cached `config.json`: 80 layers, 8 KV heads ×
 128, bf16. **One 256-token chunk is 80 MiB = 160 slots of 512 KiB**, so D-12's 256-slot
 command limit allows **1 chunk per pipelined command** (`CAP70=1`; the 8B allows 4). KV

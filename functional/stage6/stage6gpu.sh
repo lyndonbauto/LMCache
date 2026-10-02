@@ -58,10 +58,13 @@
 #             prompts, 3 rounds
 #   evt04l2   T-EVT-04, L2 records gone mid-fetch: every segment of chunk 3 of
 #             the prompt being fetched is deleted at `MP retrieve start`
-#   e2e11     T-E2E-11: Llama-3.3-70B, TP=1, util UTIL70 (0.92): base70 (the
+#   e2e11     T-E2E-11: Llama-3.3-70B, TP=1, util UTIL70 (0.9): base70 (the
 #             batch-invariant no-cache baseline) if missing, then T-E2E-04 at
-#             CAP70 (default 1: one 70B chunk is 160 slots, two need a second
-#             server command, D-12) and T-E2E-06, on a 64 GiB kv-sink
+#             CAP70 (default S6_CAP = 64; D-12 does not reproduce on this
+#             server) and T-E2E-06 on a 64G kv-sink namespace
+#             (aerospike-kvsink-bp-70b.conf), L1 L70_L1_GB (60) + windows;
+#             record layout via l2_sizes.py
+#   e2e11p    T-E2E-03/06 for the 70B on the plain path (aerospike-ce 3000)
 #   e2e11c    T-E2E-06 for the 70B on the CE cluster (plain path, E4 records)
 #   flt08     T-FLT-08 (needs FLT08_APPROVED=1: a host change, see
 #             flt08_netem.sh): 5% loss on RoCE packets for 60 s during L2 reads
@@ -70,7 +73,8 @@
 # T-FLT-05 (LMCache server killed mid-retrieve, recompute and fail) is
 # stage5.sh flt05; it needs no second host and is not repeated here.
 # Environment: TREE_HOST / TREE_CTR, TWO_VLLM_UTIL (0.3), SHR02_ROUNDS (3),
-#   SHR02_RF (2), EVT04_L1_GB (3), S6_CAP (64), CAP70 (1), UTIL70 (0.92),
+#   SHR02_RF (2), EVT04_L1_GB (3), S6_CAP (64), CAP70 (S6_CAP), UTIL70 (0.9),
+#   L70_L1_GB (60), KVSINK_CONF_70B,
 #   BASE70 (70B baseline JSON; default $W/base70/bi70.json), FLT08_MODE
 #   (rdma), STOP_GRACE (60, D-18: both servers shut down cleanly),
 #   REAP_WAIT (130, D-23: wait before a new vLLM on a server whose engine died).
@@ -100,9 +104,17 @@ FLT04K_L1_GB=${FLT04K_L1_GB:-4}
 LLAMA70=meta-llama/Llama-3.3-70B-Instruct
 # One 256-token 70B chunk: 80 layers, K and V, 8 KV heads x 128, bf16.
 L70_CHUNK=$((80 * 2 * 8 * 128 * 256 * 2))   # 80 MiB
-CAP70=${CAP70:-1}
-UTIL70=${UTIL70:-0.92}
+# D-12 does not reproduce on the batch-read server: LMCache's default cap.
+CAP70=${CAP70:-$S6_CAP}
+UTIL70=${UTIL70:-0.9}
 BASE70=${BASE70:-$W/base70/bi70.json}
+# General L1 for the 70B (GB): the cold send stores 552 chunks (43.1 GiB) and
+# must stay under the 0.8 eviction watermark, or refused L1 batches never
+# reach L2 (D-25). The two RDMA windows of CAP70 chunks come on top.
+L70_L1_GB=${L70_L1_GB:-60}
+WIN70_GB=$(( (2 * CAP70 * L70_CHUNK + (1 << 30) - 1) >> 30 ))
+KVSINK_CONF_70B=${KVSINK_CONF_70B:-$TREE_HOST/functional/configs/aerospike-kvsink-bp-70b.conf}
+CE_L2_70='--l2-adapter {"type":"aerospike","hosts":"127.0.0.1:3000","namespace":"lmcache","set_name":"kv_chunks"}'
 CLUSTER_HOSTS=127.0.0.1:3300,127.0.0.1:3310,127.0.0.1:3320
 P4=P-exact-10,P-exact-11,P-exact-12,P-exact-13,P-exact-14
 RACE_IDS=$(for i in $(seq 0 14); do printf 'P-exact-%02d,' "$i"; done | sed 's/,$//')
@@ -398,24 +410,62 @@ sec_e2e11() {
       bash $H/run_baseline.sh $LLAMA70 $CB $W/base70 bi70 P-exact,P-ragged,P-shared > $S/base70/session_base70.txt 2>&1
     progress "base70: $(tail -n 1 $S/base70/session_base70.txt); KV cache: $(grep -m1 -oE 'GPU KV cache size: [0-9,]+ tokens' $S/base70/vllm_bi70.log)"
   fi
-  local tag elig over
+  local tag elig over steps sends rargs
   elig=$( { ids P-exact 1 "$CAP70"; ids P-ragged 1 "$CAP70"; } | paste -sd,)
   over=$( { ids P-exact $((CAP70 + 1)) 999; ids P-ragged $((CAP70 + 1)) 999; } | paste -sd,)
   SERVER_FLAGS=$(server_flags "$CAP70" $L70_CHUNK)
   tag=e2e11_04_c$CAP70
-  KVSINK_CONF_FILE=$TREE_HOST/functional/configs/aerospike-kvsink-70b.conf group e2e11 $tag
-  BASES=$BASE70 VLLM_EXTRA="--gpu-memory-utilization $UTIL70" SEND_TIMEOUT=1800 session e2e11 $tag fail \
-    server "vllm model=$LLAMA70" "send name=cold sets=P-exact,P-ragged" restart \
-    "send name=warmelig sets=P-exact,P-ragged ids=$elig stats=1" "send name=warmover sets=P-exact,P-ragged ids=$over stats=1" \
-    "send name=sh_cold sets=P-shared" restart "send name=sh_warm sets=P-shared stats=1"
-  BASES=$BASE70 report e2e11 $tag all "--outcomes=${tag}_warmelig=pipelined" "--require=${tag}_warmelig=pipelined" \
-    cold warmelig warmover sh_cold sh_warm
+  KVSINK_CONF_FILE=$KVSINK_CONF_70B group e2e11 $tag
+  steps=(server "vllm model=$LLAMA70" "send name=cold sets=P-exact,P-ragged stats=1" settle "l2stats name=after_cold"
+    restart "send name=warmelig sets=P-exact,P-ragged ids=$elig stats=1")
+  sends=(cold warmelig)
+  rargs=("--outcomes=${tag}_warmelig=pipelined" "--require=${tag}_warmelig=pipelined"
+    "--outcomes=${tag}_sh_warm=pipelined" "--require=${tag}_sh_warm=pipelined")
+  # At the default cap every prompt (at most 64 chunks) is eligible.
+  [ -n "$over" ] && { steps+=("send name=warmover sets=P-exact,P-ragged ids=$over stats=1"); sends+=(warmover); }
+  steps+=("send name=sh_cold sets=P-shared" restart "send name=sh_warm sets=P-shared stats=1")
+  sends+=(sh_cold sh_warm)
+  BASES=$BASE70 VLLM_EXTRA="--gpu-memory-utilization $UTIL70" SEND_TIMEOUT=1800 \
+    L1_GB_S=$((L70_L1_GB + WIN70_GB)) session e2e11 $tag fail "${steps[@]}"
+  BASES=$BASE70 report e2e11 $tag all "${rargs[@]}" "${sends[@]}"
+  e2e11_sizes $tag $KVSINK_PORT
   progress "e2e11: $(grep -hoE '[^ ]+ fetches layer by layer from L2 adapter [0-9]+, reading records of at most [0-9]+ bytes' $S/e2e11/lmcache_$tag.log | sort -u | head -n 1); \
+$(grep -m1 -oE 'Per-layer staging matches the pipelined fetch plan for all [0-9]+ layers' $S/e2e11/lmcache_$tag.log); \
+$(grep -m1 -oE 'KernelGroupInfo\(layers=[^)]*\)' $S/e2e11/lmcache_$tag.log); \
 KV cache: $(grep -m1 -oE 'GPU KV cache size: [0-9,]+ tokens' $S/e2e11/vllm_${tag}_*.log); \
-kv-sink late completions $(grep -c 'late completion' $KVDIR/asd-kvsink.log 2>/dev/null), region errors $(grep -c 'in error state' $KVDIR/asd-kvsink.log 2>/dev/null)"
-  # The 64 GiB kv-sink server pins 64 GiB of host memory: give the next group
-  # the Stage 3 one.
+L2 after cold: $(grep -oE '"(objects|data_used_bytes)": "?[0-9]+' $S/e2e11/l2stats_${tag}_after_cold.json 2>/dev/null | paste -sd' '); \
+kv-sink late completions $(grep -c 'late completion' $KVDIR/asd-kvsink.log 2>/dev/null), region errors $(grep -c 'in error state' $KVDIR/asd-kvsink.log 2>/dev/null), \
+SERVER_FULL $(grep -c 'SERVER_FULL' $S/e2e11/lmcache_$tag.log)"
+  # The 64G namespace holds host memory: give the next group the 16G one.
   group e2e11 after_70b
+}
+# e2e11_sizes <tag> <L2 port>: record layout of a 64-chunk, a ragged
+# 48-chunk and a P-shared prompt -> $S/e2e11/sizes_<tag>.txt.
+e2e11_sizes() {
+  local p
+  for p in P-exact-15 P-ragged-19 P-shared-00; do
+    docker exec -e MODEL_NAME=$LLAMA70 -e HF_HOME=/work/hf lmc-c python $H/l2_sizes.py --port "$2" --corpus $CB prompt=$p
+  done > $S/e2e11/sizes_$1.txt 2>&1
+  progress "e2e11 sizes ($1): $(grep -E '^(segment 0 bins|chunk 0|P-exact-15)' $S/e2e11/sizes_$1.txt | head -n 3 | paste -sd';' | cut -c1-400)"
+}
+
+# e2e11p: T-E2E-03 and T-E2E-06 for the 70B on the plain path (aerospike-ce on
+# 3000, single node, no pipelining): P-exact-10..15 and P-ragged-14/18/19 cold
+# (L1), restart, L2 hits; P-shared cold (later requests hit the prefix in L1),
+# restart, L2 hits. The set is truncated first (reset).
+sec_e2e11p() {
+  local tag=e2e11p ids
+  ids="$P4,P-exact-15,P-ragged-14,P-ragged-18,P-ragged-19"
+  SERVER_FLAGS=$CE_L2_70
+  BASES=$BASE70 VLLM_EXTRA="--gpu-memory-utilization $UTIL70" SEND_TIMEOUT=1800 L2_PORT_S=3000 \
+    L1_GB_S=$L70_L1_GB session e2e11 $tag fail server reset "vllm model=$LLAMA70" \
+    "send name=cold sets=P-exact,P-ragged ids=$ids stats=1" "send name=sh_cold sets=P-shared" restart \
+    "send name=warm sets=P-exact,P-ragged ids=$ids stats=1" "send name=sh_warm sets=P-shared stats=1"
+  BASES=$BASE70 report e2e11 $tag all "--outcomes=${tag}_warm=not_deferred" "--outcomes=${tag}_sh_warm=not_deferred" \
+    cold sh_cold warm sh_warm
+  e2e11_sizes $tag 3000
+  progress "e2e11p: aerospike-ce traffic during warm: $(docker exec lmc-c python $H/l2_stats.py diff \
+$W/e2e11/l2stats_${tag}_warm_before.json $W/e2e11/l2stats_${tag}_warm_after.json 2>&1 | tail -n 1 | cut -c1-250)"
 }
 
 sec_e2e11c() {
