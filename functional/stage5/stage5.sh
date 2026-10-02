@@ -109,7 +109,8 @@ recomputed requests: $(grep -cE 'recompute|invalid block' $S/flt01/vllm_${tag}_*
 
 # flt05_case <path>:<policy>
 flt05_case() {
-  local path=${1%%:*} policy=${1#*:} lw=true p=$path rargs
+  local path=${1%%:*} policy=${1#*:} lw=true p rargs
+  p=$path
   [ "$path" = plainnolw ] && { lw=false; p=plain; }
   tag=flt05_${path}_$policy
   use_path $p flt05 $tag 64
