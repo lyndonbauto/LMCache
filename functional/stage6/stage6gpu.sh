@@ -168,7 +168,10 @@ windows=${WIN_GB} GB STOP_GRACE=$STOP_GRACE; $(wait_idle)"
 shr01_on() {
   local l2=$1 tag=shr01_$1 rargs=()
   use_l2 "$l2" shr01 "$tag" 1
-  [ "$PIPE" = 1 ] && rargs=("--outcomes=${tag}_b_hit4=pipelined" "--require=${tag}_b_hit4=pipelined")
+  # P-shared prompts are 8 chunks: pipelined at S6_CAP 64 (not_deferred at 4).
+  [ "$PIPE" = 1 ] && rargs=("--outcomes=${tag}_b_hit4=pipelined" "--require=${tag}_b_hit4=pipelined"
+    "--outcomes=${tag}_a_shared=pipelined,not_deferred" "--outcomes=${tag}_b_hitsh=pipelined,not_deferred")
+  [ "$PIPE" = 1 ] && [ "$S6_CAP" -ge 8 ] && rargs+=("--require=${tag}_b_hitsh=pipelined")
   VLLM_EXTRA="--gpu-memory-utilization $TWO_VLLM_UTIL" L1_GB_S=20 session shr01 $tag fail "${TWO_HOSTS[@]}" \
     "send name=a_store sets=P-exact,P-shared ids=$P4" "send name=a_shared sets=P-shared" settle \
     "send name=b_hit4 sets=P-exact ids=$P4 port=8001 stats=1" \
