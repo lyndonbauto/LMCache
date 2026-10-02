@@ -24,7 +24,9 @@
 # (default 100), VLLM_UTIL (0.9), MAX_LEN (131072), STOP_GRACE (60, D-18),
 # L2_PORT (3700), SEND_TIMEOUT (3600), LW_WAIT_TIMEOUT (unset: the connector's
 # lmcache.mp.layerwise_wait_timeout_seconds default, 5 s; a timeout stops
-# vLLM's engine, section 7 / D-24).
+# vLLM's engine, section 7 / D-24), STOP_ON_ENGINE_STOP (0; 1: if vLLM is
+# dead after a point, write engine_stopped_<tag>.txt and skip the remaining
+# steps).
 # Before each point, a dead vLLM is restarted (with a fresh LMCache server).
 set -u
 OUT=$1; TAG=$2; MODE=$3; shift 3
@@ -201,14 +203,22 @@ for step in "$@"; do
   done
   case $verb in
     store) say "store len=$len ids=$ids conc=$conc"
-      send "store_$len" "$len" "$ids" "$conc"; settle
+      send "store_${len}_$ids" "$len" "$ids" "$conc"; settle
       python "$HARNESS/as_info.py" "$L2_PORT" namespace/lmcache > "$OUT/l2stat_${TAG}_store_$len.txt"
       say "store done: $(tr ';' '\n' < "$OUT/l2stat_${TAG}_store_$len.txt" | grep -E '^(objects|data_used_bytes)=' | paste -sd' ')";;
     point) [ -n "$n" ] || n=$(( c > 4 ? c : 4 ))
       ensure_vllm || exit 1
       [ "$CONNECTOR" = 1 ] && { restart_server || exit 1; }
       say "point len=$len c=$c n=$n"
-      send "L${len}_c${c}" "$len" "0-$((n - 1))" "$c" || say "point L${len}_c${c} had errors";;
+      send "L${len}_c${c}" "$len" "0-$((n - 1))" "$c" || say "point L${len}_c${c} had errors"
+      if [ "${STOP_ON_ENGINE_STOP:-0}" = 1 ]; then
+        sleep 5
+        if ! curl -sf http://127.0.0.1:8000/health >/dev/null; then
+          echo "c=$c len=$len" > "$OUT/engine_stopped_$TAG.txt"
+          say "engine stopped at c=$c; skipping the remaining steps"
+          break
+        fi
+      fi;;
     restart) restart_server || exit 1;;
     sleep) sleep "$secs";;
     *) say "unknown step $step"; exit 1;;

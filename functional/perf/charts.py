@@ -5,9 +5,13 @@ Writes, under ``--out``:
 
 - ``ttft_L<len>.png``: TTFT p50 vs concurrency, one line per mode;
 - ``total_L<len>.png``: total latency p50 vs concurrency, one line per mode;
-- ``ttft_vs_length_c1.png``: TTFT p50 vs prompt length at concurrency 1.
+- ``ttft_vs_length_c1.png`` and ``ttft_vs_length_c32.png``: TTFT p50 vs
+  prompt length at concurrency 1 and 32;
+- ``speedup_c1.png``: nocache TTFT p50 / mode TTFT p50 at concurrency 1, by
+  prompt length, for each cached mode.
 
-INVALID points are drawn as hollow red-edged markers and left out of the line.
+INVALID points are drawn as hollow red-edged markers and left out of the line;
+rows that were not run (empty metrics) are skipped.
 p10-p90 bands are not drawn (n is 4 at low concurrency); the p90 is in the CSV.
 
 Usage::
@@ -26,6 +30,7 @@ import matplotlib
 matplotlib.use("Agg")
 # Third Party
 import matplotlib.pyplot as plt  # noqa: E402
+from matplotlib.ticker import FuncFormatter  # noqa: E402
 
 STYLE = {
     "nocache": {"color": "#555555", "marker": "o", "label": "no cache (recompute)"},
@@ -39,25 +44,55 @@ STYLE = {
         "marker": "^",
         "label": "Aerospike disk, layer-by-layer (Soft-RoCE, default 5 s wait)",
     },
-    "lw_wait600": {
-        "color": "#ff7f0e",
-        "marker": "v",
-        "label": "Aerospike disk, layer-by-layer (Soft-RoCE, 600 s wait)",
-    },
 }
+WAIT_COLORS = ("#ff7f0e", "#9467bd", "#8c564b", "#e377c2")
 LABEL = {8192: "8k", 16384: "16k", 32768: "32k", 65536: "64k", 130816: "128k"}
 
 
+def add_wait_styles(modes: set[str]) -> None:
+    """Add a STYLE entry for every lw_wait<secs> mode present."""
+    waits = sorted(int(m[len("lw_wait") :]) for m in modes if m.startswith("lw_wait"))
+    for i, w in enumerate(waits):
+        STYLE[f"lw_wait{w}"] = {
+            "color": WAIT_COLORS[i % len(WAIT_COLORS)],
+            "marker": "v",
+            "label": f"Aerospike disk, layer-by-layer (Soft-RoCE, {w} s wait)",
+        }
+
+
 def load(path: str) -> list[dict]:
-    """Return results.csv rows with numeric fields converted."""
+    """Return results.csv rows that have metrics, numeric fields converted."""
     with open(path) as f:
-        rows = list(csv.DictReader(f))
+        rows = [r for r in csv.DictReader(f) if r["ttft_p50"] != ""]
     for r in rows:
         for k in ("length", "concurrency", "n", "valid"):
             r[k] = int(r[k])
         for k in ("ttft_p50", "total_p50", "ttft_p90", "total_p90"):
             r[k] = float(r[k])
     return rows
+
+
+def speedup_rows(rows: list[dict], conc: int) -> list[dict]:
+    """Return one row per (cached mode, length) with ``speedup`` at ``conc``.
+
+    The speedup is nocache TTFT p50 / mode TTFT p50; a row is valid only if
+    both points are.
+    """
+    base = {
+        r["length"]: r
+        for r in rows
+        if r["mode"] == "nocache" and r["concurrency"] == conc
+    }
+    out: list[dict] = []
+    for r in rows:
+        b = base.get(r["length"])
+        if r["mode"] == "nocache" or r["concurrency"] != conc or b is None:
+            continue
+        s = dict(r)
+        s["speedup"] = b["ttft_p50"] / r["ttft_p50"]
+        s["valid"] = int(r["valid"] and b["valid"])
+        out.append(s)
+    return out
 
 
 def line_chart(
@@ -68,6 +103,7 @@ def line_chart(
     xlabel: str,
     path: str,
     xticks: dict[int, str],
+    ylabel: str = "",
 ) -> None:
     """Plot ``ykey`` against ``xkey`` per mode and save a small PNG."""
     fig, ax = plt.subplots(figsize=(6.4, 4.8), dpi=100)
@@ -97,9 +133,14 @@ def line_chart(
     ax.set_xticks(list(xticks))
     ax.set_xticklabels(list(xticks.values()))
     ax.set_yscale("log")
+    plain = FuncFormatter(lambda v, _: f"{v:g}")
+    ax.yaxis.set_major_formatter(plain)
+    ax.yaxis.set_minor_formatter(FuncFormatter(lambda v, _: ""))
     ax.set_xlabel(xlabel)
     what = {"ttft_p50": "TTFT", "total_p50": "total latency"}.get(ykey, ykey)
-    ax.set_ylabel(f"{what} p50 (s, log scale)")
+    ax.set_ylabel(ylabel or f"{what} p50 (s, log scale)")
+    if ykey == "speedup":
+        ax.axhline(1.0, color="black", linewidth=0.8, linestyle="--")
     ax.set_title(title, fontsize=10)
     ax.grid(True, which="both", alpha=0.3)
     ax.legend(fontsize=7, loc="upper center", bbox_to_anchor=(0.5, -0.17), ncol=2)
@@ -118,6 +159,7 @@ def main() -> None:
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     rows = load(args.csv)
+    add_wait_styles({r["mode"] for r in rows})
     sub = "Llama-3.1-8B, MI300X TP=1, 128 output tokens"
     for length in sorted({r["length"] for r in rows}):
         lr = [r for r in rows if r["length"] == length]
@@ -141,17 +183,32 @@ def main() -> None:
             os.path.join(args.out, f"total_L{length}.png"),
             concs,
         )
-    c1 = [r for r in rows if r["concurrency"] == 1]
-    if c1:
-        lengths = {n: LABEL.get(n, str(n)) for n in sorted({r["length"] for r in c1})}
+    for conc in (1, 32):
+        cr = [r for r in rows if r["concurrency"] == conc]
+        if not cr:
+            continue
+        lengths = {n: LABEL.get(n, str(n)) for n in sorted({r["length"] for r in cr})}
         line_chart(
-            c1,
+            cr,
             "length",
             "ttft_p50",
-            f"TTFT vs prompt length at concurrency 1\n{sub}",
+            f"TTFT vs prompt length at concurrency {conc}\n{sub}",
             "prompt length (tokens)",
-            os.path.join(args.out, "ttft_vs_length_c1.png"),
+            os.path.join(args.out, f"ttft_vs_length_c{conc}.png"),
             lengths,
+        )
+    sp = speedup_rows(rows, 1)
+    if sp:
+        lengths = {n: LABEL.get(n, str(n)) for n in sorted({r["length"] for r in sp})}
+        line_chart(
+            sp,
+            "length",
+            "speedup",
+            f"TTFT speedup vs no cache at concurrency 1 (above 1 = faster)\n{sub}",
+            "prompt length (tokens)",
+            os.path.join(args.out, "speedup_c1.png"),
+            lengths,
+            ylabel="nocache TTFT p50 / mode TTFT p50 (log scale)",
         )
     print(f"charts in {args.out}: {sorted(os.listdir(args.out))}")
 

@@ -6,18 +6,21 @@ Reads, under ``--dir`` (``/root/lmc-work/functional/perf`` on the box):
 - ``nocache/nocache_L<len>_c<c>.json``          (mode nocache)
 - ``L<len>_aon/L<len>_aon_L<len>_c<c>.json``    (mode aon)
 - ``L<len>_lw/L<len>_lw_L<len>_c<c>.json``      (mode lw: connector defaults)
-- ``L<len>_lwwait/...``                         (mode lw_wait600: layerwise
-  wait timeout raised to 600 s)
+- ``L<len>_lwwait<secs>/...``                   (mode lw_wait<secs>: layerwise
+  wait timeout raised to <secs>; a bare ``L<len>_lwwait`` is phase 1's 600 s)
 - ``<session>/outcomes_<session>_L<len>_c<c>.txt`` (``outcome:count,...``)
+- ``<session>/engine_stopped_<session>.txt`` (``c=<c> ...``): the session
+  stopped after vLLM's engine stopped at that concurrency
 
 and writes ``results.csv`` (one row per point) and ``summary_tables.md``
 (per length: rows = concurrency, columns = mode x {TTFT p50, total p50},
-plus the aon and lw TTFT speedups over nocache).
+plus each cached mode's TTFT speedup over nocache).
 
 A point is INVALID (``valid=0``, reason in ``note``) when a request failed,
 a request generated other than ``max_tokens`` tokens, or (cached modes) vLLM's
 external prefix cache hit tokens are under 95% of ``n * (length - 1)`` (vLLM
-always computes the last prompt token itself).
+always computes the last prompt token itself). Concurrencies after an engine
+stop get a row with empty metrics, ``valid=0`` and a "not run" note.
 
 Percentiles are NumPy's linear interpolation over the point's requests.
 
@@ -36,7 +39,7 @@ import re
 # Third Party
 import numpy as np
 
-MODES = ("nocache", "aon", "lw", "lw_wait600")
+CONCS = (1, 2, 4, 8, 16, 32)
 FIELDS = [
     "length",
     "concurrency",
@@ -57,6 +60,26 @@ FIELDS = [
     "note",
 ]
 POINT_RE = re.compile(r"_L(\d+)_c(\d+)\.json$")
+SESSION_RE = re.compile(r"L(\d+)_(aon|lw|lwwait)(\d*)")
+
+
+def mode_key(mode: str) -> tuple[int, int]:
+    """Sort key: nocache, aon, lw, then lw_wait<secs> by wait."""
+    if mode.startswith("lw_wait"):
+        return (3, int(mode[len("lw_wait") :]))
+    return ({"nocache": 0, "aon": 1, "lw": 2}[mode], 0)
+
+
+def session_mode(sess: str) -> str:
+    """Return the mode of a session directory name, or "" if it is not one."""
+    if sess == "nocache":
+        return "nocache"
+    m = SESSION_RE.fullmatch(sess)
+    if not m:
+        return ""
+    if m.group(2) == "lwwait":
+        return f"lw_wait{m.group(3) or 600}"
+    return "" if m.group(3) else m.group(2)
 
 
 def point_files(root: str) -> list[tuple[str, str, str]]:
@@ -64,13 +87,8 @@ def point_files(root: str) -> list[tuple[str, str, str]]:
     out: list[tuple[str, str, str]] = []
     for sess in sorted(os.listdir(root)):
         d = os.path.join(root, sess)
-        if not os.path.isdir(d) or sess == "superseded":
-            continue
-        if sess == "nocache":
-            mode = "nocache"
-        elif re.fullmatch(r"L\d+_(aon|lw|lwwait)", sess):
-            mode = {"lwwait": "lw_wait600"}.get(sess.split("_")[1], sess.split("_")[1])
-        else:
+        mode = session_mode(sess)
+        if not os.path.isdir(d) or not mode:
             continue
         for f in sorted(os.listdir(d)):
             if f.startswith(sess + "_L") and POINT_RE.search(f):
@@ -78,11 +96,46 @@ def point_files(root: str) -> list[tuple[str, str, str]]:
     return out
 
 
+def not_run_rows(root: str, rows: list[dict]) -> list[dict]:
+    """Return rows for concurrencies skipped after an engine stop.
+
+    Args:
+        root: The results directory.
+        rows: The measured rows (to skip concurrencies that have a point).
+
+    Returns:
+        One row per skipped (length, concurrency, mode), metrics empty.
+    """
+    have = {(r["length"], r["concurrency"], r["mode"]) for r in rows}
+    out: list[dict] = []
+    for sess in sorted(os.listdir(root)):
+        mode = session_mode(sess)
+        f = os.path.join(root, sess, f"engine_stopped_{sess}.txt")
+        if not mode or not os.path.exists(f):
+            continue
+        with open(f) as fh:
+            stop_c = int(re.search(r"c=(\d+)", fh.read()).group(1))
+        length = int(sess.split("_")[0][1:])
+        wait = "default 5 s wait" if mode == "lw" else f"{mode} wait"
+        for c in CONCS:
+            if c > stop_c and (length, c, mode) not in have:
+                row: dict = {k: "" for k in FIELDS}
+                row.update(
+                    length=length,
+                    concurrency=c,
+                    mode=mode,
+                    valid=0,
+                    note=f"not run: engine stopped at c={stop_c} ({wait})",
+                )
+                out.append(row)
+    return out
+
+
 def summarize(mode: str, sess_dir: str, path: str) -> dict[str, str | int | float]:
     """Return one results.csv row for a point file.
 
     Args:
-        mode: nocache, aon or lw.
+        mode: nocache, aon, lw or lw_wait<secs>.
         sess_dir: The session directory holding the point's outcome file.
         path: The point's JSON (perf_client.py output).
 
@@ -150,11 +203,7 @@ def tables(rows: list[dict]) -> str:
     out: list[str] = []
     for length in sorted({r["length"] for r in rows}):
         out.append(f"### {length} tokens\n")
-        modes = [
-            m
-            for m in MODES
-            if any(r["length"] == length and r["mode"] == m for r in rows)
-        ]
+        modes = sorted({r["mode"] for r in rows if r["length"] == length}, key=mode_key)
         head = ["c"] + [f"{m} TTFT" for m in modes] + [f"{m} total" for m in modes]
         head += [f"{m} TTFT speedup" for m in modes if m != "nocache"]
         out.append("| " + " | ".join(head) + " |")
@@ -166,6 +215,8 @@ def tables(rows: list[dict]) -> str:
                     r = by.get((length, c, m))
                     if r is None:
                         cells.append("-")
+                    elif r[key] == "":
+                        cells.append("not run")
                     else:
                         cells.append(
                             f"{r[key]:.3f}" + ("" if r["valid"] else " (INVALID)")
@@ -190,7 +241,8 @@ def main() -> None:
     ap.add_argument("--dir", default="/root/lmc-work/functional/perf")
     args = ap.parse_args()
     rows = [summarize(*t) for t in point_files(args.dir)]
-    rows.sort(key=lambda r: (r["length"], MODES.index(r["mode"]), r["concurrency"]))
+    rows += not_run_rows(args.dir, rows)
+    rows.sort(key=lambda r: (r["length"], mode_key(r["mode"]), r["concurrency"]))
     with open(os.path.join(args.dir, "results.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=FIELDS)
         w.writeheader()
