@@ -21,8 +21,12 @@
 #   flt05   T-FLT-05: SIGKILL the LMCache server right after a retrieve of
 #           P-exact-15 (64 chunks) starts. Cases FLT05_CASES (default
 #           "pipe:recompute pipe:fail plain:recompute plain:fail
-#           plainnolw:recompute"): pipe uses cap 64 so the victim is
-#           pipelined; plainnolw is the layerwise-off control. Under recompute
+#           plainnolw:recompute"), each <path>:<policy>[:<when>[:<delay>]]:
+#           when = retrieve_start or lookup_start (kill during the
+#           lookup/prefetch instead), delay = seconds between the log line
+#           and the SIGKILL (later in the retrieve); pipe uses cap 64 so the victim
+#           is pipelined; plainnolw is the layerwise-off control. FLT05_SUFFIX
+#           tags repeats; a wedged engine gets its stacks captured. Under recompute
 #           the request recomputes and is equal (a layerwise failure
 #           mid-forward may hit D-17, compared against D17-NARROWING.md); under
 #           fail it errors cleanly. vLLM should stay up (an engine stop on the
@@ -107,21 +111,46 @@ recomputed requests: $(grep -cE 'recompute|invalid block' $S/flt01/vllm_${tag}_*
   done
 }
 
-# flt05_case <path>:<policy>
+# flt05_hang_watch <tag>: if the victim is still waiting 30 s after the
+# SIGKILL while vLLM answers /health (a wedged engine, D-21), capture the
+# EngineCore's Python stacks into flt05/pystacks_<tag>.txt.
+flt05_hang_watch() {
+  local f=$S/flt05/session_$1.txt out=$S/flt05/pystacks_$1.txt pid cpid
+  for _ in $(seq 900); do grep -q 'SIGKILL to the LMCache' "$f" 2>/dev/null && break; sleep 1; done
+  sleep 30
+  grep -q 'background send .* exited' "$f" && return 0
+  curl -sf -m 3 http://127.0.0.1:8000/health >/dev/null || return 0
+  pid=$(pgrep -f '^VLLM::EngineCore' | head -n 1)
+  [ -n "$pid" ] || return 0
+  cpid=$(awk '/^NSpid/ {print $NF}' /proc/$pid/status)
+  { echo "victim still waiting 30 s after the SIGKILL, vLLM /health ok; EngineCore host pid $pid (container $cpid) $(date -u +%T)"
+    nsenter -t "$pid" -m -p -- "$PY314" -I $H/pystacks.py "$cpid"; } > "$out" 2>&1
+  progress "!! $1: vLLM engine wedged after the SIGKILL (stacks in $out)"
+}
+# flt05_case <path>:<policy>[:<when>]: when = retrieve_start (default) or
+# lookup_start (LMCache killed during the lookup/prefetch, before the
+# forward pass).
 flt05_case() {
-  local path=${1%%:*} policy=${1#*:} lw=true p rargs
+  local path policy when delay lw=true p rargs delay_step=()
+  IFS=: read -r path policy when delay <<< "$1"
+  when=${when:-retrieve_start}
   p=$path
   [ "$path" = plainnolw ] && { lw=false; p=plain; }
   tag=flt05_${path}_$policy
+  [ "$when" = retrieve_start ] || tag=${tag}_${when%_start}
+  [ -n "$delay" ] && { tag=${tag}_d${delay//./}; delay_step=("sleep secs=$delay"); }
+  [ -n "${FLT05_SUFFIX:-}" ] && tag=${tag}_$FLT05_SUFFIX
   use_path $p flt05 $tag 64
+  flt05_hang_watch $tag & local hw=$!
   # server_up comes before vllm_ensure: a vLLM started while LMCache is down
   # would wait for a registration; with vLLM alive, server_up waits for its
   # re-registration (the store send primed its heartbeat).
-  LW_S=$lw SEND_TIMEOUT=300 session flt05 $tag $policy server "vllm model=$LLAMA" \
+  LW_S=$lw SEND_TIMEOUT=${FLT05_SEND_TIMEOUT:-150} session flt05 $tag $policy server "vllm model=$LLAMA" \
     "send name=store sets=P-exact ids=P-exact-15,P-exact-10" settle restart \
-    "send name=victim sets=P-exact ids=P-exact-15 bg=1 errors=1" "wait_log what=retrieve_start timeout=120" \
-    kill9 wait_bg "vllm_check name=afterkill" server_up "vllm_ensure model=$LLAMA" \
+    "send name=victim sets=P-exact ids=P-exact-15 bg=1 errors=1" "wait_log what=$when timeout=120" \
+    "${delay_step[@]}" kill9 wait_bg "vllm_check name=afterkill" server_up "vllm_ensure model=$LLAMA" \
     "send name=after sets=P-exact ids=P-exact-10 errors=1" "vllm_check name=end"
+  kill $hw 2>/dev/null
   rargs=("--no-hit-check=${tag}_victim")
   [ $p = pipe ] && rargs+=("--outcomes=${tag}_after=pipelined,not_deferred")
   [ $policy = fail ] && rargs+=("--allow-error=${tag}_victim")
