@@ -15,6 +15,11 @@ generator seeded with ``L * 1009 + i``, with the first token replaced by a
 value unique to ``(L, i)``, so no two prompts share a prefix. The same
 ``(L, i)`` always gives the same prompt, in every mode.
 
+With ``--prefix-length P`` (partial hits), prompt ``i`` is prompt ``i`` of
+length ``P`` (as stored by an earlier point of length ``P``) followed by
+``--length`` suffix tokens from a generator seeded with
+``7_000_000 + P * 1009 + i``, which no stored prompt contains.
+
 Prometheus counters from ``--metrics-urls`` are scraped before and after the
 point and their deltas stored (vLLM's external prefix cache hit tokens,
 LMCache's deferred retrieves by outcome).
@@ -27,7 +32,8 @@ Usage::
 
 Output JSON schema::
 
-    {"tag": str, "length": int, "concurrency": int, "n": int, "wall_s": float,
+    {"tag": str, "length": int, "prefix_length": int, "concurrency": int,
+     "n": int, "wall_s": float,
      "requests": [{"id": int, "ttft_s": float, "total_s": float,
                    "out_tokens": int, "error": str}],
      "metrics_delta": {"<metric>{<labels>}": float}}
@@ -46,7 +52,7 @@ import aiohttp
 import numpy as np
 
 MODEL = "meta-llama/Llama-3.1-8B-Instruct"
-LENGTH_INDEX = {8192: 0, 16384: 1, 32768: 2, 65536: 3, 130816: 4}
+LENGTH_INDEX = {8192: 0, 16384: 1, 32768: 2, 65536: 3, 130816: 4, 2048: 5}
 METRIC_PREFIXES = (
     "vllm:external_prefix_cache_hits_total",
     "vllm:external_prefix_cache_queries_total",
@@ -80,6 +86,25 @@ def prompt_tokens(length: int, idx: int) -> list[int]:
     toks = rng.integers(1000, 128000, size=length)
     toks[0] = 500 + LENGTH_INDEX[length] * 64 + idx
     return [int(t) for t in toks]
+
+
+def partial_prompt_tokens(prefix: int, suffix: int, idx: int) -> list[int]:
+    """Return prompt ``idx`` of length ``prefix`` followed by an uncached suffix.
+
+    Args:
+        prefix: Prefix length; a key of ``LENGTH_INDEX``.
+        suffix: Number of suffix tokens.
+        idx: Prompt index, 0 to 63.
+
+    Returns:
+        ``prefix + suffix`` token IDs.
+
+    Raises:
+        ValueError: As ``prompt_tokens`` for the prefix.
+    """
+    rng = np.random.default_rng(7_000_000 + prefix * 1009 + idx)
+    tail = rng.integers(1000, 128000, size=suffix)
+    return prompt_tokens(prefix, idx) + [int(t) for t in tail]
 
 
 def parse_ids(spec: str) -> list[int]:
@@ -207,7 +232,13 @@ async def run(args: argparse.Namespace) -> dict:
             res = await one_request(session, args.url, prompt, 16, args.timeout)
             return {"tag": args.tag, "warmup": args.warmup, "requests": [res]}
         ids = parse_ids(args.ids)
-        prompts = {i: prompt_tokens(args.length, i) for i in ids}
+        if args.prefix_length:
+            prompts = {
+                i: partial_prompt_tokens(args.prefix_length, args.length, i)
+                for i in ids
+            }
+        else:
+            prompts = {i: prompt_tokens(args.length, i) for i in ids}
         queue: asyncio.Queue[int] = asyncio.Queue()
         for i in ids:
             queue.put_nowait(i)
@@ -236,6 +267,7 @@ async def run(args: argparse.Namespace) -> dict:
         return {
             "tag": args.tag,
             "length": args.length,
+            "prefix_length": args.prefix_length,
             "concurrency": args.concurrency,
             "n": len(ids),
             "ids": ids,
@@ -253,6 +285,12 @@ def main() -> None:
     )
     p.add_argument("--url", default="http://127.0.0.1:8000")
     p.add_argument("--length", type=int, default=8192)
+    p.add_argument(
+        "--prefix-length",
+        type=int,
+        default=0,
+        help="prepend the stored prompt of this length (--length = new suffix)",
+    )
     p.add_argument("--ids", default="0-3")
     p.add_argument("--concurrency", type=int, default=1)
     p.add_argument("--max-tokens", type=int, default=128)

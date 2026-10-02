@@ -32,6 +32,8 @@
 #              store check and data file deletion
 #   fio        O_DIRECT read and write throughput of the data disk(s) with
 #              fio in the kv-sink container (FIO_DIRS)
+#   exp_start, exp_aon, exp_tcplw, exp_nocache, exp_lw, exp_timeline, exp_stop
+#              the lw investigation experiments (LW-EXPERIMENTS.md)
 #   smoke      a short end-to-end check at 8k (2 prompts): store, aon point,
 #              lw point; validates the device namespace and shared records
 #   smoke2     cached2's 128k setup with one prompt: store, aon c=1 n=1, lw
@@ -298,6 +300,38 @@ sec_fio() {
     progress "fio $d (O_DIRECT, 32 GiB file): $(grep -E '^ *(READ|WRITE): bw=' $S/fio/fio$tag.txt | sed -E 's/^ *//; s/, io=.*//' | paste -sd';')"
   done
 }
+# lw investigation experiments (LW-INVESTIGATION.md section 7; LW-EXPERIMENTS.md),
+# 8k prompts and partial hits on one data file in DATA_DIR. Sessions E_<mode>.
+# exp_start / exp_stop bracket the data file; exp_aon stores the 8k and 2k
+# prefixes (prompts 0-3) and must run first.
+EXP_FULL=("point len=8192 c=1" "point len=8192 c=4")
+EXP_PART=("point pre=2048 len=8192 c=1" "point pre=2048 len=8192 c=4"
+  "point pre=8192 len=8192 c=1" "point pre=8192 len=8192 c=4")
+sec_exp_start() { FS_PCT=200 aero_start 8192; }
+sec_exp_aon() {
+  session E_aon aon "$L1_GEN_GB" "$AON_L2" "store len=8192 ids=0-3 conc=4" "store len=2048 ids=0-3 conc=4" \
+    "${EXP_FULL[@]}" "${EXP_PART[@]}"
+  store_check E_aon 8192 4
+}
+# E2: layerwise on, plain TCP L2 path (no --pipelined-fetch, so nothing is
+# deferred).
+sec_exp_tcplw() { session E_tcplw lw "$L1_GEN_GB" "$AON_L2" "${EXP_FULL[@]}" "${EXP_PART[@]}"; }
+sec_exp_nocache() { session E_nocache nocache 1 "" "${EXP_FULL[@]}" "${EXP_PART[@]}"; }
+# E4: lw over Soft-RoCE, default 5 s wait, partial hits only (full hits are
+# phase 1's L8192_lw); stops at the first engine stop.
+sec_exp_lw() { STOP_ON_ENGINE_STOP=1 session E_lw lw $((L1_GEN_GB + WIN_GB)) "$LW_L2" "${EXP_PART[@]}"; }
+# E3: one lw c=1 point at 8k (n=4) with asd's threads sampled every 0.2 s.
+# The per-layer timestamps need a local debug line in pump.py on the box,
+# applied and reverted outside this script (never committed).
+sec_exp_timeline() {
+  mkdir -p $S/E_timeline
+  local pid; pid=$(docker top "$KVSINK_CTR" -eo pid,comm | awk '$2=="asd"{print $1}')
+  ( top -H -b -d 0.2 -n 2400 -w 200 -p "$pid" | awk '/^top -/{n=0} {n++} n<=16' > $S/E_timeline/top_asd_threads.txt 2>&1 ) &
+  local toploop=$!
+  session E_timeline lw $((L1_GEN_GB + WIN_GB)) "$LW_L2" "point len=8192 c=1 n=4"
+  kill "$toploop" 2>/dev/null; pkill -P "$toploop" 2>/dev/null
+}
+sec_exp_stop() { aero_stop_delete; }
 sec_idle() { progress "idle: $(wait_idle)"; }
 
 mkdir -p $S

@@ -12,7 +12,11 @@
 # Steps (one argument each; words after the verb are key=value):
 #   store len=<L> ids=<a-b> conc=<c>   send prompts once (not a measurement),
 #                                      then wait until L2 writes stop
-#   point len=<L> c=<c> [n=<n>]        one measurement: n = max(4, c) prompts
+#   point len=<L> c=<c> [n=<n>] [pre=<P>]
+#                                      (pre: partial hit, the stored prompt of
+#                                      length P plus L new tokens; name
+#                                      P<P>_L<L>_c<c>)
+#                                      one measurement: n = max(4, c) prompts
 #                                      0..n-1, c in flight. In aon/lw the
 #                                      LMCache server is restarted first (L1
 #                                      empty, every hit from L2), vLLM must
@@ -172,12 +176,12 @@ metrics_urls() {
   if [ "$CONNECTOR" = 1 ]; then echo http://127.0.0.1:8000/metrics,http://127.0.0.1:8080/metrics
   else echo http://127.0.0.1:8000/metrics; fi
 }
-# send <name> <len> <ids> <conc>
+# send <name> <len> <ids> <conc> [prefix-len]
 send() {
-  local name=$1 len=$2 ids=$3 conc=$4 mark=0
+  local name=$1 len=$2 ids=$3 conc=$4 pre=${5:-0} mark=0
   [ -f "$LOG" ] && mark=$(wc -l < "$LOG")
   echo "$mark" > "$OUT/logmark_${TAG}_$name.txt"
-  python "$HERE/perf_client.py" --length "$len" --ids "$ids" --concurrency "$conc" \
+  python "$HERE/perf_client.py" --length "$len" --prefix-length "$pre" --ids "$ids" --concurrency "$conc" \
     --timeout "${SEND_TIMEOUT:-3600}" --metrics-urls "$(metrics_urls)" --tag "${TAG}_$name" \
     --out "$OUT/${TAG}_$name.json"
   local rc=$?
@@ -196,9 +200,10 @@ start_vllm || exit 1
 warm "after vLLM start" 600 || exit 1
 for step in "$@"; do
   read -r verb rest <<< "$step"
-  len=8192; ids=0-31; conc=8; c=1; n=""
+  len=8192; ids=0-31; conc=8; c=1; n=""; pre=0
   for kv in $rest; do
     case $kv in len=*) len=${kv#len=};; ids=*) ids=${kv#ids=};; conc=*) conc=${kv#conc=};;
+      pre=*) pre=${kv#pre=};;
       c=*) c=${kv#c=};; n=*) n=${kv#n=};; secs=*) secs=${kv#secs=};; esac
   done
   case $verb in
@@ -209,8 +214,9 @@ for step in "$@"; do
     point) [ -n "$n" ] || n=$(( c > 4 ? c : 4 ))
       ensure_vllm || exit 1
       [ "$CONNECTOR" = 1 ] && { restart_server || exit 1; }
-      say "point len=$len c=$c n=$n"
-      send "L${len}_c${c}" "$len" "0-$((n - 1))" "$c" || say "point L${len}_c${c} had errors"
+      pname="L${len}_c${c}"; [ "$pre" -gt 0 ] && pname="P${pre}_$pname"
+      say "point $pname len=$len pre=$pre c=$c n=$n"
+      send "$pname" "$len" "0-$((n - 1))" "$c" "$pre" || say "point $pname had errors"
       if [ "${STOP_ON_ENGINE_STOP:-0}" = 1 ]; then
         sleep 5
         if ! curl -sf http://127.0.0.1:8000/health >/dev/null; then
