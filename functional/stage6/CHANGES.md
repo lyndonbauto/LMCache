@@ -14,3 +14,15 @@ GPU or on ports 8000/6555. `aerospike-ce` (3000-3003), `lmc-b` and
 | Per-port builds of the server branch's `examples/kv-sink/kvsink_client` (warm-up) | `/root/lmc-work/aero-cluster/kvsink/kvsink_client_build/` | Same (test tooling) | Kept |
 | Host-side control daemon so tests in `lmc-c` (no docker) can kill/restart nodes; a bash loop reading request files | `functional/harness/cluster_ctl_daemon.sh`, requests in `/root/lmc-work/aero-cluster/ctl/` | Same (test tooling) | Stopped (`touch /root/lmc-work/aero-cluster/ctl/stop`) |
 | Test-only `kv_sink_fanout_probe` binary built in the box clone's git-ignored RDMA build dir | `/root/lmc-work/LMCache-cpu/tests/v1/distributed/rdma/build/` | Same (test tooling) | Kept |
+
+## GPU half, part A (gpu-stage6a, 2026-10-02)
+
+No host change. Only Aerospike containers on 127.0.0.1 were started and stopped, as
+the work brief allows. No packages were installed; ufw, sshd, `rdma_rxe` and `rxe0`
+were not touched; `lmc-b`, `lmc-d`, `lmc-newstack` and `aero-kvsink` were not touched.
+
+| Change | Where | Approved by | State left |
+|---|---|---|---|
+| `aero-n1..3` (CE cluster) wiped and started per session at RF 1 or 2; nodes SIGKILLed / restarted by `flt02/03/04` | `functional/harness/cluster.sh` | Work brief (Aerospike containers on 127.0.0.1) | Stopped |
+| kv-sink `asd` in `aero-kvsink-bp` (127.0.0.1:3700-3703) restarted before each kv-sink session and once inside `flt04k` | `functional/harness/kvsink_server.sh` via `kvsink_bp_env.sh` | Same | asd stopped |
+| Second LMCache server (127.0.0.1:6556, HTTP 8081, Prometheus 9091) and second vLLM (127.0.0.1:8001) in `lmc-c`; every listener check passed | `functional/harness/run_steps.sh` | Work brief (services on 127.0.0.1) | Stopped |
