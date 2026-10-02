@@ -8,6 +8,8 @@ product change (the box tree was at `704a50a3` at the start; product code last c
 |---|---|
 | Host | DigitalOcean MI300X droplet, 1x MI300X (gfx942, 192 GB), 20 vCPU, 235 GiB RAM, Ubuntu 24.04.4 LTS, kernel `6.8.0-138-generic`, MLNX OFED 24.10 IB core |
 | Boot disk (Aerospike data) | `/dev/vda` 720 GB virtio disk (`/dev/vda1` ext4 on `/`), scheduler `mq-deadline`; the droplet's network-attached virtual disk, not a local NVMe |
+| Scratch disk (Aerospike data, phase 2: 32k-128k) | `/dev/vdc` 5 TB DigitalOcean scratch volume (virtual, virtio), `/dev/vdc1` ext4 mounted at `/mnt/scratch` by the host owner (`functional/HOST-CHANGES.md`, 9a069f71); data file `/mnt/scratch/perf-aero/lmcache.dat` |
+| Disk throughput (fio 3.x in `aero-kvsink-bp`, O_DIRECT, libaio, 32 GiB file, 30 s) | `/mnt/scratch`: write 1 MiB QD32 19.9 GiB/s, read 1 MiB QD32 39.4 GiB/s, random read 512 KiB 4 jobs x QD32 31.1 GiB/s. Boot disk: 4.4 GiB/s, 11.4 GiB/s, 8.8 GiB/s (`fio/` on the box) |
 | ROCm / HIP / torch / vLLM | ROCm 10.0.0 (amdgpu 6.19.14), HIP `7.15.26333`, torch `2.12.0+rocm10.0.0`, vLLM `0.27.1.dev5+gf46a9dfe2.d20260827` (ROCm) |
 | Container | `lmc-c`, image `lmcache-rocm:day1` (`sha256:50c62263906e…`) |
 | LMCache | `prototype-stage1`, version `0.4.6.dev1038`, native extensions built with HIP, Aerospike and Aerospike RDMA against client `523d51ea` (by `gpu-newstack-s3`; not rebuilt) |
@@ -38,3 +40,17 @@ product change (the box tree was at `704a50a3` at the start; product code last c
 | L1 (general) | 100 GB, so the 32 GiB (8k) or 64 GiB (16k) store pass stays under the 0.8 eviction watermark (D-25) |
 | Cached point procedure | Per length: store all 32 prompts once (aon session, 8 in flight), wait for L2 writes to settle, check the record count (65 records per chunk). Then, per mode and per point: restart the LMCache server (`STOP_GRACE 60`, D-18), so L1 is empty and every hit is read from Aerospike's disk; wait for re-registration; send the point. vLLM is restarted between aon and lw (with a fresh LMCache server, so the D-23 reap does not apply). `lw_wait600` runs in a later session per length: a fresh device file, an aon store-only pass (record count checked again), then the six lw points |
 | Logging | `LMCACHE_LOG_LEVEL=DEBUG` in aon and lw (the per-retrieve `pipelined_outcome` line is DEBUG) |
+
+## Phase 2 run definitions (32k, 64k, 128k cached; `perf.sh cached2:<len>`)
+
+Everything above applies, except:
+
+| Item | Value |
+|---|---|
+| Data file | `/mnt/scratch/perf-aero/lmcache.dat`, same namespace stanza as phase 1 (`direct-files true`, `read-page-cache false`, `post-write-cache 0`, `max-write-cache 8G`); `filesize` 256G / 512G / 1022G for 32k / 64k / 128k (32 prompts x KV x 2.0, so the full store uses about 50% of the file, under Aerospike's default `stop-writes-used-pct 70`; the first 32k run at 1.4x hit stop-writes and is in `superseded/`) |
+| Store pass | One data file per length, stored once and read by all three cached modes. Prompts go in batches of at most 64 GiB of KV (16 / 8 / 4 prompts at 32k / 64k / 128k, all in flight), with an L2 settle and an LMCache restart (empty L1) after each, so no burst exceeds L1's headroom (D-25). Record count and `DEVICE_OVERLOAD` (D-26) checked before measuring |
+| L1 (aon) | 180 GB, `--no-l1-use-lazy` (host has 235 GiB; lowest available memory seen is in each session's `hostmem.txt` and `progress.log`) |
+| L1 and windows (lw) | 140 GB general plus the windows. `--pipelined-max-chunks` = the prompt's chunk count, `window_bytes` = cap x 32 MiB; 32k: cap 128, 8 x 4 GiB; 64k: cap 256, 4 x 8 GiB; 128k: cap 511, 2 x 15.97 GiB (17,146,314,752 B). 32 GB of windows in every case, L1 total 172 GB |
+| lw in phase 2 | **Not run.** Lyndon ordered at 21:05Z (Slack, relayed by the control tower) that no more layer-by-layer points be run; phase 2 ran with `AON_ONLY=1`. Only the pre-sweep smoke `smoke2_lw` (128k, c=1, n=1) ran, before the order. The rows below are the planned settings, implemented in `cached2` and checked by that smoke |
+| lw (default wait) | Points from c=1 upward; the series stops at the first point after which vLLM's engine is dead (`engine_stopped_<session>.txt`); later concurrencies are INVALID "not run" |
+| lw long wait | `lmcache.mp.layerwise_wait_timeout_seconds` 600 (32k, mode `lw_wait600`) or 1800 (64k and 128k, mode `lw_wait1800`), sized above the worst queue (32 requests x about 16 s at 128k is about 520 s) |

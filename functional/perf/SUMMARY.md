@@ -1,35 +1,49 @@
-# Perf sanity check: LMCache + Aerospike (device namespace) on MI300X, phase 1
+# Perf sanity check: LMCache + Aerospike (device namespace) on MI300X
 
 Llama-3.1-8B-Instruct, one MI300X at TP=1, vLLM 0.27.1 (ROCm), 128 output tokens, closed
 loop with `c` requests in flight and `n = max(4, c)` requests per point. Versions and exact
 flags: [VERSIONS.md](VERSIONS.md); box changes and the Aerospike namespace stanza:
 [CHANGES.md](CHANGES.md); every point: [results.csv](results.csv); charts: [charts/](charts/).
 
-Phase 1 covers `nocache` at 8k-128k and the cached modes at 8k and 16k, with the cached KV
-in an Aerospike `storage-engine device` file (`O_DIRECT`, no read or post-write cache) on
-the droplet's boot disk. Phase 2 (32k-128k cached) needs a second disk (`/dev/vdc1`),
-which is awaiting approval.
+The cached KV lives in an Aerospike `storage-engine device` file (`O_DIRECT`, no read or
+post-write cache), with L1 emptied before every point, so every hit is read from the drive
+through Aerospike.
+
+| Phase | Lengths | Modes | Data file on |
+|---|---|---|---|
+| 1 | nocache 8k-128k; cached 8k, 16k | nocache, aon, lw (default 5 s wait), lw_wait600 | boot disk (`/dev/vda`) |
+| 2 | cached 32k, 64k, 128k | aon only (see below) | scratch disk (`/dev/vdc1` at `/mnt/scratch`) |
+
+**Layer-by-layer was not run in phase 2.** Lyndon ordered at 21:05Z (Slack, relayed by the
+control tower) that no more lw points be run. The phase 2 lw harness (per-length windows,
+`lw_wait1800`, stopping the default-wait series at the first engine stop) is in place but
+produced no points; only one pre-sweep 128k smoke request ran (below).
 
 ## Result
 
-- **All-or-nothing (aon) from Aerospike disk beats recompute at every point**: TTFT p50
-  1.5x (8k) / 2.0x (16k) faster at c=1, rising to 4.5x / 6.1x at c=32. Total latency and
-  throughput improve too (8k c=32: 5.4 vs 1.25 req/s).
-- **Layer-by-layer (lw) over Soft-RoCE is slower than recompute** at every point: TTFT p50
-  about 1 s per 8k request and 2 s per 16k request, and retrieves run one at a time, so
-  TTFT grows linearly with `c` (8k c=32: 30.8 s vs 12.0 s nocache). The fetch moves about
-  1 GiB/s through the software RDMA device; aon's plain read path moves about 5 GiB/s.
-- **With the connector's default 5 s layerwise wait, lw stops vLLM once retrieves queue**
-  (c >= 8 at 8k and 16k; 4 INVALID points). `lw_wait600` is the same lw setup with
-  `lmcache.mp.layerwise_wait_timeout_seconds 600` (a labelled deviation) and is valid at
-  every point.
-- 60 of 64 points are valid; every valid cached point hit 100% of the expected tokens
-  (`n x (L - 1)`), and every lw retrieve logged `pipelined_outcome=pipelined`.
+- **All-or-nothing (aon) from the Aerospike drive beats recompute at every point of every
+  length**, and the gain grows with prompt length and concurrency. TTFT p50 speedup at c=1:
+  1.5x (8k), 2.0x (16k), 3.0x (32k), 4.7x (64k), 9.3x (128k); at c=32: 4.5x, 6.1x, 9.7x,
+  17.4x, 21.2x. At 128k c=32, TTFT p50 is 37.7 s against 798 s, and total latency 40 s
+  against 1129 s.
+- **aon moves about 5-7 GiB/s of KV**: TTFT at c=1 is about 1 s per 5.3-5.9 GiB, and at
+  c=32 it delivers 5.4 (8k) to 7.0 (64k) GiB/s. The drives read far faster (fio O_DIRECT:
+  scratch 31-39 GiB/s, boot 9-11 GiB/s), so the aon limit is LMCache's plain read path,
+  not the disk.
+- **Layer-by-layer (lw) over Soft-RoCE is slower than recompute** at 8k and 16k (phase 1):
+  about 1 GiB/s, one retrieve at a time, so TTFT grows linearly with `c` (8k c=32: 30.8 s
+  against 12.0 s for nocache).
+- **With the default 5 s layerwise wait, lw stops vLLM once retrieves queue** (c >= 8 at 8k
+  and 16k). `lw_wait600` (the wait raised to 600 s, a labelled deviation) is valid at every
+  point.
+- 78 of 84 rows are valid. All 18 phase 2 points are valid, with 100% of the expected hit
+  tokens (`n x (L - 1)`). The 6 invalid rows are all default-wait lw: 4 engine stops and
+  2 not run after the engine stopped.
 
 ## Tables (p50 seconds; speedup = nocache TTFT p50 / mode TTFT p50)
 
 `lw` = default 5 s layerwise wait; `lw_wait600` = 600 s wait. INVALID points show the
-latency of the requests that finished and are excluded from the speedups.
+latency of the requests that finished; they and "not run" rows are excluded from speedups.
 
 ### 8k (8192 tokens)
 
@@ -53,76 +67,131 @@ latency of the requests that finished and are excluded from the speedups.
 | 16 | 15.017 | 2.892 | INVALID | 31.544 | 34.016 | 4.020 | INVALID | 33.582 | 5.19x | - | 0.48x |
 | 32 | 33.713 | 5.532 | INVALID | 63.285 | 69.580 | 6.678 | INVALID | 69.356 | 6.09x | - | 0.53x |
 
-### 32k, 64k, 128k (nocache only in phase 1)
+### 32k (32768 tokens)
 
-| c | 32k TTFT | 32k total | 64k TTFT | 64k total | 128k TTFT | 128k total |
-|---|---|---|---|---|---|---|
-| 1 | 2.247 | 3.008 | 7.114 | 8.031 | 25.276 | 26.457 |
-| 2 | 4.744 | 7.095 | 14.334 | 21.372 | 45.689 | 75.560 |
-| 4 | 8.772 | 17.121 | 26.034 | 52.834 | 84.433 | 181.338 |
-| 8 | 18.583 | 41.645 | 57.742 | 131.343 | 188.105 | 443.798 |
-| 16 | 42.698 | 97.285 | 135.655 | 310.198 | 448.747 | 766.224 |
-| 32 | 97.813 | 199.070 | 321.378 | 523.529 | 797.570 | 1128.943 |
+| c | nocache TTFT | aon TTFT | nocache total | aon total | aon speedup |
+|---|---|---|---|---|---|
+| 1 | 2.247 | 0.748 | 3.008 | 1.857 | 3.00x |
+| 2 | 4.744 | 0.761 | 7.095 | 1.893 | 6.23x |
+| 4 | 8.772 | 1.766 | 17.121 | 2.989 | 4.97x |
+| 8 | 18.583 | 2.860 | 41.645 | 4.129 | 6.50x |
+| 16 | 42.698 | 5.732 | 97.285 | 6.966 | 7.45x |
+| 32 | 97.813 | 10.100 | 199.070 | 11.446 | 9.68x |
+
+### 64k (65536 tokens)
+
+| c | nocache TTFT | aon TTFT | nocache total | aon total | aon speedup |
+|---|---|---|---|---|---|
+| 1 | 7.114 | 1.506 | 8.031 | 3.103 | 4.72x |
+| 2 | 14.334 | 1.423 | 21.372 | 3.088 | 10.07x |
+| 4 | 26.034 | 3.318 | 52.834 | 5.058 | 7.85x |
+| 8 | 57.742 | 5.354 | 131.343 | 7.103 | 10.79x |
+| 16 | 135.655 | 11.176 | 310.198 | 12.937 | 12.14x |
+| 32 | 321.378 | 18.484 | 523.529 | 20.212 | 17.39x |
+
+### 128k (130816 tokens)
+
+| c | nocache TTFT | aon TTFT | nocache total | aon total | aon speedup |
+|---|---|---|---|---|---|
+| 1 | 25.276 | 2.711 | 26.457 | 5.274 | 9.32x |
+| 2 | 45.689 | 3.110 | 75.560 | 5.754 | 14.69x |
+| 4 | 84.433 | 6.229 | 181.338 | 8.920 | 13.56x |
+| 8 | 188.105 | 10.620 | 443.798 | 13.312 | 17.71x |
+| 16 | 448.747 | 19.101 | 766.224 | 21.761 | 23.49x |
+| 32 | 797.570 | 37.679 | 1128.943 | 40.387 | 21.17x |
 
 128k is 130816 tokens (511 chunks of 256, leaving room for the output under 131072).
 
+## Drive throughput next to aon's effective rate
+
+| Measurement | Scratch (`/dev/vdc1`) | Boot (`/dev/vda1`) |
+|---|---|---|
+| fio sequential write, 1 MiB, QD32, O_DIRECT | 19.9 GiB/s | 4.4 GiB/s |
+| fio sequential read, 1 MiB, QD32, O_DIRECT | 39.4 GiB/s | 11.4 GiB/s |
+| fio random read, 512 KiB (Aerospike's record size), 4 jobs x QD32, O_DIRECT | 31.1 GiB/s | 8.8 GiB/s |
+| aon at c=32 (KV delivered / wall time) | 6.3 (32k), 7.0 (64k), 6.9 (128k) GiB/s | 5.4 (8k), 5.7 (16k) GiB/s |
+| aon at c=1 (KV per request / TTFT p50) | 5.3, 5.3, 5.9 GiB/s | 4.7, 5.1 GiB/s |
+
+fio ran in `aero-kvsink-bp` (the container `asd` reads through) on a 32 GiB file for 30 s
+per test. `asd`'s storage reads (`/proc/<pid>/io` `read_bytes`) match one full read of every
+requested prompt per point: 1,113,892 MiB in the 128k session, against 1,111,936 MiB for
+68 requests x 511 chunks x 32 MiB (the rest is the warm-up retrieves after each restart). So aon reads did go to the block device, bypassing
+the guest page cache. Both disks are virtual, though, and 39 GiB/s O_DIRECT means the
+hypervisor serves at least part of each disk from cache or very fast backing. This test
+cannot show what a cold physical drive would deliver; it does show aon uses well under the
+drive's rate.
+
+## Findings
+
+1. **Engine stop under queued lw retrieves (default 5 s wait).** lw retrieves run one at a
+   time on LMCache's worker (about 1 s per 8k prompt, 2 s per 16k). Once one waits more
+   than 5 s for its turn, the connector raises `LayerProgressRetrieveGenerationTimeoutError:
+   timed out after 5.0s waiting for retrieve generation 9 (shared memory shows 8)`, vLLM
+   raises `EngineDeadError`, and every other in-flight request streams no token. This
+   happened at c=8 at 8k and at c=8, 16 and 32 at 16k (vLLM restarted before each point).
+   c <= 4 stayed valid even with TTFT up to 7.8 s, so not every queued retrieve trips it.
+2. **`ValueError: operation forbidden on released memoryview object` in LMCache** after that
+   engine stop: the layer-progress record read (`_RECORD_STRUCT.unpack_from(self._buffer,
+   0)`) runs after vLLM's KV cache is unregistered. Seen 7 times at 8k and 21 times at 16k.
+3. **Aerospike stop-writes silently trims a store.** With the data file at 1.4x the KV (as
+   in phase 1), the 32k store reached `data_used_pct 70`, Aerospike's default
+   `stop-writes-used-pct`, and refused further writes. LMCache logged only WARNINGs (`Store
+   task 66 to adapter 0 (aerospike) failed for 31 key(s): put-payload: Aerospike status 8:
+   AEROSPIKE_ERR_SERVER_FULL`; 68 keys over 4 tasks), and 34 of 4,096 chunks were missing.
+   That run is in `superseded/` on the box; phase 2 used 2.0x (about 50% used) and every
+   store landed exactly. Size kv-sink namespaces so the working set stays under
+   `stop-writes-used-pct`, and watch these WARNINGs.
+4. D-25 and D-26 did not occur. Phase 2 stored in batches of at most 64 GiB with an LMCache
+   restart between them, which kept every burst under L1's headroom. Every store check
+   showed 0 `DEVICE_OVERLOAD`, 0 `Failed to batched allocate`, 0 L1 refusals and exact record
+   counts: 266,370 / 532,610 / 1,063,010 records, each `32 x chunks x 65` plus 130 for the
+   600-token warm-up prompt.
+
 ## Observations
 
-- **nocache throughput falls as `c` grows** (8k: 1.49 req/s at c=4, 1.25 at c=32; 128k
-  stays around 0.02 req/s). vLLM's chunked prefill (`max_num_batched_tokens 8192`) admits
-  long prefills alongside running decodes, so decode slows as more prompts are queued. At
-  128k about 9.7 prompts fit in the KV cache (1,266,704 tokens), so c=16 and c=32 run in
-  waves. The 128k c=32 point took 24.7 min; it was not capped because `n = c = 32` is
-  already the minimum.
-- **aon retrieves are serialized too**, but each is short: about 0.19 s per 8k request
-  and 0.35 s per 16k request at c=32 (5.4 and 2.8 req/s, about 5.5 GiB/s of KV). `asd` read 70,082 MiB from storage (its
-  `/proc/<pid>/io` `read_bytes`) during the 8k aon session and 139,785 MiB during 16k,
-  matching one full read of every requested prompt per point.
-- **lw retrieves serialize at about 1 GiB/s.** Each request's TTFT is about `k x 1 s`
-  (8k) or `k x 2 s` (16k) for the k-th queued retrieve. Throughput stays flat from c=8
-  upward at about 0.93 req/s at 8k (nocache: 1.25-1.38) and 0.46-0.48 req/s at 16k (nocache
-  falls to the same level: 0.53 at c=8, 0.46 at c=32).
-- **Default-wait failure mode (lw, c >= 8).** One retrieve exceeds the connector's 5 s
-  wait (`LayerProgressRetrieveGenerationTimeoutError: timed out after 5.0s waiting for
-  retrieve generation 9 (shared memory shows 8)`), vLLM raises `EngineDeadError`, and the
-  other in-flight requests stream no token (`outcomes`: `failed:1, pipelined:N`). After
-  the engine stops, LMCache logs `ValueError: operation forbidden on released memoryview
-  object` from the layer-progress record (7 times at 8k, 21 times at 16k). Earlier points
-  (c <= 4) stay valid even with TTFT up to 7.8 s, so the timeout does not trigger for
-  every queued retrieve. At 8k, the session ended after c=8 (c=16 and c=32 not run).
-  At 16k, the harness restarted vLLM before each later point, and each one failed the
-  same way.
-- No HTTP 500s, no `DEVICE_OVERLOAD`, no L1 refusals; every LMCache stop was clean (TERM,
-  exit 143). Store record counts matched `32 x chunks x 65` plus 130 records for the
-  600-token warm-up prompt's 2 chunks.
+- **nocache throughput falls as `c` grows** (8k: 1.49 req/s at c=4, 1.25 at c=32). vLLM's
+  chunked prefill (`max_num_batched_tokens 8192`) runs long prefills alongside decodes. At
+  128k only about 9.7 prompts fit in the KV cache (1,266,704 tokens), so c=16 and c=32 run
+  in waves. The 128k c=32 nocache point took 24.7 min; it could not be capped because
+  `n = c = 32`.
+- **aon retrieves are serialized too**, but at 5-7 GiB/s. aon throughput at c=32 is 4.3x
+  (8k) to 20x (128k) nocache's.
+- **One 128k lw data point exists**: the pre-sweep smoke (`smoke2_lw`, n=1, c=1) had TTFT
+  15.1 s, `pipelined`, with 2 x 15.97 GiB windows. That is about 1.06 GiB/s, the same
+  Soft-RoCE rate as at 8k and 16k. It is a single smoke request, not a measured point, and
+  is not in the tables.
+- Host memory with the 180 GB aon L1: lowest available was 41.7 GB (`hostmem.txt` per
+  session).
+- No HTTP 500s; every LMCache stop was clean (TERM, exit 143); every listener was on
+  127.0.0.1.
 
 ## Caveats
 
 - **Soft-RoCE is software RDMA and CPU bound.** `rxe0` runs on `lo`, so the lw numbers
-  measure the kernel's RDMA emulation, not a NIC. On hardware RDMA, the lw fetch rate and
-  the ranking against aon may differ completely; treat lw here as a functional check with
-  timings.
+  measure the kernel's RDMA emulation, not a NIC. On hardware RDMA, the lw rate and its
+  ranking against aon may differ completely.
 - **Layerwise forces PIECEWISE CUDA graphs** (section 5.3): vLLM drops from
-  `FULL_AND_PIECEWISE` to `PIECEWISE` when `use_layerwise` is on, which slows decode in lw
+  `FULL_AND_PIECEWISE` to `PIECEWISE` with `use_layerwise` on, which slows lw decode
   independently of the fetch.
-- **One GPU, TP=1, one vLLM instance.** LMCache serves one worker, so retrieves for that
-  worker run one at a time. Multi-GPU or multi-instance setups were not tested.
-- **Aerospike sits on a virtual disk of this droplet** (`/dev/vda`, virtio, network
-  attached). Reads were `O_DIRECT` with no Aerospike read cache, and `asd` counted them as
-  storage reads, but about 5 GiB/s for aon is above what a typical virtual disk delivers.
-  The hypervisor may be caching the file, so the aon numbers may be optimistic compared
-  with a cold physical disk.
-- **`lw_wait600` deviates from the default connector config.** It exists only to measure
-  lw latency under concurrency; the default config is not usable at c >= 8 on this box.
-- `LMCACHE_LOG_LEVEL=DEBUG` was on in aon and lw (needed for the `pipelined_outcome`
-  line); this adds logging overhead to both cached modes.
+- **One GPU, TP=1, one vLLM instance.** LMCache serves one worker, whose retrieves run one
+  at a time; multi-GPU and multi-instance setups were not tested.
+- **Aerospike sits on virtual disks of this droplet** (boot `/dev/vda` in phase 1,
+  DigitalOcean scratch `/dev/vdc` in phase 2). Reads bypassed the guest page cache, but the
+  hypervisor likely caches them (see the fio table), so a deployment on physical NVMe may
+  see different aon numbers once the drive, not LMCache, is the limit.
+- **lw coverage is 8k and 16k only**, by Lyndon's order. `lw_wait600` deviates from the
+  default connector config; it exists only to measure lw latency under concurrency.
+- `LMCACHE_LOG_LEVEL=DEBUG` was on in the cached modes (needed for `pipelined_outcome`).
 - `n` is 4 at c <= 4, so the p50 and p90 there come from 4 requests.
-- An earlier 8k aon run (lazy L1 allocation: the first retrieve after each restart took
-  9.4 s) was superseded by the run above; its files are under `superseded/` on the box.
+- Superseded runs, kept on the box under `superseded/`: 8k aon with lazy L1 (cold-start
+  9.4 s first retrieve), 32k aon at 1.4x file size (stop-writes), and a partial 64k store
+  stopped for the same reason.
 
 ## Files
 
 On the box under `/root/lmc-work/functional/perf/`: `nocache/`, `L<len>_aon/`, `L<len>_lw/`,
-`L<len>_store/` + `L<len>_lwwait/` (per point JSON, outcome counts, LMCache and vLLM logs,
-listener checks, `asd_read_bytes.txt`) and `progress.log`. Here: `results.csv`,
-`summary_tables.md` (generated by `aggregate.py`), `charts/` (generated by `charts.py`).
+`L<len>_store/` + `L<len>_lwwait/` (phase 1), `smoke2_*`, `fio/` (per point JSON, outcome
+counts, LMCache and vLLM logs, listener checks, `asd_read_bytes.txt`, `hostmem.txt`,
+`store_check.txt`) and `progress.log`. Here: `results.csv` and `summary_tables.md` (from
+`aggregate.py`), `charts/` (from `charts.py`): TTFT and total vs concurrency per length,
+TTFT vs length at c=1 and c=32, and `speedup_c1.png`.

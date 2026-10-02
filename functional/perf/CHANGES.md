@@ -63,6 +63,41 @@ config is unchanged at `functional/configs/aerospike-kvsink-bp.conf`. To go back
 original: start `asd` with the original config as every earlier stage did. Free space on `/`
 is back to 170 GB.
 
+## Phase 2: aero-kvsink-bp recreated with the scratch disk
+
+`/dev/vdc1` was mounted at `/mnt/scratch` by the host owner (approved; logged in
+`functional/HOST-CHANGES.md`, 9a069f71). This item did not mount, format or add it to
+`fstab`. It only created `/mnt/scratch/perf-aero/` and recreated the kv-sink container so
+that directory is visible inside (`functional/perf/recreate_kvsink.sh` on the box, run
+2026-10-02 20:50Z):
+
+1. `asd` was stopped; `docker inspect` of the old container is saved as
+   `/root/lmc-work/functional/perf/aero-kvsink-bp.orig.inspect.json`.
+2. The old container was committed to the image `aero-kvsink-bp:perf2-base`
+   (`sha256:e274d36add9c…`), because its writable layer holds the packages installed for
+   the server build.
+3. The old container was stopped and renamed `aero-kvsink-bp-orig` (kept, not removed).
+4. A new `aero-kvsink-bp` was created from that image with the same settings (host
+   network, `/dev/infiniband/uverbs0`, `memlock` unlimited, `CAP_IPC_LOCK`, seccomp
+   unconfined, `/root/lmc-work` bind mount, `sleep infinity`) plus
+   `-v /mnt/scratch/perf-aero:/mnt/scratch/perf-aero`
+   (`aero-kvsink-bp.perf2.inspect.json`).
+
+`asd` still binds only to 127.0.0.1 (the config's service and fabric addresses). `fio`
+was installed in the new container with apt for the disk measurement.
+
+Phase 2 uses the same template and the same generated config path; `@FILE@` is
+`/mnt/scratch/perf-aero/lmcache.dat`, `@FILESIZE@` is 2.0x the KV (256G / 512G / 1022G), and
+the free-space floor (60 GB) is checked on the data file's filesystem. The last generated
+config (128k, `filesize 1022G`) stays at
+`/root/lmc-work/functional/perf/aerospike-kvsink-bp-perf.conf`.
+
+State at the end of phase 2: `asd` stopped (nothing on 3700-3703; the new container is up
+and idle), `/mnt/scratch/perf-aero/` kept and empty, `/mnt/scratch` still mounted (4823 GB
+free), boot disk 169 GB free (1 GB less than after phase 1; not investigated, likely the
+committed image layer and the session logs). To go back to the old container: stop and remove `aero-kvsink-bp`,
+then rename `aero-kvsink-bp-orig` back and start it.
+
 ## Other state
 
 - `lmc-c`: nothing installed; `vllm serve` and `lmcache server` are started and stopped per
