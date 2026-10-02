@@ -47,6 +47,7 @@
 #   PIPE08_ROUNDS (default 3), TWO_VLLM_UTIL (default 0.3: each of the two
 #   instances' --gpu-memory-utilization).
 #   P10_POLICY (default fail: kv_load_failure_policy of pipe10, see below),
+#   E2E09_VARIANTS (default "plain pipe pipewait", see e2e09_variant),
 #   STOP_GRACE (default 60: LMCache SIGTERM grace on restarts, D-18).
 # New kv-sink stack (batch-read server on 3700): source
 # functional/newstack/kvsink_bp_env.sh first; it sets KVSINK_PORT, which the
@@ -124,7 +125,7 @@ sec_pipe08s() {
 }
 
 sec_pipe08() {
-  SERVER_FLAGS="--max-gpu-workers 2 --pipelined-fetch --pipelined-max-chunks 4 --l2-adapter $(l2_json_w 1 4 $LLAMA_CHUNK)"
+  SERVER_FLAGS="--max-gpu-workers 2 --no-l1-use-lazy --pipelined-fetch --pipelined-max-chunks 4 --l2-adapter $(l2_json_w 1 4 $LLAMA_CHUNK)"
   tag=pipe08
   group pipe08 $tag
   local steps=(server "vllm model=$LLAMA" "vllm2 model=$LLAMA"
@@ -156,8 +157,13 @@ pipe10_mode() {
   [ "$P10_POLICY" = fail ] || tag=${tag}_$P10_POLICY
   group pipe10 $tag
   local ids5; ids5=$(for p in $P10_PROMPTS; do printf 'P-exact-%s,' "$p"; done | sed 's/,$//')
-  local steps=(server "vllm model=$LLAMA" "vllm2 model=$LLAMA" "send name=store sets=P-exact ids=$ids5" settle restart)
-  local sends=(store) rargs=("--outcomes=*=pipelined,reused,shared_keys_busy,not_deferred")
+  # store2: instance 2's LMCache heartbeat starts with its first request, so
+  # without a send before the restart it never notices the restart and never
+  # re-registers (S2, the pre-heartbeat gap). It reads instance 1's keys from L1.
+  local steps=(server "vllm model=$LLAMA" "vllm2 model=$LLAMA" "send name=store sets=P-exact ids=$ids5"
+    "send name=store2 sets=P-exact ids=$ids5 port=8001" settle restart)
+  local sends=(store store2) rargs=("--outcomes=*=pipelined,reused,shared_keys_busy,not_deferred"
+    "--no-hit-check=${tag}_store2")
   # A busy request fails under fail (no recompute), so recompute mode allows
   # errors on its pair sends; wait mode must have none.
   local err=""
@@ -209,43 +215,61 @@ sec_ref16() {
       bash $H/run_ref.sh $LLAMA $CB $W/ref16 ref16$run 8000 "name=c16 sets=$E2E09_SETS conc=16" \
       > $S/ref16/session_ref16$run.txt 2>&1
     echo "rc=$?"
-    docker exec lmc-c python $H/compare.py $BASE1 $W/ref16/ref16${run}_c16.json \
-      --out $W/ref16/compare_ref16${run}.json > $S/ref16/compare_ref16$run.md 2>&1
   done
+  # compare.py needs the same corpus file; BASE1 was sent from the day-1
+  # corpus, whose P-shared and P-multi prompts are identical to $CB's (which
+  # only adds sets). logprob_agree.py matches by prompt id.
+  docker exec lmc-c python $H/logprob_agree.py --baseline $BASE1 --out $W/ref16/agree_ref16.json \
+    $W/ref16/ref16a_c16.json $W/ref16/ref16b_c16.json > $S/ref16/agree_ref16.md 2>&1
   docker exec lmc-c python $H/compare.py $W/ref16/ref16a_c16.json $W/ref16/ref16b_c16.json \
     > $S/ref16/compare_ref16a_b.md 2>&1
   progress "ref16 (no LMCache, concurrency 16, batch invariant) vs batch 1: \
-a: $(grep '^Total' $S/ref16/compare_ref16a.md); b: $(grep '^Total' $S/ref16/compare_ref16b.md); \
+$(grep -E '^\| ref16' $S/ref16/agree_ref16.md | cut -d'|' -f2,4 | paste -sd' '); \
 a vs b: $(grep '^Total' $S/ref16/compare_ref16a_b.md); \
 token equality is T-E2E-09's oracle only if a and b are 60/60 exact"
 }
 
-# e2e09_variant <plain|pipe>
+# e2e09_variant <plain|pipe|pipewait>
+#   pipe      pipelined, --pipelined-shared-keys recompute (the default). Even
+#             one vLLM overlaps retrieves of a shared prefix (P-multi turns at
+#             concurrency 16), so some retrieves are `shared_keys_busy`; under
+#             fail those requests end in a clean HTTP 500 (recompute: D-17).
+#             Errors are allowed and counted; every served request must be exact
+#   pipewait  pipelined, --pipelined-shared-keys wait: no request may fail and
+#             no retrieve may be `shared_keys_busy` (the T-E2E-09 verdict for
+#             the pipelined path)
 e2e09_variant() {
-  local v=$1 rargs=()
-  if [ "$v" = plain ]; then
-    # The adapter enables RDMA, which needs a fixed L1 slab (lazy off).
-    SERVER_FLAGS="--no-l1-use-lazy --l2-adapter $(l2_json 4 $LLAMA_CHUNK)"
-  else
-    SERVER_FLAGS=$(server_flags 4 $LLAMA_CHUNK)
-    rargs=("--outcomes=*=pipelined,not_deferred")
-  fi
+  local v=$1 rargs=() err=""
+  case $v in
+    plain)
+      # The adapter enables RDMA, which needs a fixed L1 slab (lazy off).
+      SERVER_FLAGS="--no-l1-use-lazy --l2-adapter $(l2_json 4 $LLAMA_CHUNK)";;
+    pipe)
+      SERVER_FLAGS=$(server_flags 4 $LLAMA_CHUNK)
+      err=" errors=1"
+      rargs=("--outcomes=*=pipelined,not_deferred,reused,shared_keys_busy" "--allow-error=*");;
+    pipewait)
+      SERVER_FLAGS="--pipelined-shared-keys wait $(server_flags 4 $LLAMA_CHUNK)"
+      rargs=("--outcomes=*=pipelined,not_deferred,reused");;
+    *) echo "e2e09: unknown variant $v"; return 1;;
+  esac
   tag=e2e09_$v
   group e2e09 $tag
   session e2e09 $tag fail server "vllm model=$LLAMA" \
-    "send name=cold sets=$E2E09_SETS conc=16" settle \
-    "send name=l1 sets=$E2E09_SETS conc=16 stats=1" restart \
-    "send name=l2 sets=$E2E09_SETS conc=16 stats=1"
+    "send name=cold sets=$E2E09_SETS conc=16$err" settle \
+    "send name=l1 sets=$E2E09_SETS conc=16 stats=1$err" restart \
+    "send name=l2 sets=$E2E09_SETS conc=16 stats=1$err" "vllm_check name=end"
   # The cold send's hits depend on which in-flight requests stored first.
   report e2e09 $tag all "${rargs[@]}" "--no-hit-check=${tag}_cold" cold l1 l2
   docker exec lmc-c python $H/logprob_agree.py --baseline $BASE1 --out $W/e2e09/agree_$tag.json \
     $W/e2e09/${tag}_cold.json $W/e2e09/${tag}_l1.json $W/e2e09/${tag}_l2.json > $S/e2e09/agree_$tag.md 2>&1
   progress "e2e09 $v: $(tail -n 1 $S/e2e09/report_${tag}_all.md | cut -c1-300); $(tail -n 1 $S/e2e09/agree_$tag.md); \
-outcomes $(outcome_counts e2e09 $tag)"
+outcomes $(outcome_counts e2e09 $tag); failed requests (vLLM 'Failing'): \
+$(grep -hoE 'Failing [0-9]+ request' $S/e2e09/vllm_${tag}_*.log | grep -oE '[0-9]+' | awk '{s += $1} END {print s + 0}')"
 }
 sec_e2e09() {
-  e2e09_variant plain
-  e2e09_variant pipe
+  local v
+  for v in ${E2E09_VARIANTS:-plain pipe pipewait}; do e2e09_variant "$v"; done
 }
 
 sec_dry() {
