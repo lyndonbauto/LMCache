@@ -14,6 +14,8 @@
 #           the fetch is issued, once at retrieve start); the exit status and
 #           any crash lines in its log. D15_GRACE (default 60) is the wait before
 #           SIGKILL: a clean shutdown takes about 14 s (telemetry flush timeouts)
+#   e2e04s16  stage3.sh's e2e04 short group again at every cap in CAPS (tag
+#           short16g), after the kv-sink namespace was raised from 8G to 16G
 set -u
 # shellcheck source=../stage3/stage3.sh
 source "$(dirname "$0")/../stage3/stage3.sh"
@@ -70,6 +72,15 @@ sec_d15() {
   progress "d15: shutdowns: $(grep -oE 'stopped \((TERM|kill -9)\) exit=[0-9]+' $S/d15/session_$tag.txt | sort | uniq -c | sed 's/^ *//' | paste -sd';'); \
 crash lines in the LMCache log: $(grep -cE "$CRASH" $S/d15/lmcache_$tag.log); \
 'Shutting down' lines: $(grep -c 'Shutting down' $S/d15/lmcache_$tag.log)"
+}
+
+# e2e04 short groups again (tag short16g) after the kv-sink namespace went
+# from 8G to 16G: the first run's cold sends hit AEROSPIKE_ERR_SERVER_FULL.
+sec_e2e04s16() {
+  local cap
+  for cap in $CAPS; do
+    e2e04_group "$cap" short16g "$(ids P-exact 1 4)" "$(ids P-ragged 1 999)"
+  done
 }
 
 mkdir -p $S
