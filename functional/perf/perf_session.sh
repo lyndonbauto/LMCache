@@ -176,12 +176,12 @@ metrics_urls() {
   if [ "$CONNECTOR" = 1 ]; then echo http://127.0.0.1:8000/metrics,http://127.0.0.1:8080/metrics
   else echo http://127.0.0.1:8000/metrics; fi
 }
-# send <name> <len> <ids> <conc> [prefix-len]
+# send <name> <len> <ids> <conc> [prefix-len] [suffix-salt]
 send() {
-  local name=$1 len=$2 ids=$3 conc=$4 pre=${5:-0} mark=0
+  local name=$1 len=$2 ids=$3 conc=$4 pre=${5:-0} salt=${6:-0} mark=0
   [ -f "$LOG" ] && mark=$(wc -l < "$LOG")
   echo "$mark" > "$OUT/logmark_${TAG}_$name.txt"
-  python "$HERE/perf_client.py" --length "$len" --prefix-length "$pre" --ids "$ids" --concurrency "$conc" \
+  python "$HERE/perf_client.py" --length "$len" --prefix-length "$pre" --suffix-salt "$salt" --ids "$ids" --concurrency "$conc" \
     --timeout "${SEND_TIMEOUT:-3600}" --metrics-urls "$(metrics_urls)" --tag "${TAG}_$name" \
     --out "$OUT/${TAG}_$name.json"
   local rc=$?
@@ -216,7 +216,8 @@ for step in "$@"; do
       [ "$CONNECTOR" = 1 ] && { restart_server || exit 1; }
       pname="L${len}_c${c}"; [ "$pre" -gt 0 ] && pname="P${pre}_$pname"
       say "point $pname len=$len pre=$pre c=$c n=$n"
-      send "$pname" "$len" "0-$((n - 1))" "$c" "$pre" || say "point $pname had errors"
+      salt=0; [ "$pre" -gt 0 ] && salt=$(printf '%s' "$TAG $pname" | cksum | cut -d' ' -f1)
+      send "$pname" "$len" "0-$((n - 1))" "$c" "$pre" "$salt" || say "point $pname had errors"
       if [ "${STOP_ON_ENGINE_STOP:-0}" = 1 ]; then
         sleep 5
         if ! curl -sf http://127.0.0.1:8000/health >/dev/null; then

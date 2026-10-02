@@ -18,7 +18,8 @@ value unique to ``(L, i)``, so no two prompts share a prefix. The same
 With ``--prefix-length P`` (partial hits), prompt ``i`` is prompt ``i`` of
 length ``P`` (as stored by an earlier point of length ``P``) followed by
 ``--length`` suffix tokens from a generator seeded with
-``7_000_000 + P * 1009 + i``, which no stored prompt contains.
+``7_000_000 + P * 1009 + i`` (and ``--suffix-salt`` if non-zero), which no
+stored prompt contains unless an earlier point with the same salt stored it.
 
 Prometheus counters from ``--metrics-urls`` are scraped before and after the
 point and their deltas stored (vLLM's external prefix cache hit tokens,
@@ -32,7 +33,8 @@ Usage::
 
 Output JSON schema::
 
-    {"tag": str, "length": int, "prefix_length": int, "concurrency": int,
+    {"tag": str, "length": int, "prefix_length": int, "suffix_salt": int,
+     "concurrency": int,
      "n": int, "wall_s": float,
      "requests": [{"id": int, "ttft_s": float, "total_s": float,
                    "out_tokens": int, "error": str}],
@@ -88,13 +90,18 @@ def prompt_tokens(length: int, idx: int) -> list[int]:
     return [int(t) for t in toks]
 
 
-def partial_prompt_tokens(prefix: int, suffix: int, idx: int) -> list[int]:
+def partial_prompt_tokens(
+    prefix: int, suffix: int, idx: int, salt: int = 0
+) -> list[int]:
     """Return prompt ``idx`` of length ``prefix`` followed by an uncached suffix.
 
     Args:
         prefix: Prefix length; a key of ``LENGTH_INDEX``.
         suffix: Number of suffix tokens.
         idx: Prompt index, 0 to 63.
+        salt: Extra suffix seed. 0 keeps the original suffix; give each point
+            its own salt so a suffix stored by one point (aon and lw store
+            what they compute) is not a hit for the next.
 
     Returns:
         ``prefix + suffix`` token IDs.
@@ -102,7 +109,8 @@ def partial_prompt_tokens(prefix: int, suffix: int, idx: int) -> list[int]:
     Raises:
         ValueError: As ``prompt_tokens`` for the prefix.
     """
-    rng = np.random.default_rng(7_000_000 + prefix * 1009 + idx)
+    seed = 7_000_000 + prefix * 1009 + idx
+    rng = np.random.default_rng([seed, salt] if salt else seed)
     tail = rng.integers(1000, 128000, size=suffix)
     return prompt_tokens(prefix, idx) + [int(t) for t in tail]
 
@@ -234,7 +242,9 @@ async def run(args: argparse.Namespace) -> dict:
         ids = parse_ids(args.ids)
         if args.prefix_length:
             prompts = {
-                i: partial_prompt_tokens(args.prefix_length, args.length, i)
+                i: partial_prompt_tokens(
+                    args.prefix_length, args.length, i, args.suffix_salt
+                )
                 for i in ids
             }
         else:
@@ -268,6 +278,7 @@ async def run(args: argparse.Namespace) -> dict:
             "tag": args.tag,
             "length": args.length,
             "prefix_length": args.prefix_length,
+            "suffix_salt": args.suffix_salt,
             "concurrency": args.concurrency,
             "n": len(ids),
             "ids": ids,
@@ -290,6 +301,12 @@ def main() -> None:
         type=int,
         default=0,
         help="prepend the stored prompt of this length (--length = new suffix)",
+    )
+    p.add_argument(
+        "--suffix-salt",
+        type=int,
+        default=0,
+        help="extra seed for the partial-hit suffix (unique per point)",
     )
     p.add_argument("--ids", default="0-3")
     p.add_argument("--concurrency", type=int, default=1)

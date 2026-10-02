@@ -331,6 +331,16 @@ sec_exp_timeline() {
   session E_timeline lw $((L1_GEN_GB + WIN_GB)) "$LW_L2" "point len=8192 c=1 n=4"
   kill "$toploop" 2>/dev/null; pkill -P "$toploop" 2>/dev/null
 }
+# Partial-hit rerun (modes <mode>2): in the first pass every point reused the
+# same suffix, so aon/lw points after the first stored it and later points were
+# full hits. perf_session.sh now salts the suffix per session and point.
+sec_exp2_aon() {
+  session E_aon2 aon "$L1_GEN_GB" "$AON_L2" "store len=8192 ids=0-3 conc=4" "store len=2048 ids=0-3 conc=4" \
+    "${EXP_PART[@]}"
+  store_check E_aon2 8192 4
+}
+sec_exp2_tcplw() { session E_tcplw2 lw "$L1_GEN_GB" "$AON_L2" "${EXP_PART[@]}"; }
+sec_exp2_lw() { STOP_ON_ENGINE_STOP=1 session E_lw2 lw $((L1_GEN_GB + WIN_GB)) "$LW_L2" "${EXP_PART[@]}"; }
 sec_exp_stop() { aero_stop_delete; }
 sec_idle() { progress "idle: $(wait_idle)"; }
 
