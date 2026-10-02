@@ -3,7 +3,8 @@
 **Status:** Decided (option 2) and implemented in e9cd0689; the pipelined
 path uses sub-option A (one extra batch read of the meta records).
 **Decided by:** Lyndon Bauto, 2026-10-01 ("we may want to revisit"); sub-option
-A chosen 2026-10-01 19:30Z.
+A chosen 2026-10-01 19:43Z (time from the control tower's Slack-derived
+decision note).
 **Defect:** D-14 (S2) in [`functional/LEDGER.md`](../../../../../functional/LEDGER.md),
 found by T-FLT-10.
 

@@ -41,6 +41,13 @@ The tests are `tests/v1/distributed/test_aerospike_cluster_integration.py`
 `tests/v1/distributed/rdma/csrc/kv_sink_fanout_probe.cpp` (`make fanout-probe`).
 Logs are under `logs/` on the box.
 
+**Superseded (2026-10-02):** this table is the CPU half as run on
+2026-10-01; the current status of each row is in the [ledger](../LEDGER.md).
+T-FLT-10 passes after the D-14 fix (`e9cd0689`, [`d14/SUMMARY.md`](../d14/SUMMARY.md)),
+and T-FLT-02/03/04 and T-EVT-06 pass with their GPU halves (section "GPU
+half, part A" below). The CPU half's Defects and Next steps are superseded
+the same way: D-14 is fixed in `e9cd0689`, and Stage 6 GPU has run.
+
 | Test ID | What | Result | Evidence (`logs/`) |
 |---|---|---|---|
 | T-STO-08 | RF 2, commit level all: a store returns only with its replica; reads survive one node down | **pass** | `sto08.txt`, `cluster_it_full.txt`, `sto08_sensitivity.txt` |

@@ -29,7 +29,7 @@ D-14 (concurrent writers mix segments) has its own decision record:
 | [G-04](#g-04-memlock-shortfall-warns-instead-of-failing-startup) | Memlock shortfall warns instead of failing startup | T-CFG-07 | Owner question |
 | [G-05](#g-05-wrong-gid-index-is-not-named-at-startup) | Wrong GID index is not named at startup | T-CFG-06, D-11 | Track B |
 | [G-06](#g-06-lmcache-refuses-multi-node-rdma) | LMCache refuses multi-node RDMA | T-RDMA-05, T-FLT-04, T-E2E-11 | Track A / B |
-| [G-07](#g-07-no-re-registration-after-an-aerospike-node-restart) | No re-registration after an Aerospike node restart | T-FLT-04 | Track B; Aerospike server team |
+| [G-07](#g-07-no-re-registration-after-an-aerospike-node-restart) | No re-registration after an Aerospike node restart (multi-node only; single node re-registers on the new stack) | T-FLT-04 | Track B; Aerospike server team |
 | [G-08](#g-08-l2-prefetched-chunks-are-evicted-from-l1-right-away) | L2-prefetched chunks are evicted from L1 right away | D-13, T-LKP-03 | L1 / prefetch controller |
 | [G-09](#g-09-l2-lookup-reads-keys-after-a-gap) | L2 lookup reads keys after a gap | T-LKP-03 | Unassigned (L2 lookup) |
 | [G-10](#g-10-client-teardown-leaves-l1-writable-by-the-server) | Client teardown leaves L1 writable by the server | D-15 | Track B |
@@ -38,7 +38,7 @@ D-14 (concurrent writers mix segments) has its own decision record:
 | [G-13](#g-13-rdma-link-down-needs-a-dedicated-link) | RDMA link-down needs a dedicated link | T-FLT-07 | Harness; new host-change approval needed |
 | [G-14](#g-14-gpt-oss-is-not-batch-invariant-across-batch-sizes) | gpt-oss is not batch invariant across batch sizes | T-E2E-09, D-06 | vLLM upstream; test plan |
 | [G-15](#g-15-no-per-request-byte-oracle-for-concurrent-retrieves) | No per-request byte oracle for concurrent retrieves | T-E2E-09 | Test plan / harness; Track C |
-| [G-16](#g-16-retrieves-from-one-vllm-never-run-concurrently) | Retrieves from one vLLM never run concurrently | T-PIPE-08, T-PIPE-10 | Test plan |
+| [G-16](#g-16-retrieves-of-distinct-keys-from-one-vllm-never-run-concurrently) | Retrieves of distinct keys from one vLLM never run concurrently | T-PIPE-08, T-PIPE-10, T-E2E-09 | Test plan |
 
 ## G-01 Late write after re-lease cannot be forced end to end
 
@@ -57,7 +57,16 @@ D-14 (concurrent writers mix segments) has its own decision record:
 
 ## G-02 No log of the pipelined fetch plan
 
-- **Tests / defects**: T-PIPE-11 (partial).
+- **Tests / defects**: T-PIPE-11 (pass on the new stack; the ledger row
+  passes on packet counts).
+- **Status (2026-10-02, new stack)**: the packet count of the
+  separate-object-groups pipe11 run matches the window-limited plan exactly
+  (10,530 = 18 full layers × 4 chunks + 18 sliding layers × the 128-token
+  window, ×1.016 acks), so T-PIPE-11 passes
+  ([`stage3-newstack/SUMMARY.md`](stage3-newstack/SUMMARY.md), "Packet
+  counts"). The gap stays open for what packet counts cannot show: which
+  slots each layer fetched, and the 5 extra half-chunks in the one-group
+  e2e08p run (217,620 packets).
 - **Missing**: a direct check that sliding-window layers of gpt-oss fetch only
   the chunks inside their window.
 - **Why not now**: the planner emits no plan. The Stage 3 harness infers it
@@ -126,10 +135,20 @@ D-14 (concurrent writers mix segments) has its own decision record:
 
 ## G-07 No re-registration after an Aerospike node restart
 
-- **Tests / defects**: T-FLT-04 (partial).
+- **Tests / defects**: T-FLT-04 (pass in the ledger; this gap is the
+  multi-node case only).
+- **Status (2026-10-02, new stack)**: on a single-node kv-sink the gap is
+  closed. In Stage 6 GPU (`flt04k`, O-5) the server restarted under a live
+  LMCache and the reread stayed `pipelined` and exact: the client registered
+  a new region on the restarted server inside the fetch, after 48 sub-read
+  errors ([`stage6/SUMMARY.md`](stage6/SUMMARY.md), GPU half; ledger
+  T-FLT-04). What follows still holds for a multi-node kv-sink cluster,
+  which LMCache refuses for pipelined fetches anyway (N1, G-06), and was
+  shown only on the old server (`kvsink_cluster.sh`).
 - **Missing**: a path that notices a restarted node and registers L1 with it
-  again. Today the restarted node has dropped the region (deregister returns
-  `no such region`) and the client never re-registers.
+  again. On the old 3-node kv-sink cluster the restarted node had dropped the
+  region (deregister returns `no such region`) and the client never
+  re-registered.
 - **Why not now**: `register_all_nodes` cannot run twice on one `RdmaContext`
   (`queue pair already exists`); a fresh context registers 3/3. The design
   ("Still open: registration lifecycle on node restart" in
@@ -203,7 +222,12 @@ D-14 (concurrent writers mix segments) has its own decision record:
 
 ## G-12 Multi-command pipelined fetch breaks the region
 
-- **Tests / defects**: D-12 (S2), T-RDMA-06 (partial), T-E2E-04.
+- **Tests / defects**: D-12 (S2), T-RDMA-06, T-E2E-04 (both pass on the new
+  stack).
+- **Status (2026-10-02)**: old server `512b0c207` only. D-12 does not
+  reproduce on server `046e8558d`: cap-64 runs stayed `pipelined` with 0 late
+  completions or region errors ([`stage3-newstack/SUMMARY.md`](stage3-newstack/SUMMARY.md);
+  ledger D-12). Not fixed on the old server, by decision (server replaced).
 - **Missing**: pipelined fetches over 256 slots (more than 4 Llama-3.1-8B
   chunks). The server splits them into several commands; it intermittently
   logs `late completion for slot N`, then `region N in error state`, and the
@@ -289,12 +313,16 @@ D-14 (concurrent writers mix segments) has its own decision record:
 - **Owner**: test plan / harness (1); Track C (2).
 - **Evidence**: `functional/stage4/HARNESS.md` (oracle decision).
 
-## G-16 Retrieves from one vLLM never run concurrently
+## G-16 Retrieves of distinct keys from one vLLM never run concurrently
 
-- **Tests / defects**: T-PIPE-08, T-PIPE-10.
-- **Missing**: window exhaustion (`refused`) and same-key overlap
-  (`shared_keys_busy`, `reused`) from a single vLLM instance.
-- **Why not now**: this is by design. `RETRIEVE` is a blocking handler on
+- **Tests / defects**: T-PIPE-08 (pass), T-PIPE-10 (partial, for D-17), T-E2E-09.
+- **Status (2026-10-02, new stack)**: only partly true; see the update at
+  the end of this entry and [`stage4/SUMMARY.md`](stage4/SUMMARY.md)
+  ("G-16 is only partly true"). Distinct keys serialize (`pipe08s`); a
+  shared prefix does overlap within one vLLM (T-E2E-09: `reused`,
+  `shared_keys_busy`). The ledger rows are run with two vLLMs as below.
+- **Missing**: window exhaustion (`refused`) from a single vLLM instance.
+- **Why not now**: for distinct keys this is by design. `RETRIEVE` is a blocking handler on
   the affinity pool, keyed by the ZMQ client identity, so one vLLM (TP=1)
   runs its retrieves one at a time. Each pipelined fetch holds and releases
   its window inside its own retrieve.
