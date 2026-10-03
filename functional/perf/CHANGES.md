@@ -100,8 +100,19 @@ then rename `aero-kvsink-bp-orig` back and start it.
 
 ## Other state
 
-- `lmc-c`: nothing installed; `vllm serve` and `lmcache server` are started and stopped per
+- `lmc-c`: `perftest` (24.10.0, apt) installed for the lw experiments' `ibbw.sh`; no
+  perftest process left running. `vllm serve` and `lmcache server` are started and stopped per
   session by `functional/perf/perf_session.sh`, all on 127.0.0.1 (listener check after every
   start).
 - `aerospike-ce`, `lmc-b`, `lmc-d`, `lmc-newstack`, `aero-kvsink`, `aero-n1..3`: not touched.
 - Charts were rendered on the local machine (matplotlib 3.10.8), not in `lmc-c`.
+
+## lw experiments (LW-EXPERIMENTS.md)
+
+- `aero-kvsink-bp` was used as in phase 2 (data file `/mnt/scratch/perf-aero/lmcache.dat`,
+  64 GiB, created and deleted twice); asd stopped at the end, the container idles on `sleep`.
+- `/root/lmc-work/LMCache/lmcache/v1/layerwise/pump.py` carried a two-line debug patch
+  during the timeline run only (00:00-00:02Z, 3 Oct); reverted with `git checkout --`,
+  `git status` clean afterwards. Never committed.
+- Box-only runner scripts `lwexp_run.sh` and `lwexp2_run.sh` stay in
+  `/root/lmc-work/functional/perf/` (not committed).

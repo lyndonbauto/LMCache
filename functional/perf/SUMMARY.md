@@ -31,8 +31,10 @@ produced no points; only one pre-sweep 128k smoke request ran (below).
   scratch 31-39 GiB/s, boot 9-11 GiB/s), so the aon limit is LMCache's plain read path,
   not the disk.
 - **Layer-by-layer (lw) over Soft-RoCE is slower than recompute** at 8k and 16k (phase 1):
-  about 1 GiB/s, one retrieve at a time, so TTFT grows linearly with `c` (8k c=32: 30.8 s
-  against 12.0 s for nocache).
+  about 1 GiB/s, one retrieve at a time. The requests in one vLLM step all wait for the
+  sum of that step's retrieves, so TTFT grows linearly with `c` (8k c=32: 30.8 s against
+  12.0 s for nocache). See [LW-INVESTIGATION.md](LW-INVESTIGATION.md) and
+  [LW-EXPERIMENTS.md](LW-EXPERIMENTS.md).
 - **With the default 5 s layerwise wait, lw stops vLLM once retrieves queue** (c >= 8 at 8k
   and 16k). `lw_wait600` (the wait raised to 600 s, a labelled deviation) is valid at every
   point.
