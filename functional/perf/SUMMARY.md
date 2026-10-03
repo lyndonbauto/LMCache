@@ -185,6 +185,10 @@ drive's rate.
   default connector config; it exists only to measure lw latency under concurrency.
 - `LMCACHE_LOG_LEVEL=DEBUG` was on in the cached modes (needed for `pipelined_outcome`).
 - `n` is 4 at c <= 4, so the p50 and p90 there come from 4 requests.
+- **The harness store check can read stale stats.** In the lw experiments `store_check`
+  reported 7% used while the server was at stop-writes (70%), because it reads the stats
+  saved at the store step, not live ones (harness issue, not a product defect; see
+  [LW-EXPERIMENTS.md](LW-EXPERIMENTS.md) defect 2).
 - Superseded runs, kept on the box under `superseded/`: 8k aon with lazy L1 (cold-start
   9.4 s first retrieve), 32k aon at 1.4x file size (stop-writes), and a partial 64k store
   stopped for the same reason.
