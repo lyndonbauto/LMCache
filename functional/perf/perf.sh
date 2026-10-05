@@ -38,6 +38,8 @@
 #              lw point; validates the device namespace and shared records
 #   smoke2     cached2's 128k setup with one prompt: store, aon c=1 n=1, lw
 #              c=1 n=1 (checks the 2 x 16 GiB windows and the L1 sizes)
+#   qpstore:<L>, qplw:<L>:<qp>, timeline:<qp>
+#              the queue-pair scan (functional/perf2): see sec_qpstore
 #   idle       wait for the GPU to be idle and print USED_VRAM
 # Environment: LENGTHS ("8192 16384 32768 65536 130816"), CONCS ("1 2 4 8 16
 #   32"), CAP (--pipelined-max-chunks, default 64 = 16k, the longest prompt of
@@ -47,13 +49,18 @@
 #   Aerospike data file's directory, default /root/lmc-work/perf-aero on the
 #   boot disk). Phase 2 (cached2): AON_L1_GB (180), LW_GEN_GB (140),
 #   LW_WINDOWS_GB (32), STORE_BATCH_GB (64), LW_WAIT (by length).
+#   PERF_OUT (/root/lmc-work/functional/perf): the results directory on the
+#   host. PERF_MODEL: weights to serve under the Llama name (perf_session.sh).
+#   CONF_TMPL: the kv-sink config template (default the device-namespace
+#   aerospike-kvsink-bp-perf.conf.in).
 #   QUEUE_PAIRS (1): the lw rdma block's queue_pairs, RC queue pairs per
 #   kv-sink node (1-16; needs the multi-queue-pair client and server).
 set -u
 TREE_HOST=${TREE_HOST:-/root/lmc-work/LMCache}
 TREE_CTR=/work/LMCache
-S=/root/lmc-work/functional/perf
-W=/work/functional/perf
+S=${PERF_OUT:-/root/lmc-work/functional/perf}
+# lmc-c mounts /root/lmc-work at /work.
+W=/work${S#/root/lmc-work}
 H=$TREE_HOST/functional/harness
 LENGTHS=${LENGTHS:-8192 16384 32768 65536 130816}
 CONCS=${CONCS:-1 2 4 8 16 32}
@@ -75,7 +82,7 @@ LW_WINDOWS_GB=${LW_WINDOWS_GB:-32}
 STORE_BATCH_GB=${STORE_BATCH_GB:-64}
 FIO_DIRS=${FIO_DIRS:-/mnt/scratch/perf-aero /root/lmc-work/perf-aero}
 PERF_CONF=$S/aerospike-kvsink-bp-perf.conf
-CONF_TMPL=$TREE_HOST/functional/configs/aerospike-kvsink-bp-perf.conf.in
+CONF_TMPL=${CONF_TMPL:-$TREE_HOST/functional/configs/aerospike-kvsink-bp-perf.conf.in}
 CLONE=$TREE_HOST . "$TREE_HOST/functional/newstack/kvsink_bp_env.sh"
 # Both cached modes allocate L1 up front (--no-l1-use-lazy, which lw's RDMA
 # windows require): with lazy L1, the first retrieve after a restart took
@@ -87,7 +94,11 @@ lw_l2() {
 }
 LW_L2=$(lw_l2 "$CAP" "$WINDOW_COUNT")
 
-vram() { amd-smi metric --mem-usage 2>/dev/null | grep -m1 USED_VRAM | grep -oE '[0-9]+'; }
+# USED_VRAM in MB. amd-smi 7.14's "metric --mem-usage" raises, hence sysfs.
+vram() {
+  amd-smi metric --mem-usage 2>/dev/null | grep -m1 USED_VRAM | grep -oE '[0-9]+' ||
+    awk '{print int($1 / 1048576); exit}' /sys/class/drm/card*/device/mem_info_vram_used 2>/dev/null
+}
 wait_idle() { local u=""; for _ in $(seq 60); do u=$(vram); [ -n "$u" ] && [ "$u" -lt 4000 ] && break; sleep 3; done; echo "VRAM ${u} MB"; }
 progress() { echo "$(date -u +%FT%TZ) $*" | tee -a $S/progress.log; }
 free_gb() { df -BG --output=avail "${1:-/}" | tail -n 1 | tr -dc 0-9; }
@@ -108,7 +119,7 @@ session() {
   local memloop=$!
   timeout 21600 docker exec -e LMC_EXTRA="$extra" -e L1_GB="$l1" -e STOP_GRACE="$STOP_GRACE" \
     -e LW_WAIT_TIMEOUT="${SESSION_LW_WAIT:-}" -e STOP_ON_ENGINE_STOP="${STOP_ON_ENGINE_STOP:-0}" \
-    -e L2_PORT="$KVSINK_PORT" lmc-c bash $TREE_CTR/functional/perf/perf_session.sh $W/$name "$name" "$mode" "$@" \
+    -e L2_PORT="$KVSINK_PORT" -e PERF_MODEL="${PERF_MODEL:-}" lmc-c bash $TREE_CTR/functional/perf/perf_session.sh $W/$name "$name" "$mode" "$@" \
     > $S/$name/session_$name.txt 2>&1
   local rc=$? rb1; rb1=$(asd_read_bytes)
   kill "$memloop" 2>/dev/null
@@ -152,12 +163,15 @@ aero_stop_delete() {
   rm -f "$DATA_FILE"
   progress "aero-kvsink-bp stopped, data file deleted; $(disks)"
 }
-# store_check <session> <len> <prompts>: the namespace stats perf_session.sh
-# saved right after the store settled, against 65 records per chunk (1 meta
-# + 64 K/V planes of 512 KiB, each under the 1 MiB record cap).
+# store_check <session> <len> <prompts>: the live namespace stats (saved to
+# l2stat_live.txt), against 65 records per chunk (1 meta + 64 K/V planes of
+# 512 KiB, each under the 1 MiB record cap). Falls back to the stats
+# perf_session.sh saved right after the store if the server does not answer.
 store_check() {
   local name=$1 len=$2 nprompts=$3 objs used want f
-  f=$(ls $S/$name/l2stat_*store*.txt 2>/dev/null | head -n 1)
+  f=$S/$name/l2stat_live.txt
+  python3 $H/as_info.py "$KVSINK_PORT" namespace/lmcache > "$f" 2>/dev/null || \
+    f=$(ls $S/$name/l2stat_*store*.txt 2>/dev/null | head -n 1)
   objs=$(tr ';' '\n' < "$f" | grep -E '^objects=' | cut -d= -f2)
   used=$(tr ';' '\n' < "$f" | grep -E '^data_used_bytes=' | cut -d= -f2)
   local sw werr pct
@@ -345,6 +359,37 @@ sec_exp2_aon() {
 sec_exp2_tcplw() { session E_tcplw2 lw "$L1_GEN_GB" "$AON_L2" "${EXP_PART[@]}"; }
 sec_exp2_lw() { STOP_ON_ENGINE_STOP=1 session E_lw2 lw $((L1_GEN_GB + WIN_GB)) "$LW_L2" "${EXP_PART[@]}"; }
 sec_exp_stop() { aero_stop_delete; }
+# Queue-pair scan (perf2 step 4), on one data file per length:
+#   qpstore:<len>    start the server, store prompts 0-31, aon points (CONCS)
+#                    (STORE_IDS, default 0-31)
+#   qplw:<len>:<qp>  lw points (CONCS) with queue_pairs <qp>
+#   timeline:<qp>    E3 at queue_pairs <qp> (8k stored; the pump.py print
+#                    patch is applied and reverted outside this script)
+#   exp_stop         stop the server, delete the data file
+sec_qpstore() {
+  local len=$1 steps=()
+  aero_start "$len" || return 1
+  mapfile -t steps < <(point_steps "$len")
+  local ids=${STORE_IDS:-0-31}
+  session L${len}_aon aon "$L1_GEN_GB" "$AON_L2" "store len=$len ids=$ids conc=$STORE_CONC" "${steps[@]}"
+  store_check L${len}_aon "$len" $(( ${ids#*-} - ${ids%-*} + 1 ))
+}
+sec_qplw() {
+  local len=${1%%:*} qp=${1#*:} steps=()
+  mapfile -t steps < <(point_steps "$len")
+  QUEUE_PAIRS=$qp
+  STOP_ON_ENGINE_STOP=1 session L${len}_lw_qp$qp lw $((L1_GEN_GB + WIN_GB)) "$(lw_l2 "$CAP" "$WINDOW_COUNT")" "${steps[@]}"
+}
+sec_timeline() {
+  local qp=$1 name=E_timeline_qp$1 pid toploop
+  mkdir -p $S/$name
+  pid=$(docker top "$KVSINK_CTR" -eo pid,comm | awk '$2=="asd"{print $1}')
+  ( top -H -b -d 0.2 -n 2400 -w 200 -p "$pid" | awk '/^top -/{n=0} {n++} n<=16' > $S/$name/top_asd_threads.txt 2>&1 ) &
+  toploop=$!
+  QUEUE_PAIRS=$qp
+  session $name lw $((L1_GEN_GB + WIN_GB)) "$(lw_l2 "$CAP" "$WINDOW_COUNT")" "point len=8192 c=1 n=4"
+  kill "$toploop" 2>/dev/null; pkill -P "$toploop" 2>/dev/null
+}
 sec_idle() { progress "idle: $(wait_idle)"; }
 
 mkdir -p $S
@@ -352,7 +397,8 @@ for sec in "$@"; do
   progress "section $sec started"
   case $sec in cached:*) sec_cached "${sec#cached:}";; cached2:*) sec_cached2 "${sec#cached2:}";;
     finish:*) sec_finish "${sec#finish:}";;
-    lwwait:*) sec_lwwait "${sec#lwwait:}";; *) "sec_$sec";; esac
+    lwwait:*) sec_lwwait "${sec#lwwait:}";; qpstore:*) sec_qpstore "${sec#qpstore:}";;
+    qplw:*) sec_qplw "${sec#qplw:}";; timeline:*) sec_timeline "${sec#timeline:}";; *) "sec_$sec";; esac
   progress "section $sec finished"
 done
 echo "##### PERF DONE $(date -u +%T) $(wait_idle)"

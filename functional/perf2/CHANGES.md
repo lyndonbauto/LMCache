@@ -1,0 +1,58 @@
+# Perf rerun: changes to the box and the harness
+
+No product-code change beyond `rdma.queue_pairs` (`81288120`, tested before the run on a
+local Soft-RoCE VM). Host-level changes (the `rocm`/`caddy` stop, the out-of-tree
+`rdma_rxe`, the scratch mount) are in `functional/HOST-CHANGES.md`. Every listener is on
+127.0.0.1; only port 22 is public.
+
+## Containers (new droplet)
+
+Both created by `scripts/create_containers.sh`: host network, `/dev/infiniband/uverbs0`,
+`memlock` unlimited, `CAP_IPC_LOCK`, `/root/lmc-work` bind-mounted.
+
+| Container | Image | Added inside |
+|---|---|---|
+| `aero-kvsink-bp` | `ubuntu:24.04` | Server build dependencies (`scripts/build_server.sh`, apt); `python-is-python3`, because `functional/harness/kvsink_server.sh` probes the port with `python` and the server never counted as started without it |
+| `lmc-c` | `vllm/vllm-openai-rocm:v0.27.1` | apt: `perftest`, `numactl`, `libuv1-dev` (for `kvlayers`). pip, all missing from the image: `cupy-rocm-7-0` 14.2.0 (`requirements/rocm_core.txt`; without it the MP server fails `register_kv_cache` and vLLM's engine times out), `sortedcontainers` 2.4.0, `aiofile` 3.12.3, `opentelemetry-exporter-prometheus` 0.61b0 (this moved `opentelemetry-sdk`/`-api` from 1.44 to 1.40; vLLM's tracing still imports, and tracing is off), Python `aerospike` 19.3.0 (the pipelined RDMA integration test's server probe), `pytest-cov`, `pytest-benchmark`. torch and vLLM unchanged (checked after each install). LMCache installed editable from `/work/LMCache` (`scripts/build_client_lmcache.sh`) |
+
+The client and LMCache were built in `lmc-c`. `kvlayers` was built from a copy of the client
+tree (`/work/kvlayers-build/client`, `make EVENT_LIB=libuv`), so the client LMCache links
+against (no event library) was not touched.
+
+## kv-sink server configs
+
+- `functional/configs/aerospike-kvsink-bp-perf.conf.in` (unchanged): the device namespace
+  of `functional/perf/` (`direct-files true`, `read-page-cache false`, `post-write-cache 0`,
+  `max-write-cache 8G`), `filesize` 2.0x the KV.
+- `functional/configs/aerospike-kvsink-bp-perf-mem.conf.in` (new, step 5): the same stanza
+  with `storage-engine memory { data-size 16G }`.
+
+Every session's server log, the generated config and `asd`'s disk `read_bytes` are kept in
+the session directories on the box (`/root/lmc-work/functional/perf2/`).
+
+## Harness changes (`functional/`)
+
+| File | Change |
+|---|---|
+| `perf/perf.sh` | `PERF_OUT` (results directory; container path derived), `PERF_MODEL` passthrough, `CONF_TMPL` override, `STORE_IDS`; `vram()` falls back to sysfs `mem_info_vram_used`; `store_check` reads live namespace stats; new sections `qpstore:<L>`, `qplw:<L>:<qp>`, `timeline:<qp>` |
+| `perf/perf_session.sh` | `PERF_MODEL`: weights to serve under the Llama name (`--served-model-name`); unused in the end (Meta's repo was available) |
+| `perf/ibbw.sh` | `IBBW_OUT` output directory |
+| `perf/aggregate.py` | Session names with a `_qp<n>` suffix become mode `lw_qp<n>` |
+| `perf2/scripts/` | `create_containers.sh`, `build_server.sh`, `build_client_lmcache.sh`, `gate.sh` (step 3), `qpscan.sh` (step 4), `memscan.sh` (step 5), `sweep.sh` (step 6) |
+
+The E3 print patch to `lmcache/v1/layerwise/pump.py` is box-only
+(`/root/lmc-work/functional/perf2/e3_pump_patch.py`), applied and reverted by `qpscan.sh` and
+`memscan.sh` around the timeline sessions (19:43-19:52Z and 20:18-20:22Z); `lmcache/` and
+`csrc/` were clean after each. Never committed.
+
+## Aborted attempts (kept on the box, not used)
+
+- `gate_attempt1/`, `gate_attempt2/`: the gate before the container packages above were
+  added (no `sortedcontainers`, no Python `aerospike`, no `cupy`, no `python` in the server
+  container, `kvlayers` linked without libuv).
+- `gate_attempt3/`: with `RUN_AEROSPIKE_SLOW_INTEGRATION=1`; the region-release test ran
+  873 adapter lifetimes in 15 min without finishing and hit the gate's timeout. The VM check
+  and the old d14 runs did not set it either; the gate ran without it.
+- The first queue-pair scan start (19:23Z) used a 45G file (`FS_PCT` 140, about 71% full
+  after the store, over `stop-writes-used-pct` 70); stopped during the store and restarted
+  with `FS_PCT=200`.

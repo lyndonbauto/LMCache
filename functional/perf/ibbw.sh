@@ -6,7 +6,9 @@
 # --bind_source_ip 127.0.0.1 and checked with ss before each run; a server
 # found listening off loopback is killed and the sweep stops.
 set -u
-OUT=/root/lmc-work/functional/perf/ibbw
+OUT=${IBBW_OUT:-/root/lmc-work/functional/perf/ibbw}
+# lmc-c mounts /root/lmc-work at /work.
+OUTC=/work${OUT#/root/lmc-work}
 C=lmc-c
 mkdir -p $OUT
 rm -f $OUT/*.txt
@@ -17,7 +19,7 @@ COMMON="-d rxe0 -x 1 -m 4096 -s 524288 -D 10 -F --report_gbits"
 run() {  # run <name> <tool> <args...>
   local name=$1 tool=$2; shift 2
   port=$((port + 1))
-  docker exec -d $C bash -c "$tool $COMMON -p $port --bind_source_ip 127.0.0.1 $* > /work/functional/perf/ibbw/${name}_server.txt 2>&1"
+  docker exec -d $C bash -c "$tool $COMMON -p $port --bind_source_ip 127.0.0.1 $* > $OUTC/${name}_server.txt 2>&1"
   sleep 1
   local l; l=$(ss -ltnp | grep ":$port ")
   echo "$name listener: $l" >> $OUT/listeners.txt
@@ -30,7 +32,7 @@ run() {  # run <name> <tool> <args...>
     ( sleep 4; top -b -n 3 -d 2 -w 200 > $OUT/top_${name}.txt 2>&1 ) &
     ( head -n 1 /proc/stat > $OUT/stat0_$name.txt; sleep 9; head -n 1 /proc/stat > $OUT/stat1_$name.txt ) &
   fi
-  docker exec $C bash -c "$tool $COMMON -p $port --cpu_util $* 127.0.0.1 > /work/functional/perf/ibbw/${name}_client.txt 2>&1; echo rc=\$? >> /work/functional/perf/ibbw/${name}_client.txt"
+  docker exec $C bash -c "$tool $COMMON -p $port --cpu_util $* 127.0.0.1 > $OUTC/${name}_client.txt 2>&1; echo rc=\$? >> $OUTC/${name}_client.txt"
   wait
   sleep 2
   echo "$name: $(grep -E '^ *524288' $OUT/${name}_client.txt | tr -s ' ') $(grep rc= $OUT/${name}_client.txt)"

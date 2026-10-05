@@ -60,26 +60,33 @@ FIELDS = [
     "note",
 ]
 POINT_RE = re.compile(r"_L(\d+)_c(\d+)\.json$")
-SESSION_RE = re.compile(r"L(\d+)_(aon|lw|lwwait)(\d*)")
+SESSION_RE = re.compile(r"L(\d+)_(aon|lw|lwwait)(\d*)(?:_qp(\d+))?")
 
 
-def mode_key(mode: str) -> tuple[int, int]:
-    """Sort key: nocache, aon, lw, then lw_wait<secs> by wait."""
-    if mode.startswith("lw_wait"):
-        return (3, int(mode[len("lw_wait") :]))
-    return ({"nocache": 0, "aon": 1, "lw": 2}[mode], 0)
+def mode_key(mode: str) -> tuple[int, int, int]:
+    """Sort key: nocache, aon, lw, then lw_wait<secs> by wait; then by _qp<n>."""
+    base, _, qp = mode.partition("_qp")
+    q = int(qp) if qp else 0
+    if base.startswith("lw_wait"):
+        return (3, int(base[len("lw_wait") :]), q)
+    return ({"nocache": 0, "aon": 1, "lw": 2}[base], 0, q)
 
 
 def session_mode(sess: str) -> str:
-    """Return the mode of a session directory name, or "" if it is not one."""
+    """Return the mode of a session directory name, or "" if it is not one.
+
+    A ``_qp<n>`` suffix (perf2's queue-pair scan) is kept on the mode:
+    ``L8192_lw_qp8`` is mode ``lw_qp8``.
+    """
     if sess == "nocache":
         return "nocache"
     m = SESSION_RE.fullmatch(sess)
     if not m:
         return ""
+    qp = f"_qp{m.group(4)}" if m.group(4) else ""
     if m.group(2) == "lwwait":
-        return f"lw_wait{m.group(3) or 600}"
-    return "" if m.group(3) else m.group(2)
+        return f"lw_wait{m.group(3) or 600}{qp}"
+    return "" if m.group(3) else m.group(2) + qp
 
 
 def point_files(root: str) -> list[tuple[str, str, str]]:
@@ -116,7 +123,8 @@ def not_run_rows(root: str, rows: list[dict]) -> list[dict]:
         with open(f) as fh:
             stop_c = int(re.search(r"c=(\d+)", fh.read()).group(1))
         length = int(sess.split("_")[0][1:])
-        wait = "default 5 s wait" if mode == "lw" else f"{mode} wait"
+        lw_default = mode.partition("_qp")[0] == "lw"
+        wait = "default 5 s wait" if lw_default else f"{mode} wait"
         for c in CONCS:
             if c > stop_c and (length, c, mode) not in have:
                 row: dict = {k: "" for k in FIELDS}

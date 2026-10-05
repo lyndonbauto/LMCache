@@ -1,0 +1,17 @@
+host uname -r: 6.8.0-138-generic
+== host numactl -H
+available: 1 nodes (0)
+node 0 cpus: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19
+node 0 size: 241610 MB
+node 0 free: 194640 MB
+node distances:
+node   0 
+  0:  10 
+== nproc 20
+Model name:                              INTEL(R) XEON(R) PLATINUM 8568Y+
+BIOS Model name:                         pc-q35-6.1  CPU @ 2.0GHz
+Thread(s) per core:                      1
+Core(s) per socket:                      20
+Socket(s):                               1
+NUMA node(s):                            1
+NUMA node0 CPU(s):                       0-19

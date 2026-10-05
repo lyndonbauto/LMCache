@@ -30,7 +30,7 @@
 # lmcache.mp.layerwise_wait_timeout_seconds default, 5 s; a timeout stops
 # vLLM's engine, section 7 / D-24), STOP_ON_ENGINE_STOP (0; 1: if vLLM is
 # dead after a point, write engine_stopped_<tag>.txt and skip the remaining
-# steps).
+# steps), PERF_MODEL (default MODEL: the weights to serve under MODEL's name).
 # Before each point, a dead vLLM is restarted (with a fresh LMCache server).
 set -u
 OUT=$1; TAG=$2; MODE=$3; shift 3
@@ -43,6 +43,9 @@ export HF_HOME=${HF_HOME:-/work/hf} HF_HUB_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1
 export LMCACHE_LOG_LEVEL=${LMCACHE_LOG_LEVEL:-DEBUG}
 unset VLLM_BATCH_INVARIANT
 MODEL=meta-llama/Llama-3.1-8B-Instruct
+# PERF_MODEL: the weights to serve (e.g. an ungated mirror of the same model);
+# vLLM always serves them under MODEL, which perf_client.py requests.
+PERF_MODEL=${PERF_MODEL:-$MODEL}
 L1_GB=${L1_GB:-100}
 STOP_GRACE=${STOP_GRACE:-60}
 L2_PORT=${L2_PORT:-3700}
@@ -94,7 +97,7 @@ start_vllm() {
 \"kv_load_failure_policy\":\"fail\",\"kv_connector_extra_config\":{\
 \"lmcache.mp.host\":\"tcp://localhost\",\"lmcache.mp.port\":6555,\"lmcache.mp.use_layerwise\":$LW$wait_cfg}}")
   fi
-  vllm serve "$MODEL" --host 127.0.0.1 --port 8000 --seed 0 --no-enable-prefix-caching \
+  vllm serve "$PERF_MODEL" --served-model-name "$MODEL" --host 127.0.0.1 --port 8000 --seed 0 --no-enable-prefix-caching \
     --async-scheduling --max-model-len "${MAX_LEN:-131072}" --gpu-memory-utilization "${VLLM_UTIL:-0.9}" \
     "${kv[@]}" >> "$VLOG" 2>&1 &
   VLLM_PID=$!

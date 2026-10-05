@@ -1,0 +1,52 @@
+# Memory-namespace variant of aerospike-kvsink-bp-perf.conf.in for perf2 step 5
+# (functional/perf2/scripts/memscan.sh): the same server, ports and limits,
+# but the lmcache namespace keeps its data in RAM, so a sink fetch reads no
+# disk. perf.sh fills in @FILESIZE@ as the namespace's data-size; @FILE@ is
+# unused.
+service {
+    proto-fd-max 15000
+    cluster-name lmcache-kvsink-bp
+    work-directory /root/lmc-work/aerospike-kvsink-bp-data/work
+}
+logging {
+    console {
+        context any info
+    }
+}
+mod-lua {
+    user-path /root/lmc-work/aerospike-kvsink-bp-data/work/usr/udf/lua
+    allow-unsafe-lua false
+}
+network {
+    service {
+        address 127.0.0.1
+        port 3700
+        access-address 127.0.0.1
+        access-port 3700
+    }
+    heartbeat {
+        mode mesh
+        address 127.0.0.1
+        port 3702
+        interval 150
+        timeout 10
+    }
+    fabric {
+        address 127.0.0.1
+        port 3701
+    }
+    admin {
+        address 127.0.0.1
+        port 3703
+    }
+}
+namespace lmcache {
+    replication-factor 1
+    nsup-period 120
+    default-ttl 0
+    max-record-size 1048576
+    stop-writes-sys-memory-pct 100
+    storage-engine memory {
+        data-size @FILESIZE@
+    }
+}
