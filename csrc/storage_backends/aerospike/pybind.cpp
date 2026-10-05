@@ -33,6 +33,8 @@ PYBIND11_MODULE(lmcache_aerospike, m) {
                      &lmcache::connector::L1RdmaRegistration::device_name)
       .def_readwrite("gid_index",
                      &lmcache::connector::L1RdmaRegistration::gid_index)
+      .def_readwrite("queue_pairs",
+                     &lmcache::connector::L1RdmaRegistration::queue_pairs)
       .def_readwrite("base", &lmcache::connector::L1RdmaRegistration::base)
       .def_readwrite("size", &lmcache::connector::L1RdmaRegistration::size)
       .def_readwrite("window_count",

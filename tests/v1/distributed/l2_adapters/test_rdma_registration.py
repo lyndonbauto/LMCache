@@ -188,6 +188,23 @@ class TestL1RdmaConfig:
         with pytest.raises(ValueError, match="gid_index"):
             L1RdmaConfig.from_dict({"transport": "RC", "gid_index": bad})
 
+    def test_queue_pairs_defaults_to_one(self) -> None:
+        assert L1RdmaConfig.from_dict({"transport": "RC"}).queue_pairs == 1
+        assert L1RdmaConfig().queue_pairs == 1
+
+    @pytest.mark.parametrize("value", [1, 8, 16])
+    def test_queue_pairs_is_parsed(self, value: int) -> None:
+        config = L1RdmaConfig.from_dict({"transport": "RC", "queue_pairs": value})
+        assert config.queue_pairs == value
+
+    @pytest.mark.parametrize("bad", [0, -1, 17, True, "8", 2.0, None])
+    def test_invalid_queue_pairs_is_rejected(self, bad: object) -> None:
+        with pytest.raises(ValueError, match="queue_pairs"):
+            L1RdmaConfig.from_dict({"transport": "RC", "queue_pairs": bad})
+
+    def test_help_documents_queue_pairs(self) -> None:
+        assert "queue_pairs" in L1RdmaConfig.help()
+
     def test_help_documents_the_allocator_constraint(self) -> None:
         text = L1RdmaConfig.help()
         assert "MixedMemoryAllocator" in text

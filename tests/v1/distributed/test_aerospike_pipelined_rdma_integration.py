@@ -22,6 +22,7 @@ no kv-sink, so CI's Docker server does not run these. On the Soft-RoCE VM::
     pytest tests/v1/distributed/test_aerospike_pipelined_rdma_integration.py
 
 On AWS EFA, run with ``RDMA_TRANSPORT=SRD RDMA_DEVICE=<efa device>``.
+``RDMA_QUEUE_PAIRS=8`` spreads the server's RC writes over 8 queue pairs.
 ``RUN_AEROSPIKE_SLOW_INTEGRATION=1`` also runs the region-release test, which
 opens more client lifetimes than the server has region slots (about 17
 minutes on EFA).
@@ -105,6 +106,8 @@ RDMA_DEVICE = os.environ.get("RDMA_DEVICE", "")
 RDMA_GID_INDEX = int(os.environ.get("RDMA_GID_INDEX", "0"))
 #: ``RC`` (Soft-RoCE, the default) or ``SRD`` (AWS EFA).
 RDMA_TRANSPORT = RdmaTransport[os.environ.get("RDMA_TRANSPORT", "RC").upper()]
+#: RC queue pairs per node; above 1 needs a multi-queue-pair client and server.
+RDMA_QUEUE_PAIRS = int(os.environ.get("RDMA_QUEUE_PAIRS", "1"))
 
 #: One window holds the request's five full-attention chunks and two
 #: sliding-window chunks, page-aligned.
@@ -344,6 +347,7 @@ def _build_manager(set_name: str, shm_name: str = "") -> StorageManager:
         transport=RDMA_TRANSPORT,
         device_name=RDMA_DEVICE,
         gid_index=RDMA_GID_INDEX,
+        queue_pairs=RDMA_QUEUE_PAIRS,
         window_plan=RdmaWindowPlan(window_count=1, window_bytes=WINDOW_BYTES),
         fetch_timeout_seconds=FETCH_TIMEOUT,
     )

@@ -88,6 +88,7 @@ def _build_native_rdma_registration(
     registration.transport = rdma.transport.name
     registration.device_name = rdma.device_name
     registration.gid_index = rdma.gid_index
+    registration.queue_pairs = rdma.queue_pairs
     registration.base = l1_memory_desc.ptr
     registration.size = l1_memory_desc.size
     registration.window_count = rdma.window_plan.window_count

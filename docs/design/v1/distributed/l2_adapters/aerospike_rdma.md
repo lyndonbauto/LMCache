@@ -55,6 +55,7 @@ as_sink_config_init(&cfg);
 cfg.transport = "rc";          // or "srd"; LMCache never uses "local"
 cfg.device = "rxe0";           // NULL: first device
 cfg.gid_index = 1;
+cfg.queue_pairs = 8;           // RC: queue pairs per node (1-16)
 aerospike_sink_create(&as, &err, l1_base, window_count * window_bytes,
                       &cfg, &sink);
 
@@ -499,12 +500,22 @@ RDMA is off unless the adapter config asks for it:
         "transport": "RC",      # DISABLED (default) | RC | SRD
         "device_name": "rxe0",  # empty selects the first device
         "gid_index": 1,         # RC: the GID the node addresses us by
+        "queue_pairs": 1,       # RC: queue pairs per node, 1-16 (default 1)
         "window_count": 8,      # max concurrent RDMA fetches
         "window_bytes": 8388608,
         "fetch_timeout_seconds": 30.0,  # must be < --l1-write-ttl-seconds
     },
 }
 ```
+
+`queue_pairs` asks the client to open that many RC queue pairs to each node;
+the server spreads a fetch's writes over them round-robin. On a hardware NIC one
+queue pair already reaches line rate, so leave it at 1. Soft-RoCE runs each
+queue pair's work on one core at a time, which capped one sink at about
+2.2 GiB/s on the MI300X test box (8.6 GiB/s raw at 8 queue pairs), so raise it
+there. It needs a kv-sink client with `as_sink_config.queue_pairs` and a server
+that accepts several queue pairs per region; LMCache does not build against
+older clients.
 
 The server must run the same transport, on a device configured with
 `KV_SINK_RDMA_DEVICE` and, where the automatic choice is wrong,

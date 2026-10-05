@@ -95,6 +95,7 @@ void AerospikeSinkFetchDriver::initialize(aerospike* client) {
                         ? nullptr
                         : registration_.device_name.c_str();
     config.gid_index = static_cast<int>(registration_.gid_index);
+    config.queue_pairs = registration_.queue_pairs;
 
     as_error err;
     as_sink* created = nullptr;

@@ -26,6 +26,9 @@ from lmcache.v1.distributed.internal_api import L1MemoryDesc, MemoryGrowthPolicy
 _DEFAULT_WINDOW_COUNT = 8
 _DEFAULT_WINDOW_BYTES = 8 << 20
 _DEFAULT_FETCH_TIMEOUT_SECONDS = 30.0
+_DEFAULT_QUEUE_PAIRS = 1
+# The kv-sink client and server accept at most 16 RC queue pairs per node.
+_MAX_QUEUE_PAIRS = 16
 
 
 def _require_positive_int(raw: object, name: str) -> int:
@@ -179,6 +182,9 @@ class L1RdmaConfig:
             the first device the driver reports.
         gid_index: Port GID index the RC transport addresses the node by.
             Soft-RoCE on ``lo`` needs the IPv4-mapped entry, usually 1.
+        queue_pairs: RC queue pairs per node; the server spreads a fetch's
+            writes over them. Soft-RoCE runs each queue pair on one core at a
+            time, so more queue pairs raise its throughput. Ignored by SRD.
         window_plan: The bounded registration windows to pre-register at init.
         fetch_timeout_seconds: Deadline for one layer's batch read, RDMA
             write included; rows are never retried. Must stay strictly below
@@ -189,6 +195,7 @@ class L1RdmaConfig:
     transport: RdmaTransport = RdmaTransport.DISABLED
     device_name: str = ""
     gid_index: int = 0
+    queue_pairs: int = _DEFAULT_QUEUE_PAIRS
     window_plan: RdmaWindowPlan = DEFAULT_RDMA_WINDOW_PLAN
     fetch_timeout_seconds: float = _DEFAULT_FETCH_TIMEOUT_SECONDS
 
@@ -206,7 +213,8 @@ class L1RdmaConfig:
 
         Args:
             raw: Raw mapping with optional ``transport``, ``device_name``,
-                ``gid_index``, ``window_count``, and ``window_bytes`` keys.
+                ``gid_index``, ``queue_pairs``, ``window_count``,
+                ``window_bytes``, and ``fetch_timeout_seconds`` keys.
 
         Returns:
             A validated ``L1RdmaConfig``. An empty mapping yields the disabled
@@ -214,8 +222,9 @@ class L1RdmaConfig:
 
         Raises:
             ValueError: If ``transport`` is not a known transport name, if
-                ``gid_index`` is negative, or if a window field is not a
-                positive integer.
+                ``gid_index`` is negative, if ``queue_pairs`` is not an
+                integer from 1 to 16, if a window field is not a positive
+                integer, or if ``fetch_timeout_seconds`` is not positive.
         """
         transport_name = str(raw.get("transport", RdmaTransport.DISABLED.name)).upper()
         try:
@@ -232,6 +241,17 @@ class L1RdmaConfig:
         if gid_index < 0:
             raise ValueError(f"gid_index must be non-negative, got {gid_index}")
 
+        queue_pairs = raw.get("queue_pairs", _DEFAULT_QUEUE_PAIRS)
+        if (
+            isinstance(queue_pairs, bool)
+            or not isinstance(queue_pairs, int)
+            or not 1 <= queue_pairs <= _MAX_QUEUE_PAIRS
+        ):
+            raise ValueError(
+                f"queue_pairs must be an integer from 1 to {_MAX_QUEUE_PAIRS}, "
+                f"got {queue_pairs!r}"
+            )
+
         timeout = raw.get("fetch_timeout_seconds", _DEFAULT_FETCH_TIMEOUT_SECONDS)
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
             raise ValueError(
@@ -246,6 +266,7 @@ class L1RdmaConfig:
             transport=transport,
             device_name=str(raw.get("device_name", "")),
             gid_index=gid_index,
+            queue_pairs=queue_pairs,
             window_plan=RdmaWindowPlan(
                 window_count=_require_positive_int(
                     raw.get("window_count", _DEFAULT_WINDOW_COUNT), "window_count"
@@ -271,6 +292,10 @@ class L1RdmaConfig:
             "- device_name (str): libibverbs device, e.g. rxe0 "
             "(default: first device)\n"
             "- gid_index (int): port GID index (default 0)\n"
+            "- queue_pairs (int): RC queue pairs per node, 1 to "
+            f"{_MAX_QUEUE_PAIRS} (default {_DEFAULT_QUEUE_PAIRS}). Soft-RoCE "
+            "runs each on one core, so more raise its throughput; needs a "
+            "kv-sink client and server with multi-queue-pair support\n"
             "- window_count (int): pre-registered windows / max in-flight "
             f"RDMA fetches (default {_DEFAULT_WINDOW_COUNT})\n"
             "- window_bytes (int): bytes per window; must hold at least one "

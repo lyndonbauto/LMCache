@@ -814,6 +814,7 @@ built outside `setup.py`.
   - `transport`: `RdmaTransport` `DISABLED` / `RC` / `SRD`;
   - `device_name`;
   - `gid_index`;
+  - `queue_pairs` (RC queue pairs per node, 1-16);
   - `window_plan`: `RdmaWindowPlan(window_count, window_bytes)`;
   - `fetch_timeout_seconds`.
 - **Translation to native.** `_build_native_rdma_registration` translates it

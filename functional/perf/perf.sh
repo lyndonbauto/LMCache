@@ -47,6 +47,8 @@
 #   Aerospike data file's directory, default /root/lmc-work/perf-aero on the
 #   boot disk). Phase 2 (cached2): AON_L1_GB (180), LW_GEN_GB (140),
 #   LW_WINDOWS_GB (32), STORE_BATCH_GB (64), LW_WAIT (by length).
+#   QUEUE_PAIRS (1): the lw rdma block's queue_pairs, RC queue pairs per
+#   kv-sink node (1-16; needs the multi-queue-pair client and server).
 set -u
 TREE_HOST=${TREE_HOST:-/root/lmc-work/LMCache}
 TREE_CTR=/work/LMCache
@@ -57,6 +59,7 @@ LENGTHS=${LENGTHS:-8192 16384 32768 65536 130816}
 CONCS=${CONCS:-1 2 4 8 16 32}
 CAP=${CAP:-64}
 WINDOW_COUNT=${WINDOW_COUNT:-8}
+QUEUE_PAIRS=${QUEUE_PAIRS:-1}
 L1_GEN_GB=${L1_GEN_GB:-100}
 MIN_FREE_GB=${MIN_FREE_GB:-60}
 STORE_CONC=${STORE_CONC:-8}
@@ -80,7 +83,7 @@ CLONE=$TREE_HOST . "$TREE_HOST/functional/newstack/kvsink_bp_env.sh"
 AON_L2="--no-l1-use-lazy --l2-adapter {\"type\":\"aerospike\",\"hosts\":\"127.0.0.1:$KVSINK_PORT\",\"namespace\":\"lmcache\",\"set_name\":\"kv_chunks\"}"
 # lw_l2 <cap> <window_count>: lw server flags; each window holds cap chunks.
 lw_l2() {
-  echo "--no-l1-use-lazy --pipelined-fetch --pipelined-max-chunks $1 --l2-adapter {\"type\":\"aerospike\",\"hosts\":\"127.0.0.1:$KVSINK_PORT\",\"namespace\":\"lmcache\",\"set_name\":\"kv_chunks\",\"rdma\":{\"transport\":\"RC\",\"device_name\":\"rxe0\",\"gid_index\":1,\"window_count\":$2,\"window_bytes\":$(($1 * LLAMA_CHUNK))}}"
+  echo "--no-l1-use-lazy --pipelined-fetch --pipelined-max-chunks $1 --l2-adapter {\"type\":\"aerospike\",\"hosts\":\"127.0.0.1:$KVSINK_PORT\",\"namespace\":\"lmcache\",\"set_name\":\"kv_chunks\",\"rdma\":{\"transport\":\"RC\",\"device_name\":\"rxe0\",\"gid_index\":1,\"queue_pairs\":$QUEUE_PAIRS,\"window_count\":$2,\"window_bytes\":$(($1 * LLAMA_CHUNK))}}"
 }
 LW_L2=$(lw_l2 "$CAP" "$WINDOW_COUNT")
 

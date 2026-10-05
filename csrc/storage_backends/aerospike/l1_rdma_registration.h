@@ -25,6 +25,8 @@ struct L1RdmaRegistration {
   std::string device_name;
   // Port GID index for ibv_query_gid. 0 is the link-local GID.
   uint32_t gid_index = 0;
+  // RC queue pairs per node (1 to 16); the server spreads writes over them.
+  uint32_t queue_pairs = 1;
   // Base address and length of LMCache's pinned L1 slab.
   uint64_t base = 0;
   size_t size = 0;
