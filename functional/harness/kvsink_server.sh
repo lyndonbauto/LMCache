@@ -10,6 +10,7 @@
 #   KVSINK_RDMA_DEVICE, KVSINK_GID_INDEX  passed to the server as KV_SINK_RDMA_DEVICE
 #                and KV_SINK_GID_INDEX when set (the batch-read server 046e8558d
 #                reads them; the old server ignores them)
+#   KVSINK_EXTRA_ENV  more NAME=value pairs for the server's environment
 # The new kv-sink stack (server 046e8558d, ports 3700-3703) is selected with
 # functional/newstack/kvsink_bp_env.sh.
 set -u
@@ -22,6 +23,7 @@ PORT=${KVSINK_PORT:-3100}
 ENVS=""
 [ -n "${KVSINK_RDMA_DEVICE:-}" ] && ENVS="$ENVS KV_SINK_RDMA_DEVICE=$KVSINK_RDMA_DEVICE"
 [ -n "${KVSINK_GID_INDEX:-}" ] && ENVS="$ENVS KV_SINK_GID_INDEX=$KVSINK_GID_INDEX"
+[ -n "${KVSINK_EXTRA_ENV:-}" ] && ENVS="$ENVS $KVSINK_EXTRA_ENV"
 
 asd_pid() {
   docker exec "$CTR" pgrep -x asd

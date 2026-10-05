@@ -45,6 +45,16 @@ The E3 print patch to `lmcache/v1/layerwise/pump.py` is box-only
 `memscan.sh` around the timeline sessions (19:43-19:52Z and 20:18-20:22Z); `lmcache/` and
 `csrc/` were clean after each. Never committed.
 
+## Follow-up A and D (2026-10-05 22:04-22:47Z, `FOLLOWUP-A-D.md`)
+
+| What | Change |
+|---|---|
+| Product code | `2eefa049`: the layer wait in `lmcache/v1/multiprocess/layer_progress.py` restarts its deadline on progress (A). On the box the file was copied over the tree before `scripts/fixa.sh` |
+| `harness/kvsink_server.sh` | `KVSINK_EXTRA_ENV`: more `NAME=value` pairs for the server's environment |
+| `perf/perf.sh` | `PERF_ASD` (another server binary) and `PERF_ASD_ENV` (its environment) |
+| `perf2/scripts/` | `fixa.sh` (A rerun), `trace.sh` (D runs; builds the traced server), `trace_analyze.py` (trace summary) |
+| Server (box-only) | Trace patch `/root/lmc-work/functional/perf2/trace_patch.py`, not committed (it quotes the private server source): per-op timestamps, `KV_SINK_TRACE`, `KV_SINK_REGION_INFLIGHT_KB`, `KV_SINK_GLOBAL_INFLIGHT_KB`. Traced binary `/root/lmc-work/asd-trace/asd` (md5 `172df35939cc7aa17bb86797241a86e3`); the source tree and the original binary were restored (`functional/HOST-CHANGES.md`) |
+
 ## Aborted attempts (kept on the box, not used)
 
 - `gate_attempt1/`, `gate_attempt2/`: the gate before the container packages above were
@@ -56,3 +66,5 @@ The E3 print patch to `lmcache/v1/layerwise/pump.py` is box-only
 - The first queue-pair scan start (19:23Z) used a 45G file (`FS_PCT` 140, about 71% full
   after the store, over `stop-writes-used-pct` 70); stopped during the store and restarted
   with `FS_PCT=200`.
+- `trace/build_copy_attempt.txt`: the first traced-server build, from a copy of the server
+  tree; failed on CMake caches that name the original tree.

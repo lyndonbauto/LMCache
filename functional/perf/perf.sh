@@ -52,7 +52,8 @@
 #   PERF_OUT (/root/lmc-work/functional/perf): the results directory on the
 #   host. PERF_MODEL: weights to serve under the Llama name (perf_session.sh).
 #   CONF_TMPL: the kv-sink config template (default the device-namespace
-#   aerospike-kvsink-bp-perf.conf.in).
+#   aerospike-kvsink-bp-perf.conf.in). PERF_ASD: another kv-sink server
+#   binary; PERF_ASD_ENV: NAME=value pairs for its environment.
 #   QUEUE_PAIRS (1): the lw rdma block's queue_pairs, RC queue pairs per
 #   kv-sink node (1-16; needs the multi-queue-pair client and server).
 set -u
@@ -84,6 +85,8 @@ FIO_DIRS=${FIO_DIRS:-/mnt/scratch/perf-aero /root/lmc-work/perf-aero}
 PERF_CONF=$S/aerospike-kvsink-bp-perf.conf
 CONF_TMPL=${CONF_TMPL:-$TREE_HOST/functional/configs/aerospike-kvsink-bp-perf.conf.in}
 CLONE=$TREE_HOST . "$TREE_HOST/functional/newstack/kvsink_bp_env.sh"
+[ -n "${PERF_ASD:-}" ] && export KVSINK_ASD=$PERF_ASD
+[ -n "${PERF_ASD_ENV:-}" ] && export KVSINK_EXTRA_ENV=$PERF_ASD_ENV
 # Both cached modes allocate L1 up front (--no-l1-use-lazy, which lw's RDMA
 # windows require): with lazy L1, the first retrieve after a restart took
 # 9.4 s (run 1, superseded/run1_8k_lazyL1), a server cold start, not L2.
