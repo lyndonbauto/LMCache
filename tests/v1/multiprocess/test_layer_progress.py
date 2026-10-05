@@ -257,6 +257,75 @@ def test_waiter_times_out_when_watermark_stalls() -> None:
         waiter.wait_for_layer(1, 1, schedule)
 
 
+class _FakeClock:
+    """Monotonic clock that advances only when the waiter sleeps."""
+
+    def __init__(self, step_seconds: float) -> None:
+        self.now = 0.0
+        self.step_seconds = step_seconds
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self) -> None:
+        self.now += self.step_seconds
+
+
+def test_wait_queued_behind_progressing_retrieves_outlasts_the_timeout() -> None:
+    """Older retrieves that keep advancing hold the timeout off."""
+    record = _record_at(1, 0)
+    schedule = LayerwiseSchedule([[0, 1]])
+    clock = _FakeClock(step_seconds=1.0)
+    progress_steps = iter([(1, 1), (1, 2), (2, 1), (2, 2), (3, 1)])
+
+    def publish_next_step(_seconds: float) -> None:
+        clock.advance()
+        generation, watermark = next(progress_steps)
+        if record.read().generation != generation:
+            record.begin_retrieve(generation)
+        record.report_launch_recorded(watermark)
+
+    waiter = LayerProgressWaiter(
+        record,
+        RecordingEventPool(schedule.launch_count()),
+        poll_interval_seconds=0.001,
+        wait_timeout_seconds=2.0,
+        monotonic=clock.monotonic,
+        sleep=publish_next_step,
+    )
+
+    waiter.wait_for_layer(3, 0, schedule)
+
+    assert clock.now > 2.0
+
+
+def test_wait_times_out_once_the_older_retrieve_stops_progressing() -> None:
+    record = _record_at(1, 0)
+    schedule = LayerwiseSchedule([[0, 1]])
+    clock = _FakeClock(step_seconds=1.0)
+    sleeps = 0
+
+    def advance_once_then_stall(_seconds: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        clock.advance()
+        if sleeps == 1:
+            record.report_launch_recorded(1)
+
+    waiter = LayerProgressWaiter(
+        record,
+        RecordingEventPool(schedule.launch_count()),
+        poll_interval_seconds=0.001,
+        wait_timeout_seconds=2.0,
+        monotonic=clock.monotonic,
+        sleep=advance_once_then_stall,
+    )
+
+    with pytest.raises(LayerProgressRetrieveGenerationTimeoutError):
+        waiter.wait_for_layer(2, 0, schedule)
+    assert clock.now == 3.0
+
+
 def test_worker_event_pool_validates_size() -> None:
     backend = _RecordingEventBackend()
     with pytest.raises(ValueError, match="expected"):

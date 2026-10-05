@@ -279,8 +279,11 @@ class LayerProgressWaiter:
             event_pool: Pool of IPC events recorded by the daemon per ordinal.
             poll_interval_seconds: Sleep between shared-memory polls while
                 waiting for the watermark.
-            wait_timeout_seconds: Maximum time to wait for progress before
-                raising a timeout error.
+            wait_timeout_seconds: How long a wait tolerates no progress before
+                raising a timeout error. Progress is any change to the shared
+                generation or watermark, including an older retrieve that
+                this one is queued behind, so the total wait is unbounded
+                while the daemon keeps moving.
             monotonic: Clock for timeout measurement (injectable in tests).
             sleep: Sleep callable (injectable in tests).
         """
@@ -322,9 +325,11 @@ class LayerProgressWaiter:
             LayerProgressRetrieveFailedError: If the daemon set the failure flag
                 under this ``generation``. A flag left by an older generation
                 is ignored.
-            LayerProgressRetrieveGenerationTimeoutError: If the daemon never
-                published this generation before the timeout.
-            LayerProgressRetrieveProgressTimeoutError: If the watermark stalled.
+            LayerProgressRetrieveGenerationTimeoutError: If shared memory
+                still shows an older generation and has not changed for the
+                wait timeout.
+            LayerProgressRetrieveProgressTimeoutError: If this generation's
+                watermark has not advanced for the wait timeout.
             LayerProgressIncompatibleWithCudaGraphError: If the compute stream
                 is still under CUDA graph capture (invariant violation).
         """
@@ -353,8 +358,15 @@ class LayerProgressWaiter:
 
     def _wait_for_watermark(self, generation: int, wait_ordinal: int) -> None:
         deadline = self._monotonic() + self._wait_timeout_seconds
+        last_progress = (-1, -1)
         while True:
             snapshot = self._record.read()
+            progress = (snapshot.generation, snapshot.watermark)
+            if progress != last_progress:
+                # Retrieves on one worker run one at a time, so a wait queued
+                # behind older generations must not time out while they move.
+                last_progress = progress
+                deadline = self._monotonic() + self._wait_timeout_seconds
             if snapshot.generation > generation:
                 raise LayerProgressStaleGenerationError(
                     f"expected retrieve generation {generation}, "
@@ -375,13 +387,15 @@ class LayerProgressWaiter:
             if self._monotonic() >= deadline:
                 if snapshot.generation < generation:
                     raise LayerProgressRetrieveGenerationTimeoutError(
-                        f"timed out after {self._wait_timeout_seconds}s waiting "
-                        f"for retrieve generation {generation} (shared memory "
-                        f"shows {snapshot.generation})"
+                        f"timed out after {self._wait_timeout_seconds}s with no "
+                        f"progress waiting for retrieve generation "
+                        f"{generation} (shared memory "
+                        f"shows generation {snapshot.generation}, watermark "
+                        f"{snapshot.watermark})"
                     )
                 raise LayerProgressRetrieveProgressTimeoutError(
-                    f"timed out after {self._wait_timeout_seconds}s waiting for "
-                    f"launch ordinal {wait_ordinal} (watermark "
+                    f"timed out after {self._wait_timeout_seconds}s with no "
+                    f"progress waiting for launch ordinal {wait_ordinal} (watermark "
                     f"{snapshot.watermark})"
                 )
             self._sleep(self._poll_interval_seconds)
