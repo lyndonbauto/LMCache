@@ -1,0 +1,62 @@
+breakdown/mem32e/E_B_qp8/perf_full.txt: total 90.5% of samples
+   78.74%  kworker
+   11.17%  asd
+    0.56%  swapper
+    0.02%  top
+    0.01%  kvlayers
+    0.01%  perf
+    0.00%  f2b
+    0.00%  mpstat
+    0.00%  awk
+    0.00%  rcu_preempt
+    0.00%  multipathd
+    0.00%  containerd
+    0.00%  tend
+    0.00%  kcompactd
+    0.00%  gmain
+    8.83%  kworker  [kernel.kallsyms]  memset_orig
+    7.61%  kworker  [kernel.kallsyms]  __raw_spin_lock_irqsave
+    7.46%  kworker  [kernel.kallsyms]  crypto_shash_update
+    7.33%  kworker  [kernel.kallsyms]  crc32_pclmul_le_16
+    6.99%  kworker  [kernel.kallsyms]  __memcpy
+    6.81%  asd  libc.so.6  0x00000000001a19d2
+    4.91%  kworker  [kernel.kallsyms]  rdma_get_gid_attr
+    2.62%  kworker  [kernel.kallsyms]  __raw_callee_save___pv_queued_spin_unlock
+    2.60%  kworker  [kernel.kallsyms]  clear_page_erms
+    2.39%  kworker  [kernel.kallsyms]  rxe_xmit_packet
+    2.36%  kworker  [kernel.kallsyms]  ib_device_put
+    1.89%  kworker  [kernel.kallsyms]  __rxe_put
+    1.77%  kworker  [kernel.kallsyms]  __ip_select_ident
+    1.65%  kworker  [kernel.kallsyms]  rxe_pool_get_index
+    1.62%  kworker  [kernel.kallsyms]  rxe_rcv
+breakdown/mem32e/E_C_qp8/perf_full.txt: total 83.2% of samples
+   73.69%  lmcache
+    4.10%  swapper
+    3.86%  asd
+    1.05%  top
+    0.20%  grpcpp_sync_ser
+    0.12%  curl
+    0.09%  kworker
+    0.06%  amd-metrics-exp
+    0.04%  perf
+    0.02%  file
+    0.01%  sleep
+    0.00%  bash
+    0.00%  awk
+    0.00%  ksoftirqd
+    0.00%  mpstat
+   22.83%  lmcache  [kernel.kallsyms]  clear_page_erms
+    8.39%  lmcache  python3.12  _PyEval_EvalFrameDefault
+    1.49%  asd  asd  hash_table_reduce
+    0.75%  lmcache  python3.12  0x000000000015ad6d
+    0.69%  lmcache  python3.12  0x000000000015a963
+    0.64%  lmcache  [kernel.kallsyms]  post_alloc_hook
+    0.57%  lmcache  [kernel.kallsyms]  __handle_mm_fault
+    0.55%  lmcache  python3.12  _PyObject_GenericGetAttrWithDict
+    0.52%  lmcache  python3.12  PyObject_GC_Del
+    0.51%  swapper  [kernel.kallsyms]  pv_native_safe_halt
+    0.48%  lmcache  python3.12  PyUnicode_Splitlines
+    0.46%  lmcache  python3.12  0x0000000000159740
+    0.43%  lmcache  python3.12  0x000000000015fd78
+    0.42%  swapper  [kernel.kallsyms]  native_write_msr
+    0.40%  lmcache  [kernel.kallsyms]  aa_dfa_match

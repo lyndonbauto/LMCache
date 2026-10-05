@@ -6,6 +6,7 @@
 # --bind_source_ip 127.0.0.1 and checked with ss before each run; a server
 # found listening off loopback is killed and the sweep stops.
 set -u
+# IBBW_SET=sink_depths: only ib_write_bw at the kv-sink server's depths.
 OUT=${IBBW_OUT:-/root/lmc-work/functional/perf/ibbw}
 # lmc-c mounts /root/lmc-work at /work.
 OUTC=/work${OUT#/root/lmc-work}
@@ -37,12 +38,20 @@ run() {  # run <name> <tool> <args...>
   sleep 2
   echo "$name: $(grep -E '^ *524288' $OUT/${name}_client.txt | tr -s ' ') $(grep rc= $OUT/${name}_client.txt)"
 }
-run write_q1_t8 ib_write_bw -q 1 -t 8
-run write_q4_t8 ib_write_bw -q 4 -t 8
-run write_q8_t8 ib_write_bw -q 8 -t 8
-run write_q1_t128 ib_write_bw -q 1 -t 128
-run write_q4_t128 ib_write_bw -q 4 -t 128
-run write_q8_t128 ib_write_bw -q 8 -t 128
-run read_q1 ib_read_bw -q 1
-run read_q4 ib_read_bw -q 4
+if [ "${IBBW_SET:-}" = sink_depths ]; then
+  # The kv-sink server's depths (perf2 breakdown run A).
+  run write_q1_t8 ib_write_bw -q 1 -t 8
+  run write_q8_t4 ib_write_bw -q 8 -t 4
+  run write_q16_t2 ib_write_bw -q 16 -t 2
+  run write_q16_t8 ib_write_bw -q 16 -t 8
+else
+  run write_q1_t8 ib_write_bw -q 1 -t 8
+  run write_q4_t8 ib_write_bw -q 4 -t 8
+  run write_q8_t8 ib_write_bw -q 8 -t 8
+  run write_q1_t128 ib_write_bw -q 1 -t 128
+  run write_q4_t128 ib_write_bw -q 4 -t 128
+  run write_q8_t128 ib_write_bw -q 8 -t 128
+  run read_q1 ib_read_bw -q 1
+  run read_q4 ib_read_bw -q 4
+fi
 cat $OUT/listeners.txt
