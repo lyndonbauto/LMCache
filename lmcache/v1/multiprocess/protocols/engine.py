@@ -79,10 +79,9 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         #   - layout_hints: LayoutHints - See custom_types.LayoutHints.
         #   - engine_group_infos: list[EngineGroupInfo] - Engine-neutral KV cache
         #     group metadata (msgspec-encoded by the message queue).
-        #   - layer_event_ipc_handles: list[bytes] - Reserved; must be empty.
-        #     Daemon-owned layer events are returned in the response when
-        #     layerwise mode is enabled on the server.
         # Returns: RegisterKvCacheResponse (server/worker must upgrade together).
+        #   Daemon-owned layer events are returned in it when layerwise mode
+        #   is enabled on the server.
         "REGISTER_KV_CACHE": ProtocolDefinition(
             payload_classes=[
                 int,
@@ -92,7 +91,6 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
                 EngineType,
                 LayoutHints,
                 list[EngineGroupInfo],
-                list[bytes],
             ],
             response_class=RegisterKvCacheResponse,
             handler_type=HandlerType.SYNC,

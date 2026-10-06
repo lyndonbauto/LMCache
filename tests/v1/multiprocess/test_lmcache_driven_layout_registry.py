@@ -215,7 +215,7 @@ def test_registration_hands_storage_the_layout_and_layer_indices(
     ctx.layout_desc_registry = LayoutDescRegistry()
 
     module = _registration_module(monkeypatch, ctx, layout_desc)
-    module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [], [])
+    module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [])
 
     ctx.storage_manager.set_object_group_layouts.assert_called_once_with(
         {0: layout_desc}, {0: [[0, 1]]}
@@ -242,7 +242,7 @@ def test_a_layout_storage_rejects_does_not_fail_registration(
     ctx.storage_manager.set_object_group_layouts.side_effect = ValueError("bad")
 
     module = _registration_module(monkeypatch, ctx, layout_desc)
-    module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [], [])
+    module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [])
 
     assert ctx.layout_desc_registry.find("model", 1) is layout_desc
 
@@ -270,8 +270,8 @@ def test_registration_builds_the_fetch_layout_until_the_last_worker_leaves(
     ctx.layout_desc_registry = LayoutDescRegistry()
 
     module = _registration_module(monkeypatch, ctx, layout_desc)
-    module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [], [])
-    module.register_kv_cache(2, [], "model", 1, EngineType.VLLM, {}, [], [])
+    module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [])
+    module.register_kv_cache(2, [], "model", 1, EngineType.VLLM, {}, [])
 
     fetch_model = module.fetch_model("model", 1)
     assert fetch_model.layout.layer_ids() == (0, 1)
@@ -303,7 +303,7 @@ def test_a_layout_that_cannot_be_planned_does_not_fail_registration(
     ctx.storage_manager.set_object_group_layouts.side_effect = ValueError("bad")
 
     module = _registration_module(monkeypatch, ctx, layout_desc)
-    module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [], [])
+    module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [])
 
     assert ctx.layout_desc_registry.find("model", 1) is layout_desc
     with pytest.raises(KeyError):
@@ -376,8 +376,8 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
     )
 
     module = lmcache_driven_transfer_mod.LMCacheDrivenTransferModule(ctx)
-    module.register_kv_cache(1, [], "shared-model", 1, EngineType.VLLM, {}, [], [])
-    module.register_kv_cache(2, [], "shared-model", 1, EngineType.VLLM, {}, [], [])
+    module.register_kv_cache(1, [], "shared-model", 1, EngineType.VLLM, {}, [])
+    module.register_kv_cache(2, [], "shared-model", 1, EngineType.VLLM, {}, [])
     assert ctx.layout_desc_registry.find("shared-model", 1) is layout_desc
 
     module.unregister_kv_cache(1)
@@ -507,7 +507,7 @@ def test_registration_sets_up_the_pipelined_fetch_until_the_worker_leaves(
     layout_desc = _pipelined_layout()
     ctx = _pipelined_ctx()
     module = _registration_module(monkeypatch, ctx, layout_desc, _SinkFactory())
-    module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [], [])
+    module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [])
 
     model = ctx.pipelined_models.find("model", 1)
     ctx.storage_manager.pipelined_window_placer.assert_called_once_with(
@@ -537,7 +537,7 @@ def test_a_pipelined_setup_storage_refuses_does_not_fail_registration(
         "no RDMA windows"
     )
     module = _registration_module(monkeypatch, ctx, _pipelined_layout(), _SinkFactory())
-    module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [], [])
+    module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [])
 
     module.fetch_model("model", 1)
     with pytest.raises(KeyError):
@@ -570,7 +570,7 @@ def test_a_window_too_small_for_the_chunk_cap_warns_and_loads_whole_objects(
     ctx.storage_manager.pipelined_window_placer.side_effect = refusal
     module = _registration_module(monkeypatch, ctx, _pipelined_layout(), _SinkFactory())
     with patch.object(lmcache_driven_transfer_mod, "logger") as logger:
-        module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [], [])
+        module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [])
 
     warnings = [
         call
@@ -605,7 +605,7 @@ def test_staging_that_disagrees_with_the_plan_keeps_the_pipelined_fetch_off(
         _SinkFactory(),
         cache_context_factory=_ShiftedStagingContext,
     )
-    module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [], [])
+    module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [])
 
     module.fetch_model("model", 1)
     ctx.storage_manager.pipelined_window_placer.assert_not_called()
@@ -629,8 +629,8 @@ def test_registration_reports_the_layer_publish_budget(
     module = _registration_module(monkeypatch, ctx, _pipelined_layout(), _SinkFactory())
     expected = ctx.pipelined_fetch.layer_publish_budget_seconds
 
-    first = module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [], [])
-    again = module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [], [])
+    first = module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [])
+    again = module.register_kv_cache(1, [], "model", 1, EngineType.VLLM, {}, [])
 
     assert expected == (3.0 if enabled else 0.0)
     assert first.layer_publish_budget_seconds == expected
@@ -656,7 +656,7 @@ def test_the_pipelined_setup_is_skipped_when_it_cannot_apply(
 
     ctx = _pipelined_ctx(enabled=enabled)
     module = _registration_module(monkeypatch, ctx, _pipelined_layout(), sink_factory)
-    module.register_kv_cache(1, [], "model", world_size, EngineType.VLLM, {}, [], [])
+    module.register_kv_cache(1, [], "model", world_size, EngineType.VLLM, {}, [])
 
     ctx.storage_manager.pipelined_window_placer.assert_not_called()
     with pytest.raises(KeyError):

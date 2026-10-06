@@ -32,7 +32,6 @@ class RequestClient(Protocol):
         engine_type: Any,
         layout_hints: Any,
         engine_group_infos: list[Any],
-        layer_event_ipc_handles: list[bytes] | None = None,
     ) -> MessagingFuture[Any]: ...
 
     def unregister_kv_cache(self, instance_id: int) -> MessagingFuture[Any]: ...

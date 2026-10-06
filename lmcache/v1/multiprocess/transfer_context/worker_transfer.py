@@ -608,7 +608,6 @@ class LMCacheDrivenTransferContext(TransferContext):
                     engine_type,
                     layout_hints,
                     list(engine_group_infos),
-                    [],
                 )
             )
             raw_response = future.result(timeout=mq_timeout)

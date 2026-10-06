@@ -430,7 +430,6 @@ def test_mq_register_kv_cache():
             EngineType.VLLM,
             {"vllm_block_size": 16},
             [],
-            [],
         ],
         expected_response=None,
         num_requests=1,

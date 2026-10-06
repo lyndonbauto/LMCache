@@ -42,7 +42,6 @@ def register_kv_cache_handler(
     engine_type: EngineType,
     layout_hints: LayoutHints,
     engine_group_infos: list[EngineGroupInfo],
-    layer_event_ipc_handles: list[bytes],
 ) -> None:
     """
     Dummy handler for REGISTER_KV_CACHE requests.

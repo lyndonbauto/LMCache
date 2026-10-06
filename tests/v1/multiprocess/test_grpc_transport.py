@@ -540,13 +540,11 @@ def test_register_kv_cache_layerwise_response_survives_grpc_round_trip() -> None
             engine_type: EngineType,
             layout_hints: LayoutHints,
             engine_group_infos: list[EngineGroupInfo],
-            layer_event_ipc_handles: list[bytes],
         ) -> RegisterKvCacheResponse:
             assert instance_id == 9
             assert model_name == "layerwise-model"
             assert world_size == 1
             assert engine_type is EngineType.VLLM
-            assert layer_event_ipc_handles == []
             return expected
 
     server = GrpcMultiprocessServer(
@@ -568,7 +566,6 @@ def test_register_kv_cache_layerwise_response_survives_grpc_round_trip() -> None
             1,
             EngineType.VLLM,
             LayoutHints(),
-            [],
             [],
         ).result(timeout=5)
     finally:

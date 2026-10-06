@@ -578,7 +578,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         engine_type: EngineType,
         layout_hints: LayoutHints,
         engine_group_infos: list[EngineGroupInfo],
-        layer_event_ipc_handles: list[bytes],
     ) -> RegisterKvCacheResponse:
         """Register the KV cache tensors for a given GPU instance ID.
 
@@ -594,8 +593,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 GPUCacheContext for GPU KV format detection.
             engine_group_infos: Engine-neutral KV cache group metadata
                 (already msgspec-decoded by the message queue).
-            layer_event_ipc_handles: Must be empty; daemon-owned events are
-                returned in the response when layerwise is enabled.
 
         Returns:
             Registration metadata including server layerwise flag and optional
@@ -629,12 +626,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         self._ctx.pipelined_fetch.layer_publish_budget_seconds
                     ),
                 )
-
-        if layer_event_ipc_handles:
-            raise ValueError(
-                "REGISTER_KV_CACHE layer_event_ipc_handles must be empty; "
-                "the server exports daemon-owned events in the response"
-            )
 
         # Build the context and layout descriptor outside the lock.
         cache_context = create_cache_context(
