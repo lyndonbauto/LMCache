@@ -1,0 +1,83 @@
+struct rxe_qp {
+	struct ib_qp               ibqp;                 /*     0   296 */
+	/* --- cacheline 4 boundary (256 bytes) was 40 bytes ago --- */
+	struct rxe_pool_elem       elem;                 /*   296    80 */
+
+	/* XXX last struct has 4 bytes of padding */
+
+	/* --- cacheline 5 boundary (320 bytes) was 56 bytes ago --- */
+	struct ib_qp_attr          attr;                 /*   376   224 */
+	/* --- cacheline 9 boundary (576 bytes) was 24 bytes ago --- */
+	unsigned int               valid;                /*   600     4 */
+	unsigned int               mtu;                  /*   604     4 */
+	bool                       is_user;              /*   608     1 */
+
+	/* XXX 7 bytes hole, try to pack */
+
+	struct rxe_pd *            pd;                   /*   616     8 */
+	struct rxe_srq *           srq;                  /*   624     8 */
+	struct rxe_cq *            scq;                  /*   632     8 */
+	/* --- cacheline 10 boundary (640 bytes) --- */
+	struct rxe_cq *            rcq;                  /*   640     8 */
+	enum ib_sig_type           sq_sig_type;          /*   648     4 */
+
+	/* XXX 4 bytes hole, try to pack */
+
+	struct rxe_sq              sq;                   /*   656    24 */
+	struct rxe_rq              rq;                   /*   680    24 */
+	/* --- cacheline 11 boundary (704 bytes) --- */
+	struct socket *            sk;                   /*   704     8 */
+	u32                        dst_cookie;           /*   712     4 */
+	u16                        src_port;             /*   716     2 */
+
+	/* XXX 2 bytes hole, try to pack */
+
+	struct rxe_av              pri_av;               /*   720    88 */
+	/* --- cacheline 12 boundary (768 bytes) was 40 bytes ago --- */
+	struct rxe_av              alt_av;               /*   808    88 */
+	/* --- cacheline 14 boundary (896 bytes) --- */
+	atomic_t                   mcg_num;              /*   896     4 */
+
+	/* XXX 4 bytes hole, try to pack */
+
+	struct sk_buff_head        req_pkts;             /*   904    24 */
+	struct sk_buff_head        resp_pkts;            /*   928    24 */
+	struct rxe_task            send_task;            /*   952    80 */
+	/* --- cacheline 16 boundary (1024 bytes) was 8 bytes ago --- */
+	struct rxe_task            recv_task;            /*  1032    80 */
+	/* --- cacheline 17 boundary (1088 bytes) was 24 bytes ago --- */
+	struct rxe_req_info        req;                  /*  1112    44 */
+	/* --- cacheline 18 boundary (1152 bytes) was 4 bytes ago --- */
+	struct rxe_comp_info       comp;                 /*  1156    28 */
+	struct rxe_resp_info       resp __attribute__((__aligned__(8))); /*  1184   664 */
+	/* --- cacheline 28 boundary (1792 bytes) was 56 bytes ago --- */
+	atomic_t                   ssn;                  /*  1848     4 */
+	atomic_t                   skb_out;              /*  1852     4 */
+	/* --- cacheline 29 boundary (1856 bytes) --- */
+	int                        need_req_skb;         /*  1856     4 */
+
+	/* XXX 4 bytes hole, try to pack */
+
+	struct timer_list          retrans_timer;        /*  1864    40 */
+
+	/* XXX last struct has 4 bytes of padding */
+
+	u64                        qp_timeout_jiffies;   /*  1904     8 */
+	struct timer_list          rnr_nak_timer;        /*  1912    40 */
+
+	/* XXX last struct has 4 bytes of padding */
+
+	/* --- cacheline 30 boundary (1920 bytes) was 32 bytes ago --- */
+	spinlock_t                 state_lock;           /*  1952     4 */
+
+	/* XXX 4 bytes hole, try to pack */
+
+	struct execute_work        cleanup_work;         /*  1960    32 */
+
+	/* size: 1992, cachelines: 32, members: 34 */
+	/* sum members: 1967, holes: 6, sum holes: 25 */
+	/* paddings: 3, sum paddings: 12 */
+	/* forced alignments: 1 */
+	/* last cacheline: 8 bytes */
+} __attribute__((__aligned__(8)));
+

@@ -1,0 +1,17 @@
+struct rxe_req_info {
+	int                        wqe_index;            /*     0     4 */
+	u32                        psn;                  /*     4     4 */
+	int                        opcode;               /*     8     4 */
+	atomic_t                   rd_atomic;            /*    12     4 */
+	int                        wait_fence;           /*    16     4 */
+	int                        need_rd_atomic;       /*    20     4 */
+	int                        wait_psn;             /*    24     4 */
+	int                        need_retry;           /*    28     4 */
+	int                        wait_for_rnr_timer;   /*    32     4 */
+	int                        noack_pkts;           /*    36     4 */
+	int                        again;                /*    40     4 */
+
+	/* size: 44, cachelines: 1, members: 11 */
+	/* last cacheline: 44 bytes */
+};
+
