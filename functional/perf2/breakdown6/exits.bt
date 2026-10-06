@@ -1,0 +1,15 @@
+kprobe:rxe_requester { @calls = count(); @qp[tid] = arg0; }
+kretprobe:rxe_requester /@qp[tid]/ {
+  $qp = @qp[tid];
+  if ((int32)retval == -11) {
+    if (*(int32 *)($qp + 1136)) { @exit["window_full"] = count(); }
+    else if (*(int32 *)($qp + 1856)) { @exit["rx_backed_up"] = count(); }
+    else if (*(int32 *)($qp + 1128)) { @exit["wait_fence"] = count(); }
+    else if (*(int32 *)($qp + 1132)) { @exit["need_rd_atomic"] = count(); }
+    else { @exit["nothing_or_other"] = count(); }
+  } else { @exit["sent_packet"] = count(); }
+  delete(@qp[tid]);
+}
+kprobe:retransmit_timer { @timer["retransmit"] = count(); }
+kprobe:rnr_nak_timer { @timer["rnr"] = count(); }
+interval:s:10 { exit(); }
