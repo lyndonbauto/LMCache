@@ -902,6 +902,14 @@ pipelined retrieves:
 
 **Commits.** `83f391d3`, `0703d954`.
 
+**TODO, not in this PR: size windows from the model.** The 8 MiB default
+`window_bytes` is smaller than one chunk of most models (32 MiB for
+Llama-3-8B), so with defaults nothing is pipelined. The windows are reserved
+and registered at server start, before any model registers, so fixing this
+means deferring both to the first `REGISTER_KV_CACHE`. It is a follow-up PR
+after PR-A9 and PR-A10. The design doc's "Sizing `window_bytes`" section
+records it.
+
 **Tests.** `tests/v1/distributed/test_l1_rdma_windows.py` and
 `tests/v1/test_range_memory_allocator.py`.
 
@@ -947,6 +955,10 @@ windows", so any zero-copy transport can use them.
     `retain_none`) decides which fetched objects stay in L1. A clean release
     uses `finish_write_and_reserve_read` then `finish_read`, so no store
     notification fires. This is F1, `8e18aabd`.
+  - The default stays `retain_none` (G-08). The design doc tells users who
+    want L1 hits on repeats to set `--l2-prefetch-policy retain`, and that a
+    retained chunk lives only until its window is leased again. Carry that
+    section ("Keeping fetched chunks in L1") with this PR.
 
 **Where.** `lmcache/v1/distributed/l2_adapters/rdma_window_leaser.py` and
 `rdma_window_placer.py` (both new). The storage manager builds the placer

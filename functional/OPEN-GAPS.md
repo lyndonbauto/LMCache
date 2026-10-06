@@ -169,6 +169,11 @@ D-14 (concurrent writers mix segments) has its own decision record:
   whether this is intended.
 - **Proposed change**: keep L2-loaded chunks in L1 under normal LRU instead of
   freeing them after the retrieve.
+- **Decision (2026-10-06)**: keep `default` as the default. Deployments that
+  want L1 locality set `--l2-prefetch-policy retain`, documented in
+  `docs/design/v1/distributed/l2_adapters/aerospike_rdma.md` ("Keeping
+  fetched chunks in L1"). On the pipelined path a retained chunk lives only
+  until its RDMA window is leased again.
 - **Owner**: L1 / prefetch controller.
 - **Evidence**: `stage2/lkp03/`.
 

@@ -552,6 +552,29 @@ The 8 MiB default is too small for either. The windows come out of L1
 (`window_count x window_bytes`), so eight 32 MiB windows take 256 MiB of the
 slab away from general L1.
 
+**TODO: size windows from the model.** An unset `window_bytes` should become
+one chunk of the first model that registers. Today the windows are carved
+out of L1 and registered with every node when the server starts, before any
+model is known. So sizing them from the model means deferring both steps to
+the first `REGISTER_KV_CACHE`, and refusing a later model whose chunk is
+larger. Until then, set `window_bytes` explicitly.
+
+### Keeping fetched chunks in L1
+
+By default, chunks loaded from Aerospike are dropped from L1 once the GPU has
+copied them, so a repeat of the same prompt fetches from Aerospike again. To
+keep them, start the server with the `retain` prefetch policy:
+
+```bash
+--l2-prefetch-policy retain
+```
+
+On the pipelined path, a retained chunk stays readable inside its RDMA window
+until the window is leased to a later retrieve. So `retain` serves L1 hits
+for roughly the last `window_count` pipelined retrieves, not for as long as
+general L1 would keep them. Chunks loaded on the whole-object path go to
+general L1 and follow its normal eviction.
+
 ## Testing
 
 ### Without a device
