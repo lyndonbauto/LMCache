@@ -112,6 +112,52 @@ def test_the_pipelined_planner_still_gets_its_layouts(
     assert client.object_group_layouts[0][0]["layer_indices"] == [[0, 2, 4], [1, 3]]
 
 
+@pytest.mark.parametrize(
+    ("dtype", "element_size"),
+    [
+        (torch.float8_e4m3fn, 1),
+        (torch.int8, 1),
+        (torch.uint8, 1),
+        (torch.bfloat16, 2),
+        (torch.float16, 2),
+        (torch.float32, 4),
+        (torch.float64, 8),
+    ],
+)
+def test_the_pipelined_planner_gets_each_kernel_groups_element_size(
+    client: _RecordLayoutClient, dtype: torch.dtype, element_size: int
+) -> None:
+    """The window-fit check sizes planes from these, so FP8 must be 1 byte.
+
+    A 4-byte guess for FP8 overestimates every plane fourfold, and a window
+    that holds the model is then reported too small, turning pipelining off.
+    """
+    adapter = NativeConnectorL2Adapter(native_client=client, type_name="test")
+    try:
+        adapter.set_object_group_layouts(
+            {0: MemoryLayoutDesc(shapes=[torch.Size([2, 3, 16, 32])], dtypes=[dtype])}
+        )
+    finally:
+        adapter.close()
+
+    assert client.object_group_layouts[0][0]["element_sizes"] == [element_size]
+
+
+def test_hybrid_kernel_groups_keep_their_own_element_sizes(
+    client: _RecordLayoutClient,
+) -> None:
+    """One element size per kernel group, in the order of the shapes."""
+    adapter = NativeConnectorL2Adapter(native_client=client, type_name="test")
+    try:
+        adapter.set_object_group_layouts(_hybrid_descs())
+    finally:
+        adapter.close()
+
+    layouts = client.object_group_layouts[0]
+    assert layouts[0]["element_sizes"] == [2, 4]
+    assert layouts[1]["element_sizes"] == [2]
+
+
 def test_a_group_without_layer_indices_lets_the_native_side_number_layers(
     client: _RecordLayoutClient,
 ) -> None:

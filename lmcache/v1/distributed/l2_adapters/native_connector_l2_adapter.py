@@ -63,7 +63,7 @@ def _native_object_group_layouts(
     for group_id, layout_desc in group_layout_descs.items():
         group: dict[str, object] = {
             "shapes": [tuple(shape) for shape in layout_desc.shapes],
-            "dtypes": [str(dtype) for dtype in layout_desc.dtypes],
+            "element_sizes": [dtype.itemsize for dtype in layout_desc.dtypes],
         }
         layer_indices = (group_kernel_layer_indices or {}).get(group_id)
         if layer_indices:

@@ -27,10 +27,10 @@ std::map<uint32_t, rdma::ObjectGroupLayoutInput> parse_object_group_layouts(
     rdma::ObjectGroupLayoutInput layout_input;
 
     const py::list shapes = group["shapes"].cast<py::list>();
-    const py::list dtypes = group["dtypes"].cast<py::list>();
-    if (shapes.size() != dtypes.size()) {
+    const py::list element_sizes = group["element_sizes"].cast<py::list>();
+    if (shapes.size() != element_sizes.size()) {
       throw std::invalid_argument(
-          "object group layout: shapes and dtypes length mismatch");
+          "object group layout: shapes and element_sizes length mismatch");
     }
 
     py::list layer_indices_list;
@@ -48,7 +48,7 @@ std::map<uint32_t, rdma::ObjectGroupLayoutInput> parse_object_group_layouts(
       for (py::ssize_t dim = 0; dim < shape_tuple.size(); ++dim) {
         kernel_input.shape.push_back(shape_tuple[dim].cast<int64_t>());
       }
-      kernel_input.dtype = dtypes[i].cast<std::string>();
+      kernel_input.element_size = element_sizes[i].cast<size_t>();
       if (!layer_indices_list.empty()) {
         const py::list indices = layer_indices_list[i].cast<py::list>();
         for (py::ssize_t j = 0; j < indices.size(); ++j) {

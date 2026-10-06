@@ -21,6 +21,7 @@ SHARD_BIN := $(BUILD_DIR)/shard_plan_test
 PLAN_BIN := $(BUILD_DIR)/request_plan_test
 PLANNER_BIN := $(BUILD_DIR)/slot_planner_test
 TABLE_BIN := $(BUILD_DIR)/sink_fetch_table_test
+LAYOUT_BIN := $(BUILD_DIR)/memory_layout_conversion_test
 DUMP_BIN := $(BUILD_DIR)/slot_plan_dump
 
 INCLUDES := -I$(SRC_DIR) -I$(CONNECTOR_DIR)
@@ -39,6 +40,9 @@ PLANNER_SOURCES := \
 TABLE_SOURCES := \
 	$(SRC_DIR)/sink_fetch_table_test.cpp \
 	$(CONNECTOR_DIR)/sink_fetch_table.cpp
+LAYOUT_SOURCES := \
+	$(SRC_DIR)/memory_layout_conversion_test.cpp \
+	$(CONNECTOR_DIR)/memory_layout_conversion.cpp
 # Takes a fixture path and prints plans instead of asserting, so it is built
 # with the logic harnesses but driven by test_slot_plan_parity.py rather than
 # run bare by `logic-test`.
@@ -47,7 +51,8 @@ DUMP_SOURCES := \
 	$(CONNECTOR_DIR)/slot_planner.cpp \
 	$(CONNECTOR_DIR)/layer_pipeline.cpp \
 	$(CONNECTOR_DIR)/shard_plan.cpp
-LOGIC_BINS := $(SHARD_BIN) $(PLAN_BIN) $(PLANNER_BIN) $(TABLE_BIN) $(DUMP_BIN)
+LOGIC_BINS := $(SHARD_BIN) $(PLAN_BIN) $(PLANNER_BIN) $(TABLE_BIN) $(LAYOUT_BIN) \
+	$(DUMP_BIN)
 
 # Test-only Python module over the real SinkFetchTable, driven by the
 # layerwise conformance suite (tests/v1/layerwise/aerospike_harness.py).
@@ -69,6 +74,7 @@ logic-test: $(LOGIC_BINS)
 	$(PLAN_BIN)
 	$(PLANNER_BIN)
 	$(TABLE_BIN)
+	$(LAYOUT_BIN)
 
 test: logic-test
 
@@ -89,6 +95,9 @@ $(PLANNER_BIN): $(PLANNER_SOURCES) | $(BUILD_DIR)
 
 $(TABLE_BIN): $(TABLE_SOURCES) | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(TABLE_SOURCES) -o $@
+
+$(LAYOUT_BIN): $(LAYOUT_SOURCES) | $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $(LAYOUT_SOURCES) -o $@
 
 $(DUMP_BIN): $(DUMP_SOURCES) | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(DUMP_SOURCES) -o $@

@@ -2,40 +2,13 @@
 
 #include "memory_layout_conversion.h"
 
-#include <algorithm>
-#include <cctype>
 #include <stdexcept>
+#include <string>
 
 namespace lmcache {
 namespace connector {
 namespace rdma {
 namespace {
-
-std::string lower_ascii(std::string value) {
-  std::transform(
-      value.begin(), value.end(), value.begin(),
-      [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-  return value;
-}
-
-size_t element_size_from_dtype(const std::string& dtype) {
-  const std::string normalized = lower_ascii(dtype);
-  if (normalized.find("float16") != std::string::npos ||
-      normalized.find("bfloat16") != std::string::npos ||
-      normalized == "half") {
-    return 2;
-  }
-  if (normalized.find("float32") != std::string::npos ||
-      normalized.find("float") != std::string::npos) {
-    return 4;
-  }
-  if (normalized.find("uint8") != std::string::npos ||
-      normalized.find("byte") != std::string::npos) {
-    return 1;
-  }
-  throw std::invalid_argument("memory layout conversion: unsupported dtype '" +
-                              dtype + "'");
-}
 
 struct ParsedShape {
   uint32_t kv_size = 0;
@@ -122,6 +95,11 @@ std::vector<ObjectGroupLayout> object_group_layouts_from_inputs(
         throw std::invalid_argument(
             "memory layout conversion: kernel group shape is empty");
       }
+      if (group_input.element_size == 0) {
+        throw std::invalid_argument(
+            "memory layout conversion: kernel group element size must be "
+            "positive");
+      }
       const ParsedShape parsed = parse_kernel_shape(group_input.shape);
       const std::vector<uint32_t> layer_indices = resolve_layer_indices(
           group_input.layer_indices, parsed.num_layers, next_auto_layer);
@@ -131,7 +109,7 @@ std::vector<ObjectGroupLayout> object_group_layouts_from_inputs(
       group.kv_size = parsed.kv_size;
       group.num_slots = parsed.num_slots;
       group.hidden_dim = parsed.hidden_dim;
-      group.element_size = element_size_from_dtype(group_input.dtype);
+      group.element_size = group_input.element_size;
       layout.kernel_groups.push_back(std::move(group));
     }
     layouts.push_back(std::move(layout));
