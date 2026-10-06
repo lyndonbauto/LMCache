@@ -1,0 +1,2 @@
+[ perf record: Woken up 332 times to write data ]
+[ perf record: Captured and wrote 93.707 MB /root/lmc-work/functional/perf2/breakdown4/P2/wq.data (539391 samples) ]

@@ -1,0 +1,36 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 85K of event 'cycles:P'
+# Event count (approx.): 281587600050
+#
+# Overhead       Samples  CPU
+# ........  ............  ...
+#
+     5.94%          5034  006
+     5.71%          4858  013
+     5.63%          4793  004
+     5.27%          4502  001
+     5.25%          4475  017
+     5.25%          4478  019
+     5.19%          4426  005
+     5.11%          4355  012
+     5.10%          4343  016
+     5.07%          4321  015
+     5.06%          4319  018
+     5.03%          4280  011
+     4.97%          4246  009
+     4.81%          4107  010
+     4.76%          4056  000
+     4.69%          4003  003
+     4.67%          3995  002
+     4.51%          3854  014
+     4.24%          3630  008
+     3.75%          3219  007
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

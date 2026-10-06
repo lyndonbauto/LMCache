@@ -1,0 +1,2 @@
+[ perf record: Woken up 18 times to write data ]
+[ perf record: Captured and wrote 59.136 MB /root/lmc-work/functional/perf2/breakdown4/P8/sched.data (557851 samples) ]
