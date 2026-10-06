@@ -1,0 +1,2 @@
+[ perf record: Woken up 98 times to write data ]
+[ perf record: Captured and wrote 219.486 MB /mnt/scratch/breakdown7-tmp/sched.data (950890 samples) ]

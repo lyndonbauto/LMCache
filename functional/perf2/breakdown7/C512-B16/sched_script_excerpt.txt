@@ -1,0 +1,2000 @@
+asd  404052 [001] 27829.363411:       sched:sched_waking: comm=asd pid=404056 prio=120 target_cpu=004
+	ffffffff86366e7e try_to_wake_up
+	ffffffff86367200 wake_up_q
+	ffffffff8642eda7 futex_wake
+	ffffffff8642b7de do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+
+asd  404052 [001] 27829.363474: sched:sched_stat_runtime: comm=asd pid=404052 runtime=67563 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+
+asd  404052 [001] 27829.363479:       sched:sched_switch: asd:404052 [120] S ==> swapper/1:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+
+asd  404028 [000] 27829.365443: sched:sched_stat_runtime: comm=asd pid=404028 runtime=58381 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca6e4446 run_retransmit
+
+asd  404028 [000] 27829.365447:       sched:sched_switch: asd:404028 [120] S ==> swapper/0:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca6e4446 run_retransmit
+
+asd  404027 [001] 27829.366068: sched:sched_stat_runtime: comm=asd pid=404027 runtime=22836 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca6dd893 run_proxy_timeout
+
+asd  404027 [001] 27829.366072:       sched:sched_switch: asd:404027 [120] S ==> swapper/1:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca6dd893 run_proxy_timeout
+
+asd  404044 [000] 27829.367167:       sched:sched_waking: comm=kvlayers pid=404634 prio=120 target_cpu=012
+	ffffffff86366e7e try_to_wake_up
+	ffffffff863672aa default_wake_function
+	ffffffff86717642 pollwake
+	ffffffff8638efe6 __wake_up_common
+	ffffffff863965be __wake_up_sync_key
+	ffffffff870f1352 sock_def_readable
+	ffffffff87210e72 tcp_data_ready
+	ffffffff87211324 tcp_data_queue
+	ffffffff87211a44 tcp_rcv_established
+	ffffffff8722494d tcp_v4_do_rcv
+	ffffffff87226dca tcp_v4_rcv
+	ffffffff871e5e9c ip_protocol_deliver_rcu
+	ffffffff871e60f7 ip_local_deliver_finish
+	ffffffff871e619e ip_local_deliver
+	ffffffff871e67aa ip_rcv
+	ffffffff87127761 __netif_receive_skb_one_core
+	ffffffff871277e5 __netif_receive_skb
+	ffffffff87127a5e process_backlog
+	ffffffff87128623 __napi_poll
+	ffffffff87128c01 net_rx_action
+	ffffffff8631218b handle_softirqs
+	ffffffff8746b6c0 __do_softirq
+	ffffffff86311dc1 do_softirq.part.0
+	ffffffff86312582 __local_bh_enable_ip
+	ffffffff871256a8 __dev_queue_xmit
+	ffffffff871e9e13 neigh_hh_output
+	ffffffff871ea6a4 ip_finish_output2
+	ffffffff871eb626 __ip_finish_output
+	ffffffff871eb729 ip_finish_output
+	ffffffff871eb896 ip_output
+	ffffffff871ecf11 ip_local_out
+	ffffffff871ed0c5 __ip_queue_xmit
+	ffffffff871ed465 ip_queue_xmit
+	ffffffff8721839b __tcp_transmit_skb
+	ffffffff87219df8 tcp_write_xmit
+	ffffffff8721a2f7 __tcp_push_pending_frames
+	ffffffff871fe193 tcp_push
+	ffffffff871ff3cd tcp_sendmsg_locked
+	ffffffff871ff76c tcp_sendmsg
+	ffffffff8724aab2 inet_sendmsg
+	ffffffff870ec225 __sys_sendto
+	ffffffff870ec274 __x64_sys_sendto
+	ffffffff8620745d x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741d384 sendto
+	    5797ca723a8e cf_socket_send_to
+	    5797cb30c584 [unknown]
+
+asd  404044 [000] 27829.367177: sched:sched_stat_runtime: comm=asd pid=404044 runtime=34645 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f087389e51 [unknown]
+	    78f08738c8cd pthread_cond_wait
+	    5797ca735ec2 cf_queue_pop
+	             139 [unknown]
+
+asd  404044 [000] 27829.367179:       sched:sched_switch: asd:404044 [120] S ==> swapper/0:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f087389e51 [unknown]
+	    78f08738c8cd pthread_cond_wait
+	    5797ca735ec2 cf_queue_pop
+	             139 [unknown]
+
+asd  404002 [000] 27829.367306: sched:sched_stat_runtime: comm=asd pid=404002 runtime=22927 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+
+asd  404002 [000] 27829.367308:       sched:sched_switch: asd:404002 [120] S ==> swapper/0:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+
+asd  404005 [000] 27829.370337: sched:sched_stat_runtime: comm=asd pid=404005 runtime=62876 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468d42 schedule_hrtimeout_range_clock
+	ffffffff87468d73 schedule_hrtimeout_range
+	ffffffff8676a352 ep_poll
+	ffffffff8676a48b do_epoll_wait
+	ffffffff8676b14f __x64_sys_epoll_wait
+	ffffffff86206ea6 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741b2d2 epoll_wait
+	    5797ca725c4e cf_poll_wait
+
+asd  404005 [000] 27829.370339:       sched:sched_switch: asd:404005 [120] S ==> swapper/0:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468d42 schedule_hrtimeout_range_clock
+	ffffffff87468d73 schedule_hrtimeout_range
+	ffffffff8676a352 ep_poll
+	ffffffff8676a48b do_epoll_wait
+	ffffffff8676b14f __x64_sys_epoll_wait
+	ffffffff86206ea6 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741b2d2 epoll_wait
+	    5797ca725c4e cf_poll_wait
+
+asd  404055 [003] 27829.370821:       sched:sched_waking: comm=kworker/u44:5 pid=388508 prio=120 target_cpu=003
+	ffffffff86366e7e try_to_wake_up
+	ffffffff86367185 wake_up_process
+	ffffffff8633094e kick_pool
+	ffffffff86334ad6 __queue_work.part.0
+	ffffffff86334da6 __queue_work
+	ffffffff86334e87 queue_work_on
+	ffffffffc28875ed rxe_sched_task
+	ffffffffc2880d40 rxe_post_send
+	ffffffffc082ede6 ib_uverbs_post_send
+	ffffffffc0827998 ib_uverbs_write
+	ffffffff866f7da0 vfs_write
+	ffffffff866f8529 ksys_write
+	ffffffff866f8589 __x64_sys_write
+	ffffffff862059ae x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142298 [unknown]
+	    5797ca5aa121 verbs_post
+
+asd  404055 [003] 27829.370826:       sched:sched_waking: comm=asd pid=404058 prio=120 target_cpu=004
+	ffffffff86366e7e try_to_wake_up
+	ffffffff86367200 wake_up_q
+	ffffffff8642eda7 futex_wake
+	ffffffff8642b7de do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+
+asd  404028 [000] 27829.371029: sched:sched_stat_runtime: comm=asd pid=404028 runtime=65420 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca6e4446 run_retransmit
+
+asd  404028 [000] 27829.371032:       sched:sched_switch: asd:404028 [120] S ==> kworker/u41:4:395196 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca6e4446 run_retransmit
+
+asd  404055 [003] 27829.371081: sched:sched_stat_runtime: comm=asd pid=404055 runtime=269547 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+
+asd  404055 [003] 27829.371085:       sched:sched_switch: asd:404055 [120] S ==> asd:404062 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+
+asd  404062 [003] 27829.371090:       sched:sched_waking: comm=asd pid=404063 prio=120 target_cpu=012
+	ffffffff86366e7e try_to_wake_up
+	ffffffff86367200 wake_up_q
+	ffffffff8642eda7 futex_wake
+	ffffffff8642b7de do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+
+asd  404027 [001] 27829.371124: sched:sched_stat_runtime: comm=asd pid=404027 runtime=14032 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca6dd893 run_proxy_timeout
+
+asd  404027 [001] 27829.371127:       sched:sched_switch: asd:404027 [120] S ==> swapper/1:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca6dd893 run_proxy_timeout
+
+asd  404062 [003] 27829.371145: sched:sched_stat_runtime: comm=asd pid=404062 runtime=64206 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+
+asd  404062 [003] 27829.371147:       sched:sched_switch: asd:404062 [120] S ==> kworker/u44:5:388508 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+
+asd  404066 [001] 27829.371331:       sched:sched_waking: comm=kworker/u42:1 pid=395203 prio=120 target_cpu=001
+	ffffffff86366e7e try_to_wake_up
+	ffffffff86367185 wake_up_process
+	ffffffff8633094e kick_pool
+	ffffffff86334ad6 __queue_work.part.0
+	ffffffff86334da6 __queue_work
+	ffffffff86334e87 queue_work_on
+	ffffffffc28875ed rxe_sched_task
+	ffffffffc2880d40 rxe_post_send
+	ffffffffc082ede6 ib_uverbs_post_send
+	ffffffffc0827998 ib_uverbs_write
+	ffffffff866f7da0 vfs_write
+	ffffffff866f8529 ksys_write
+	ffffffff866f8589 __x64_sys_write
+	ffffffff862059ae x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142298 [unknown]
+	    5797ca5aa121 verbs_post
+
+asd  404066 [001] 27829.371336: sched:sched_stat_runtime: comm=asd pid=404066 runtime=10454 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86377a08 put_prev_entity
+	ffffffff8637c7e1 pick_next_task_fair
+	ffffffff8635e54b pick_next_task
+	ffffffff874613c1 __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142298 [unknown]
+	    5797ca5aa121 verbs_post
+
+asd  404066 [001] 27829.371337:       sched:sched_switch: asd:404066 [120] R ==> kworker/u42:1:395203 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142298 [unknown]
+	    5797ca5aa121 verbs_post
+
+asd  404002 [000] 27829.371889: sched:sched_stat_runtime: comm=asd pid=404002 runtime=62146 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468d42 schedule_hrtimeout_range_clock
+	ffffffff87468d73 schedule_hrtimeout_range
+	ffffffff8676a352 ep_poll
+	ffffffff8676a48b do_epoll_wait
+	ffffffff8676b14f __x64_sys_epoll_wait
+	ffffffff86206ea6 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741b2d2 epoll_wait
+	    5797ca725c4e cf_poll_wait
+
+asd  404002 [000] 27829.371894: sched:sched_stat_runtime: comm=kworker/u59:1 pid=395183 runtime=296704 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff8635fb0a deactivate_task
+	ffffffff86368ee0 detach_task
+	ffffffff86374821 detach_tasks
+	ffffffff8637b7c0 load_balance
+	ffffffff8637c1d9 sched_balance_newidle
+	ffffffff8637c4c8 pick_next_task_fair
+	ffffffff8635e54b pick_next_task
+	ffffffff874613c1 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468d42 schedule_hrtimeout_range_clock
+	ffffffff87468d73 schedule_hrtimeout_range
+	ffffffff8676a352 ep_poll
+	ffffffff8676a48b do_epoll_wait
+	ffffffff8676b14f __x64_sys_epoll_wait
+	ffffffff86206ea6 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741b2d2 epoll_wait
+	    5797ca725c4e cf_poll_wait
+
+asd  404002 [000] 27829.371896: sched:sched_migrate_task: comm=kworker/u59:0 pid=394976 prio=120 orig_cpu=18 dest_cpu=0
+	ffffffff86360303 set_task_cpu
+	ffffffff86368eed detach_task
+	ffffffff86374821 detach_tasks
+	ffffffff8637b7c0 load_balance
+	ffffffff8637c1d9 sched_balance_newidle
+	ffffffff8637c4c8 pick_next_task_fair
+	ffffffff8635e54b pick_next_task
+	ffffffff874613c1 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468d42 schedule_hrtimeout_range_clock
+	ffffffff87468d73 schedule_hrtimeout_range
+	ffffffff8676a352 ep_poll
+	ffffffff8676a48b do_epoll_wait
+	ffffffff8676b14f __x64_sys_epoll_wait
+	ffffffff86206ea6 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741b2d2 epoll_wait
+	    5797ca725c4e cf_poll_wait
+
+asd  404002 [000] 27829.371898:       sched:sched_switch: asd:404002 [120] S ==> kworker/u59:0:394976 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468d42 schedule_hrtimeout_range_clock
+	ffffffff87468d73 schedule_hrtimeout_range
+	ffffffff8676a352 ep_poll
+	ffffffff8676a48b do_epoll_wait
+	ffffffff8676b14f __x64_sys_epoll_wait
+	ffffffff86206ea6 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741b2d2 epoll_wait
+	    5797ca725c4e cf_poll_wait
+
+asd  404066 [001] 27829.371946:       sched:sched_waking: comm=asd pid=404072 prio=120 target_cpu=004
+	ffffffff86366e7e try_to_wake_up
+	ffffffff86367200 wake_up_q
+	ffffffff8642eda7 futex_wake
+	ffffffff8642b7de do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+
+asd  404066 [001] 27829.372056:       sched:sched_waking: comm=kworker/u42:1 pid=395203 prio=120 target_cpu=001
+	ffffffff86366e7e try_to_wake_up
+	ffffffff86367185 wake_up_process
+	ffffffff8633094e kick_pool
+	ffffffff86334ad6 __queue_work.part.0
+	ffffffff86334da6 __queue_work
+	ffffffff86334e87 queue_work_on
+	ffffffffc28875ed rxe_sched_task
+	ffffffffc2880d40 rxe_post_send
+	ffffffffc082ede6 ib_uverbs_post_send
+	ffffffffc0827998 ib_uverbs_write
+	ffffffff866f7da0 vfs_write
+	ffffffff866f8529 ksys_write
+	ffffffff866f8589 __x64_sys_write
+	ffffffff862059ae x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142298 [unknown]
+	    5797ca5aa121 verbs_post
+
+asd  404066 [001] 27829.372060: sched:sched_stat_runtime: comm=asd pid=404066 runtime=116205 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86377a08 put_prev_entity
+	ffffffff8637c7e1 pick_next_task_fair
+	ffffffff8635e54b pick_next_task
+	ffffffff874613c1 __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142298 [unknown]
+	    5797ca5aa121 verbs_post
+
+asd  404066 [001] 27829.372061:       sched:sched_switch: asd:404066 [120] R ==> kworker/u42:1:395203 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142298 [unknown]
+	    5797ca5aa121 verbs_post
+
+asd  404066 [001] 27829.372225:       sched:sched_waking: comm=kworker/u42:1 pid=395203 prio=120 target_cpu=001
+	ffffffff86366e7e try_to_wake_up
+	ffffffff86367185 wake_up_process
+	ffffffff8633094e kick_pool
+	ffffffff86334ad6 __queue_work.part.0
+	ffffffff86334da6 __queue_work
+	ffffffff86334e87 queue_work_on
+	ffffffffc28875ed rxe_sched_task
+	ffffffffc2880d40 rxe_post_send
+	ffffffffc082ede6 ib_uverbs_post_send
+	ffffffffc0827998 ib_uverbs_write
+	ffffffff866f7da0 vfs_write
+	ffffffff866f8529 ksys_write
+	ffffffff866f8589 __x64_sys_write
+	ffffffff862059ae x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142298 [unknown]
+	    5797ca5aa121 verbs_post
+
+asd  404066 [001] 27829.372230: sched:sched_stat_runtime: comm=asd pid=404066 runtime=165018 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86377a08 put_prev_entity
+	ffffffff8637c7e1 pick_next_task_fair
+	ffffffff8635e54b pick_next_task
+	ffffffff874613c1 __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142298 [unknown]
+	    5797ca5aa121 verbs_post
+
+asd  404066 [001] 27829.372232:       sched:sched_switch: asd:404066 [120] R ==> kworker/u42:1:395203 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142298 [unknown]
+	    5797ca5aa121 verbs_post
+
+asd  404066 [001] 27829.372387: sched:sched_stat_runtime: comm=asd pid=404066 runtime=151499 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff8637658b task_tick_fair
+	ffffffff86367fa3 scheduler_tick
+	ffffffff8640ddc9 update_process_times
+	ffffffff86426798 tick_sched_handle
+	ffffffff86426cb8 tick_nohz_highres_handler
+	ffffffff8640ed0a __hrtimer_run_queues
+	ffffffff8640fc86 hrtimer_interrupt
+	ffffffff862ad76e __sysvec_apic_timer_interrupt
+	ffffffff8745830b sysvec_apic_timer_interrupt
+	ffffffff87600f4b asm_sysvec_apic_timer_interrupt
+	    78f0874929d2 [unknown]
+
+asd  404066 [001] 27829.372403: sched:sched_stat_runtime: comm=asd pid=404066 runtime=17304 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+
+asd  404066 [001] 27829.372406:       sched:sched_switch: asd:404066 [120] S ==> swapper/1:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+
+asd  404050 [007] 27829.373288: sched:sched_stat_runtime: comm=asd pid=404050 runtime=141838 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.373294:       sched:sched_switch: asd:404050 [120] S ==> swapper/7:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.373362: sched:sched_stat_runtime: comm=asd pid=404050 runtime=5182 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.373364:       sched:sched_switch: asd:404050 [120] S ==> swapper/7:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.373394: sched:sched_stat_runtime: comm=asd pid=404050 runtime=4989 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.373396:       sched:sched_switch: asd:404050 [120] S ==> swapper/7:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.373742: sched:sched_stat_runtime: comm=asd pid=404050 runtime=283365 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.373744:       sched:sched_switch: asd:404050 [120] S ==> swapper/7:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.373812: sched:sched_stat_runtime: comm=asd pid=404050 runtime=4907 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.373814:       sched:sched_switch: asd:404050 [120] S ==> swapper/7:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.374231: sched:sched_stat_runtime: comm=asd pid=404050 runtime=359103 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.374236: sched:sched_stat_runtime: comm=kworker/u60:1 pid=369971 runtime=171413 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff8635fb0a deactivate_task
+	ffffffff86368ee0 detach_task
+	ffffffff86374821 detach_tasks
+	ffffffff8637b7c0 load_balance
+	ffffffff8637c1d9 sched_balance_newidle
+	ffffffff8637c4c8 pick_next_task_fair
+	ffffffff8635e54b pick_next_task
+	ffffffff874613c1 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.374238: sched:sched_migrate_task: comm=kworker/u60:2 pid=395181 prio=120 orig_cpu=19 dest_cpu=7
+	ffffffff86360303 set_task_cpu
+	ffffffff86368eed detach_task
+	ffffffff86374821 detach_tasks
+	ffffffff8637b7c0 load_balance
+	ffffffff8637c1d9 sched_balance_newidle
+	ffffffff8637c4c8 pick_next_task_fair
+	ffffffff8635e54b pick_next_task
+	ffffffff874613c1 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.374241:       sched:sched_switch: asd:404050 [120] S ==> kworker/u60:2:395181 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.374297: sched:sched_stat_runtime: comm=asd pid=404050 runtime=5127 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.374299:       sched:sched_switch: asd:404050 [120] S ==> swapper/7:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.374361: sched:sched_stat_runtime: comm=asd pid=404050 runtime=3604 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.374365: sched:sched_stat_runtime: comm=kworker/u53:7 pid=391173 runtime=129481 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff8635fb0a deactivate_task
+	ffffffff86368ee0 detach_task
+	ffffffff86374821 detach_tasks
+	ffffffff8637b7c0 load_balance
+	ffffffff8637c1d9 sched_balance_newidle
+	ffffffff8637c4c8 pick_next_task_fair
+	ffffffff8635e54b pick_next_task
+	ffffffff874613c1 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.374367: sched:sched_migrate_task: comm=kworker/u53:2 pid=388472 prio=120 orig_cpu=12 dest_cpu=7
+	ffffffff86360303 set_task_cpu
+	ffffffff86368eed detach_task
+	ffffffff86374821 detach_tasks
+	ffffffff8637b7c0 load_balance
+	ffffffff8637c1d9 sched_balance_newidle
+	ffffffff8637c4c8 pick_next_task_fair
+	ffffffff8635e54b pick_next_task
+	ffffffff874613c1 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.374368:       sched:sched_switch: asd:404050 [120] S ==> kworker/u53:2:388472 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404068 [009] 27829.374435:       sched:sched_waking: comm=asd pid=404064 prio=120 target_cpu=016
+	ffffffff86366e7e try_to_wake_up
+	ffffffff86367200 wake_up_q
+	ffffffff8642eda7 futex_wake
+	ffffffff8642b7de do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+
+asd  404068 [009] 27829.374656: sched:sched_stat_runtime: comm=asd pid=404068 runtime=231478 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+
+asd  404068 [009] 27829.374664:       sched:sched_switch: asd:404068 [120] S ==> swapper/9:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+
+asd  404050 [007] 27829.375044: sched:sched_stat_runtime: comm=asd pid=404050 runtime=240405 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.375047:       sched:sched_switch: asd:404050 [120] S ==> kworker/u53:2:388472 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.375201: sched:sched_stat_runtime: comm=asd pid=404050 runtime=3171 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86377a08 put_prev_entity
+	ffffffff8637c7e1 pick_next_task_fair
+	ffffffff8635e54b pick_next_task
+	ffffffff874613c1 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.375203:       sched:sched_switch: asd:404050 [120] R ==> kworker/u53:2:388472 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.375214: sched:sched_stat_runtime: comm=asd pid=404050 runtime=3010 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86377a08 put_prev_entity
+	ffffffff8637c7e1 pick_next_task_fair
+	ffffffff8635e54b pick_next_task
+	ffffffff874613c1 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.375216:       sched:sched_switch: asd:404050 [120] R ==> kworker/u53:2:388472 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.375227: sched:sched_stat_runtime: comm=asd pid=404050 runtime=2577 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86377a08 put_prev_entity
+	ffffffff8637c7e1 pick_next_task_fair
+	ffffffff8635e54b pick_next_task
+	ffffffff874613c1 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.375228:       sched:sched_switch: asd:404050 [120] R ==> kworker/u53:2:388472 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.375322: sched:sched_stat_runtime: comm=asd pid=404050 runtime=86280 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.375325:       sched:sched_switch: asd:404050 [120] S ==> swapper/7:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.375390: sched:sched_stat_runtime: comm=asd pid=404050 runtime=6519 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.375392:       sched:sched_switch: asd:404050 [120] S ==> swapper/7:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.375456: sched:sched_stat_runtime: comm=asd pid=404050 runtime=5012 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.375461: sched:sched_stat_runtime: comm=kworker/u53:5 pid=395240 runtime=75938 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff8635fb0a deactivate_task
+	ffffffff86368ee0 detach_task
+	ffffffff86374821 detach_tasks
+	ffffffff8637b7c0 load_balance
+	ffffffff8637c1d9 sched_balance_newidle
+	ffffffff8637c4c8 pick_next_task_fair
+	ffffffff8635e54b pick_next_task
+	ffffffff874613c1 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.375463: sched:sched_migrate_task: comm=kworker/u53:4 pid=395213 prio=120 orig_cpu=12 dest_cpu=7
+	ffffffff86360303 set_task_cpu
+	ffffffff86368eed detach_task
+	ffffffff86374821 detach_tasks
+	ffffffff8637b7c0 load_balance
+	ffffffff8637c1d9 sched_balance_newidle
+	ffffffff8637c4c8 pick_next_task_fair
+	ffffffff8635e54b pick_next_task
+	ffffffff874613c1 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.375465:       sched:sched_switch: asd:404050 [120] S ==> kworker/u53:4:395213 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.375848: sched:sched_stat_runtime: comm=asd pid=404050 runtime=90995 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.375850:       sched:sched_switch: asd:404050 [120] S ==> kworker/u53:4:395213 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404058 [004] 27829.376078:       sched:sched_waking: comm=kworker/u45:4 pid=402024 prio=120 target_cpu=004
+	ffffffff86366e7e try_to_wake_up
+	ffffffff86367185 wake_up_process
+	ffffffff8633094e kick_pool
+	ffffffff86334ad6 __queue_work.part.0
+	ffffffff86334da6 __queue_work
+	ffffffff86334e87 queue_work_on
+	ffffffffc28875ed rxe_sched_task
+	ffffffffc2880d40 rxe_post_send
+	ffffffffc082ede6 ib_uverbs_post_send
+	ffffffffc0827998 ib_uverbs_write
+	ffffffff866f7da0 vfs_write
+	ffffffff866f8529 ksys_write
+	ffffffff866f8589 __x64_sys_write
+	ffffffff862059ae x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142298 [unknown]
+	    5797ca5aa121 verbs_post
+
+asd  404058 [004] 27829.376082: sched:sched_stat_runtime: comm=asd pid=404058 runtime=74855 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86377a08 put_prev_entity
+	ffffffff8637c7e1 pick_next_task_fair
+	ffffffff8635e54b pick_next_task
+	ffffffff874613c1 __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142298 [unknown]
+	    5797ca5aa121 verbs_post
+
+asd  404058 [004] 27829.376084:       sched:sched_switch: asd:404058 [120] R ==> kworker/u45:4:402024 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142298 [unknown]
+	    5797ca5aa121 verbs_post
+
+asd  404028 [000] 27829.376092: sched:sched_stat_runtime: comm=asd pid=404028 runtime=67158 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca6e4446 run_retransmit
+
+asd  404028 [000] 27829.376095:       sched:sched_switch: asd:404028 [120] S ==> swapper/0:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca6e4446 run_retransmit
+
+asd  404058 [004] 27829.376150:       sched:sched_waking: comm=kworker/u45:4 pid=402024 prio=120 target_cpu=004
+	ffffffff86366e7e try_to_wake_up
+	ffffffff86367185 wake_up_process
+	ffffffff8633094e kick_pool
+	ffffffff86334ad6 __queue_work.part.0
+	ffffffff86334da6 __queue_work
+	ffffffff86334e87 queue_work_on
+	ffffffffc28875ed rxe_sched_task
+	ffffffffc2880d40 rxe_post_send
+	ffffffffc082ede6 ib_uverbs_post_send
+	ffffffffc0827998 ib_uverbs_write
+	ffffffff866f7da0 vfs_write
+	ffffffff866f8529 ksys_write
+	ffffffff866f8589 __x64_sys_write
+	ffffffff862059ae x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142298 [unknown]
+	    5797ca5aa121 verbs_post
+
+asd  404058 [004] 27829.376153: sched:sched_stat_runtime: comm=asd pid=404058 runtime=66338 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86377a08 put_prev_entity
+	ffffffff8637c7e1 pick_next_task_fair
+	ffffffff8635e54b pick_next_task
+	ffffffff874613c1 __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142298 [unknown]
+	    5797ca5aa121 verbs_post
+
+asd  404058 [004] 27829.376154:       sched:sched_switch: asd:404058 [120] R ==> kworker/u45:4:402024 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142298 [unknown]
+	    5797ca5aa121 verbs_post
+
+asd  404027 [001] 27829.376199: sched:sched_stat_runtime: comm=asd pid=404027 runtime=28157 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca6dd893 run_proxy_timeout
+
+asd  404027 [001] 27829.376205: sched:sched_stat_runtime: comm=kworker/u44:5 pid=388508 runtime=736453 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff8635fb0a deactivate_task
+	ffffffff86368ee0 detach_task
+	ffffffff86374821 detach_tasks
+	ffffffff8637b7c0 load_balance
+	ffffffff8637c1d9 sched_balance_newidle
+	ffffffff8637c4c8 pick_next_task_fair
+	ffffffff8635e54b pick_next_task
+	ffffffff874613c1 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca6dd893 run_proxy_timeout
+
+asd  404027 [001] 27829.376208: sched:sched_migrate_task: comm=kworker/u44:2 pid=395185 prio=120 orig_cpu=3 dest_cpu=1
+	ffffffff86360303 set_task_cpu
+	ffffffff86368eed detach_task
+	ffffffff86374821 detach_tasks
+	ffffffff8637b7c0 load_balance
+	ffffffff8637c1d9 sched_balance_newidle
+	ffffffff8637c4c8 pick_next_task_fair
+	ffffffff8635e54b pick_next_task
+	ffffffff874613c1 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca6dd893 run_proxy_timeout
+
+asd  404027 [001] 27829.376210:       sched:sched_switch: asd:404027 [120] S ==> kworker/u44:2:395185 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca6dd893 run_proxy_timeout
+
+asd  404058 [004] 27829.376387: sched:sched_stat_runtime: comm=asd pid=404058 runtime=230107 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff8637658b task_tick_fair
+	ffffffff86367fa3 scheduler_tick
+	ffffffff8640ddc9 update_process_times
+	ffffffff86426798 tick_sched_handle
+	ffffffff86426cb8 tick_nohz_highres_handler
+	ffffffff8640ed0a __hrtimer_run_queues
+	ffffffff8640fc86 hrtimer_interrupt
+	ffffffff862ad76e __sysvec_apic_timer_interrupt
+	ffffffff8745830b sysvec_apic_timer_interrupt
+	ffffffff87600f4b asm_sysvec_apic_timer_interrupt
+	    78f0874929d2 [unknown]
+
+asd  404058 [004] 27829.376604:       sched:sched_waking: comm=kworker/u45:4 pid=402024 prio=120 target_cpu=004
+	ffffffff86366e7e try_to_wake_up
+	ffffffff86367185 wake_up_process
+	ffffffff8633094e kick_pool
+	ffffffff86334ad6 __queue_work.part.0
+	ffffffff86334da6 __queue_work
+	ffffffff86334e87 queue_work_on
+	ffffffffc28875ed rxe_sched_task
+	ffffffffc2880d40 rxe_post_send
+	ffffffffc082ede6 ib_uverbs_post_send
+	ffffffffc0827998 ib_uverbs_write
+	ffffffff866f7da0 vfs_write
+	ffffffff866f8529 ksys_write
+	ffffffff866f8589 __x64_sys_write
+	ffffffff862059ae x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142298 [unknown]
+	    5797ca5aa121 verbs_post
+
+asd  404058 [004] 27829.376609: sched:sched_stat_runtime: comm=asd pid=404058 runtime=221492 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86377a08 put_prev_entity
+	ffffffff8637c7e1 pick_next_task_fair
+	ffffffff8635e54b pick_next_task
+	ffffffff874613c1 __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142298 [unknown]
+	    5797ca5aa121 verbs_post
+
+asd  404058 [004] 27829.376611:       sched:sched_switch: asd:404058 [120] R ==> kworker/u45:4:402024 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142298 [unknown]
+	    5797ca5aa121 verbs_post
+
+asd  404060 [002] 27829.377548:       sched:sched_waking: comm=asd pid=404074 prio=120 target_cpu=014
+	ffffffff86366e7e try_to_wake_up
+	ffffffff86367200 wake_up_q
+	ffffffff8642eda7 futex_wake
+	ffffffff8642b7de do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+
+asd  404060 [002] 27829.377725: sched:sched_stat_runtime: comm=asd pid=404060 runtime=321659 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+
+asd  404060 [002] 27829.377730:       sched:sched_switch: asd:404060 [120] S ==> kworker/u60:2:395181 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+
+asd  404050 [007] 27829.379643:       sched:sched_waking: comm=asd pid=404035 prio=120 target_cpu=002
+	ffffffff86366e7e try_to_wake_up
+	ffffffff86367200 wake_up_q
+	ffffffff8642eda7 futex_wake
+	ffffffff8642b7de do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08738c14f pthread_cond_signal
+	    5797ca7356ba cf_queue_push
+	    78df9bf36500 [unknown]
+	    78f084b36c80 [unknown]
+
+asd  404050 [007] 27829.379655:       sched:sched_waking: comm=asd pid=404033 prio=120 target_cpu=016
+	ffffffff86366e7e try_to_wake_up
+	ffffffff86367200 wake_up_q
+	ffffffff8642eda7 futex_wake
+	ffffffff8642b7de do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08738c14f pthread_cond_signal
+	    5797ca7356ba cf_queue_push
+	    78df9bc91cc0 [unknown]
+	    78f084b36a80 [unknown]
+
+asd  404050 [007] 27829.379664:       sched:sched_waking: comm=asd pid=404038 prio=120 target_cpu=003
+	ffffffff86366e7e try_to_wake_up
+	ffffffff86367200 wake_up_q
+	ffffffff8642eda7 futex_wake
+	ffffffff8642b7de do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08738c14f pthread_cond_signal
+	    5797ca7356ba cf_queue_push
+	    78df9be91a40 [unknown]
+	    78f084b36f80 [unknown]
+
+asd  404035 [002] 27829.379691:       sched:sched_waking: comm=kvlayers pid=404620 prio=120 target_cpu=002
+	ffffffff86366e7e try_to_wake_up
+	ffffffff863672aa default_wake_function
+	ffffffff86717642 pollwake
+	ffffffff8638efe6 __wake_up_common
+	ffffffff863965be __wake_up_sync_key
+	ffffffff870f1352 sock_def_readable
+	ffffffff87210e72 tcp_data_ready
+	ffffffff87211324 tcp_data_queue
+	ffffffff87211a44 tcp_rcv_established
+	ffffffff8722494d tcp_v4_do_rcv
+	ffffffff87226dca tcp_v4_rcv
+	ffffffff871e5e9c ip_protocol_deliver_rcu
+	ffffffff871e60f7 ip_local_deliver_finish
+	ffffffff871e619e ip_local_deliver
+	ffffffff871e67aa ip_rcv
+	ffffffff87127761 __netif_receive_skb_one_core
+	ffffffff871277e5 __netif_receive_skb
+	ffffffff87127a5e process_backlog
+	ffffffff87128623 __napi_poll
+	ffffffff87128c01 net_rx_action
+	ffffffff8631218b handle_softirqs
+	ffffffff8746b6c0 __do_softirq
+	ffffffff86311dc1 do_softirq.part.0
+	ffffffff86312582 __local_bh_enable_ip
+	ffffffff871256a8 __dev_queue_xmit
+	ffffffff871e9e13 neigh_hh_output
+	ffffffff871ea6a4 ip_finish_output2
+	ffffffff871eb626 __ip_finish_output
+	ffffffff871eb729 ip_finish_output
+	ffffffff871eb896 ip_output
+	ffffffff871ecf11 ip_local_out
+	ffffffff871ed0c5 __ip_queue_xmit
+	ffffffff871ed465 ip_queue_xmit
+	ffffffff8721839b __tcp_transmit_skb
+	ffffffff87219df8 tcp_write_xmit
+	ffffffff8721a2f7 __tcp_push_pending_frames
+	ffffffff871fe193 tcp_push
+	ffffffff871ff3cd tcp_sendmsg_locked
+	ffffffff871ff76c tcp_sendmsg
+	ffffffff8724aab2 inet_sendmsg
+	ffffffff870ec225 __sys_sendto
+	ffffffff870ec274 __x64_sys_sendto
+	ffffffff8620745d x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741d384 sendto
+	    5797ca723a8e cf_socket_send_to
+	    5797cb30c584 [unknown]
+
+asd  404035 [002] 27829.379704: sched:sched_stat_runtime: comm=asd pid=404035 runtime=49612 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f087389e51 [unknown]
+	    78f08738c8cd pthread_cond_wait
+	    5797ca735ec2 cf_queue_pop
+	             135 [unknown]
+
+asd  404035 [002] 27829.379706:       sched:sched_switch: asd:404035 [120] S ==> kvlayers:404620 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f087389e51 [unknown]
+	    78f08738c8cd pthread_cond_wait
+	    5797ca735ec2 cf_queue_pop
+	             135 [unknown]
+
+asd  404050 [007] 27829.379781: sched:sched_stat_runtime: comm=asd pid=404050 runtime=164640 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.379783:       sched:sched_switch: asd:404050 [120] S ==> kworker/u48:3:395198 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  403986 [000] 27829.379834: sched:sched_stat_runtime: comm=asd pid=403986 runtime=71392 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468d42 schedule_hrtimeout_range_clock
+	ffffffff87468d73 schedule_hrtimeout_range
+	ffffffff8676a352 ep_poll
+	ffffffff8676a48b do_epoll_wait
+	ffffffff8676b14f __x64_sys_epoll_wait
+	ffffffff86206ea6 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741b2d2 epoll_wait
+	    5797ca725c4e cf_poll_wait
+
+asd  403986 [000] 27829.379836:       sched:sched_switch: asd:403986 [120] S ==> swapper/0:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468d42 schedule_hrtimeout_range_clock
+	ffffffff87468d73 schedule_hrtimeout_range
+	ffffffff8676a352 ep_poll
+	ffffffff8676a48b do_epoll_wait
+	ffffffff8676b14f __x64_sys_epoll_wait
+	ffffffff86206ea6 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741b2d2 epoll_wait
+	    5797ca725c4e cf_poll_wait
+
+asd  404050 [007] 27829.380286: sched:sched_stat_runtime: comm=asd pid=404050 runtime=179517 [ns]
+	ffffffff86375ba9 update_curr
+	ffffffff86376c4b dequeue_entity
+	ffffffff863771cf dequeue_task_fair
+	ffffffff8635cdcd dequeue_task
+	ffffffff87461656 __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]
+
+asd  404050 [007] 27829.380288:       sched:sched_switch: asd:404050 [120] S ==> kworker/u48:3:395198 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab27 __nanosleep
+	    78f08741a9bc usleep
+	    5797ca5aac44 run_poller
+	               0 [unknown]

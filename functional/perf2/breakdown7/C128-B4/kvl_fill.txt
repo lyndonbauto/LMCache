@@ -1,0 +1,13 @@
+filled 32 layers x 64 chunks of 512 KiB
+sink 8344910126165298846 over rc, 1 node(s), 32 layers x 64 chunks x 512 KiB = 1024 MiB, 1 reps per mode
+
+layer landed, ms after release (p50 / p99 over 1 reps):
+layer     priority on           priority off        
+0           26.13 / 26.13        208.93 / 208.93    
+1           46.72 / 46.72        277.46 / 277.46    
+8          208.09 / 208.09       383.46 / 383.46    
+16         381.67 / 381.67       611.60 / 611.60    
+31         714.63 / 714.63       305.99 / 305.99    
+priority on : all layers 714.63 ms p50, 1.40 GiB/s, bad pages 0, short layers 0, failed rows 0
+priority off: all layers 701.30 ms p50, 1.43 GiB/s, bad pages 0, short layers 0, failed rows 0
+row results: ok 4096, not-found 0, size-mismatch 0, unknown-region 0, other 0; unexpected 0

@@ -1,0 +1,2000 @@
+asd  404083 [001] 27826.953226: asd:404083 [120] S ==> swapper/1:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab26 __nanosleep
+	    78f08741a9bb usleep
+	    5797ca5a65c1 run_stats
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404083 [001] 27826.954289: asd:404083 [120] S ==> swapper/1:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab26 __nanosleep
+	    78f08741a9bb usleep
+	    5797ca5a65c1 run_stats
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404083 [001] 27826.955354: asd:404083 [120] S ==> asd:404068 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab26 __nanosleep
+	    78f08741a9bb usleep
+	    5797ca5a65c1 run_stats
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404068 [001] 27826.955367: asd:404068 [120] R ==> kworker/u42:1:395203 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142297 [unknown]
+
+asd  404068 [001] 27826.955380: asd:404068 [120] S ==> swapper/1:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08738a050 [unknown]
+	    78f0873911e0 pthread_mutex_lock
+	    5797ca735dd4 cf_queue_lock (inlined)
+	    5797ca735dd4 cf_queue_pop
+	    5797ca5a7b2c run_placer
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404083 [001] 27826.956362: asd:404083 [120] S ==> swapper/1:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab26 __nanosleep
+	    78f08741a9bb usleep
+	    5797ca5a65c1 run_stats
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404083 [001] 27826.957421: asd:404083 [120] S ==> swapper/1:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab26 __nanosleep
+	    78f08741a9bb usleep
+	    5797ca5a65c1 run_stats
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404083 [001] 27826.958489: asd:404083 [120] S ==> kworker/u57:2:395180 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab26 __nanosleep
+	    78f08741a9bb usleep
+	    5797ca5a65c1 run_stats
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404083 [001] 27826.959549: asd:404083 [120] S ==> swapper/1:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab26 __nanosleep
+	    78f08741a9bb usleep
+	    5797ca5a65c1 run_stats
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404083 [001] 27826.960613: asd:404083 [120] S ==> swapper/1:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab26 __nanosleep
+	    78f08741a9bb usleep
+	    5797ca5a65c1 run_stats
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404083 [001] 27826.961675: asd:404083 [120] S ==> swapper/1:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab26 __nanosleep
+	    78f08741a9bb usleep
+	    5797ca5a65c1 run_stats
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404083 [001] 27826.962739: asd:404083 [120] S ==> swapper/1:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab26 __nanosleep
+	    78f08741a9bb usleep
+	    5797ca5a65c1 run_stats
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404083 [001] 27826.963808: asd:404083 [120] S ==> kworker/u57:4:395202 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab26 __nanosleep
+	    78f08741a9bb usleep
+	    5797ca5a65c1 run_stats
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404059 [001] 27826.964090: asd:404059 [120] S ==> kworker/u57:4:395202 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08738a050 [unknown]
+	    78f0873911e0 pthread_mutex_lock
+	    5797ca735dd4 cf_queue_lock (inlined)
+	    5797ca735dd4 cf_queue_pop
+	    5797ca5a7b2c run_placer
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404083 [001] 27826.964870: asd:404083 [120] S ==> swapper/1:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab26 __nanosleep
+	    78f08741a9bb usleep
+	    5797ca5a65c1 run_stats
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404062 [002] 27826.965485: asd:404062 [120] S ==> asd:404073 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08738a050 [unknown]
+	    78f0873911e0 pthread_mutex_lock
+	    5797ca735dd4 cf_queue_lock (inlined)
+	    5797ca735dd4 cf_queue_pop
+	    5797ca5a7b2c run_placer
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404073 [002] 27826.965496: asd:404073 [120] S ==> asd:404075 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed1e sys_futex (inlined)
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404075 [002] 27826.965506: asd:404075 [120] S ==> asd:404067 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08738a050 [unknown]
+	    78f0873911e0 pthread_mutex_lock
+	    5797ca735dd4 cf_queue_lock (inlined)
+	    5797ca735dd4 cf_queue_pop
+	    5797ca5a7b2c run_placer
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404067 [002] 27826.965513: asd:404067 [120] S ==> kworker/u43:7:391171 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08738a050 [unknown]
+	    78f0873911e0 pthread_mutex_lock
+	    5797ca735dd4 cf_queue_lock (inlined)
+	    5797ca735dd4 cf_queue_pop
+	    5797ca5a7b2c run_placer
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404073 [002] 27826.966674: asd:404073 [120] S ==> kworker/u43:5:388474 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08738a050 [unknown]
+	    78f0873911e0 pthread_mutex_lock
+	    5797ca735dd4 cf_queue_lock (inlined)
+	    5797ca735dd4 cf_queue_pop
+	    5797ca5a7b2c run_placer
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404129 [006] 27826.967107: asd:404129 [120] S ==> swapper/6:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab26 __nanosleep
+	    78f08741a9bb usleep
+	    5797ca67e8c8 hb_adjacency_tender
+	    5797ca700a01 joinable_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404078 [003] 27826.968192: asd:404078 [120] S ==> swapper/3:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08738a050 [unknown]
+	    78f087390441 [unknown]
+	    78f08738c7b1 pthread_cond_wait
+	    5797ca735ec1 cf_queue_pop
+	    5797ca5a7b2c run_placer
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404054 [007] 27826.968230: asd:404054 [120] S ==> swapper/7:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08738a050 [unknown]
+	    78f087390441 [unknown]
+	    78f08738c7b1 pthread_cond_wait
+	    5797ca735ec1 cf_queue_pop
+	    5797ca5a7b2c run_placer
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404083 [001] 27826.968237: asd:404083 [120] S ==> asd:404061 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab26 __nanosleep
+	    78f08741a9bb usleep
+	    5797ca5a65c1 run_stats
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404080 [004] 27826.968303: asd:404080 [120] S ==> asd:404072 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed1e sys_futex (inlined)
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404069 [000] 27826.968316: asd:404069 [120] R ==> kworker/u41:0:394047 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142297 [unknown]
+
+asd  404061 [001] 27826.968317: asd:404061 [120] R ==> kworker/u42:3:388481 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142297 [unknown]
+
+asd  404063 [007] 27826.968319: asd:404063 [120] R ==> kworker/u48:5:398748 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142297 [unknown]
+
+asd  404062 [002] 27826.968332: asd:404062 [120] S ==> asd:404067 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed1e sys_futex (inlined)
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404072 [004] 27826.968387: asd:404072 [120] R ==> kworker/u45:1:395182 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142297 [unknown]
+
+asd  404067 [002] 27826.968415: asd:404067 [120] S ==> asd:404075 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed53 sys_futex (inlined)
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404078 [003] 27826.968436: asd:404078 [120] S ==> swapper/3:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed53 sys_futex (inlined)
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404075 [002] 27826.968489: asd:404075 [120] S ==> asd:404073 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed53 sys_futex (inlined)
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404073 [002] 27826.968553: asd:404073 [120] S ==> swapper/2:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed1e sys_futex (inlined)
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404068 [001] 27826.968693: asd:404068 [120] S ==> asd:404059 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed53 sys_futex (inlined)
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404043 [003] 27826.968706: asd:404043 [120] S ==> asd:404038 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f087389e51 [unknown]
+	    78f08738c8cc pthread_cond_wait
+	    5797ca735ec1 cf_queue_pop
+	    5797ca54466e as_batch_worker
+	    5797ca544048 run_pool_worker
+	    5797ca700810 run_pool
+	    5797ca7006b4 pool_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404038 [003] 27826.968725: asd:404038 [120] S ==> swapper/3:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f087389e51 [unknown]
+	    78f08738c8cc pthread_cond_wait
+	    5797ca735ec1 cf_queue_pop
+	    5797ca54466e as_batch_worker
+	    5797ca544048 run_pool_worker
+	    5797ca700810 run_pool
+	    5797ca7006b4 pool_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404059 [001] 27826.968758: asd:404059 [120] S ==> asd:404032 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed53 sys_futex (inlined)
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404032 [001] 27826.968804: asd:404032 [120] S ==> kvlayers:404636 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f087389e51 [unknown]
+	    78f08738c8cc pthread_cond_wait
+	    5797ca735ec1 cf_queue_pop
+	    5797ca54466e as_batch_worker
+	    5797ca544048 run_pool_worker
+	    5797ca700810 run_pool
+	    5797ca7006b4 pool_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404061 [001] 27826.968915: asd:404061 [120] S ==> asd:404068 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed53 sys_futex (inlined)
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  403996 [003] 27826.968965: asd:403996 [120] S ==> asd:404078 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468d42 schedule_hrtimeout_range_clock
+	ffffffff87468d73 schedule_hrtimeout_range
+	ffffffff8676a352 ep_poll
+	ffffffff8676a48b do_epoll_wait
+	ffffffff8676b14f __x64_sys_epoll_wait
+	ffffffff86206ea6 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741b2d2 epoll_wait
+	    5797ca725c4d cf_poll_wait
+	    5797ca5faf14 run_service
+	ffffffffffffffff [unknown]
+
+asd  404068 [001] 27826.968991: asd:404068 [120] S ==> kworker/u42:3:388481 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed53 sys_futex (inlined)
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404073 [002] 27826.969015: asd:404073 [120] S ==> kworker/u43:7:391171 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed53 sys_futex (inlined)
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404063 [007] 27826.969017: asd:404063 [120] S ==> asd:404054 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed53 sys_futex (inlined)
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404057 [004] 27826.969039: asd:404057 [120] S ==> asd:404081 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed53 sys_futex (inlined)
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404078 [003] 27826.969099: asd:404078 [120] S ==> swapper/3:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed53 sys_futex (inlined)
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404081 [004] 27826.969105: asd:404081 [120] S ==> asd:404070 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed53 sys_futex (inlined)
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404069 [000] 27826.969158: asd:404069 [120] S ==> asd:404127 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed53 sys_futex (inlined)
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404070 [004] 27826.969172: asd:404070 [120] S ==> asd:404072 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed53 sys_futex (inlined)
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404127 [000] 27826.969173: asd:404127 [120] S ==> swapper/0:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab26 __nanosleep
+	    78f08741a9bb usleep
+	    5797ca68a3ae mesh_tender
+	    5797ca700a01 joinable_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404072 [004] 27826.969249: asd:404072 [120] R ==> kworker/u45:4:402024 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142297 [unknown]
+
+asd  404054 [007] 27826.969341: asd:404054 [120] S ==> kvlayers:404628 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed53 sys_futex (inlined)
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404072 [004] 27826.969925: asd:404072 [120] R ==> kworker/u45:1:395182 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142297 [unknown]
+
+asd  404029 [007] 27826.970396: asd:404029 [120] S ==> asd:404052 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f087389e51 [unknown]
+	    78f08738c8cc pthread_cond_wait
+	    5797ca735ec1 cf_queue_pop
+	    5797ca54466e as_batch_worker
+	    5797ca544048 run_pool_worker
+	    5797ca700810 run_pool
+	    5797ca7006b4 pool_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404052 [007] 27826.970457: asd:404052 [120] R ==> kworker/u48:3:395198 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142297 [unknown]
+
+asd  404080 [004] 27826.970521: asd:404080 [120] S ==> asd:404072 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed1e sys_futex (inlined)
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404072 [004] 27826.970568: asd:404072 [120] R ==> asd:404070 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8745997e irqentry_exit_to_user_mode
+	ffffffff87459a93 irqentry_exit
+	ffffffff8745823b sysvec_call_function_single
+	ffffffff87600fcb asm_sysvec_call_function_single
+	    78f0874929d2 [unknown]
+	    5797ca5a9e54 memcpy (inlined)
+	    5797ca5a9e54 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404070 [004] 27826.970635: asd:404070 [120] S ==> asd:404072 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed1e sys_futex (inlined)
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404073 [002] 27826.970662: asd:404073 [120] S ==> kworker/u43:7:391171 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed53 sys_futex (inlined)
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404072 [004] 27826.970681: asd:404072 [120] S ==> asd:404062 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed1e sys_futex (inlined)
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404062 [004] 27826.970690: asd:404062 [120] S ==> swapper/4:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed1e sys_futex (inlined)
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404052 [007] 27826.971172: asd:404052 [120] S ==> kworker/u47:7:398746 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed1e sys_futex (inlined)
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404067 [000] 27826.971441: asd:404067 [120] R ==> kworker/u41:6:403590 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142297 [unknown]
+
+asd  404063 [007] 27826.971496: asd:404063 [120] R ==> kworker/u48:5:398748 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142297 [unknown]
+
+asd  404075 [000] 27826.972057: asd:404075 [120] S ==> asd:404067 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed1e sys_futex (inlined)
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404081 [004] 27826.972106: asd:404081 [120] R ==> kworker/u45:4:402024 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142297 [unknown]
+
+asd  404067 [000] 27826.972125: asd:404067 [120] R ==> kworker/u41:0:394047 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142297 [unknown]
+
+asd  404063 [007] 27826.972343: asd:404063 [120] R ==> kworker/u48:3:395198 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142297 [unknown]
+
+asd  404083 [001] 27826.972503: asd:404083 [120] S ==> asd:404068 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab26 __nanosleep
+	    78f08741a9bb usleep
+	    5797ca5a65c1 run_stats
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404068 [001] 27826.972510: asd:404068 [120] S ==> asd:404059 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed1e sys_futex (inlined)
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404059 [001] 27826.972515: asd:404059 [120] S ==> kworker/u42:3:388481 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed1e sys_futex (inlined)
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404081 [004] 27826.972813: asd:404081 [120] R ==> kworker/u45:1:395182 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142297 [unknown]
+
+asd  404067 [000] 27826.972872: asd:404067 [120] S ==> asd:404069 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed53 sys_futex (inlined)
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404069 [000] 27826.972879: asd:404069 [120] S ==> swapper/0:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed1e sys_futex (inlined)
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404063 [007] 27826.973034: asd:404063 [120] S ==> kworker/u47:7:398746 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed53 sys_futex (inlined)
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404054 [007] 27826.973693: asd:404054 [120] R ==> kworker/u48:5:398748 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142297 [unknown]
+
+asd  404061 [001] 27826.973766: asd:404061 [120] S ==> asd:404083 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed1e sys_futex (inlined)
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404083 [001] 27826.973774: asd:404083 [120] S ==> kworker/u42:3:388481 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab26 __nanosleep
+	    78f08741a9bb usleep
+	    5797ca5a65c1 run_stats
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404054 [007] 27826.974406: asd:404054 [120] S ==> kworker/u47:7:398746 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed53 sys_futex (inlined)
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404034 [003] 27826.974638: asd:404034 [120] S ==> swapper/3:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f087389e51 [unknown]
+	    78f08738c8cc pthread_cond_wait
+	    5797ca735ec1 cf_queue_pop
+	    5797ca54466e as_batch_worker
+	    5797ca544048 run_pool_worker
+	    5797ca700810 run_pool
+	    5797ca7006b4 pool_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  403991 [001] 27826.974934: asd:403991 [120] S ==> asd:404083 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468d42 schedule_hrtimeout_range_clock
+	ffffffff87468d73 schedule_hrtimeout_range
+	ffffffff8676a352 ep_poll
+	ffffffff8676a48b do_epoll_wait
+	ffffffff8676b14f __x64_sys_epoll_wait
+	ffffffff86206ea6 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741b2d2 epoll_wait
+	    5797ca725c4d cf_poll_wait
+	    5797ca5faf14 run_service
+	ffffffffffffffff [unknown]
+
+asd  404083 [001] 27826.974943: asd:404083 [120] S ==> kworker/u42:3:388481 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab26 __nanosleep
+	    78f08741a9bb usleep
+	    5797ca5a65c1 run_stats
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404083 [001] 27826.976006: asd:404083 [120] S ==> swapper/1:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab26 __nanosleep
+	    78f08741a9bb usleep
+	    5797ca5a65c1 run_stats
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404081 [004] 27826.976821: asd:404081 [120] R ==> kworker/u45:1:395182 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142297 [unknown]
+
+asd  404083 [001] 27826.977069: asd:404083 [120] S ==> swapper/1:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab26 __nanosleep
+	    78f08741a9bb usleep
+	    5797ca5a65c1 run_stats
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404057 [004] 27826.977380: asd:404057 [120] R ==> kworker/u45:1:395182 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142297 [unknown]
+
+asd  404081 [004] 27826.978077: asd:404081 [120] R ==> kworker/u45:1:395182 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142297 [unknown]
+
+asd  404083 [001] 27826.978132: asd:404083 [120] S ==> swapper/1:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab26 __nanosleep
+	    78f08741a9bb usleep
+	    5797ca5a65c1 run_stats
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404057 [004] 27826.978707: asd:404057 [120] S ==> asd:404070 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed53 sys_futex (inlined)
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404070 [004] 27826.978719: asd:404070 [120] R ==> kworker/u45:1:395182 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142297 [unknown]
+
+asd  404078 [003] 27826.978730: asd:404078 [120] S ==> kworker/u44:4:388476 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed1e sys_futex (inlined)
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404054 [007] 27826.978917: asd:404054 [120] S ==> kworker/u47:7:398746 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed1e sys_futex (inlined)
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404083 [001] 27826.979198: asd:404083 [120] S ==> swapper/1:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab26 __nanosleep
+	    78f08741a9bb usleep
+	    5797ca5a65c1 run_stats
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404070 [004] 27826.979407: asd:404070 [120] S ==> asd:404072 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed53 sys_futex (inlined)
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404072 [004] 27826.979414: asd:404072 [120] S ==> asd:404081 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed1e sys_futex (inlined)
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404081 [004] 27826.979479: asd:404081 [120] R ==> kworker/u45:5:397100 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142297 [unknown]
+
+asd  404081 [004] 27826.980107: asd:404081 [120] R ==> asd:404057 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed95 sys_futex (inlined)
+	    5797ca6fed95 cf_mutex_unlock
+	    5797ca5aa12a verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404057 [004] 27826.980114: asd:404057 [120] R ==> kworker/u45:1:395182 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142297 [unknown]
+
+asd  404054 [007] 27826.980201: asd:404054 [120] S ==> kworker/u48:3:395198 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed1e sys_futex (inlined)
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404083 [001] 27826.980260: asd:404083 [120] S ==> kworker/u47:6:395244 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab26 __nanosleep
+	    78f08741a9bb usleep
+	    5797ca5a65c1 run_stats
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404078 [003] 27826.980569: asd:404078 [120] S ==> asd:404126 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed1e sys_futex (inlined)
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404126 [003] 27826.980583: asd:404126 [120] S ==> swapper/3:0 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468cf2 schedule_hrtimeout_range_clock
+	ffffffff87468d73 schedule_hrtimeout_range
+	ffffffff8676a352 ep_poll
+	ffffffff8676a48b do_epoll_wait
+	ffffffff8676b14f __x64_sys_epoll_wait
+	ffffffff86206ea6 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741b2d2 epoll_wait
+	    5797ca725c4d cf_poll_wait
+	    5797ca685b6d channel_tender
+	ffffffffffffffff [unknown]
+
+asd  404063 [007] 27826.980799: asd:404063 [120] S ==> kworker/u48:3:395198 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed1e sys_futex (inlined)
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404081 [004] 27826.980800: asd:404081 [120] R ==> kworker/u45:5:397100 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142297 [unknown]
+
+asd  404057 [004] 27826.981422: asd:404057 [120] R ==> kworker/u45:1:395182 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142297 [unknown]
+
+asd  404083 [001] 27826.981507: asd:404083 [120] S ==> kworker/u42:1:395203 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab26 __nanosleep
+	    78f08741a9bb usleep
+	    5797ca5a65c1 run_stats
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404062 [004] 27826.981996: asd:404062 [120] R ==> kworker/u45:5:397100 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142297 [unknown]
+
+asd  404083 [001] 27826.982620: asd:404083 [120] S ==> kworker/u42:3:388481 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab26 __nanosleep
+	    78f08741a9bb usleep
+	    5797ca5a65c1 run_stats
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404062 [004] 27826.982622: asd:404062 [120] R ==> kworker/u45:1:395182 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142297 [unknown]
+
+asd  404078 [003] 27826.982725: asd:404078 [120] R ==> kworker/u44:4:388476 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142297 [unknown]
+
+asd  404070 [004] 27826.983284: asd:404070 [120] S ==> asd:404081 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed1e sys_futex (inlined)
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404081 [004] 27826.983362: asd:404081 [120] S ==> asd:404062 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed1e sys_futex (inlined)
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404078 [003] 27826.983410: asd:404078 [120] S ==> kworker/u44:6:402037 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed53 sys_futex (inlined)
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404062 [004] 27826.983433: asd:404062 [120] S ==> asd:404080 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed53 sys_futex (inlined)
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404080 [004] 27826.983466: asd:404080 [120] S ==> asd:404057 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed1e sys_futex (inlined)
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404057 [004] 27826.983730: asd:404057 [120] S ==> kworker/u47:7:398746 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed53 sys_futex (inlined)
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404054 [007] 27826.983917: asd:404054 [120] S ==> kworker/u48:6:388485 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed1e sys_futex (inlined)
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca6fed1e cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404083 [001] 27826.983947: asd:404083 [120] S ==> asd:404059 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff87468e3d do_nanosleep
+	ffffffff86410082 hrtimer_nanosleep
+	ffffffff8641a823 common_nsleep
+	ffffffff8641d814 __x64_sys_clock_nanosleep
+	ffffffff8620755c x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f0873ddbdf clock_nanosleep
+	    78f0873eab26 __nanosleep
+	    78f08741a9bb usleep
+	    5797ca5a65c1 run_stats
+	    5797ca700aa0 detached_shim_fn
+	    78f08738db83 [unknown]
+	    78f08741aecb [unknown]
+
+asd  404059 [001] 27826.984077: asd:404059 [120] S ==> kworker/u42:1:395203 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed53 sys_futex (inlined)
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
+asd  404072 [004] 27826.984231: asd:404072 [120] R ==> kworker/u45:5:397100 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff874596d9 syscall_exit_to_user_mode
+	ffffffff87452e44 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08740d87d write
+	    78f084142297 [unknown]
+
+asd  404073 [002] 27826.984500: asd:404073 [120] S ==> kworker/u43:5:388474 [120]
+	ffffffff874615cc __schedule
+	ffffffff87461993 schedule
+	ffffffff8642f1e4 futex_wait_queue
+	ffffffff8642f9c5 __futex_wait
+	ffffffff8642fac4 futex_wait
+	ffffffff8642b755 do_futex
+	ffffffff8642be0a __x64_sys_futex
+	ffffffff86205a41 x64_sys_call
+	ffffffff87452e37 do_syscall_64
+	ffffffff87600130 entry_SYSCALL_64_after_hwframe
+	    78f08741852d syscall
+	    5797ca6fed53 sys_futex (inlined)
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca6fed53 cf_mutex_lock
+	    5797ca5a9fb9 verbs_post
+	    5797ca5a729b place (inlined)
+	ffffffffffffffff [unknown]
+
