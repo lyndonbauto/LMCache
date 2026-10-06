@@ -440,7 +440,8 @@ def fetch_deferred_objects(
 
     Raises:
         LayerwiseContractError: If the objects could not be delivered either
-            way; a load the sink began has been abandoned.
+            way; a load the sink began has been abandoned. Keys that do not
+            match the model raise before anything is fetched or loaded.
         LMCacheTimeoutError: If a whole load took longer than
             ``config.whole_load_timeout_seconds``.
         Exception: Anything else the transport, sink or storage raises.
@@ -454,6 +455,7 @@ def fetch_deferred_objects(
         config.whole_load_timeout_seconds,
     )
     try:
+        objects = _objects_of(model, obj_keys_per_obj_group, wanted)
         try:
             source = storage.layer_arrival_source()
         except LayerwiseContractError as exc:
@@ -461,7 +463,7 @@ def fetch_deferred_objects(
             outcome = PipelinedOutcome.NO_SOURCE
         else:
             try:
-                loader.place(_objects_of(model, obj_keys_per_obj_group, wanted))
+                loader.place(objects)
                 result = run_pipelined_retrieve(
                     model.fetch_model,
                     obj_keys_per_obj_group,
@@ -485,7 +487,6 @@ def fetch_deferred_objects(
                     "Pipelined fetch refused; loading whole objects: %s", exc
                 )
                 outcome = PipelinedOutcome.REFUSED
-        objects = _objects_of(model, obj_keys_per_obj_group, wanted)
         request.objects.put(
             _load_whole(
                 storage,

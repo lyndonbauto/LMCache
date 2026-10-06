@@ -267,6 +267,32 @@ def test_a_refused_lease_loads_the_objects_whole() -> None:
     assert set(loaded) == set(_deferred_keys())
 
 
+@pytest.mark.parametrize("has_source", [True, False], ids=["source", "no-source"])
+def test_keys_that_do_not_match_the_model_fail_before_any_load(
+    has_source: bool,
+) -> None:
+    """Neither a fetch nor a whole load can place objects the model lacks."""
+    placer = PackingPlacer()
+    storage = FakeStorage(LandingSource() if has_source else None)
+    one_group_short = KEYS[:-1]
+
+    with pytest.raises(LayerwiseContractError, match="cannot place"):
+        fetch_deferred_objects(
+            storage,
+            _model(placer),
+            one_group_short,
+            _deferred_keys(),
+            Factory(),
+            _request(_table()),
+            GROUP_LAYOUTS,
+            CONFIG,
+        )
+
+    assert placer.requests == []
+    assert storage.loads == []
+    assert storage.released == []
+
+
 def test_a_transport_failure_swaps_in_whole_objects_for_the_rest() -> None:
     """Layers after the failure read the reloaded objects; retrieve unlocks them."""
     factory = Factory()
