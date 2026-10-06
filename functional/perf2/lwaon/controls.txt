@@ -1,0 +1,25 @@
+Controls for lwaon (TTFT p50 / p90 in s, NumPy linear interpolation over n=4 requests)
+
+ctl_nocache_part (scripts/lwaon_ctl2.sh): no cache, prompt = cached + new tokens, uncached
+cached new c  p50    p90
+0      8192 1  0.314  0.315
+0      8192 4  1.448  1.927
+2048   2048 1  0.141  0.147
+2048   8192 1  0.445  0.450
+8192   2048 1  0.447  0.452
+8192   8192 1  0.820  0.825
+16384  2048 1  1.010  1.015
+16384  8192 1  1.522  1.526
+2048   8192 4  1.548  2.347
+8192   8192 4  3.710  5.608
+16384  8192 4  6.358 10.259
+
+ctl_9c (scripts/lwaon_ctl.sh): aon 8k full hits, server 9c16972132 at defaults (day 1's build)
+c  p50
+1  0.208
+2  0.239
+4  0.483
+
+ctl_nocache (scripts/lwaon_ctl.sh): nocache 8k c=1, session p50 ~0.314
+ctl_new (aon on untuned 314564cfb): not run; lwaon_ctl.sh was stopped to start Sriram's
+round 2 first.

@@ -1,0 +1,18 @@
+2026-10-06T17:44:50Z breakdown3: building 0c9703931 in place
+2026-10-06T17:44:58Z breakdown3: tree and 9c16972132 binary restored (0b953fb421486d003e28ccc90dde2d7b)
+2026-10-06T17:44:58Z breakdown3: 0c9703931 binary 73b677809610fef94ac32247f6b379e7
+2026-10-06T17:44:59Z breakdown3: e8158149 kvlayers ebba33e598a4ed53356ab57f9859bbd0; old kvlayers 71105b74857c078867a0ec567279e10c
+2026-10-06T17:45:11Z breakdown3: q16_t2:  524288 133109 0.00 93.05 		 0.022185
+2026-10-06T17:45:24Z breakdown3: q24_t2:  524288 129241 0.00 90.34 		 0.021540
+2026-10-06T17:45:36Z breakdown3: q32_t2:  524288 123633 0.00 86.42 		 0.020605
+2026-10-06T17:45:48Z breakdown3: q64_t2:  524288 116373 0.00 81.33 		 0.019391
+2026-10-06T17:48:10Z breakdown3: mem: storage-engine=memory; at most 128 writes in flight,32 placement threads
+2026-10-06T17:48:13Z breakdown3: mem: kvlayers fill exit=0: priority on : all layers 743.04 ms p50, 1.35 GiB/s, bad pages 0, short layers 0, failed rows 0 priority off: all layers 713.78 ms p50, 1.40 GiB/s, bad pages 0, short layers 0, failed rows 0
+2026-10-06T17:48:22Z breakdown3: mem: run 1 qp=16 (1) stream: 8.11 s, 58.44 GiB landed, 7.205 GiB/s, failed rows 0
+2026-10-06T17:48:31Z breakdown3: mem: run 1 qp=16 (2) stream: 8.11 s, 57.91 GiB landed, 7.139 GiB/s, failed rows 0
+2026-10-06T17:48:39Z breakdown3: mem: run 2 qp=24 stream: 8.10 s, 59.19 GiB landed, 7.309 GiB/s, failed rows 0
+2026-10-06T17:48:48Z breakdown3: mem: run 2 qp=32 stream: 8.13 s, 56.88 GiB landed, 6.996 GiB/s, failed rows 0
+2026-10-06T17:48:58Z breakdown3: mem: run 5 qp=16 stream: 8.12 s, 56.28 GiB landed, 6.928 GiB/s, failed rows 0
+2026-10-06T17:51:10Z breakdown3: mem: run 4 qp=16 point E_timeline_qp16_L8192_c1: n=4 errors=0 wall=5.19s ttft_p50~0.199s ext_hit_tokens=32764 out_tokens=[128]
+2026-10-06T17:51:12Z breakdown3: mem: server stopped, data deleted
+2026-10-06T17:51:12Z breakdown3: BREAKDOWN3 DONE

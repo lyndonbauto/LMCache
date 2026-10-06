@@ -1,0 +1,16 @@
+== q16_t2_client.txt
+ #bytes     #iterations    BW peak[Gb/sec]    BW average[Gb/sec]   MsgRate[Mpps]
+ 524288     133109           0.00               93.05  		     0.022185
+== q24_t2_client.txt
+ #bytes     #iterations    BW peak[Gb/sec]    BW average[Gb/sec]   MsgRate[Mpps]
+ 524288     129241           0.00               90.34  		     0.021540
+== q32_t2_client.txt
+ #bytes     #iterations    BW peak[Gb/sec]    BW average[Gb/sec]   MsgRate[Mpps]
+ 524288     123633           0.00               86.42  		     0.020605
+== q64_t2_client.txt
+ #bytes     #iterations    BW peak[Gb/sec]    BW average[Gb/sec]   MsgRate[Mpps]
+ 524288     116373           0.00               81.33  		     0.019391
+q16_t2 listener: LISTEN 0      1          127.0.0.1:18801      0.0.0.0:*    users:(("ib_write_bw",pid=358484,fd=5))                  
+q24_t2 listener: LISTEN 0      1          127.0.0.1:18802      0.0.0.0:*    users:(("ib_write_bw",pid=358607,fd=5))                  
+q32_t2 listener: LISTEN 0      1          127.0.0.1:18803      0.0.0.0:*    users:(("ib_write_bw",pid=358717,fd=5))                  
+q64_t2 listener: LISTEN 0      1          127.0.0.1:18804      0.0.0.0:*    users:(("ib_write_bw",pid=358957,fd=5))                  

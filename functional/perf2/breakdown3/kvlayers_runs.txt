@@ -1,0 +1,34 @@
+== kvl_fill.txt
+filled 32 layers x 64 chunks of 512 KiB
+sink 9005922739791211485 over rc, 1 node(s), 32 layers x 64 chunks x 512 KiB = 1024 MiB, 1 reps per mode
+
+layer landed, ms after release (p50 / p99 over 1 reps):
+layer     priority on           priority off        
+0           27.67 / 27.67        486.94 / 486.94    
+1           49.41 / 49.41        380.15 / 380.15    
+8          212.81 / 212.81       676.28 / 676.28    
+16         403.40 / 403.40       396.70 / 396.70    
+31         743.04 / 743.04       320.93 / 320.93    
+priority on : all layers 743.04 ms p50, 1.35 GiB/s, bad pages 0, short layers 0, failed rows 0
+priority off: all layers 713.78 ms p50, 1.40 GiB/s, bad pages 0, short layers 0, failed rows 0
+row results: ok 4096, not-found 0, size-mismatch 0, unknown-region 0, other 0; unexpected 0
+== kvl_qp16_1.txt
+sink 14777401608331051234 over rc, 1 node(s), 32 layers x 64 chunks x 512 KiB = 1024 MiB, 10 reps per mode
+
+stream: 8.11 s, 58.44 GiB landed, 7.205 GiB/s, failed rows 0
+== kvl_qp16_2.txt
+sink 6317553618312442089 over rc, 1 node(s), 32 layers x 64 chunks x 512 KiB = 1024 MiB, 10 reps per mode
+
+stream: 8.11 s, 57.91 GiB landed, 7.139 GiB/s, failed rows 0
+== kvl_qp16_R5.txt
+sink 17523135856022196838 over rc, 1 node(s), 32 layers x 64 chunks x 512 KiB = 1024 MiB, 10 reps per mode
+
+stream: 8.12 s, 56.28 GiB landed, 6.928 GiB/s, failed rows 0
+== kvl_qp24.txt
+sink 17519883529412498925 over rc, 1 node(s), 32 layers x 64 chunks x 512 KiB = 1024 MiB, 10 reps per mode
+
+stream: 8.10 s, 59.19 GiB landed, 7.309 GiB/s, failed rows 0
+== kvl_qp32.txt
+sink 3055089285471477808 over rc, 1 node(s), 32 layers x 64 chunks x 512 KiB = 1024 MiB, 10 reps per mode
+
+stream: 8.13 s, 56.88 GiB landed, 6.996 GiB/s, failed rows 0
