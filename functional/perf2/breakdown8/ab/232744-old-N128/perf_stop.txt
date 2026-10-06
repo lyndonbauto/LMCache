@@ -1,0 +1,5 @@
+2026-10-06T23:28:17Z section exp_stop started
+stopped (pid 22981)
+2026-10-06T23:28:18Z aero-kvsink-bp stopped, data file deleted; free: / 588 GB, data dir 4823 GB
+2026-10-06T23:28:18Z section exp_stop finished
+##### PERF DONE 23:28:18 VRAM 285 MB

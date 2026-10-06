@@ -1,0 +1,5 @@
+2026-10-06T23:26:36Z section exp_start started
+started: pid 22495, service 127.0.0.1:3700, log /root/lmc-work/functional/perf2/breakdown8/ab/232636-old-N512/asd-kvsink-bp-perf.log
+2026-10-06T23:26:39Z aero-kvsink-bp started on a device namespace: file /mnt/scratch/perf-aero/lmcache.dat filesize 64G; ; storage engine reported: storage-engine=memory storage-engine.direct-files=false storage-engine.filesize=0; free: / 588 GB, data dir 4823 GB
+2026-10-06T23:26:39Z section exp_start finished
+##### PERF DONE 23:26:39 VRAM 285 MB

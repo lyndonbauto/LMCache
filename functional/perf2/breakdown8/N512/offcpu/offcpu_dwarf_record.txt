@@ -1,0 +1,2 @@
+[ perf record: Woken up 169 times to write data ]
+[ perf record: Captured and wrote 60.480 MB /mnt/scratch/breakdown8-tmp/offcpu_dwarf.data (7350 samples) ]

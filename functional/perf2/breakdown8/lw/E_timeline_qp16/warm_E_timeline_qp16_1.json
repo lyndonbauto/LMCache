@@ -1,0 +1,12 @@
+{
+ "tag": "E_timeline_qp16_warm1",
+ "warmup": "Warm-up request 1 of session E_timeline_qp16 (after vLLM start). Say hello.",
+ "requests": [
+  {
+   "ttft_s": 0.135474635000719,
+   "total_s": 0.25728141799845616,
+   "out_tokens": 16,
+   "error": ""
+  }
+ ]
+}

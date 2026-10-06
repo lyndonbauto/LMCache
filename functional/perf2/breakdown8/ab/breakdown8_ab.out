@@ -1,0 +1,8 @@
+2026-10-06T23:26:01Z breakdown8: 232529-old-N128/clean: stream: 25.09 s, 187.53 GiB landed, 7.475 GiB/s, failed rows 0
+2026-10-06T23:26:35Z breakdown8: 232602-new-N128/clean: stream: 25.13 s, 166.94 GiB landed, 6.643 GiB/s, failed rows 0
+2026-10-06T23:27:09Z breakdown8: 232636-old-N512/clean: stream: 25.08 s, 203.38 GiB landed, 8.109 GiB/s, failed rows 0
+2026-10-06T23:27:43Z breakdown8: 232710-new-N512/clean: stream: 25.10 s, 182.00 GiB landed, 7.251 GiB/s, failed rows 0
+2026-10-06T23:28:17Z breakdown8: 232744-old-N128/clean: stream: 25.11 s, 185.81 GiB landed, 7.400 GiB/s, failed rows 0
+2026-10-06T23:28:51Z breakdown8: 232818-new-N128/clean: stream: 25.14 s, 167.03 GiB landed, 6.645 GiB/s, failed rows 0
+2026-10-06T23:28:52Z breakdown8: ab: server stopped, data deleted
+2026-10-06T23:28:52Z breakdown8: BREAKDOWN8 DONE

@@ -1,0 +1,3 @@
+sink 7143548688694683777 over rc, 1 node(s), 32 layers x 64 chunks x 512 KiB = 1024 MiB, 10 reps per mode
+
+stream: 25.09 s, 178.19 GiB landed, 7.101 GiB/s, failed rows 0

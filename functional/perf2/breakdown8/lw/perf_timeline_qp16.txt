@@ -1,0 +1,6 @@
+2026-10-06T23:21:58Z section timeline:16 started
+2026-10-06T23:21:59Z session E_timeline_qp16 (lw) started; L1 116 GB; VRAM 285 MB; free: / 588 GB, data dir 4823 GB
+2026-10-06T23:24:25Z session E_timeline_qp16 host memory: min available 104218 MB
+2026-10-06T23:24:25Z session E_timeline_qp16 rc=0; asd read_bytes (disk) during it: 0 MiB; 1 points; errors: 0; LMCache stops:       2 stopped (TERM) exit=143
+2026-10-06T23:24:25Z section timeline:16 finished
+##### PERF DONE 23:24:25 VRAM 285 MB

@@ -1,0 +1,18 @@
+2026-10-06T23:16:33Z breakdown8: building 55d6ae8d8 in place
+2026-10-06T23:16:41Z breakdown8: tree and 9c16972132 binary restored (0b953fb421486d003e28ccc90dde2d7b)
+2026-10-06T23:16:41Z breakdown8: 55d6ae8d8 binary e3f29f9172b0ca9eabf20b34c1d00345
+2026-10-06T23:16:44Z breakdown8: N128: at most 128 writes in flight, 4 MiB per path,32 placement threads
+2026-10-06T23:17:14Z breakdown8: N128/clean: stream: 25.12 s, 167.62 GiB landed, 6.673 GiB/s, failed rows 0
+2026-10-06T23:17:39Z breakdown8: N128/bt: stream: 25.10 s, 166.69 GiB landed, 6.641 GiB/s, failed rows 0
+2026-10-06T23:18:05Z breakdown8: N128/offcpu: stream: 25.13 s, 169.75 GiB landed, 6.755 GiB/s, failed rows 0
+2026-10-06T23:18:15Z breakdown8: N128: off-CPU parsed
+2026-10-06T23:18:18Z breakdown8: N512: at most 512 writes in flight, 16 MiB per path,32 placement threads
+2026-10-06T23:18:47Z breakdown8: N512/clean: stream: 25.10 s, 183.75 GiB landed, 7.321 GiB/s, failed rows 0
+2026-10-06T23:19:13Z breakdown8: N512/bt: stream: 25.09 s, 178.19 GiB landed, 7.101 GiB/s, failed rows 0
+2026-10-06T23:19:39Z breakdown8: N512/offcpu: stream: 25.06 s, 182.75 GiB landed, 7.294 GiB/s, failed rows 0
+2026-10-06T23:19:47Z breakdown8: N512: off-CPU parsed
+2026-10-06T23:19:47Z breakdown8: server stopped, data deleted
+2026-10-06T23:19:47Z breakdown8: lw: 8k c=1 at 16 QPs with N512
+2026-10-06T23:24:25Z breakdown8: lw: point E_timeline_qp16_L8192_c1: n=4 errors=0 wall=5.23s ttft_p50~0.187s ext_hit_tokens=32764 out_tokens=[128]
+2026-10-06T23:24:27Z breakdown8: lw: server stopped, data deleted
+2026-10-06T23:24:27Z breakdown8: BREAKDOWN8 DONE
