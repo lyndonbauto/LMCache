@@ -711,7 +711,15 @@ obsolete.
     `finish_request`, `abandon_request`, `max_slots_per_request`, `node_name`
     and `shutdown`.
 - **`memory_layout_conversion.{h,cpp}`**: `MemoryLayoutDesc` to
-  `rdma::ObjectGroupLayoutInput`. Unchanged.
+  `rdma::ObjectGroupLayoutInput`. Each kernel group carries an
+  `element_size` in bytes, which Python sends as `element_sizes`
+  (`dtype.itemsize`) from `_native_object_group_layouts` in
+  `native_connector_l2_adapter.py`. A zero size is refused. Since
+  `ea17f741`, C++ no longer parses dtype names: the parser sized FP8, int8
+  and float64 as 4 bytes. Its Python tests,
+  `test_the_pipelined_planner_gets_each_kernel_groups_element_size` and
+  `test_hybrid_kernel_groups_keep_their_own_element_sizes` in
+  `test_native_record_layouts.py`, go to PR-A8 with it, not to PR-A5.
 - **`aerospike_pipelined_pybind.{h,cpp}`**: Python bindings for the pipelined
   types. Small edits.
 - **Connector methods** (`connector.{h,cpp}`, under `#ifdef`), which keep
@@ -738,8 +746,8 @@ obsolete.
 `SinkFetchTable`: one fetch per window, and stale results never credit a
 newer fetch.
 
-**Commits.** `8993843e`, `61d39ffa` (format), plus the surviving parts of
-`b359b4ea`, `7333280b` and `adaf1ced`.
+**Commits.** `8993843e`, `61d39ffa` (format), `ea17f741` (element sizes from
+torch), plus the surviving parts of `b359b4ea`, `7333280b` and `adaf1ced`.
 
 **Pushback.**
 
@@ -754,8 +762,9 @@ newer fetch.
 > **PR: split by the code each harness tests.**
 >
 > - `shard_plan_test` → PR-A5.
-> - `sink_fetch_table_test`, `slot_planner_test` and
->   `fabric_free_session_pybind.cpp` → PR-A8.
+> - `sink_fetch_table_test`, `slot_planner_test`,
+>   `memory_layout_conversion_test` and `fabric_free_session_pybind.cpp` →
+>   PR-A8.
 > - `test_slot_plan_parity.py` → PR-A8, after PR-A6.
 >
 > Each PR carries only its targets in the harness `Makefile`.
@@ -768,6 +777,9 @@ newer fetch.
 - **Tests,** each a `csrc/*_test.cpp` plus a `test_*.py` wrapper:
   - `request_plan`, `slot_planner`, `shard_plan`;
   - `sink_fetch_table` (new);
+  - `memory_layout_conversion` (new, C++ only, run by `logic-test`):
+    element sizes are used as given, hybrid kernel groups keep their own,
+    and a zero size is refused;
   - `test_slot_plan_parity.py`, with `slot_plan_dump.cpp` and
     `fixtures/slot_plans.txt`.
 - **`fabric_free_session_pybind.cpp`**, used by the Python harness in
@@ -1164,7 +1176,13 @@ Aerospike records, RDMA windows and slots. `track-c-status.md` reports all
 
 **Known cleanups.**
 
-- D-03: the fallback re-runs `_objects_of`.
+- D-03, partly fixed. Since `bb1eac1f`, `fetch_deferred_objects` lists the
+  deferred objects once and reuses them for the lease and the whole-object
+  fallback; keys that don't match the model raise before anything loads.
+  Still open: `run_pipelined_retrieve` lists them again, and
+  `build_request_fetch` serializes every key again. Fixing that means both
+  take the listed objects instead of the keys, which touches about 30 call
+  sites. The cost is about 1 ms per retrieve.
 - D-04: defaults are duplicated between `MPServerConfig` and
   `PipelinedFetchConfig`, and the sliding-window rule is written four times.
 
@@ -1266,7 +1284,8 @@ Aerospike records, RDMA windows and slots. `track-c-status.md` reports all
     `LayerLoadSink` with per-layer staging (GF-3), and `LayerLauncher`.
 
 **Commits.** `7f75a0ba`, `48288b94`, `235f9a24`, `ae529b58`, `e3c665db`,
-`004b692b`, `b88ec0ff`, `694eb6b8`.
+`004b692b`, `b88ec0ff`, `694eb6b8`, `bb1eac1f` (list the deferred objects
+once; D-03, partly).
 
 **Tests.**
 

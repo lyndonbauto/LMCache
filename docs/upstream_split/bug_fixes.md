@@ -766,6 +766,8 @@ nobody files them as upstream fixes by mistake.
 | `RdmaWindowPlacer` release called `finish_write` on fetched objects, so the store controller queued every fetched object for a store back to L2 (F1) | `8e18aabd` | AS-P3 (PR-A10) |
 | Connector pybind chain broken outside `#ifdef LMCACHE_AEROSPIKE_RDMA`; ~~verbs helpers in the wrong namespace~~ | `b3d67843`, ~~`a74e828c`~~ | AS-R5 (PR-A8). **After the PR** only the pybind half applies; the verbs helpers are deleted |
 | "Too many slots" raised `ValueError` where `PlanTooLargeError` is documented | `93a77e56` | AS-L1 (PR-A6) |
+| The C++ layout conversion parsed dtype names and sized FP8, int8 and float64 as 4 bytes, so an FP8 model's records were sized wrong and could fail the window-fit check; Python now sends `dtype.itemsize` | `ea17f741` | AS-R5 (PR-A8) |
+| `fetch_deferred_objects` logged a misleading "refused" warning when the keys did not match the model, then failed listing them again (D-03, partly) | `bb1eac1f` | AS-M3 (PR-A11) |
 | D-15: client teardown did not revoke RDMA access before L1 freed the slab. **Not fixed**; test `0ebf98d0` | — | AS-R5 (PR-A8). **After the PR** the cause (`AerospikePipelinedRdmaDriver::shutdown()`) is deleted; re-run the test against the new driver. Any remaining risk is server issue 2 |
 
 ---
