@@ -768,14 +768,11 @@ def transfer_kv_layerwise_h2d(
 ) -> None:
     """Retrieve KV with one H2D kernel launch per scheduled layer.
 
-    When every object group fits in one staging batch, staging copies whole
-    memory objects once, before the first launch that needs them, and later
-    layers reuse them. Otherwise the batches of a group share the staging
-    slots, so each layer stages only its own bytes (per-layer staging), which
-    copies each byte once instead of restaging whole objects for every layer.
-    GDS objects only transfer whole and always use whole-object staging.
-    Overlap is between attention on layer *L* and the transfer stream work
-    for layer *L+1*.
+    Each layer stages only its own bytes (per-layer staging), so the first
+    layer's wait covers one layer's copy rather than every layer's. GDS
+    objects only transfer whole, so a retrieve holding any uses whole-object
+    staging. Overlap is between attention on layer *L* and the transfer
+    stream work for layer *L+1*.
 
     Args:
         cache_context: Registered worker cache context on the daemon.
@@ -796,16 +793,12 @@ def transfer_kv_layerwise_h2d(
     """
     del transfer_key
 
-    present = [mo for group in memory_objs_by_group for mo in group if mo is not None]
-    one_batch_per_group = all(
-        sum(mo is not None for mo in group) <= cache_context.max_batch_size
+    has_gds_objects = any(
+        isinstance(mo, GDSMemoryObject)
         for group in memory_objs_by_group
+        for mo in group
     )
-    staging = (
-        LayerStaging.WHOLE_OBJECT
-        if one_batch_per_group or any(isinstance(mo, GDSMemoryObject) for mo in present)
-        else LayerStaging.PER_LAYER
-    )
+    staging = LayerStaging.WHOLE_OBJECT if has_gds_objects else LayerStaging.PER_LAYER
     retrieve = LayerwiseH2DRetrieve(
         cache_context,
         block_ids_gpu,

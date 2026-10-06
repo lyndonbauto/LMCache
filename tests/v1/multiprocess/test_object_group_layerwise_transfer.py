@@ -422,6 +422,9 @@ def test_transfer_kv_layerwise_records_before_watermark(
     monkeypatch.setattr(
         object_group_transfer, "lmcache_memcpy_async_h2d", lambda *a, **k: None
     )
+    monkeypatch.setattr(
+        object_group_transfer, "lmcache_memcpy_async_h2d_range", lambda *a, **k: None
+    )
     monkeypatch.setattr(progress, "report_launch_recorded", fake_report)
 
     cache_context = MagicMock()
@@ -430,9 +433,11 @@ def test_transfer_kv_layerwise_records_before_watermark(
     cache_context.device = torch.device("cpu")
     cache_context.stream = MagicMock(name="transfer_stream")
     cache_context.calculate_num_blocks = lambda tokens, _gid: max(1, tokens // 16)
-    cache_context.get_temp_object_group_buffer = MagicMock()
-    cache_context.get_temp_kernel_group_buffer = MagicMock(
+    cache_context.get_temp_object_group_buffer = MagicMock(
         return_value=SimpleNamespace(data_ptr=lambda: 0)
+    )
+    cache_context.get_temp_kernel_group_buffer = MagicMock(
+        return_value=torch.zeros(_KV_SIZE, _LAYERS_PER_GROUP, _SLOTS, _HIDDEN)
     )
     cache_context.get_kernel_group_kv_pointers = MagicMock(return_value=[])
     cache_context.get_shape_desc = MagicMock()
@@ -503,6 +508,9 @@ def test_transfer_kv_layerwise_batch_setup_once_per_batch(
     monkeypatch.setattr(
         object_group_transfer, "lmcache_memcpy_async_h2d", lambda *a, **k: None
     )
+    monkeypatch.setattr(
+        object_group_transfer, "lmcache_memcpy_async_h2d_range", lambda *a, **k: None
+    )
 
     num_blocks_calls = 0
     temp_og_buffer_calls = 0
@@ -525,7 +533,7 @@ def test_transfer_kv_layerwise_batch_setup_once_per_batch(
     cache_context.calculate_num_blocks = counting_calculate_num_blocks
     cache_context.get_temp_object_group_buffer = counting_temp_og_buffer
     cache_context.get_temp_kernel_group_buffer = MagicMock(
-        return_value=SimpleNamespace(data_ptr=lambda: 0)
+        return_value=torch.zeros(_KV_SIZE, _LAYERS_PER_GROUP, _SLOTS, _HIDDEN)
     )
     cache_context.get_kernel_group_kv_pointers = MagicMock(return_value=[])
     cache_context.get_shape_desc = MagicMock()
@@ -882,6 +890,62 @@ def test_per_layer_staging_on_gpu(kernel_calls: list[int], kv_size: int) -> None
     them in order.
     """
     _check_per_layer_staging(kv_size, "cuda")
+
+
+def test_a_one_batch_retrieve_stages_each_layer_at_its_own_launch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An L1-hit retrieve that fits one staging batch still stages per layer.
+
+    Staging every layer before the first kernel would make the first layer's
+    wait cover the whole object's copy. At each launch, no later layer may
+    have been staged yet, and every layer must end up staged.
+    """
+    real = _RealStaging(_KV_SIZE)
+    for kernel_group_id in (0, 1):
+        for position in range(_LAYERS_PER_GROUP):
+            real.arrive(
+                kernel_group_id, position, 10.0 * kernel_group_id + position + 1
+            )
+    schedule = LayerwiseSchedule([[0, 2], [1, 3]])
+    launches = schedule.launches
+    staged_early: list[int] = []
+    launched = 0
+
+    def check_kernel(*args: object, **kwargs: object) -> None:
+        nonlocal launched
+        for later in launches[launched + 1 :]:
+            if not torch.all(
+                real.staged(later.kernel_group_index, later.position_in_group)
+                == _SENTINEL
+            ):
+                staged_early.append(later.layer_id)
+        launched += 1
+
+    monkeypatch.setattr(
+        object_group_transfer.device_ops, "multi_layer_block_kv_transfer", check_kernel
+    )
+
+    object_group_transfer.transfer_kv_layerwise_h2d(
+        real.cache_context(),
+        [torch.tensor([0, 1]), torch.tensor([0, 1])],
+        [[real.memory_obj]],
+        0,
+        schedule,
+        LayerProgressRecord(bytearray(LayerProgressRecord.RECORD_SIZE)),
+        _RecordingEventPool(schedule.launch_count()),
+        1,
+        transfer_key="k",
+    )
+
+    assert launched == schedule.launch_count()
+    assert staged_early == []
+    for kernel_group_id in (0, 1):
+        for position in range(_LAYERS_PER_GROUP):
+            assert torch.all(
+                real.staged(kernel_group_id, position)
+                == 10.0 * kernel_group_id + position + 1
+            )
 
 
 def test_whole_object_staging_would_miss_a_late_arrival(
