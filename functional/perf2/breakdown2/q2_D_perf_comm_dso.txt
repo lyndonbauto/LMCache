@@ -1,0 +1,139 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 81K of event 'cycles:P'
+# Event count (approx.): 126409564579
+#
+# Overhead       Samples  Command          Shared Object                                    
+# ........  ............  ...............  .................................................
+#
+    25.31%         26000  asd              [kernel.kallsyms]                                
+    20.55%         16805  lmcache          [kernel.kallsyms]                                
+    12.27%          4897  python           [kernel.kallsyms]                                
+    11.76%         10032  lmcache          libc.so.6                                        
+     9.35%          3758  python           libhsa-runtime64.so.1.18.70203                   
+     5.12%          7515  swapper          [kernel.kallsyms]                                
+     4.28%          4076  asd              libc.so.6                                        
+     2.83%          1556  python           python3.12                                       
+     1.17%          1136  asd              asd                                              
+     1.08%          1181  lmcache          python3.12                                       
+     0.96%           418  python           libc.so.6                                        
+     0.90%           774  lmcache          libaerospike.so                                  
+     0.73%           590  vllm             python3.12                                       
+     0.44%           232  vllm             tokenizers.abi3.so                               
+     0.40%           230  vllm             libc.so.6                                        
+     0.27%           114  python           libamdhip64.so.7.2.70203                         
+     0.25%           109  python           libtorch_cpu.so                                  
+     0.22%           190  ZMQbg/IO/0       [kernel.kallsyms]                                
+     0.19%            77  python           libtorch_python.so                               
+     0.18%            83  lmcache          libhsa-runtime64.so.1.18.70203                   
+     0.16%            66  python           _multiarray_umath.cpython-312-x86_64-linux-gnu.so
+     0.12%           100  vllm             [kernel.kallsyms]                                
+     0.12%            96  lmcache          libstdc++.so.6.0.30                              
+     0.10%            93  lmcache          [vdso]                                           
+     0.09%            75  ZMQbg/IO/0       libzmq-7b073b3d.so.5.2.5                         
+     0.09%            62  vllm             _pydantic_core.cpython-312-x86_64-linux-gnu.so   
+     0.07%            27  python           libc10.so                                        
+     0.06%            54  python           _core.cpython-312-x86_64-linux-gnu.so            
+     0.06%            25  python           ld-linux-x86-64.so.2                             
+     0.06%            50  lmcache          lmcache_aerospike.cpython-312-x86_64-linux-gnu.so
+     0.06%            24  python           libc10_hip.so                                    
+     0.06%            24  python           libhipblaslt.so.1.2.70203                        
+     0.06%            23  python           libtorch_hip.so                                  
+     0.05%            61  perf             [kernel.kallsyms]                                
+     0.04%            44  python           libzmq-7b073b3d.so.5.2.5                         
+     0.04%            38  asd              [vdso]                                           
+     0.04%            52  lmcache          libzmq-7b073b3d.so.5.2.5                         
+     0.03%            46  lmcache          _core.cpython-312-x86_64-linux-gnu.so            
+     0.02%            11  python           libstdc++.so.6.0.30                              
+     0.02%            18  python           _zmq.abi3.so                                     
+     0.02%            14  vllm             loop.cpython-312-x86_64-linux-gnu.so             
+     0.02%            15  ZMQbg/IO/0       libc.so.6                                        
+     0.02%            10  lmcache          libamdhip64.so.7.2.70203                         
+     0.02%            14  kworker/0:1-eve  [kernel.kallsyms]                                
+     0.02%            16  python           _json.cpython-312-x86_64-linux-gnu.so            
+     0.01%            10  python           libcrypto.so.3                                   
+     0.01%            10  lmcache          libtorch_cpu.so                                  
+     0.01%            17  top              [kernel.kallsyms]                                
+     0.01%             9  python           [vdso]                                           
+     0.01%            15  lmcache          lmcache_native.cpython-312-x86_64-linux-gnu.so   
+     0.01%            11  kworker/u61:0-K  [kernel.kallsyms]                                
+     0.01%             8  ZMQbg/IO/1       libzmq-7b073b3d.so.5.2.5                         
+     0.01%            10  lmcache          cuda_ops.cpython-312-x86_64-linux-gnu.so         
+     0.01%             8  lmcache          libtorch_python.so                               
+     0.01%             6  vllm             _core.cpython-312-x86_64-linux-gnu.so            
+     0.01%             4  python           libtriton.so                                     
+     0.01%             6  vllm             _json.cpython-312-x86_64-linux-gnu.so            
+     0.01%             4  python           __triton_launcher.cpython-312-x86_64-linux-gnu.so
+     0.01%             6  vllm             _asyncio.cpython-312-x86_64-linux-gnu.so         
+     0.01%             8  python           _http_parser.cpython-312-x86_64-linux-gnu.so     
+     0.01%             9  lmcache          blake3.cpython-312-x86_64-linux-gnu.so           
+     0.01%             8  python           _asyncio.cpython-312-x86_64-linux-gnu.so         
+     0.01%            12  lmcache          _zmq.abi3.so                                     
+     0.01%             6  vllm             libzmq-7b073b3d.so.5.2.5                         
+     0.01%             6  lmcache          libc10.so                                        
+     0.01%             5  ZMQbg/IO/1       [kernel.kallsyms]                                
+     0.01%             9  mpstat           [kernel.kallsyms]                                
+     0.01%            28  asd              librxe-rdmav34.so                                
+     0.00%             5  vllm             [vdso]                                           
+     0.00%             7  grpc_global_tim  gpuagent                                         
+     0.00%             2  lmcache          _ctypes.cpython-312-x86_64-linux-gnu.so          
+     0.00%             4  top              libc.so.6                                        
+     0.00%             2  vllm             _regex.cpython-312-x86_64-linux-gnu.so           
+     0.00%             3  pt_nccl_watchdg  [kernel.kallsyms]                                
+     0.00%            14  containerd       containerd                                       
+     0.00%             2  python           _multidict.cpython-312-x86_64-linux-gnu.so       
+     0.00%             3  kworker/u40:1-e  [kernel.kallsyms]                                
+     0.00%             1  kworker/4:1-mm_  [kernel.kallsyms]                                
+     0.00%             2  lmcache          loop.cpython-312-x86_64-linux-gnu.so             
+     0.00%            13  containerd       [kernel.kallsyms]                                
+     0.00%             1  vllm             _zmq.abi3.so                                     
+     0.00%             4  kworker/u43:5-e  [kernel.kallsyms]                                
+     0.00%            10  f2b/f.sshd       python3.12                                       
+     0.00%             2  pt_nccl_heartbt  [kernel.kallsyms]                                
+     0.00%             1  pt_nccl_watchdg  libc.so.6                                        
+     0.00%             1  kworker/9:0-mm_  [kernel.kallsyms]                                
+     0.00%             1  pool-fwupd       libc.so.6                                        
+     0.00%             1  kworker/u48:5-e  [kernel.kallsyms]                                
+     0.00%             1  tend             [kernel.kallsyms]                                
+     0.00%             1  lmcache          _asyncio.cpython-312-x86_64-linux-gnu.so         
+     0.00%             2  lmcache          _queue.cpython-312-x86_64-linux-gnu.so           
+     0.00%             1  kworker/7:2-eve  [kernel.kallsyms]                                
+     0.00%             2  rcu_preempt      [kernel.kallsyms]                                
+     0.00%             2  awk              gawk                                             
+     0.00%             1  pt_nccl_watchdg  libtorch_cpu.so                                  
+     0.00%             3  sleep            [kernel.kallsyms]                                
+     0.00%             1  vllm             url_parser.cpython-312-x86_64-linux-gnu.so       
+     0.00%             1  sleep            libc.so.6                                        
+     0.00%             3  perf-exec        [kernel.kallsyms]                                
+     0.00%             1  dockerd          [kernel.kallsyms]                                
+     0.00%             1  lmcache          libm.so.6                                        
+     0.00%             1  multipathd       [kernel.kallsyms]                                
+     0.00%             1  lmcache          ld-linux-x86-64.so.2                             
+     0.00%             1  awk              [kernel.kallsyms]                                
+     0.00%             1  grpc_global_tim  [kernel.kallsyms]                                
+     0.00%             1  dockerd          dockerd                                          
+     0.00%             1  vllm             ld-linux-x86-64.so.2                             
+     0.00%             1  api              libc.so.6                                        
+     0.00%             4  f2b/f.sshd       [kernel.kallsyms]                                
+     0.00%             1  kworker/u52:3-e  [kernel.kallsyms]                                
+     0.00%             1  top              top                                              
+     0.00%             1  f2b/a.sshd       python3.12                                       
+     0.00%             1  kworker/3:2-eve  [kernel.kallsyms]                                
+     0.00%             1  f2b/a.sshd       [kernel.kallsyms]                                
+     0.00%             1  pt_nccl_watchdg  libstdc++.so.6.0.30                              
+     0.00%             1  mpstat           libc.so.6                                        
+     0.00%             1  perf             libc.so.6                                        
+     0.00%             2  kworker/2:2-eve  [kernel.kallsyms]                                
+     0.00%             2  kworker/12:0-ev  [kernel.kallsyms]                                
+     0.00%             1  systemd          libc.so.6                                        
+     0.00%             1  f2b/f.sshd       libc.so.6                                        
+     0.00%             1  systemd          libsystemd-shared-255.so                         
+     0.00%             1  f2b/f.sshd       libsystemd.so.0.38.0                             
+
+
+#
+# (Cannot load tips.txt file, please install perf!)
+#

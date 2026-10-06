@@ -17,6 +17,9 @@
 #   mem128p16  the same plus KV_SINK_PLACE_THREADS=16
 #   dev32, dev128  device namespace, B and C at 16 QPs, cap 32 and 128
 #   mem32e     E again at 8 QPs, keeping perf's full report (perf_full.txt)
+#   devp16, devp32, devp64  device namespace, cap 128, 16/32/64 placement
+#              threads, B and C at 16 QPs (day 2, Q3 G)
+# BD_OUT: the results directory (default .../perf2/breakdown).
 # C's per-layer timeline uses the box-only E3 print patch in pump.py, applied
 # for the C sessions and reverted (never committed); the script stops if
 # lmcache/ or csrc/ are not clean afterwards.
@@ -28,7 +31,7 @@ ASD=$SRC/target/Linux-x86_64/bin/asd
 ASD_ORIG_MD5=0b953fb421486d003e28ccc90dde2d7b
 NEW=/root/lmc-work/asd-314564cfb
 SRC_TAR=${SRC_TAR:-$NEW/src-314564cfb.tar}
-O=/root/lmc-work/functional/perf2/breakdown
+O=${BD_OUT:-/root/lmc-work/functional/perf2/breakdown}
 PERF="bash $T/functional/perf/perf.sh"
 E3_PATCH=${E3_PATCH:-/root/lmc-work/functional/perf2/e3_pump_patch.py}
 PUMP=lmcache/v1/layerwise/pump.py
@@ -153,6 +156,7 @@ for s in $STEPS; do
     dev32) cycle dev32 $DEV_CONF "" "16" "16" 0 ;;
     dev128) cycle dev128 $DEV_CONF "KV_SINK_MAX_IN_FLIGHT=128" "16" "16" 0 ;;
     mem32e) cycle mem32e $MEM_CONF "" "8" "8" 1 ;;
+    devp16|devp32|devp64) cycle $s $DEV_CONF "KV_SINK_MAX_IN_FLIGHT=128 KV_SINK_PLACE_THREADS=${s#devp}" "16" "16" 0 ;;
     *) say "unknown step $s" ;;
   esac
 done

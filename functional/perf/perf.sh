@@ -56,6 +56,9 @@
 #   binary; PERF_ASD_ENV: NAME=value pairs for its environment.
 #   QUEUE_PAIRS (1): the lw rdma block's queue_pairs, RC queue pairs per
 #   kv-sink node (1-16; needs the multi-queue-pair client and server).
+#   POINT_N: prompts per point in qpstore/qplw (default max(4, c)).
+#   STORE_COUNT (32): prompts cached2 stores (ids 0..STORE_COUNT-1);
+#   CACHED2_LWWAIT (1): 0 skips cached2's long-wait lw session.
 set -u
 TREE_HOST=${TREE_HOST:-/root/lmc-work/LMCache}
 TREE_CTR=/work/LMCache
@@ -136,7 +139,7 @@ LMCache stops: $(grep -oE 'stopped \([^)]*\) exit=[0-9]+' $S/$name/session_$name
 }
 point_steps() {
   local len=$1 c out=()
-  for c in $CONCS; do out+=("point len=$len c=$c"); done
+  for c in $CONCS; do out+=("point len=$len c=$c${POINT_N:+ n=$POINT_N}"); done
   printf '%s\n' "${out[@]}"
 }
 
@@ -246,12 +249,12 @@ lw_sizing() {
 # store_steps <len>: store steps in batches of STORE_BATCH_GB of KV, with an
 # LMCache restart (empty L1) between batches.
 store_steps() {
-  local len=$1 bs i last
+  local len=$1 bs i last n=${STORE_COUNT:-32}
   bs=$((STORE_BATCH_GB * 1024 / (len / 256 * 32)))
   [ "$bs" -lt 1 ] && bs=1
-  [ "$bs" -gt 32 ] && bs=32
-  for ((i = 0; i < 32; i += bs)); do
-    last=$((i + bs - 1)); [ "$last" -gt 31 ] && last=31
+  [ "$bs" -gt "$n" ] && bs=$n
+  for ((i = 0; i < n; i += bs)); do
+    last=$((i + bs - 1)); [ "$last" -ge "$n" ] && last=$((n - 1))
     [ "$i" -gt 0 ] && echo "restart"
     echo "store len=$len ids=$i-$last conc=$((last - i + 1))"
   done
@@ -267,7 +270,7 @@ sec_cached2() {
   mapfile -t pts < <(point_steps "$len")
   progress "store plan $name: ${#steps[@]} steps ($(printf '%s; ' "${steps[@]}"))"
   session ${name}_aon aon "$AON_L1_GB" "$AON_L2" "${steps[@]}" "${pts[@]}"
-  store_check ${name}_aon "$len" 32
+  store_check ${name}_aon "$len" "${STORE_COUNT:-32}"
   if [ "${AON_ONLY:-0}" = 1 ]; then
     progress "$name: AON_ONLY=1, no lw sessions"
     aero_stop_delete
@@ -278,7 +281,8 @@ sec_cached2() {
   STOP_ON_ENGINE_STOP=1 session ${name}_lw lw $((LW_GEN_GB + wgb)) "$lw" "${pts[@]}"
   [ -f $S/${name}_lw/engine_stopped_${name}_lw.txt ] && \
     progress "${name}_lw: series stopped, engine stopped at $(cat $S/${name}_lw/engine_stopped_${name}_lw.txt)"
-  SESSION_LW_WAIT=$wait session ${name}_lwwait$wait lw $((LW_GEN_GB + wgb)) "$lw" "${pts[@]}"
+  [ "${CACHED2_LWWAIT:-1}" = 1 ] && \
+    SESSION_LW_WAIT=$wait session ${name}_lwwait$wait lw $((LW_GEN_GB + wgb)) "$lw" "${pts[@]}"
   aero_stop_delete
 }
 # finish:<len>: the end of cached2 for an aon session that ran without its
@@ -327,6 +331,9 @@ sec_fio() {
 EXP_FULL=("point len=8192 c=1" "point len=8192 c=4")
 EXP_PART=("point pre=2048 len=8192 c=1" "point pre=2048 len=8192 c=4"
   "point pre=8192 len=8192 c=1" "point pre=8192 len=8192 c=4")
+# EXP_PART_POINTS ("|"-separated steps) replaces the partial-hit points;
+# EXP_STORE_LENS ("8192 2048") the prefix lengths exp2_aon stores (ids 0-3).
+[ -n "${EXP_PART_POINTS:-}" ] && IFS='|' read -ra EXP_PART <<< "$EXP_PART_POINTS"
 sec_exp_start() { FS_PCT=200 aero_start 8192; }
 sec_exp_aon() {
   session E_aon aon "$L1_GEN_GB" "$AON_L2" "store len=8192 ids=0-3 conc=4" "store len=2048 ids=0-3 conc=4" \
@@ -355,8 +362,9 @@ sec_exp_timeline() {
 # same suffix, so aon/lw points after the first stored it and later points were
 # full hits. perf_session.sh now salts the suffix per session and point.
 sec_exp2_aon() {
-  session E_aon2 aon "$L1_GEN_GB" "$AON_L2" "store len=8192 ids=0-3 conc=4" "store len=2048 ids=0-3 conc=4" \
-    "${EXP_PART[@]}"
+  local stores=() l
+  for l in ${EXP_STORE_LENS:-8192 2048}; do stores+=("store len=$l ids=0-3 conc=4"); done
+  session E_aon2 aon "$L1_GEN_GB" "$AON_L2" "${stores[@]}" "${EXP_PART[@]}"
   store_check E_aon2 8192 4
 }
 sec_exp2_tcplw() { session E_tcplw2 lw "$L1_GEN_GB" "$AON_L2" "${EXP_PART[@]}"; }

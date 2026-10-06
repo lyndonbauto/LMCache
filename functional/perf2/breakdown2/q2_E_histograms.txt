@@ -1,0 +1,121 @@
+Oct 06 2026 15:41:03 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-read (2 total) msec
+Oct 06 2026 15:41:03 GMT: INFO (info): (hist.c:339)  (00: 0000000002)
+Oct 06 2026 15:41:03 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-write (133250 total) msec
+Oct 06 2026 15:41:03 GMT: INFO (info): (hist.c:339)  (00: 0000133237) (01: 0000000013)
+Oct 06 2026 15:41:03 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-batch-sub-read (2048 total) msec
+Oct 06 2026 15:41:03 GMT: INFO (info): (hist.c:339)  (00: 0000002042) (01: 0000000004) (02: 0000000002)
+Oct 06 2026 15:41:03 GMT: INFO (deprecation): (thr_info.c:903) (repeated:2) info parameter 'id' is deprecated - use 'namespace' instead
+Oct 06 2026 15:41:13 GMT: INFO (drv_ssd): (drv_ssd.c:1817) {lmcache} /mnt/scratch/perf-aero/lmcache.dat: used-bytes 68795343200 free-wblocks 7636 write-q 0 write (8746,0.0) defrag-q 0 defrag-read (0,0.0) defrag-write (0,0.0)
+Oct 06 2026 15:41:13 GMT: INFO (info): (ticker.c:172) NODE-ID e753328b2ba7c62 CLUSTER-SIZE 1 CLUSTER-NAME lmcache-kvsink-bp
+--
+Oct 06 2026 15:41:13 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-read (2 total) msec
+Oct 06 2026 15:41:13 GMT: INFO (info): (hist.c:339)  (00: 0000000002)
+Oct 06 2026 15:41:13 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-write (133250 total) msec
+Oct 06 2026 15:41:13 GMT: INFO (info): (hist.c:339)  (00: 0000133237) (01: 0000000013)
+Oct 06 2026 15:41:13 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-batch-sub-read (2048 total) msec
+Oct 06 2026 15:41:13 GMT: INFO (info): (hist.c:339)  (00: 0000002042) (01: 0000000004) (02: 0000000002)
+Oct 06 2026 15:41:23 GMT: INFO (info): (ticker.c:172) NODE-ID e753328b2ba7c62 CLUSTER-SIZE 1 CLUSTER-NAME lmcache-kvsink-bp
+Oct 06 2026 15:41:23 GMT: INFO (info): (ticker.c:244)    cluster-clock: skew-ms 0
+Oct 06 2026 15:41:23 GMT: INFO (info): (ticker.c:268)    system: total-cpu-pct 107 user-cpu-pct 4 kernel-cpu-pct 103 free-mem-kbytes 136224936 free-mem-pct 55 thp-mem-kbytes 99985408 host-free-mem-kbytes 136224936 host-free-mem-pct 55
+--
+Oct 06 2026 15:41:23 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-read (2 total) msec
+Oct 06 2026 15:41:23 GMT: INFO (info): (hist.c:339)  (00: 0000000002)
+Oct 06 2026 15:41:23 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-write (133250 total) msec
+Oct 06 2026 15:41:23 GMT: INFO (info): (hist.c:339)  (00: 0000133237) (01: 0000000013)
+Oct 06 2026 15:41:23 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-batch-sub-read (2048 total) msec
+Oct 06 2026 15:41:23 GMT: INFO (info): (hist.c:339)  (00: 0000002042) (01: 0000000004) (02: 0000000002)
+Oct 06 2026 15:41:33 GMT: INFO (drv_ssd): (drv_ssd.c:1817) {lmcache} /mnt/scratch/perf-aero/lmcache.dat: used-bytes 68795343200 free-wblocks 7636 write-q 0 write (8746,0.0) defrag-q 0 defrag-read (0,0.0) defrag-write (0,0.0)
+Oct 06 2026 15:41:33 GMT: INFO (info): (ticker.c:172) NODE-ID e753328b2ba7c62 CLUSTER-SIZE 1 CLUSTER-NAME lmcache-kvsink-bp
+Oct 06 2026 15:41:33 GMT: INFO (info): (ticker.c:244)    cluster-clock: skew-ms 0
+--
+Oct 06 2026 15:41:33 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-read (74464 total) msec
+Oct 06 2026 15:41:33 GMT: INFO (info): (hist.c:339)  (00: 0000074440) (01: 0000000021) (02: 0000000003)
+Oct 06 2026 15:41:33 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-read-start (74468 total) msec
+Oct 06 2026 15:41:33 GMT: INFO (info): (hist.c:339)  (00: 0000074468)
+Oct 06 2026 15:41:33 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-read-local (74468 total) msec
+Oct 06 2026 15:41:33 GMT: INFO (info): (hist.c:339)  (00: 0000074454) (01: 0000000012) (02: 0000000002)
+Oct 06 2026 15:41:33 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-read-response (74463 total) msec
+Oct 06 2026 15:41:33 GMT: INFO (info): (hist.c:339)  (00: 0000074463)
+Oct 06 2026 15:41:33 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-write (133250 total) msec
+Oct 06 2026 15:41:33 GMT: INFO (info): (hist.c:339)  (00: 0000133237) (01: 0000000013)
+Oct 06 2026 15:41:33 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-batch-sub-read (3296 total) msec
+Oct 06 2026 15:41:33 GMT: INFO (info): (hist.c:330)  (00: 0000003288) (01: 0000000005) (02: 0000000002) (03: 0000000001)
+Oct 06 2026 15:41:33 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-batch-sub-prestart (1248 total) msec
+Oct 06 2026 15:41:33 GMT: INFO (info): (hist.c:339)  (00: 0000001248)
+Oct 06 2026 15:41:33 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-batch-sub-start (1248 total) msec
+Oct 06 2026 15:41:33 GMT: INFO (info): (hist.c:339)  (00: 0000001247) (03: 0000000001)
+Oct 06 2026 15:41:33 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-batch-sub-read-local (1248 total) msec
+Oct 06 2026 15:41:33 GMT: INFO (info): (hist.c:339)  (00: 0000001248)
+Oct 06 2026 15:41:33 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-batch-sub-response (1248 total) msec
+Oct 06 2026 15:41:33 GMT: INFO (info): (hist.c:339)  (00: 0000001248)
+Oct 06 2026 15:41:43 GMT: INFO (info): (ticker.c:172) NODE-ID e753328b2ba7c62 CLUSTER-SIZE 1 CLUSTER-NAME lmcache-kvsink-bp
+Oct 06 2026 15:41:43 GMT: INFO (info): (ticker.c:244)    cluster-clock: skew-ms 0
+--
+Oct 06 2026 15:41:43 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-read (133254 total) msec
+Oct 06 2026 15:41:43 GMT: INFO (info): (hist.c:339)  (00: 0000133208) (01: 0000000043) (02: 0000000003)
+Oct 06 2026 15:41:43 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-read-start (133252 total) msec
+Oct 06 2026 15:41:43 GMT: INFO (info): (hist.c:339)  (00: 0000133252)
+Oct 06 2026 15:41:43 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-read-local (133252 total) msec
+Oct 06 2026 15:41:43 GMT: INFO (info): (hist.c:339)  (00: 0000133227) (01: 0000000023) (02: 0000000002)
+Oct 06 2026 15:41:43 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-read-response (133252 total) msec
+Oct 06 2026 15:41:43 GMT: INFO (info): (hist.c:339)  (00: 0000133251) (01: 0000000001)
+Oct 06 2026 15:41:43 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-write (133250 total) msec
+Oct 06 2026 15:41:43 GMT: INFO (info): (hist.c:339)  (00: 0000133237) (01: 0000000013)
+Oct 06 2026 15:41:43 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-batch-sub-read (4096 total) msec
+Oct 06 2026 15:41:43 GMT: INFO (info): (hist.c:330)  (00: 0000004088) (01: 0000000005) (02: 0000000002) (03: 0000000001)
+Oct 06 2026 15:41:43 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-batch-sub-prestart (2048 total) msec
+Oct 06 2026 15:41:43 GMT: INFO (info): (hist.c:339)  (00: 0000002048)
+Oct 06 2026 15:41:43 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-batch-sub-start (2048 total) msec
+Oct 06 2026 15:41:43 GMT: INFO (info): (hist.c:339)  (00: 0000002047) (03: 0000000001)
+Oct 06 2026 15:41:43 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-batch-sub-read-local (2048 total) msec
+Oct 06 2026 15:41:43 GMT: INFO (info): (hist.c:339)  (00: 0000002048)
+Oct 06 2026 15:41:43 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-batch-sub-response (2048 total) msec
+Oct 06 2026 15:41:43 GMT: INFO (info): (hist.c:339)  (00: 0000002048)
+Oct 06 2026 15:41:53 GMT: INFO (drv_ssd): (drv_ssd.c:1817) {lmcache} /mnt/scratch/perf-aero/lmcache.dat: used-bytes 68795343200 free-wblocks 7636 write-q 0 write (8746,0.0) defrag-q 0 defrag-read (0,0.0) defrag-write (0,0.0)
+Oct 06 2026 15:41:53 GMT: INFO (info): (ticker.c:172) NODE-ID e753328b2ba7c62 CLUSTER-SIZE 1 CLUSTER-NAME lmcache-kvsink-bp
+--
+Oct 06 2026 15:41:53 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-read (133254 total) msec
+Oct 06 2026 15:41:53 GMT: INFO (info): (hist.c:339)  (00: 0000133208) (01: 0000000043) (02: 0000000003)
+Oct 06 2026 15:41:53 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-read-start (133252 total) msec
+Oct 06 2026 15:41:53 GMT: INFO (info): (hist.c:339)  (00: 0000133252)
+Oct 06 2026 15:41:53 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-read-local (133252 total) msec
+Oct 06 2026 15:41:53 GMT: INFO (info): (hist.c:339)  (00: 0000133227) (01: 0000000023) (02: 0000000002)
+Oct 06 2026 15:41:53 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-read-response (133252 total) msec
+Oct 06 2026 15:41:53 GMT: INFO (info): (hist.c:339)  (00: 0000133251) (01: 0000000001)
+Oct 06 2026 15:41:53 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-write (133250 total) msec
+Oct 06 2026 15:41:53 GMT: INFO (info): (hist.c:339)  (00: 0000133237) (01: 0000000013)
+Oct 06 2026 15:41:53 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-batch-sub-read (4096 total) msec
+Oct 06 2026 15:41:53 GMT: INFO (info): (hist.c:330)  (00: 0000004088) (01: 0000000005) (02: 0000000002) (03: 0000000001)
+Oct 06 2026 15:41:53 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-batch-sub-prestart (2048 total) msec
+Oct 06 2026 15:41:53 GMT: INFO (info): (hist.c:339)  (00: 0000002048)
+Oct 06 2026 15:41:53 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-batch-sub-start (2048 total) msec
+Oct 06 2026 15:41:53 GMT: INFO (info): (hist.c:339)  (00: 0000002047) (03: 0000000001)
+Oct 06 2026 15:41:53 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-batch-sub-read-local (2048 total) msec
+Oct 06 2026 15:41:53 GMT: INFO (info): (hist.c:339)  (00: 0000002048)
+Oct 06 2026 15:41:53 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-batch-sub-response (2048 total) msec
+Oct 06 2026 15:41:53 GMT: INFO (info): (hist.c:339)  (00: 0000002048)
+Oct 06 2026 15:42:03 GMT: INFO (info): (ticker.c:172) NODE-ID e753328b2ba7c62 CLUSTER-SIZE 1 CLUSTER-NAME lmcache-kvsink-bp
+Oct 06 2026 15:42:03 GMT: INFO (info): (ticker.c:244)    cluster-clock: skew-ms 0
+--
+Oct 06 2026 15:42:03 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-read (133254 total) msec
+Oct 06 2026 15:42:03 GMT: INFO (info): (hist.c:339)  (00: 0000133208) (01: 0000000043) (02: 0000000003)
+Oct 06 2026 15:42:03 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-read-start (133252 total) msec
+Oct 06 2026 15:42:03 GMT: INFO (info): (hist.c:339)  (00: 0000133252)
+Oct 06 2026 15:42:03 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-read-local (133252 total) msec
+Oct 06 2026 15:42:03 GMT: INFO (info): (hist.c:339)  (00: 0000133227) (01: 0000000023) (02: 0000000002)
+Oct 06 2026 15:42:03 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-read-response (133252 total) msec
+Oct 06 2026 15:42:03 GMT: INFO (info): (hist.c:339)  (00: 0000133251) (01: 0000000001)
+Oct 06 2026 15:42:03 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-write (133250 total) msec
+Oct 06 2026 15:42:03 GMT: INFO (info): (hist.c:339)  (00: 0000133237) (01: 0000000013)
+Oct 06 2026 15:42:03 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-batch-sub-read (4096 total) msec
+Oct 06 2026 15:42:03 GMT: INFO (info): (hist.c:330)  (00: 0000004088) (01: 0000000005) (02: 0000000002) (03: 0000000001)
+Oct 06 2026 15:42:03 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-batch-sub-prestart (2048 total) msec
+Oct 06 2026 15:42:03 GMT: INFO (info): (hist.c:339)  (00: 0000002048)
+Oct 06 2026 15:42:03 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-batch-sub-start (2048 total) msec
+Oct 06 2026 15:42:03 GMT: INFO (info): (hist.c:339)  (00: 0000002047) (03: 0000000001)
+Oct 06 2026 15:42:03 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-batch-sub-read-local (2048 total) msec
+Oct 06 2026 15:42:03 GMT: INFO (info): (hist.c:339)  (00: 0000002048)
+Oct 06 2026 15:42:03 GMT: INFO (info): (hist.c:319) histogram dump: {lmcache}-batch-sub-response (2048 total) msec
+Oct 06 2026 15:42:03 GMT: INFO (info): (hist.c:339)  (00: 0000002048)
+Oct 06 2026 15:42:09 GMT: INFO (deprecation): (thr_info.c:903) info parameter 'id' is deprecated - use 'namespace' instead
+Oct 06 2026 15:42:09 GMT: INFO (info): (cfg_info.c:1890) Changing value of enable-benchmarks-read of ns lmcache from true to false

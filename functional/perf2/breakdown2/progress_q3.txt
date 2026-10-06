@@ -1,0 +1,19 @@
+2026-10-06T15:22:28Z breakdown: devp16: aerospike-kvsink-bp-perf.conf.in, KV_SINK_MAX_IN_FLIGHT=128 KV_SINK_PLACE_THREADS=16; B at 16 QPs, C at 16 QPs
+2026-10-06T15:24:49Z breakdown: devp16: storage-engine=device; at most 128 writes in flight,16 placement threads
+2026-10-06T15:24:52Z breakdown: devp16: kvlayers fill exit=0: priority on : all layers 746.73 ms p50, 1.34 GiB/s, bad pages 0, short layers 0, failed rows 0 priority off: all layers 737.46 ms p50, 1.36 GiB/s, bad pages 0, short layers 0, failed rows 0
+2026-10-06T15:24:59Z breakdown: devp16: B qp=16 stream: 6.14 s, 43.50 GiB landed, 7.090 GiB/s, failed rows 0
+2026-10-06T15:27:08Z breakdown: devp16: C qp=16 point E_timeline_qp16_L8192_c1: n=4 errors=0 wall=5.11s ttft_p50~0.190s ext_hit_tokens=32764 out_tokens=[128]
+2026-10-06T15:27:09Z breakdown: devp16: server stopped, data deleted
+2026-10-06T15:27:09Z breakdown: devp32: aerospike-kvsink-bp-perf.conf.in, KV_SINK_MAX_IN_FLIGHT=128 KV_SINK_PLACE_THREADS=32; B at 16 QPs, C at 16 QPs
+2026-10-06T15:29:32Z breakdown: devp32: storage-engine=device; at most 128 writes in flight,32 placement threads
+2026-10-06T15:29:35Z breakdown: devp32: kvlayers fill exit=0: priority on : all layers 749.96 ms p50, 1.33 GiB/s, bad pages 0, short layers 0, failed rows 0 priority off: all layers 726.32 ms p50, 1.38 GiB/s, bad pages 0, short layers 0, failed rows 0
+2026-10-06T15:29:42Z breakdown: devp32: B qp=16 stream: 6.11 s, 44.69 GiB landed, 7.308 GiB/s, failed rows 0
+2026-10-06T15:32:01Z breakdown: devp32: C qp=16 point E_timeline_qp16_L8192_c1: n=4 errors=0 wall=5.15s ttft_p50~0.198s ext_hit_tokens=32764 out_tokens=[128]
+2026-10-06T15:32:03Z breakdown: devp32: server stopped, data deleted
+2026-10-06T15:32:03Z breakdown: devp64: aerospike-kvsink-bp-perf.conf.in, KV_SINK_MAX_IN_FLIGHT=128 KV_SINK_PLACE_THREADS=64; B at 16 QPs, C at 16 QPs
+2026-10-06T15:34:27Z breakdown: devp64: storage-engine=device; at most 128 writes in flight,64 placement threads
+2026-10-06T15:34:30Z breakdown: devp64: kvlayers fill exit=0: priority on : all layers 703.58 ms p50, 1.42 GiB/s, bad pages 0, short layers 0, failed rows 0 priority off: all layers 719.45 ms p50, 1.39 GiB/s, bad pages 0, short layers 0, failed rows 0
+2026-10-06T15:34:37Z breakdown: devp64: B qp=16 stream: 6.12 s, 44.94 GiB landed, 7.343 GiB/s, failed rows 0
+2026-10-06T15:36:58Z breakdown: devp64: C qp=16 point E_timeline_qp16_L8192_c1: n=4 errors=0 wall=5.10s ttft_p50~0.215s ext_hit_tokens=32764 out_tokens=[128]
+2026-10-06T15:36:59Z breakdown: devp64: server stopped, data deleted
+2026-10-06T15:36:59Z breakdown: BREAKDOWN DONE

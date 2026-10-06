@@ -1,0 +1,42 @@
+2026-10-06T15:17:09Z breakdown2: q1 A: perftest q16 t2, profiled
+2026-10-06T15:17:24Z breakdown2: A_perftest:  524288 130510 0.00 91.23 		 0.021751
+2026-10-06T15:17:27Z breakdown2: q1: storage-engine=memory; at most 32 writes in flight,8 placement threads
+2026-10-06T15:17:30Z breakdown2: q1: fills exit, cold: priority on : all layers 715.06 ms p50, 1.40 GiB/s, bad pages 0, short layers 0, failed rows 0; hot: priority on : all layers 22.13 ms p50, 1.41 GiB/s, bad pages 0, short layers 0, failed rows 0
+2026-10-06T15:17:30Z breakdown2: q1 A: kvlayers qps 16, profiled
+2026-10-06T15:17:41Z breakdown2: q1 A: kvlayers stream: 8.19 s, 40.53 GiB landed, 4.947 GiB/s, failed rows 0
+2026-10-06T15:17:49Z breakdown2: q1 B: hot 1 stream: 8.01 s, 47.73 GiB landed, 5.959 GiB/s, failed rows 0
+2026-10-06T15:17:58Z breakdown2: q1 B: cold 1 stream: 8.19 s, 42.44 GiB landed, 5.181 GiB/s, failed rows 0
+2026-10-06T15:18:06Z breakdown2: q1 B: hot 2 stream: 8.01 s, 47.48 GiB landed, 5.930 GiB/s, failed rows 0
+2026-10-06T15:18:14Z breakdown2: q1 B: cold 2 stream: 8.18 s, 42.25 GiB landed, 5.167 GiB/s, failed rows 0
+2026-10-06T15:18:27Z breakdown2: C_alone1:  524288 138991 0.00 97.16 		 0.023165
+2026-10-06T15:18:41Z breakdown2: C_with_kvl:  524288 131781 0.00 92.12 		 0.021963
+2026-10-06T15:18:43Z breakdown2: q1 C: kvlayers alongside stream: 15.66 s, 13.62 GiB landed, 0.870 GiB/s, failed rows 0
+2026-10-06T15:18:55Z breakdown2: C_alone2:  524288 143657 0.00 100.42 		 0.023943
+2026-10-06T15:18:57Z breakdown2: q1: server stopped, data deleted
+2026-10-06T15:21:15Z breakdown2: q2 E: benchmarks on (ok ok)
+2026-10-06T15:22:08Z breakdown2: q2 D: profiled; reads start 15:21:46.631562657 client_read_success=7409 batch_sub_read_success=256 end 15:22:08.552817536 client_read_success=133252 batch_sub_read_success=2048
+2026-10-06T15:22:26Z breakdown2: q2 E: benchmarks off (ok ok); 126 histogram lines
+2026-10-06T15:22:26Z breakdown2: q2: point L8192_aon_store_8192_0-63: n=64 errors=0 wall=40.86s ttft_p50~1.079s ext_hit_tokens=0 out_tokens=[128] point L8192_aon_L8192_c16: n=64 errors=0 wall=10.20s ttft_p50~1.115s ext_hit_tokens=524224 out_tokens=[128]
+2026-10-06T15:22:28Z breakdown2: q2: server stopped, data deleted
+2026-10-06T15:22:28Z breakdown2: BREAKDOWN2 DONE
+2026-10-06T15:37:05Z breakdown2: q1 A: perftest q16 t2, profiled
+2026-10-06T15:37:19Z breakdown2: A_perftest:  524288 131973 0.00 92.25 		 0.021995
+2026-10-06T15:37:22Z breakdown2: q1: storage-engine=memory; at most 32 writes in flight,8 placement threads
+2026-10-06T15:37:26Z breakdown2: q1: fills exit, cold: priority on : all layers 698.03 ms p50, 1.43 GiB/s, bad pages 0, short layers 0, failed rows 0; hot: priority on : all layers 21.29 ms p50, 1.47 GiB/s, bad pages 0, short layers 0, failed rows 0
+2026-10-06T15:37:26Z breakdown2: q1 A: kvlayers qps 16, profiled
+2026-10-06T15:37:36Z breakdown2: q1 A: kvlayers stream: 8.19 s, 41.12 GiB landed, 5.024 GiB/s, failed rows 0
+2026-10-06T15:37:44Z breakdown2: q1 B: hot 1 stream: 8.01 s, 47.04 GiB landed, 5.875 GiB/s, failed rows 0
+2026-10-06T15:37:53Z breakdown2: q1 B: cold 1 stream: 8.19 s, 43.41 GiB landed, 5.301 GiB/s, failed rows 0
+2026-10-06T15:38:01Z breakdown2: q1 B: hot 2 stream: 8.00 s, 49.10 GiB landed, 6.135 GiB/s, failed rows 0
+2026-10-06T15:38:10Z breakdown2: q1 B: cold 2 stream: 8.19 s, 43.84 GiB landed, 5.353 GiB/s, failed rows 0
+2026-10-06T15:38:22Z breakdown2: C_alone1:  524288 137432 0.00 96.07 		 0.022905
+2026-10-06T15:38:36Z breakdown2: C_with_kvl:  524288 127378 0.00 89.04 		 0.021229
+2026-10-06T15:38:38Z breakdown2: q1 C: kvlayers alongside stream: 15.65 s, 14.62 GiB landed, 0.934 GiB/s, failed rows 0
+2026-10-06T15:38:50Z breakdown2: C_alone2:  524288 136533 0.00 95.44 		 0.022755
+2026-10-06T15:38:52Z breakdown2: q1: server stopped, data deleted
+2026-10-06T15:40:55Z breakdown2: q2 E: benchmarks on (ok ok)
+2026-10-06T15:41:50Z breakdown2: q2 D: profiled; reads start 15:41:28.699123496 client_read_success=7502 batch_sub_read_success=256 end 15:41:35.018351691 client_read_success=97253 batch_sub_read_success=1600
+2026-10-06T15:42:09Z breakdown2: q2 E: benchmarks off (ok ok); 49 non-empty histograms
+2026-10-06T15:42:09Z breakdown2: q2: point L8192_aon_store_8192_0-63: n=64 errors=0 wall=40.81s ttft_p50~1.073s ext_hit_tokens=0 out_tokens=[128] point L8192_aon_L8192_c16: n=64 errors=0 wall=10.48s ttft_p50~1.156s ext_hit_tokens=524224 out_tokens=[128]
+2026-10-06T15:42:11Z breakdown2: q2: server stopped, data deleted
+2026-10-06T15:42:11Z breakdown2: BREAKDOWN2 DONE

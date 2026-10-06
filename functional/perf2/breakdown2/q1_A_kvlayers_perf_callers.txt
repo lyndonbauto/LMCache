@@ -1,0 +1,400 @@
+# To display the perf.data header info, please use --header/--header-only options.
+#
+#
+# Total Lost Samples: 0
+#
+# Samples: 37K of event 'cycles:P'
+# Event count (approx.): 102405176671
+#
+# Overhead       Samples  Symbol                                            IPC   [IPC Coverage]
+# ........  ............  ................................................  ....................
+#
+     9.52%          3571  [k] __raw_spin_lock_irqsave                       -      -            
+            |          
+             --9.12%--_raw_spin_lock_irqsave
+                       |          
+                       |--5.62%--skb_dequeue
+                       |          |          
+                       |           --5.37%--rxe_receiver
+                       |                     do_task
+                       |                     do_work
+                       |                     process_one_work
+                       |                     worker_thread
+                       |                     kthread
+                       |                     ret_from_fork
+                       |                     ret_from_fork_asm
+                       |          
+                       |--0.70%--rxe_requester
+                       |          rxe_sender
+                       |          do_task
+                       |          do_work
+                       |          process_one_work
+                       |          worker_thread
+                       |          kthread
+                       |          ret_from_fork
+                       |          ret_from_fork_asm
+                       |          
+                        --0.52%--rxe_completer
+                                  rxe_sender
+                                  do_task
+                                  do_work
+                                  process_one_work
+                                  worker_thread
+                                  kthread
+                                  ret_from_fork
+                                  ret_from_fork_asm
+
+     8.57%          3233  [k] memset_orig                                   -      -            
+            |          
+             --8.52%--kmalloc_reserve
+                       __alloc_skb
+                       rxe_init_packet
+                       |          
+                        --8.52%--rxe_requester
+                                  rxe_sender
+                                  do_task
+                                  do_work
+                                  process_one_work
+                                  worker_thread
+                                  kthread
+                                  ret_from_fork
+                                  ret_from_fork_asm
+
+     7.43%          2873  [.] 0x00000000001a19d2                            -      -            
+     7.32%          2743  [k] __memcpy                                      -      -            
+            |          
+            |--4.16%--copy_data
+            |          rxe_requester
+            |          rxe_sender
+            |          do_task
+            |          do_work
+            |          process_one_work
+            |          worker_thread
+            |          kthread
+            |          ret_from_fork
+            |          ret_from_fork_asm
+            |          
+             --3.16%--rxe_receiver
+                       do_task
+                       do_work
+                       process_one_work
+                       worker_thread
+                       kthread
+                       ret_from_fork
+                       ret_from_fork_asm
+
+     7.06%          2669  [k] crypto_shash_update                           -      -            
+            |          
+             --6.95%--rxe_crc32
+                       |          
+                       |--5.43%--rxe_icrc_hdr.isra.0
+                       |          |          
+                       |          |--3.03%--rxe_icrc_generate
+                       |          |          rxe_xmit_packet
+                       |          |          |          
+                       |          |           --2.97%--rxe_requester
+                       |          |                     rxe_sender
+                       |          |                     do_task
+                       |          |                     do_work
+                       |          |                     process_one_work
+                       |          |                     worker_thread
+                       |          |                     kthread
+                       |          |                     ret_from_fork
+                       |          |                     ret_from_fork_asm
+                       |          |          
+                       |           --2.40%--rxe_icrc_check
+                       |                     rxe_rcv
+                       |                     rxe_xmit_packet
+                       |                     |          
+                       |                      --2.36%--rxe_requester
+                       |                                rxe_sender
+                       |                                do_task
+                       |                                do_work
+                       |                                process_one_work
+                       |                                worker_thread
+                       |                                kthread
+                       |                                ret_from_fork
+                       |                                ret_from_fork_asm
+                       |          
+                       |--0.79%--rxe_icrc_generate
+                       |          rxe_xmit_packet
+                       |          |          
+                       |           --0.78%--rxe_requester
+                       |                     rxe_sender
+                       |                     do_task
+                       |                     do_work
+                       |                     process_one_work
+                       |                     worker_thread
+                       |                     kthread
+                       |                     ret_from_fork
+                       |                     ret_from_fork_asm
+                       |          
+                        --0.73%--rxe_icrc_check
+                                  rxe_rcv
+                                  rxe_xmit_packet
+                                  |          
+                                   --0.72%--rxe_requester
+                                             rxe_sender
+                                             do_task
+                                             do_work
+                                             process_one_work
+                                             worker_thread
+                                             kthread
+                                             ret_from_fork
+                                             ret_from_fork_asm
+
+     6.80%          2536  [k] crc32_pclmul_le_16                            -      -            
+            |
+            ---crc32_pclmul_update
+               crypto_shash_update
+               rxe_crc32
+               |          
+               |--3.48%--rxe_icrc_check
+               |          rxe_rcv
+               |          rxe_xmit_packet
+               |          rxe_requester
+               |          rxe_sender
+               |          do_task
+               |          do_work
+               |          process_one_work
+               |          worker_thread
+               |          kthread
+               |          ret_from_fork
+               |          ret_from_fork_asm
+               |          
+                --3.32%--rxe_icrc_generate
+                          rxe_xmit_packet
+                          rxe_requester
+                          rxe_sender
+                          do_task
+                          do_work
+                          process_one_work
+                          worker_thread
+                          kthread
+                          ret_from_fork
+                          ret_from_fork_asm
+
+     4.90%          1851  [k] rdma_get_gid_attr                             -      -            
+            |          
+             --4.88%--rxe_init_packet
+                       |          
+                        --4.83%--rxe_requester
+                                  rxe_sender
+                                  do_task
+                                  do_work
+                                  process_one_work
+                                  worker_thread
+                                  kthread
+                                  ret_from_fork
+                                  ret_from_fork_asm
+
+     3.05%          1153  [k] clear_page_erms                               -      -            
+            |
+            ---get_page_from_freelist
+               __alloc_pages
+               allocate_slab
+               new_slab
+               ___slab_alloc
+               |          
+                --3.04%--__kmalloc_node_track_caller
+                          kmalloc_reserve
+                          __alloc_skb
+                          rxe_init_packet
+                          rxe_requester
+                          rxe_sender
+                          do_task
+                          do_work
+                          process_one_work
+                          worker_thread
+                          kthread
+                          ret_from_fork
+                          ret_from_fork_asm
+
+     2.50%           939  [k] ib_device_put                                 -      -            
+            |          
+            |--1.27%--rxe_skb_tx_dtor
+            |          skb_release_head_state
+            |          kfree_skb_reason
+            |          |          
+            |           --1.26%--rxe_receiver
+            |                     do_task
+            |                     do_work
+            |                     process_one_work
+            |                     worker_thread
+            |                     kthread
+            |                     ret_from_fork
+            |                     ret_from_fork_asm
+            |          
+             --1.17%--rxe_receiver
+                       do_task
+                       do_work
+                       process_one_work
+                       worker_thread
+                       kthread
+                       ret_from_fork
+                       ret_from_fork_asm
+
+     2.50%           934  [k] __raw_callee_save___pv_queued_spin_unlock     -      -            
+            |          
+             --2.27%--_raw_spin_unlock_irqrestore
+                       |          
+                        --0.53%--skb_dequeue
+
+     2.33%           878  [k] rxe_xmit_packet                               -      -            
+            |          
+             --2.26%--rxe_requester
+                       rxe_sender
+                       do_task
+                       do_work
+                       process_one_work
+                       worker_thread
+                       kthread
+                       ret_from_fork
+                       ret_from_fork_asm
+
+     1.76%           660  [k] __rxe_put                                     -      -            
+            |          
+            |--0.79%--rxe_receiver
+            |          do_task
+            |          do_work
+            |          process_one_work
+            |          worker_thread
+            |          kthread
+            |          ret_from_fork
+            |          ret_from_fork_asm
+            |          
+             --0.76%--copy_data
+                       rxe_requester
+                       rxe_sender
+                       do_task
+                       do_work
+                       process_one_work
+                       worker_thread
+                       kthread
+                       ret_from_fork
+                       ret_from_fork_asm
+
+     1.71%           644  [k] ib_device_get_by_netdev                       -      -            
+            |          
+             --1.69%--rxe_skb_tx_dtor
+                       skb_release_head_state
+                       kfree_skb_reason
+                       |          
+                        --1.66%--rxe_receiver
+                                  do_task
+                                  do_work
+                                  process_one_work
+                                  worker_thread
+                                  kthread
+                                  ret_from_fork
+                                  ret_from_fork_asm
+
+     1.68%           644  [k] rxe_pool_get_index                            -      -            
+            |          
+             --1.30%--lookup_mr
+                       |          
+                       |--0.78%--copy_data
+                       |          rxe_requester
+                       |          rxe_sender
+                       |          do_task
+                       |          do_work
+                       |          process_one_work
+                       |          worker_thread
+                       |          kthread
+                       |          ret_from_fork
+                       |          ret_from_fork_asm
+                       |          
+                        --0.53%--rxe_receiver
+                                  do_task
+                                  do_work
+                                  process_one_work
+                                  worker_thread
+                                  kthread
+                                  ret_from_fork
+                                  ret_from_fork_asm
+
+     1.47%           555  [k] rxe_rcv                                       -      -            
+            |          
+             --1.45%--rxe_xmit_packet
+                       |          
+                        --1.42%--rxe_requester
+                                  rxe_sender
+                                  do_task
+                                  do_work
+                                  process_one_work
+                                  worker_thread
+                                  kthread
+                                  ret_from_fork
+                                  ret_from_fork_asm
+
+     1.42%           531  [k] rdma_put_gid_attr                             -      -            
+            |          
+             --1.41%--rxe_init_packet
+                       |          
+                        --1.40%--rxe_requester
+                                  rxe_sender
+                                  do_task
+                                  do_work
+                                  process_one_work
+                                  worker_thread
+                                  kthread
+                                  ret_from_fork
+                                  ret_from_fork_asm
+
+     1.39%           521  [k] __alloc_skb                                   -      -            
+            |          
+             --1.38%--rxe_init_packet
+                       |          
+                        --1.34%--rxe_requester
+                                  rxe_sender
+                                  do_task
+                                  do_work
+                                  process_one_work
+                                  worker_thread
+                                  kthread
+                                  ret_from_fork
+                                  ret_from_fork_asm
+
+     1.38%           509  [k] __ip_select_ident                             -      -            
+            |          
+             --1.36%--rxe_prepare
+                       |          
+                        --1.34%--rxe_requester
+                                  rxe_sender
+                                  do_task
+                                  do_work
+                                  process_one_work
+                                  worker_thread
+                                  kthread
+                                  ret_from_fork
+                                  ret_from_fork_asm
+
+     1.33%           506  [k] crc32_body                                    -      -            
+            |          
+             --1.17%--crc32_le
+                       crc32_pclmul_le
+                       crc32_pclmul_update
+                       crypto_shash_update
+                       rxe_crc32
+
+     1.24%           470  [k] ___slab_alloc                                 -      -            
+            |          
+             --1.15%--__kmalloc_node_track_caller
+                       kmalloc_reserve
+                       __alloc_skb
+                       rxe_init_packet
+                       rxe_requester
+                       rxe_sender
+                       do_task
+                       do_work
+                       process_one_work
+                       worker_thread
+                       kthread
+                       ret_from_fork
+                       ret_from_fork_asm
+
+     1.21%           457  [k] __raw_read_lock_irqsave                       -      -            
+            |          
+             --1.17%--_raw_read_lock_irqsave
+                       |          
+                        --0.90%--rdma_read_gid_attr_ndev_rcu
