@@ -173,7 +173,6 @@ class AerospikeStorageBackend(StorageBackendProfile):
             for source in (
                 "sink_fetch_table.cpp",
                 "connector_sink_fetch.cpp",
-                "layer_pipeline.cpp",
                 "slot_planner.cpp",
                 "memory_layout_conversion.cpp",
                 "aerospike_pipelined_pybind.cpp",

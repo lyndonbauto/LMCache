@@ -2,8 +2,6 @@
 
 #include "slot_planner.h"
 
-#include <algorithm>
-#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -12,29 +10,6 @@
 namespace lmcache {
 namespace connector {
 namespace rdma {
-namespace {
-
-using lmcache::connector::plane_segment_bytes;
-
-size_t ceil_div(size_t numerator, size_t denominator) {
-  return (numerator + denominator - 1) / denominator;
-}
-
-}  // namespace
-
-std::vector<uint32_t> participating_chunks(uint32_t chunk_count,
-                                           uint32_t window_chunks) {
-  const uint32_t covered =
-      window_chunks == 0 ? chunk_count : std::min(window_chunks, chunk_count);
-  std::vector<uint32_t> out;
-  out.reserve(covered);
-  // A window covers the *trailing* chunks, the ones nearest the tail of the
-  // sequence, so it starts where the uncovered prefix ends.
-  for (uint32_t chunk = chunk_count - covered; chunk < chunk_count; ++chunk) {
-    out.push_back(chunk);
-  }
-  return out;
-}
 
 size_t plane_bytes(const KernelGroupLayout& group) {
   return group.num_slots * group.hidden_dim * group.element_size;
@@ -162,76 +137,6 @@ std::vector<uint32_t> SlotPlanner::layer_ids() const {
     out.push_back(entry.first);
   }
   return out;
-}
-
-RequestPlan SlotPlanner::plan_request(
-    const std::vector<ChunkPlacement>& placements, size_t max_record_bytes,
-    size_t max_write_bytes, uint16_t generation) const {
-  if (max_record_bytes == 0) {
-    throw std::invalid_argument(
-        "SlotPlanner: max_record_bytes is zero, so a plane could not be cut "
-        "into records");
-  }
-  if (max_write_bytes == 0) {
-    throw std::invalid_argument(
-        "SlotPlanner: max_write_bytes is zero, so no write could carry any "
-        "payload");
-  }
-
-  // Group placements by object group, preserving the caller's chunk order,
-  // and reject a repeat: two placements for one (chunk, object group) would
-  // double-count that layer's expected slots and the layer would never
-  // complete.
-  std::map<uint32_t, std::vector<const ChunkPlacement*>> by_group;
-  std::set<std::pair<uint32_t, uint32_t>> seen;
-  for (const ChunkPlacement& placement : placements) {
-    const auto key =
-        std::make_pair(placement.object_group_id, placement.chunk_id);
-    if (!seen.insert(key).second) {
-      throw std::invalid_argument("SlotPlanner: chunk " +
-                                  std::to_string(placement.chunk_id) +
-                                  " is placed twice for object group " +
-                                  std::to_string(placement.object_group_id));
-    }
-    by_group[placement.object_group_id].push_back(&placement);
-  }
-
-  RequestPlan plan(generation);
-  // Layer-major: ascending layer, and within a layer every participating
-  // chunk, so the servers are asked for layer 0 everywhere before layer 1
-  // anywhere.
-  for (const auto& [layer_id, location] : layer_locations_) {
-    const auto group_placements = by_group.find(location.object_group_id);
-    if (group_placements == by_group.end()) {
-      continue;
-    }
-    for (const ChunkPlacement* placement : group_placements->second) {
-      for (const ByteRange& plane : location.planes) {
-        const size_t base = placement->dest_offset + plane.offset;
-        // One plane is one or more records, and a slot is one of them. The
-        // last is short when the plane is not a whole multiple.
-        const size_t record_bytes =
-            plane_segment_bytes(plane.length, max_record_bytes);
-        if (record_bytes > max_write_bytes) {
-          throw std::invalid_argument(
-              "SlotPlanner: a record of " + std::to_string(record_bytes) +
-              " bytes exceeds the maximum RDMA write of " +
-              std::to_string(max_write_bytes) +
-              ", and a sink cannot name part of a record, so lower the "
-              "record cap");
-        }
-        const size_t pieces = ceil_div(plane.length, record_bytes);
-        for (size_t piece = 0; piece < pieces; ++piece) {
-          const size_t piece_offset = piece * record_bytes;
-          const size_t piece_length =
-              std::min(record_bytes, plane.length - piece_offset);
-          plan.add_slot(layer_id, placement->chunk_id, base + piece_offset,
-                        piece_length);
-        }
-      }
-    }
-  }
-  return plan;
 }
 
 }  // namespace rdma

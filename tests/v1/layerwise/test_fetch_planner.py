@@ -1025,77 +1025,15 @@ def test_the_slot_space_matches_the_native_fetch_table() -> None:
 # --------------------------------------------------------------------------
 
 
-def test_the_window_helper_selects_only_overlapping_chunks() -> None:
-    """Chunks wholly outside the window do not participate.
-
-    Requiring them would wait forever on chunks the group never covers.
-    """
-    planner = FetchPlanner(uniform_layout())
-    assert planner.participating_chunks((0, 1, 2, 3), 32, 63, 16) == (2, 3)
-
-
-def test_a_window_starting_mid_chunk_includes_that_chunk() -> None:
-    """A partially covered chunk still participates.
-
-    This is the boundary most easily got wrong, and getting it wrong fetches
-    the wrong tokens rather than failing.
-    """
-    planner = FetchPlanner(uniform_layout())
-    assert planner.participating_chunks((0, 1, 2), 8, 40, 16) == (0, 1, 2)
-
-
-def test_a_window_inside_one_chunk_selects_only_that_chunk() -> None:
-    """The narrowest window still resolves to the chunk containing it."""
-    planner = FetchPlanner(uniform_layout())
-    assert planner.participating_chunks((0, 1, 2), 17, 18, 16) == (1,)
-
-
-def test_a_window_ending_on_a_chunk_boundary_excludes_the_next_chunk() -> None:
-    """Bounds are inclusive, so token 31 is the last token of chunk 1."""
-    planner = FetchPlanner(uniform_layout())
-    assert planner.participating_chunks((0, 1, 2), 16, 31, 16) == (1,)
-    assert planner.participating_chunks((0, 1, 2), 16, 32, 16) == (1, 2)
-
-
-def test_a_chunk_id_is_its_own_index_in_the_request() -> None:
-    """A chunk's token span comes from its id, not its position in the list.
-
-    Chunk ids are indices into the request's chunk list, which is how the
-    transport reconciles a request-scoped plan with per-node commands. A
-    helper that used position instead would silently shift every span when
-    the caller passed a non-contiguous candidate list.
-    """
-    planner = FetchPlanner(uniform_layout())
-    assert planner.participating_chunks((0, 1, 2, 3), 48, 63, 16) == (3,)
-    assert planner.participating_chunks((0, 2), 32, 47, 16) == (2,)
-
-
 def test_a_windowed_group_plans_only_its_own_chunks() -> None:
-    """The helper and the planner compose: a window narrows the fetch.
+    """Placing only a window's chunks narrows the fetch to them.
 
     A sliding-window group covers only trailing chunks, so planning it over
     every chunk of the prompt would expect writes that never come.
     """
     planner = FetchPlanner(uniform_layout(num_layers=2))
-    windowed = planner.participating_chunks((0, 1, 2, 3), 32, 63, 16)
-    plan = planner.plan(request_for(place(windowed), max_record_bytes=4096), KEYS)
+    plan = planner.plan(request_for(place((2, 3)), max_record_bytes=4096), KEYS)
     assert {slot.chunk_id for slot in plan.slots} == {2, 3}
-
-
-@pytest.mark.parametrize(
-    "args, match",
-    [
-        (((0, 1), 32, 16, 16), "window"),
-        (((0, 1), 0, 16, 0), "tokens_per_chunk"),
-        (((0, -1), 0, 16, 16), "negative"),
-    ],
-)
-def test_the_window_helper_rejects_nonsense(
-    args: tuple[Sequence[int], int, int, int], match: str
-) -> None:
-    """Bad window arithmetic fails rather than returning a plausible subset."""
-    with pytest.raises(ValueError, match=match):
-        FetchPlanner(uniform_layout()).participating_chunks(*args)
 
 
 # --------------------------------------------------------------------------

@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 //
-// Prints the production SlotPlanner's output for every case in a shared
-// fixture, in a canonical form the Python planner can be compared against.
+// Prints a slot schedule for every case in a shared fixture, in a canonical
+// form the Python planner can be compared against.
 //
-// This asserts nothing on its own. slot_planner_test.cpp already checks that
-// the C++ planner is correct, and tests/v1/layerwise/ checks the Python one.
-// What neither can see is the two drifting apart, and a drift is not a
-// crash: the plan would still tile the payload, but a slot would name a
-// record the other side never produced. So this reduces a plan to text and
-// lets test_slot_plan_parity.py diff it.
+// The schedule is built here from SlotPlanner's layer geometry, independently
+// of the Python FetchPlanner that production uses. This asserts nothing on
+// its own: it reduces each plan to text and lets test_slot_plan_parity.py
+// diff it. A drift between the two is not a crash -- the plan would still
+// tile the payload, but a slot would name a record the writer never produced.
 //
 // Usage: slot_plan_dump <fixture-path>
 //
@@ -40,31 +39,94 @@
 #include "shard_plan.h"
 #include "slot_planner.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
 
 using lmcache::connector::choose_shard_plan;
+using lmcache::connector::plane_segment_bytes;
 using lmcache::connector::PlaneRun;
 using lmcache::connector::record_layouts_by_payload;
 using lmcache::connector::segment_range;
 using lmcache::connector::ShardPlan;
 using lmcache::connector::ShardRange;
-using lmcache::connector::rdma::ChunkPlacement;
+using lmcache::connector::rdma::ByteRange;
 using lmcache::connector::rdma::KernelGroupLayout;
 using lmcache::connector::rdma::ObjectGroupLayout;
-using lmcache::connector::rdma::RequestPlan;
 using lmcache::connector::rdma::SlotPlanner;
 
-// Generation is not part of the slot layout, so any non-zero value does.
-constexpr uint16_t kGeneration = 1;
+// Where one chunk's object for one object group sits in the window.
+struct ChunkPlacement {
+  uint32_t chunk_id = 0;
+  uint32_t object_group_id = 0;
+  size_t dest_offset = 0;
+};
+
+// One record's worth of one layer of one chunk.
+struct Slot {
+  uint32_t layer_id = 0;
+  uint32_t chunk_id = 0;
+  size_t offset = 0;
+  size_t length = 0;
+};
+
+// The slot schedule for `placements`: layer-major, then each placement in
+// fixture order, then each K/V plane, then each record of the plane.
+//
+// Throws std::invalid_argument for a zero cap, a (chunk, object group)
+// placed twice, or a record larger than `max_write_bytes` -- the cases the
+// Python planner also refuses.
+std::vector<Slot> schedule_slots(const SlotPlanner& planner,
+                                 const std::vector<ChunkPlacement>& placements,
+                                 size_t max_record_bytes,
+                                 size_t max_write_bytes) {
+  if (max_record_bytes == 0 || max_write_bytes == 0) {
+    throw std::invalid_argument("record and write caps must be positive");
+  }
+  std::map<uint32_t, std::vector<const ChunkPlacement*>> by_group;
+  std::set<std::pair<uint32_t, uint32_t>> seen;
+  for (const ChunkPlacement& placement : placements) {
+    if (!seen.insert({placement.object_group_id, placement.chunk_id}).second) {
+      throw std::invalid_argument("chunk placed twice for one object group");
+    }
+    by_group[placement.object_group_id].push_back(&placement);
+  }
+
+  std::vector<Slot> slots;
+  for (const uint32_t layer_id : planner.layer_ids()) {
+    const auto group = by_group.find(planner.object_group_of_layer(layer_id));
+    if (group == by_group.end()) {
+      continue;
+    }
+    for (const ChunkPlacement* placement : group->second) {
+      for (const ByteRange& plane : planner.layer_plane_ranges(layer_id)) {
+        const size_t record_bytes =
+            plane_segment_bytes(plane.length, max_record_bytes);
+        if (record_bytes > max_write_bytes) {
+          throw std::invalid_argument("a record exceeds the maximum write");
+        }
+        for (size_t piece = 0; piece * record_bytes < plane.length; ++piece) {
+          const size_t piece_offset = piece * record_bytes;
+          slots.push_back(
+              Slot{layer_id, placement->chunk_id,
+                   placement->dest_offset + plane.offset + piece_offset,
+                   std::min(record_bytes, plane.length - piece_offset)});
+        }
+      }
+    }
+  }
+  return slots;
+}
 
 // One fixture case, accumulated directive by directive.
 struct Case {
@@ -128,13 +190,13 @@ void dump_case(const Case& current) {
   }
 
   const SlotPlanner planner(layouts);
-  const RequestPlan plan =
-      planner.plan_request(current.placements, current.max_record_bytes,
-                           current.max_write_bytes, kGeneration);
+  const std::vector<Slot> slots =
+      schedule_slots(planner, current.placements, current.max_record_bytes,
+                     current.max_write_bytes);
 
   std::cout << "case " << current.name << "\n";
-  for (size_t index = 0; index < plan.slot_count(); ++index) {
-    const auto& slot = plan.slot(static_cast<uint16_t>(index));
+  for (size_t index = 0; index < slots.size(); ++index) {
+    const Slot& slot = slots[index];
     std::cout << "slot " << index << ' ' << slot.layer_id << ' '
               << slot.chunk_id << ' ' << slot.offset << ' ' << slot.length
               << "\n";
@@ -145,8 +207,8 @@ void dump_case(const Case& current) {
   // max_record_bytes. Production never sets the legacy uniform plane hint, so
   // it is 0 here too.
   const auto writer = writer_layouts(layouts);
-  for (size_t index = 0; index < plan.slot_count(); ++index) {
-    const auto& slot = plan.slot(static_cast<uint16_t>(index));
+  for (size_t index = 0; index < slots.size(); ++index) {
+    const Slot& slot = slots[index];
     const ChunkPlacement* owner = nullptr;
     for (const ChunkPlacement& placement : current.placements) {
       const size_t payload =

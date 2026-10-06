@@ -1,17 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The C++ and Python slot planners must agree, slot for slot.
+"""The Python slot planner must agree, slot for slot, with an independent one.
 
-The slot arithmetic is implemented twice on purpose. ``SlotPlanner`` in
-``csrc/storage_backends/aerospike/`` drives the production fetch path, and
-``FetchPlanner`` in ``lmcache/v1/layerwise/`` lets Track C plan and test
-without a native build (acceptance criterion C10). Each has its own tests.
+Production plans fetches with ``FetchPlanner`` in ``lmcache/v1/layerwise/``.
+The ``slot_plan_dump`` harness builds the same schedule a second way, in
+C++, from ``SlotPlanner``'s layer geometry and the writer's
+``plane_segment_bytes`` -- the code that decides where records are cut when
+they are stored.
 
-Neither can catch the two drifting apart, and drift is not a crash. Both
-plans would still tile the payload; they would simply disagree about which
-bytes a given slot carries, so a slot would name a record the write side
-never produced -- or worse, name a real record and land it at the offset the
-other side meant for a different piece. That reads back as a plausible
-tensor with no error anywhere.
+A drift between the two is not a crash. Both plans would still tile the
+payload; they would simply disagree about which bytes a given slot carries,
+so a slot would name a record the write side never produced -- or worse,
+name a real record and land it at the offset the other side meant for a
+different piece. That reads back as a plausible tensor with no error
+anywhere.
 
 So both read ``fixtures/slot_plans.txt`` and this compares the results.
 """

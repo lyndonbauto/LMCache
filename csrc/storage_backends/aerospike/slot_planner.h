@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
-// Turning a model layout into the slot schedule for one pipelined request.
+// Where each layer of a registered model sits inside one chunk's object, and
+// whether one chunk fits an RDMA window.
 //
-// layer_pipeline.h owns what a slot *means* and when a layer is done. This
-// file owns where the slots come from: given the registered layout and the
-// chunks a request needs, it produces every write the servers should perform,
-// ordered layer-major so layer 0 is asked for first.
+// The slot schedule itself -- which records to fetch, in which order -- is
+// built in Python by `FetchPlanner` (lmcache/v1/layerwise/planner.py). The
+// fetch driver uses this file only to validate the registered layout and to
+// refuse a window that cannot hold one chunk.
 //
 // == The trap this exists to avoid ==
 //
@@ -18,42 +19,13 @@
 // K for every layer comes first, then V for every layer. So one model layer
 // does **not** occupy one contiguous byte range -- it occupies `kv_size`
 // disjoint ranges, separated by `num_layers * num_slots * hidden_dim`
-// elements.
-//
-// A planner that emitted one slot per layer per chunk would deliver K,
-// see its single slot land, report the layer ready, and hand the model a
-// cache whose V half is still whatever was in the window before. The tensors
-// would look correct -- right shape, right dtype, plausible magnitudes -- and
-// nothing would raise an error. That is the worst failure shape available
-// here, and it is the reason this file computes plane ranges explicitly
-// rather than treating a layer as a range.
-//
-//   slots(layer L, chunk c) = kv_size * ceil(plane_bytes / record_bytes)
-//
-// where `plane_bytes = num_slots * hidden_dim * element_size` and
-// `record_bytes` is what shard_plan.h cut that plane into.
+// elements. A layer reported ready after its K range alone would hand the
+// model a V half holding whatever was in the window before, with no error.
 //
 // The `NL_X_NB_BS_HS` engine format is the exception: it drops the leading
 // K/V dimension, so the layer dimension is outermost and a layer *is*
 // contiguous. That needs no special case here -- it is `kv_size == 1`, and
 // the same arithmetic produces a single plane.
-//
-// == Why the caller supplies the chunk placements ==
-//
-// Two reasons, and both are about not guessing.
-//
-// LMCache chooses every destination address, because the window is its own
-// registered memory; the server is told where to write and never decides. So
-// the base offset of each chunk's object within the leased window is an input
-// here, not something to derive.
-//
-// And "which chunks participate" is group-dependent. A sliding-window group
-// covers only a window of trailing chunks, so requiring every chunk of the
-// request for such a group would wait forever. Rather than have this file
-// infer windows, the caller passes exactly the (chunk, object group) pairs it
-// wants, and the plan counts what it is given. `participating_chunks` exists
-// so that decision is made once, in one tested place, instead of open-coded
-// at each call site.
 //
 // == Why strides are not derived from model config ==
 //
@@ -66,22 +38,6 @@
 // unpredictable but that one group's stride gets used for another group's
 // layers, which is why geometry is held per kernel group here and never
 // flattened.
-//
-// == Why a slot is exactly one record ==
-//
-// A sink on the wire is `<digest>@<offset>:<length>` -- it names one record
-// and one destination -- so the piece size here is not a free choice. It has
-// to be the record size shard_plan.h cut the plane into, or the sinks are
-// unservable: too large and a sink asks for more bytes than its record holds,
-// too small and it names no particular part of one, because the format
-// carries no record-relative source offset. Taking the piece size from
-// `plane_segment_bytes()` rules out both. The device's write limit then only
-// has to be large enough to carry one record, which it is by a wide margin in
-// practice -- Aerospike caps a record at 8 MiB while EFA's `max_rdma_size` is
-// three orders of magnitude above that.
-
-#include "layer_pipeline.h"
-#include "shard_plan.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -132,28 +88,6 @@ struct ObjectGroupLayout {
   std::vector<KernelGroupLayout> kernel_groups;
 };
 
-// Where one chunk's object for one object group has been placed in the
-// registered window.
-//
-// `dest_offset` is relative to the base of the leased window and is chosen by
-// LMCache.
-struct ChunkPlacement {
-  uint32_t chunk_id = 0;
-  uint32_t object_group_id = 0;
-  size_t dest_offset = 0;
-};
-
-// Chunks a group covers: the trailing `window_chunks` of `chunk_count`.
-//
-// Pass `window_chunks == 0` for a group with no window, such as full
-// attention, which covers every chunk. A window wider than the request is
-// clamped to it.
-//
-// Returns chunk ids ascending, where a chunk id is its index in the request's
-// chunk list, so the last chunk is `chunk_count - 1`.
-std::vector<uint32_t> participating_chunks(uint32_t chunk_count,
-                                           uint32_t window_chunks);
-
 // Bytes in one K/V plane of `group`: one layer's extent within one K/V half.
 size_t plane_bytes(const KernelGroupLayout& group);
 
@@ -176,12 +110,12 @@ std::string window_fit_error(const std::vector<ObjectGroupLayout>& layouts,
                              size_t window_bytes, size_t align_bytes);
 
 // Resolves global layer indices to byte ranges within an object group's
-// payload, and builds the slot schedule for a request.
+// payload.
 //
-// Built once from the registered layout and then reused for every request, so
-// the layer lookup is a prepared map rather than a search.
+// Built once from the registered layout, so the layer lookup is a prepared
+// map rather than a search.
 //
-// Not thread safe to construct; const afterwards, so concurrent planning is
+// Not thread safe to construct; const afterwards, so concurrent lookups are
 // fine.
 class SlotPlanner {
  public:
@@ -197,7 +131,7 @@ class SlotPlanner {
   // plane, ascending by offset.
   //
   // Offsets are relative to the start of the object group's payload, so a
-  // caller adds the chunk's `dest_offset` to place them in the window.
+  // caller adds the chunk's destination offset to place them in the window.
   //
   // Throws std::out_of_range if `layer_id` is not in the layout.
   std::vector<ByteRange> layer_plane_ranges(uint32_t layer_id) const;
@@ -209,41 +143,6 @@ class SlotPlanner {
 
   // Global layer indices in the layout, ascending.
   std::vector<uint32_t> layer_ids() const;
-
-  // Build the slot schedule for one request.
-  //
-  // Slots are appended layer-major -- every chunk's pieces of layer 0, then
-  // of layer 1, and so on -- which is the order the servers are asked to push
-  // in so that the earliest layers arrive first. The order is only a hint:
-  // SRD reorders writes in flight, and independent nodes interleave anyway.
-  //
-  // `placements` decides which chunks participate for each object group;
-  // placements for an object group with no layers in the layout are ignored.
-  // A layer whose object group has no placements contributes no slots and is
-  // therefore never reported ready, which is the correct answer for a layer
-  // the request is not fetching.
-  //
-  // A slot is exactly one Aerospike record, so `max_record_bytes` -- the
-  // connector's record cap -- decides how a plane is cut, and
-  // `max_write_bytes` (the device's maximum RDMA transfer, further bounded by
-  // the leased window) only has to be large enough to carry one.
-  //
-  // Sizing slots from the write cap instead would produce sinks a server
-  // cannot serve. A sink names a record digest and a length, so a slot larger
-  // than its record is unservable, and a slot smaller than its record names
-  // no particular part of it -- the wire format has no record-relative source
-  // offset. Deriving the slot size from the record with
-  // plane_segment_bytes() makes both unrepresentable: one sink is one record
-  // is one write.
-  //
-  // Throws std::invalid_argument if either size is 0, if two placements share
-  // a (chunk, object group) pair, or if a record would exceed
-  // `max_write_bytes` -- which cannot be split without that missing wire
-  // field, so it fails loudly here rather than on the server. Throws
-  // std::length_error if the schedule exceeds `kMaxSlotsPerRequest`.
-  RequestPlan plan_request(const std::vector<ChunkPlacement>& placements,
-                           size_t max_record_bytes, size_t max_write_bytes,
-                           uint16_t generation) const;
 
  private:
   // Where a layer sits: which object group, and its plane ranges within that

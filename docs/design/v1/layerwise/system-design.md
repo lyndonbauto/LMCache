@@ -199,7 +199,7 @@ Implements `LayerLoadSink`. Tests on a GPU box, no RDMA. See
 ### Track C -- Planning and junction
 
 `csrc/storage_backends/aerospike/`: `slot_planner`, `shard_plan`,
-`layer_pipeline`, `memory_layout_conversion`.
+`memory_layout_conversion`.
 Plus all of `lmcache/v1/layerwise/`.
 
 Produces `LayerFetchPlan`, owns `LayerArrivalPump`, and owns both contracts.
@@ -641,7 +641,7 @@ Each of these was a real bug. Losing one reintroduces it.
    inconsistently. `LayerFetchPlan` enforces the ceiling at construction as
    `MAX_SLOTS_PER_REQUEST`, so a hand-built plan is held to it as well as
    planner output. It must stay equal to `kMaxSlotsPerRequest` in
-   `csrc/storage_backends/aerospike/layer_pipeline.h`.
+   `csrc/storage_backends/aerospike/sink_fetch_table.h`.
 7. A node accepts at most `max_sinks` sinks per command, advertised in the
    `kv-sink-register` reply and defaulting to 256. The transport chunks
    commands to fit; the planner does not know the cap and does not need to.

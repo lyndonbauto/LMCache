@@ -25,7 +25,7 @@ one side working around the other.
 You own:
 
 - `csrc/storage_backends/aerospike/`: `slot_planner`, `shard_plan`,
-  `layer_pipeline`, `memory_layout_conversion`
+  `memory_layout_conversion`
 - All of `lmcache/v1/layerwise/`: `contract.py`, `pump.py`, `fakes.py`
 - `tests/v1/layerwise/`, the conformance suite both other tracks must pass
 - `docs/design/v1/layerwise/`

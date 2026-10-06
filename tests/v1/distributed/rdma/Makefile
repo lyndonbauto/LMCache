@@ -18,7 +18,6 @@ CONNECTOR_DIR := ../../../../csrc/storage_backends/aerospike
 SRC_DIR := csrc
 BUILD_DIR := build
 SHARD_BIN := $(BUILD_DIR)/shard_plan_test
-PLAN_BIN := $(BUILD_DIR)/request_plan_test
 PLANNER_BIN := $(BUILD_DIR)/slot_planner_test
 TABLE_BIN := $(BUILD_DIR)/sink_fetch_table_test
 LAYOUT_BIN := $(BUILD_DIR)/memory_layout_conversion_test
@@ -29,14 +28,9 @@ INCLUDES := -I$(SRC_DIR) -I$(CONNECTOR_DIR)
 SHARD_SOURCES := \
 	$(SRC_DIR)/shard_plan_test.cpp \
 	$(CONNECTOR_DIR)/shard_plan.cpp
-PLAN_SOURCES := \
-	$(SRC_DIR)/request_plan_test.cpp \
-	$(CONNECTOR_DIR)/layer_pipeline.cpp
 PLANNER_SOURCES := \
 	$(SRC_DIR)/slot_planner_test.cpp \
-	$(CONNECTOR_DIR)/slot_planner.cpp \
-	$(CONNECTOR_DIR)/layer_pipeline.cpp \
-	$(CONNECTOR_DIR)/shard_plan.cpp
+	$(CONNECTOR_DIR)/slot_planner.cpp
 TABLE_SOURCES := \
 	$(SRC_DIR)/sink_fetch_table_test.cpp \
 	$(CONNECTOR_DIR)/sink_fetch_table.cpp
@@ -49,10 +43,8 @@ LAYOUT_SOURCES := \
 DUMP_SOURCES := \
 	$(SRC_DIR)/slot_plan_dump.cpp \
 	$(CONNECTOR_DIR)/slot_planner.cpp \
-	$(CONNECTOR_DIR)/layer_pipeline.cpp \
 	$(CONNECTOR_DIR)/shard_plan.cpp
-LOGIC_BINS := $(SHARD_BIN) $(PLAN_BIN) $(PLANNER_BIN) $(TABLE_BIN) $(LAYOUT_BIN) \
-	$(DUMP_BIN)
+LOGIC_BINS := $(SHARD_BIN) $(PLANNER_BIN) $(TABLE_BIN) $(LAYOUT_BIN) $(DUMP_BIN)
 
 # Test-only Python module over the real SinkFetchTable, driven by the
 # layerwise conformance suite (tests/v1/layerwise/aerospike_harness.py).
@@ -71,7 +63,6 @@ logic: $(LOGIC_BINS)
 
 logic-test: $(LOGIC_BINS)
 	$(SHARD_BIN)
-	$(PLAN_BIN)
 	$(PLANNER_BIN)
 	$(TABLE_BIN)
 	$(LAYOUT_BIN)
@@ -86,9 +77,6 @@ pyharness: $(PYHARNESS_SOURCES) | $(BUILD_DIR)
 
 $(SHARD_BIN): $(SHARD_SOURCES) | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(SHARD_SOURCES) -o $@
-
-$(PLAN_BIN): $(PLAN_SOURCES) | $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) $(INCLUDES) $(PLAN_SOURCES) -o $@
 
 $(PLANNER_BIN): $(PLANNER_SOURCES) | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(INCLUDES) $(PLANNER_SOURCES) -o $@

@@ -18,7 +18,7 @@
 // If a record spans two planes, it belongs to two layers at once. That breaks
 // the pipeline in two places: a layer is not ready until every record
 // touching it has landed, so the layer inherits its neighbour's latency; and
-// `FetchSlot` carries a single `layer_id`, which stops being well defined.
+// a fetch slot carries a single `layer_id`, which stops being well defined.
 //
 // Measured against the unified block sizes that Mamba/GDN hybrids force
 // (544, 784 and 944 tokens -- none of them powers of two), byte-count

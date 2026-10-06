@@ -17,12 +17,12 @@ Two stages, matching how the information actually arrives:
     this request expect", which depends on the chunks the request needs and
     where they were placed in the registered window.
 
-The same arithmetic exists in C++, in
-``csrc/storage_backends/aerospike/{slot_planner,shard_plan,memory_layout_conversion}.*``,
-where it drives the production fetch path and is proven by the harness in
-``tests/v1/distributed/rdma/``. It exists here as well so that Track C's tests
-need no native build (acceptance criterion C10). The two must agree exactly;
-see ``docs/design/v1/layerwise/system-design.md`` section 7.
+This is the planner the pipelined fetch uses. The native fetch driver only
+validates the layout against the same geometry, in
+``csrc/storage_backends/aerospike/slot_planner.*``, and the records it reads
+were cut by ``shard_plan.*`` when they were stored. ``test_slot_plan_parity.py``
+in ``tests/v1/distributed/rdma/`` checks that every slot planned here is a
+record the writer actually stored.
 """
 
 # Standard
@@ -197,9 +197,9 @@ class PlanRequest:
     Attributes:
         placements: Where each participating chunk's object sits, one entry
             per (chunk, object group). Under a sliding window this is the
-            participating subset, not every chunk of the prompt -- use
-            :meth:`FetchPlanner.participating_chunks` to derive it rather
-            than computing it at the call site.
+            participating subset, not every chunk of the prompt;
+            :func:`~lmcache.v1.layerwise.request_fetch.first_in_window_chunk`
+            decides where it starts.
         max_record_bytes: Largest record the cluster will hold, which decides
             how a plane is cut into slots.
 
@@ -983,59 +983,6 @@ class FetchPlanner:
                 "so the fetch would expect no writes"
             )
         return LayerFetchPlan(tuple(slots), request.node_names)
-
-    def participating_chunks(
-        self,
-        chunk_ids: Sequence[int],
-        window_start_token: int,
-        window_end_token: int,
-        tokens_per_chunk: int,
-    ) -> tuple[int, ...]:
-        """Return the chunks a sliding window actually touches.
-
-        This exists so call sites do not each re-derive it. Window arithmetic
-        is easy to get subtly wrong -- particularly a window starting
-        mid-chunk -- and a wrong answer here silently fetches the wrong
-        tokens rather than failing. A chunk is included when it overlaps the
-        window at all, including partially, since the model needs whatever
-        part of it falls inside.
-
-        A chunk id is its own index in the request, so chunk ``c`` spans
-        tokens ``[c * tokens_per_chunk, (c + 1) * tokens_per_chunk - 1]``.
-        Deriving the span from position in ``chunk_ids`` instead would shift
-        every span whenever the caller passed a non-contiguous candidate
-        list.
-
-        Args:
-            chunk_ids: Candidate chunk indices.
-            window_start_token: First token index in the window, inclusive.
-            window_end_token: Last token index in the window, inclusive.
-            tokens_per_chunk: Number of tokens each chunk covers.
-
-        Returns:
-            The subset of ``chunk_ids`` overlapping the window, ascending.
-
-        Raises:
-            ValueError: If ``tokens_per_chunk`` is not positive, the window
-                bounds are inverted, or a chunk id is negative.
-        """
-        if tokens_per_chunk <= 0:
-            raise ValueError(
-                f"tokens_per_chunk must be positive, got {tokens_per_chunk}"
-            )
-        if window_end_token < window_start_token:
-            raise ValueError(
-                f"window is inverted: start {window_start_token} is after "
-                f"end {window_end_token}"
-            )
-        if any(chunk_id < 0 for chunk_id in chunk_ids):
-            raise ValueError(f"chunk ids must not be negative: {tuple(chunk_ids)}")
-        return tuple(
-            chunk_id
-            for chunk_id in sorted(set(chunk_ids))
-            if chunk_id * tokens_per_chunk <= window_end_token
-            and ((chunk_id + 1) * tokens_per_chunk) - 1 >= window_start_token
-        )
 
     @staticmethod
     def _plane_slots(
