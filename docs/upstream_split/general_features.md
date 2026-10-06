@@ -342,7 +342,7 @@ time, publishing each layer's progress (GF-2) as it lands.
 - **`LayerStaging`** (`WHOLE_OBJECT` / `PER_LAYER`): stage the whole object
   once, or stage each layer's byte ranges as needed.
   - `transfer_kv_layerwise_h2d` uses `PER_LAYER` for every retrieve unless it
-    holds a GDS object (`65738f1c`). It used to pick `WHOLE_OBJECT` whenever
+    holds a GDS object (`356ff7c7`). It used to pick `WHOLE_OBJECT` whenever
     each object group fit in one batch (four chunks or fewer), so the first
     layer's wait covered every layer's copy. GDS objects only transfer
     whole, so they keep `WHOLE_OBJECT`.
@@ -380,14 +380,14 @@ time, publishing each layer's progress (GF-2) as it lands.
 - `e34fa420`: the multi-batch restage fix.
 - `5e3d5443`: the faster copy.
 - `1138782d`: report only failures, after the copies land.
-- `65738f1c`: per-layer staging for every non-GDS retrieve.
+- `356ff7c7`: per-layer staging for every non-GDS retrieve.
 
 **Tests.**
 
 - `tests/v1/multiprocess/test_object_group_layerwise_transfer.py` (includes
   the three-chunk, two-per-batch staging case that failed before `e34fa420`,
   and `test_a_one_batch_retrieve_stages_each_layer_at_its_own_launch`, which
-  failed before `65738f1c`).
+  failed before `356ff7c7`).
 - `tests/v1/multiprocess/test_layerwise_gpu_overlap.py`.
 
 **Upstream overlap.**
@@ -424,7 +424,7 @@ time, publishing each layer's progress (GF-2) as it lands.
 > **Trim it:**
 >
 > - **The request field `layer_event_ipc_handles` is already gone**
->   (`222a70cc`). It was "reserved; must be empty". The fork's
+>   (`36fbc279`). It was "reserved; must be empty". The fork's
 >   `RegisterKvCacheRequest` proto now matches upstream `dev`; only the
 >   response's `layer_event_ipc_handles` (daemon-owned events) remains.
 > - **Defer `layer_publish_budget_seconds` to PR-A11.** It is always 0 until

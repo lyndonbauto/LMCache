@@ -159,7 +159,7 @@ Every test that does not pass:
 | --- | --- | --- | --- |
 | D-01 | S2 | **Open** (by design for now; restart-shorter-than-heartbeat case fixed in `717ec8e4`) | After an LMCache restart, requests before vLLM's next heartbeat miss and recompute |
 | D-02 | S3 | Open | gpt-oss-120b runs with KV block 16 under the MP connector (vLLM alone picks 64) |
-| D-03 | Info | Partly fixed (`bb1eac1f`) | Whole-object fallback re-runs `_objects_of` and key planning two or three times; the retrieve and fetch builder still recompute |
+| D-03 | Info | Partly fixed (`49971250`) | Whole-object fallback re-runs `_objects_of` and key planning two or three times; the retrieve and fetch builder still recompute |
 | D-04 | Info | Open | Merge-review cleanups (test-only planners, duplicated defaults, `Optional` fields) |
 | D-05 | Info | Open (pre-existing) | Unit tests failing before Day 1, unrelated to this work |
 | D-06 | Info | Open (oracle adjusted) | gpt-oss output changes with vLLM's own prefix cache; LMCache matches the prefix cache |

@@ -701,7 +701,7 @@ then rebase AS-3 (PR-A5) on top of it.
 
 | Test | Real cause |
 | --- | --- |
-| `tests/v1/multiprocess/test_cache_server.py` (`registered_instance`, `test_register_unregister_kv_cache`) | Asserts `REGISTER_KV_CACHE` returns `None` ("Register should return None"). On upstream that is true. The fork changed the response to `RegisterKvCacheResponse` (GF-4 in [general_features.md](general_features.md)). The fork added an extra `[]` argument to the calls (removed again in `222a70cc` with the request field) but never updated the assertions. These tests need cross-process CUDA IPC, so they don't run under WSL. |
+| `tests/v1/multiprocess/test_cache_server.py` (`registered_instance`, `test_register_unregister_kv_cache`) | Asserts `REGISTER_KV_CACHE` returns `None` ("Register should return None"). On upstream that is true. The fork changed the response to `RegisterKvCacheResponse` (GF-4 in [general_features.md](general_features.md)). The fork added an extra `[]` argument to the calls (removed again in `36fbc279` with the request field) but never updated the assertions. These tests need cross-process CUDA IPC, so they don't run under WSL. |
 | `tests/v1/multiprocess/test_mq.py` (`test_mq_register_kv_cache`) | Same: its docstring and handler helper expect `None`. |
 
 Fix them inside the PR that changes the protocol: PR-G5, the MP layerwise
@@ -766,8 +766,8 @@ nobody files them as upstream fixes by mistake.
 | `RdmaWindowPlacer` release called `finish_write` on fetched objects, so the store controller queued every fetched object for a store back to L2 (F1) | `8e18aabd` | AS-P3 (PR-A10) |
 | Connector pybind chain broken outside `#ifdef LMCACHE_AEROSPIKE_RDMA`; ~~verbs helpers in the wrong namespace~~ | `b3d67843`, ~~`a74e828c`~~ | AS-R5 (PR-A8). **After the PR** only the pybind half applies; the verbs helpers are deleted |
 | "Too many slots" raised `ValueError` where `PlanTooLargeError` is documented | `93a77e56` | AS-L1 (PR-A6) |
-| The C++ layout conversion parsed dtype names and sized FP8, int8 and float64 as 4 bytes, so an FP8 model's records were sized wrong and could fail the window-fit check; Python now sends `dtype.itemsize` | `ea17f741` | AS-R5 (PR-A8) |
-| `fetch_deferred_objects` logged a misleading "refused" warning when the keys did not match the model, then failed listing them again (D-03, partly) | `bb1eac1f` | AS-M3 (PR-A11) |
+| The C++ layout conversion parsed dtype names and sized FP8, int8 and float64 as 4 bytes, so an FP8 model's records were sized wrong and could fail the window-fit check; Python now sends `dtype.itemsize` | `7c4b2278` | AS-R5 (PR-A8) |
+| `fetch_deferred_objects` logged a misleading "refused" warning when the keys did not match the model, then failed listing them again (D-03, partly) | `49971250` | AS-M3 (PR-A11) |
 | D-15: client teardown did not revoke RDMA access before L1 freed the slab. **Not fixed**; test `0ebf98d0` | — | AS-R5 (PR-A8). **After the PR** the cause (`AerospikePipelinedRdmaDriver::shutdown()`) is deleted; re-run the test against the new driver. Any remaining risk is server issue 2 |
 
 ---

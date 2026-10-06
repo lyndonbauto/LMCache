@@ -593,7 +593,7 @@ layout plumbing: 13 files, +2,356 lines, down from 25 files and +5,016.
   - `slot_planner.cpp`;
   - `memory_layout_conversion.cpp`, `aerospike_pipelined_pybind.cpp`.
 
-  `layer_pipeline.cpp` was dropped from the profile in `055d80b2`.
+  `layer_pipeline.cpp` was dropped from the profile in `ae4c9807`.
 
   It links `libibverbs` and `libefa`, because the client fork's transport
   calls into both and `libaerospike` doesn't declare them (client issue 11).
@@ -651,7 +651,7 @@ node reports `AEROSPIKE_ERR_SINK_UNKNOWN_REGION` (220).
 >
 > - **What the production driver uses:** only the `SlotPlanner` constructor
 >   (as validation), `window_fit_error` and `ObjectGroupLayout`.
-> - **Trimmed on the fork (`055d80b2`).** `RequestPlan`, `LayerReadiness`,
+> - **Trimmed on the fork (`ae4c9807`).** `RequestPlan`, `LayerReadiness`,
 >   `plan_request`, `participating_chunks` and `ChunkPlacement` are gone,
 >   with `layer_pipeline.*` and `request_plan_test` (about 1,400 lines).
 >   Nothing is left to drop here.
@@ -661,7 +661,7 @@ node reports `AEROSPIKE_ERR_SINK_UNKNOWN_REGION` (220).
 
 **What.** Bookkeeping with no client dependency:
 
-- ~~`layer_pipeline.{h,cpp}`~~: **deleted** (`055d80b2`). It modelled the
+- ~~`layer_pipeline.{h,cpp}`~~: **deleted** (`ae4c9807`). It modelled the
   RDMA-immediate readiness protocol the batch-read driver replaced.
 - **`slot_planner.{h,cpp}`.** Each layer's K/V plane ranges inside an object,
   layout validation, and a check that one chunk fits a window. The slot
@@ -669,7 +669,7 @@ node reports `AEROSPIKE_ERR_SINK_UNKNOWN_REGION` (220).
 - ~~`notification_depth.{h,cpp}`~~: **deleted by the PR**, since there is no
   receive queue to size.
 
-**Commits.** `5993717d`, `2b680e11`, `8ec281c0`, `73558449`, `055d80b2`
+**Commits.** `5993717d`, `2b680e11`, `8ec281c0`, `73558449`, `ae4c9807`
 (trim). `11f4dac2` and `d02b3dce` (notification depth and `max_sinks` chunking) are
 obsolete.
 
@@ -718,7 +718,7 @@ obsolete.
   `element_size` in bytes, which Python sends as `element_sizes`
   (`dtype.itemsize`) from `_native_object_group_layouts` in
   `native_connector_l2_adapter.py`. A zero size is refused. Since
-  `ea17f741`, C++ no longer parses dtype names: the parser sized FP8, int8
+  `7c4b2278`, C++ no longer parses dtype names: the parser sized FP8, int8
   and float64 as 4 bytes. Its Python tests,
   `test_the_pipelined_planner_gets_each_kernel_groups_element_size` and
   `test_hybrid_kernel_groups_keep_their_own_element_sizes` in
@@ -749,7 +749,7 @@ obsolete.
 `SinkFetchTable`: one fetch per window, and stale results never credit a
 newer fetch.
 
-**Commits.** `8993843e`, `61d39ffa` (format), `ea17f741` (element sizes from
+**Commits.** `8993843e`, `61d39ffa` (format), `7c4b2278` (element sizes from
 torch), plus the surviving parts of `b359b4ea`, `7333280b` and `adaf1ced`.
 
 **Pushback.**
@@ -779,14 +779,14 @@ torch), plus the surviving parts of `b359b4ea`, `7333280b` and `adaf1ced`.
   and a `conftest.py`.
 - **Tests,** each a `csrc/*_test.cpp` plus a `test_*.py` wrapper:
   - `slot_planner` (layer geometry, layout validation and window fit only,
-    since `055d80b2`), `shard_plan`;
-  - ~~`request_plan`~~: deleted with `layer_pipeline.*` (`055d80b2`);
+    since `ae4c9807`), `shard_plan`;
+  - ~~`request_plan`~~: deleted with `layer_pipeline.*` (`ae4c9807`);
   - `sink_fetch_table` (new);
   - `memory_layout_conversion` (new, C++ only, run by `logic-test`):
     element sizes are used as given, hybrid kernel groups keep their own,
     and a zero size is refused;
   - `test_slot_plan_parity.py`, with `slot_plan_dump.cpp` and
-    `fixtures/slot_plans.txt`. Since `055d80b2` the dump builds its own C++
+    `fixtures/slot_plans.txt`. Since `ae4c9807` the dump builds its own C++
     slot schedule from `SlotPlanner`'s geometry (formerly
     `SlotPlanner::plan_request`), so the test compares the Python planner
     against an independent schedule and against the records the writer
@@ -1106,13 +1106,13 @@ Aerospike records, RDMA windows and slots. `track-c-status.md` reports all
   old "only correct on a single-node cluster" caveat is gone from the
   docstrings.
 - **No window helper.** `FetchPlanner.participating_chunks` had no caller
-  and was removed (`055d80b2`); a sliding window's chunks come from
+  and was removed (`ae4c9807`); a sliding window's chunks come from
   `first_in_window_chunk` (AS-L2). The module docstring now says this
   planner is the production one.
 
 **Commits.** `600aa620`, `18455f35`, `93150d2f`, `344b50e1`, `5b699bfe`,
 `a7af296c`, `5aa8271c`, `93a77e56`, `e9cd0689` (write IDs), `8993843e`
-(docstrings), `055d80b2` (dead helper removed).
+(docstrings), `ae4c9807` (dead helper removed).
 
 **Tests.** `tests/v1/layerwise/test_fetch_planner.py`,
 `test_layer_fetch_plan.py`, and `tests/v1/distributed/rdma/test_slot_plan_parity.py`.
@@ -1189,7 +1189,7 @@ Aerospike records, RDMA windows and slots. `track-c-status.md` reports all
 
 **Known cleanups.**
 
-- D-03, partly fixed. Since `bb1eac1f`, `fetch_deferred_objects` lists the
+- D-03, partly fixed. Since `49971250`, `fetch_deferred_objects` lists the
   deferred objects once and reuses them for the lease and the whole-object
   fallback; keys that don't match the model raise before anything loads.
   Still open: `run_pipelined_retrieve` lists them again, and
@@ -1297,7 +1297,7 @@ Aerospike records, RDMA windows and slots. `track-c-status.md` reports all
     `LayerLoadSink` with per-layer staging (GF-3), and `LayerLauncher`.
 
 **Commits.** `7f75a0ba`, `48288b94`, `235f9a24`, `ae529b58`, `e3c665db`,
-`004b692b`, `b88ec0ff`, `694eb6b8`, `bb1eac1f` (list the deferred objects
+`004b692b`, `b88ec0ff`, `694eb6b8`, `49971250` (list the deferred objects
 once; D-03, partly).
 
 **Tests.**
