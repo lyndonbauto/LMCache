@@ -590,8 +590,10 @@ layout plumbing: 13 files, +2,356 lines, down from 25 files and +5,016.
 
 - **Build flag.** `BUILD_WITH_AEROSPIKE_RDMA=1` compiles
   - `sink_fetch_table.cpp`, `connector_sink_fetch.cpp`;
-  - `layer_pipeline.cpp`, `slot_planner.cpp`;
+  - `slot_planner.cpp`;
   - `memory_layout_conversion.cpp`, `aerospike_pipelined_pybind.cpp`.
+
+  `layer_pipeline.cpp` was dropped from the profile in `055d80b2`.
 
   It links `libibverbs` and `libefa`, because the client fork's transport
   calls into both and `libaerospike` doesn't declare them (client issue 11).
@@ -649,25 +651,26 @@ node reports `AEROSPIKE_ERR_SINK_UNKNOWN_REGION` (220).
 >
 > - **What the production driver uses:** only the `SlotPlanner` constructor
 >   (as validation), `window_fit_error` and `ObjectGroupLayout`.
-> - **Test-only code to drop:** `RequestPlan`, `LayerReadiness` and
->   `plan_request`. Dropping `layer_pipeline.*` and `request_plan_test`
->   saves about 900 lines.
-> - **Dependency:** `slot_planner.cpp` uses `plane_segment_bytes` from AS-3,
->   so it comes after PR-A5.
+> - **Trimmed on the fork (`055d80b2`).** `RequestPlan`, `LayerReadiness`,
+>   `plan_request`, `participating_chunks` and `ChunkPlacement` are gone,
+>   with `layer_pipeline.*` and `request_plan_test` (about 1,400 lines).
+>   Nothing is left to drop here.
+> - **Dependency:** `slot_planner.cpp` no longer uses AS-3. The parity
+>   harness `slot_plan_dump.cpp` (AS-R6) does, through `plane_segment_bytes`
+>   and `choose_shard_plan`, so the parity test still comes after PR-A5.
 
 **What.** Bookkeeping with no client dependency:
 
-- **`layer_pipeline.{h,cpp}`.** `RequestPlan` and `LayerReadiness`. Readiness
-  is a set of landed slots per layer, scoped to one request and generation.
-  `note_unservable` covers failed slots.
-- **`slot_planner.{h,cpp}`.** Plane ranges to record-sized slots, plus a check
-  that the slots fit the window. Its production role was taken over by the
-  Python planner (AS-L1). The C++ copy is now test-only (D-04 cleanup).
+- ~~`layer_pipeline.{h,cpp}`~~: **deleted** (`055d80b2`). It modelled the
+  RDMA-immediate readiness protocol the batch-read driver replaced.
+- **`slot_planner.{h,cpp}`.** Each layer's K/V plane ranges inside an object,
+  layout validation, and a check that one chunk fits a window. The slot
+  schedule is built by the Python planner (AS-L1).
 - ~~`notification_depth.{h,cpp}`~~: **deleted by the PR**, since there is no
   receive queue to size.
 
-**Commits.** `5993717d`, `2b680e11`, `8ec281c0`, `73558449`.
-`11f4dac2` and `d02b3dce` (notification depth and `max_sinks` chunking) are
+**Commits.** `5993717d`, `2b680e11`, `8ec281c0`, `73558449`, `055d80b2`
+(trim). `11f4dac2` and `d02b3dce` (notification depth and `max_sinks` chunking) are
 obsolete.
 
 ## AS-R5. kv-sink batch-read fetch driver, fetch table, bindings
@@ -775,13 +778,19 @@ torch), plus the surviving parts of `b359b4ea`, `7333280b` and `adaf1ced`.
 - **Build.** A `Makefile` with `logic`, `logic-test` and `pyharness` targets,
   and a `conftest.py`.
 - **Tests,** each a `csrc/*_test.cpp` plus a `test_*.py` wrapper:
-  - `request_plan`, `slot_planner`, `shard_plan`;
+  - `slot_planner` (layer geometry, layout validation and window fit only,
+    since `055d80b2`), `shard_plan`;
+  - ~~`request_plan`~~: deleted with `layer_pipeline.*` (`055d80b2`);
   - `sink_fetch_table` (new);
   - `memory_layout_conversion` (new, C++ only, run by `logic-test`):
     element sizes are used as given, hybrid kernel groups keep their own,
     and a zero size is refused;
   - `test_slot_plan_parity.py`, with `slot_plan_dump.cpp` and
-    `fixtures/slot_plans.txt`.
+    `fixtures/slot_plans.txt`. Since `055d80b2` the dump builds its own C++
+    slot schedule from `SlotPlanner`'s geometry (formerly
+    `SlotPlanner::plan_request`), so the test compares the Python planner
+    against an independent schedule and against the records the writer
+    cuts.
 - **`fabric_free_session_pybind.cpp`**, used by the Python harness in
   `tests/v1/layerwise/`. It is one of the two merge-conflict files.
 
@@ -1096,10 +1105,14 @@ Aerospike records, RDMA windows and slots. `track-c-status.md` reports all
 - **Node per slot.** Since the PR, an object's node name is nominal. The
   old "only correct on a single-node cluster" caveat is gone from the
   docstrings.
+- **No window helper.** `FetchPlanner.participating_chunks` had no caller
+  and was removed (`055d80b2`); a sliding window's chunks come from
+  `first_in_window_chunk` (AS-L2). The module docstring now says this
+  planner is the production one.
 
 **Commits.** `600aa620`, `18455f35`, `93150d2f`, `344b50e1`, `5b699bfe`,
 `a7af296c`, `5aa8271c`, `93a77e56`, `e9cd0689` (write IDs), `8993843e`
-(docstrings).
+(docstrings), `055d80b2` (dead helper removed).
 
 **Tests.** `tests/v1/layerwise/test_fetch_planner.py`,
 `test_layer_fetch_plan.py`, and `tests/v1/distributed/rdma/test_slot_plan_parity.py`.

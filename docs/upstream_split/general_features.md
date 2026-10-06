@@ -108,7 +108,7 @@ real vLLM TTFT gain has been measured yet.**
 ```
 worker (vLLM)                          LMCache MP server (daemon)
 -------------                          --------------------------
-REGISTER_KV_CACHE(..., layer_event_ipc_handles)
+REGISTER_KV_CACHE(..., engine_group_infos)
       ----------------------------->   creates LayerProgressRecord (shm)
       <-----------------------------   RegisterKvCacheResponse(server_use_layerwise,
                                           layer_event_ipc_handles,
@@ -423,8 +423,10 @@ time, publishing each layer's progress (GF-2) as it lands.
 >
 > **Trim it:**
 >
-> - **Drop the request field `layer_event_ipc_handles`.** It is "reserved;
->   must be empty": the worker always sends `[]`.
+> - **The request field `layer_event_ipc_handles` is already gone**
+>   (`222a70cc`). It was "reserved; must be empty". The fork's
+>   `RegisterKvCacheRequest` proto now matches upstream `dev`; only the
+>   response's `layer_event_ipc_handles` (daemon-owned events) remains.
 > - **Defer `layer_publish_budget_seconds` to PR-A11.** It is always 0 until
 >   the pipelined path exists. The struct isn't array-encoded, so adding the
 >   field later is compatible.
@@ -449,8 +451,7 @@ time, publishing each layer's progress (GF-2) as it lands.
 
 **What.**
 
-- **`REGISTER_KV_CACHE` request** gains a `list[bytes]` payload: the
-  worker's per-layer event IPC handles.
+- **`REGISTER_KV_CACHE` request** is unchanged from upstream `dev`.
 - **`REGISTER_KV_CACHE` response** changes from `None` to
   `RegisterKvCacheResponse(server_use_layerwise, layer_event_ipc_handles,
   layer_publish_budget_seconds)`.

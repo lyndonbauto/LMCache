@@ -701,7 +701,7 @@ then rebase AS-3 (PR-A5) on top of it.
 
 | Test | Real cause |
 | --- | --- |
-| `tests/v1/multiprocess/test_cache_server.py` (`registered_instance`, `test_register_unregister_kv_cache`) | Asserts `REGISTER_KV_CACHE` returns `None` ("Register should return None"). On upstream that is true. The fork changed the response to `RegisterKvCacheResponse` (GF-4 in [general_features.md](general_features.md)). The fork added the extra `[]` argument to the calls but never updated the assertions. |
+| `tests/v1/multiprocess/test_cache_server.py` (`registered_instance`, `test_register_unregister_kv_cache`) | Asserts `REGISTER_KV_CACHE` returns `None` ("Register should return None"). On upstream that is true. The fork changed the response to `RegisterKvCacheResponse` (GF-4 in [general_features.md](general_features.md)). The fork added an extra `[]` argument to the calls (removed again in `222a70cc` with the request field) but never updated the assertions. These tests need cross-process CUDA IPC, so they don't run under WSL. |
 | `tests/v1/multiprocess/test_mq.py` (`test_mq_register_kv_cache`) | Same: its docstring and handler helper expect `None`. |
 
 Fix them inside the PR that changes the protocol: PR-G5, the MP layerwise
