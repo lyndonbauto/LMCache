@@ -702,13 +702,20 @@ obsolete.
     with its position as the server-side priority.
   - Per-row results fold into per-layer readiness.
   - Results for a fetch that is no longer active are dropped.
+  - Per window, the batches still outstanding and whether one ended with a
+    possible late write (`on_batch_done(window, BatchEnd)`,
+    `window_settled`). A settled window ends its quarantine early (AS-P3).
+    Added on the fork after the first split; carry it in this PR with its
+    `sink_fetch_table_test` cases.
   - `kMaxSlotsPerRequest = 1 << 16`, which matches `MAX_SLOTS_PER_REQUEST` in
     `contract.py`.
 - **`connector_sink_fetch.{h,cpp}`** (new, about 490 lines):
   `AerospikeSinkFetchDriver`.
   - `initialize` calls `aerospike_sink_create` over the window range.
   - Batch worker threads (`start_workers`, `run_worker`, `execute`) send each
-    layer's `aerospike_batch_read` and record row results.
+    layer's `aerospike_batch_read` and record row results. Each batch then
+    reports to the table whether a row may still be written: anything but
+    `AEROSPIKE_OK`, record not found or unknown region.
   - `refresh_sink` handles a node that lost the sink.
   - The rest of its API: `issue`, `is_layer_ready`, `unservable_layers`,
     `finish_request`, `abandon_request`, `max_slots_per_request`, `node_name`
@@ -734,6 +741,7 @@ obsolete.
   - `pipelined_max_slots_per_request`, `is_pipelined_layer_ready`,
     `pipelined_unservable_layers`;
   - `finish_pipelined_fetch`, `abandon_pipelined_fetch`;
+  - `rdma_window_settled(window_index)`, bound under the same name;
   - `try_initialize_pipelined_rdma`.
 
   `poll_pipelined_fetch_notifications` is **gone**, because row results
@@ -750,7 +758,8 @@ obsolete.
 newer fetch.
 
 **Commits.** `8993843e`, `61d39ffa` (format), `7c4b2278` (element sizes from
-torch), plus the surviving parts of `b359b4ea`, `7333280b` and `adaf1ced`.
+torch), `9b6aac7a` (window settled), plus the surviving parts of
+`b359b4ea`, `7333280b` and `adaf1ced`.
 
 **Pushback.**
 
@@ -943,6 +952,14 @@ windows", so any zero-copy transport can use them.
     `fetch_timeout_seconds` is written by then or never. Server issue 2
     (queued writes had no deadline) broke that assumption; it is fixed in
     server `046e8558d`, where each op carries the transaction's deadline.
+  - The quarantine also ends early once `window_settled(window_index)`
+    reports no write can still land. The storage manager passes the RDMA
+    adapter's `rdma_window_settled`, a new `L2AdapterInterface` method that
+    returns `False` by default (the native adapter asks the client, through
+    the optional `WindowSettledConnector` protocol in `layerwise_source.py`).
+    Without it, the pump's 1.5 s layer timeout cost a window 30 s. It needs
+    AS-R5's `rdma_window_settled` binding; the leaser part is
+    transport-neutral.
   - `WindowLease` carries `window_index`, `base_offset`, `size_bytes` and
     `lease_id`, so a stale lease can't release a newer one.
   - `FetchOutcome` is `FINISHED` or `ABANDONED`. These are rules W1 to W4.
@@ -962,16 +979,24 @@ windows", so any zero-copy transport can use them.
 
 **Where.** `lmcache/v1/distributed/l2_adapters/rdma_window_leaser.py` and
 `rdma_window_placer.py` (both new). The storage manager builds the placer
-(`2987f5fc`).
+(`2987f5fc`), and builds the leaser after the adapter, so it can pass the
+adapter's `rdma_window_settled`. That method lives in
+`l2_adapters/base.py` and `native_connector_l2_adapter.py`, with
+`WindowSettledConnector` in `layerwise_source.py`.
 
 **Commits.** `0703d954`, `d4a5651b`, `dad66a2b`, `8e18aabd`, `2987f5fc`,
-`e3c665db`.
+`e3c665db`, `9b6aac7a` (settled windows end the quarantine early).
 
 **Tests.**
 
-- `tests/v1/distributed/test_rdma_window_leaser.py`
+- `tests/v1/distributed/test_rdma_window_leaser.py` (including the
+  settled-window cases)
 - `test_rdma_window_placer.py`
 - `test_pipelined_placer_access.py`
+  (`test_abandoned_windows_reopen_once_the_adapter_reports_them_settled`)
+- `test_layer_arrival_source_access.py` (the two `rdma_window_settled`
+  cases; `PipelinedNativeClientStub.settled_windows` in
+  `tests/v1/distributed/utils.py`)
 - `tests/v1/layerwise/test_rdma_placer_end_to_end.py`
 - `test_storage_manager_placer.py`
 
