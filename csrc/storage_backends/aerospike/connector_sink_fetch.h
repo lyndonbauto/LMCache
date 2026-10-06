@@ -113,6 +113,11 @@ class AerospikeSinkFetchDriver {
   // and their results are discarded.
   void abandon_request(uint16_t generation);
 
+  // Whether no write of any fetch begun in window `window_index` can still
+  // land (sink::SinkFetchTable::window_settled). False when not ready, and
+  // for an index past the last window.
+  bool window_settled(uint32_t window_index) const;
+
   // Stop the workers, waiting for batches in flight, then deregister the
   // sink from every node. No-op if initialization never succeeded or it
   // already ran.
@@ -129,7 +134,9 @@ class AerospikeSinkFetchDriver {
   void start_workers();
   void stop_workers();
   void run_worker();
-  void execute(const QueuedBatch& queued);
+  // Read the batch's rows, crediting each result to the table, and say
+  // whether one of its writes may still land.
+  sink::BatchEnd execute(const QueuedBatch& queued);
   // Read `slot_indices` of `queued` in one batch; one result per index.
   std::vector<as_status> read_rows(const QueuedBatch& queued,
                                    const std::vector<uint32_t>& slot_indices);

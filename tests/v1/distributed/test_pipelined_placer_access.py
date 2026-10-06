@@ -283,6 +283,24 @@ def test_a_pipelined_path_on_another_adapter_than_the_windows_gives_no_placer(
             sm.pipelined_window_placer({0: LAYOUT}, _model(), 1)
 
 
+def test_abandoned_windows_reopen_once_the_adapter_reports_them_settled(
+    stub_adapters: Callable[[], PipelinedNativeClientStub],
+) -> None:
+    """Without waiting out the fetch timeout, so a few stalls do not push every
+    retrieve onto the whole-object path."""
+    with _storage_manager([_rdma_adapter_config()]) as sm:
+        placer = sm.pipelined_window_placer({0: LAYOUT}, _model(), 1)
+        for chunk in range(WINDOW_COUNT):
+            lease = placer.lease([ObjectToPlace(0, 0, _key(chunk), OBJECT_BYTES)])
+            lease.release(LeaseOutcome.ABANDONED)
+        with pytest.raises(LayerwiseContractError, match="quarantined"):
+            placer.lease(_objects(1))
+
+        stub_adapters().settled_windows.update(range(WINDOW_COUNT))
+
+        placer.lease(_objects(1)).release(LeaseOutcome.NEVER_FETCHED)
+
+
 def test_a_window_too_small_for_the_chunk_cap_is_refused(
     stub_adapters: Callable[[], PipelinedNativeClientStub],
 ) -> None:

@@ -383,6 +383,17 @@ poll_layer -> table.is_layer_ready / unservable_layers
   once. Its queued batches are skipped; batches already sent run to their
   timeout and their results are dropped. The server may still write their
   rows, which is what the leaser's quarantine covers.
+- **Settled windows end the quarantine early.** The table counts the
+  batches outstanding in each window, and each worker reports how its batch
+  ended. A row answered `AEROSPIKE_OK` was written before the answer; a row
+  whose record or region was missing was never written. Any other result,
+  above all a timeout, may still be written. `rdma_window_settled(window)`
+  is true once nothing is outstanding and no batch ended with a possible
+  late write, and the leaser then reuses the abandoned window at once.
+  Without this, the pump's 1.5 s layer timeout would quarantine a window
+  for the full 30 s `fetch_timeout_seconds` even when the slow batch
+  answered a second later, and a few stalls would leave all 8 windows
+  quarantined and every retrieve loading whole objects.
 - **Rows are never retried** (`max_retries = 0`), except once after a sink
   refresh. A retried row could be written after LMCache gave up on it.
 - **Row results are pre-set to `AEROSPIKE_NO_RESPONSE`.** Reserved rows are
@@ -722,7 +733,12 @@ no kv-sink, so CI's Docker server does not run this suite.
   row's deadline, so only writes already on the wire at the deadline can land
   late, within one network round trip. The leaser's quarantine of
   `fetch_timeout_seconds` covers that with a wide margin; it has not been
-  measured under heavy queuing.
+  measured under heavy queuing. A window whose batches were all answered
+  skips the quarantine; only a timed-out row keeps the full one.
+- **Native worker held by a slow batch.** A batch read blocks its worker
+  (one of 16) for up to `fetch_timeout_seconds`, even after the pump gave
+  up on the fetch. Lowering `rdma.fetch_timeout_seconds` shortens both that
+  and the quarantine after a timeout; the default has not been revisited.
 - **Sink ownership.** The server trusts the region id a row carries
   ([server issue 4](aerospike_server_issues.md)), so the window bound is only
   as strong as the ids are unguessable.

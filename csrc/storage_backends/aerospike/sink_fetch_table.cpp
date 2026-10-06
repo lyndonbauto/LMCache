@@ -13,7 +13,9 @@ SinkFetchTable::SinkFetchTable(size_t window_bytes, uint32_t window_count,
     : window_bytes_(window_bytes),
       window_count_(window_count),
       max_slots_(max_slots_per_request),
-      windows_(window_count) {
+      windows_(window_count),
+      outstanding_batches_(window_count, 0),
+      may_still_write_(window_count, 0) {
   if (window_bytes == 0 || window_count == 0) {
     throw std::invalid_argument(
         "sink fetch: window_bytes and window_count must be non-zero");
@@ -97,6 +99,7 @@ BegunFetch SinkFetchTable::begin(const std::vector<SinkSlot>& slots) {
     LayerBatch batch;
     batch.generation = begun.generation;
     batch.token = next_token_++;
+    batch.window = static_cast<uint32_t>(window);
     batch.layer_id = layer_order[priority];
     batch.priority = static_cast<uint32_t>(priority);
     batch.slot_indices = std::move(slots_per_layer[batch.layer_id]);
@@ -104,7 +107,38 @@ BegunFetch SinkFetchTable::begin(const std::vector<SinkSlot>& slots) {
   }
   fetch.last_token = next_token_ - 1;
   windows_[window] = std::move(fetch);
+  // The caller reuses a window only once its earlier fetch can no longer
+  // write, so an earlier kMayStillWrite no longer applies.
+  outstanding_batches_[window] += static_cast<uint32_t>(begun.batches.size());
+  may_still_write_[window] = 0;
   return begun;
+}
+
+void SinkFetchTable::on_batch_done(uint32_t window, BatchEnd end) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (window >= window_count_) {
+    throw std::out_of_range("sink fetch: window " + std::to_string(window) +
+                            " is past the last of " +
+                            std::to_string(window_count_) + " windows");
+  }
+  if (outstanding_batches_[window] == 0) {
+    throw std::logic_error("sink fetch: window " + std::to_string(window) +
+                           " has no batch outstanding");
+  }
+  --outstanding_batches_[window];
+  if (end == BatchEnd::kMayStillWrite) {
+    may_still_write_[window] = 1;
+  }
+}
+
+bool SinkFetchTable::window_settled(uint32_t window) const {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (window >= window_count_) {
+    throw std::out_of_range("sink fetch: window " + std::to_string(window) +
+                            " is past the last of " +
+                            std::to_string(window_count_) + " windows");
+  }
+  return outstanding_batches_[window] == 0 && may_still_write_[window] == 0;
 }
 
 void SinkFetchTable::on_slot_result(uint16_t generation, uint32_t slot_index,

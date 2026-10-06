@@ -1564,10 +1564,6 @@ class StorageManager:
         )
         adapter_id = self._next_adapter_id
         self._next_adapter_id += 1
-        rdma_config = rdma_config_of(config)
-        if rdma_config.is_enabled() and self._window_leaser is None:
-            self._window_leaser = RdmaWindowLeaser(self._l1_manager, rdma_config)
-            self._window_leaser_adapter_id = adapter_id
         adapter: L2AdapterInterface = create_l2_adapter(config, self._l1_memory_desc)
         if config.serde_config is not None:
             adapter = SerdeL2AdapterWrapper(
@@ -1575,6 +1571,14 @@ class StorageManager:
                 serde=create_serde_processor(config.serde_config),
                 l1_manager=self._l1_manager,
             )
+        rdma_config = rdma_config_of(config)
+        if rdma_config.is_enabled() and self._window_leaser is None:
+            self._window_leaser = RdmaWindowLeaser(
+                self._l1_manager,
+                rdma_config,
+                window_settled=adapter.rdma_window_settled,
+            )
+            self._window_leaser_adapter_id = adapter_id
         descriptor = AdapterDescriptor(index=adapter_id, config=config)
         # Stamp the registered type name so the adapter's cache events on
         # the observability bus carry their backend identity.

@@ -40,6 +40,7 @@ from lmcache.v1.distributed.l2_adapters.layerwise_source import (
     NativePlanIssuer,
     PipelinedFetchConnector,
     PlannedFetchConnector,
+    WindowSettledConnector,
 )
 from lmcache.v1.layerwise.contract import LayerArrivalSource, LayerwiseContractError
 from lmcache.v1.layerwise.planner import record_plane_runs
@@ -416,6 +417,26 @@ class NativeConnectorL2Adapter(L2AdapterInterface):
                 f"{self._type_name}: native client has no pipelined fetch path"
             )
         return AerospikeLayerArrivalSource(self._client, NativePlanIssuer(self._client))
+
+    def rdma_window_settled(self, window_index: int) -> bool:
+        """Report whether the native client says no write into the window can land.
+
+        The native client counts the batches each fetch sends into its
+        window, and a window is settled once every one ended with every row
+        answered: written, or its record or region missing. A row that timed
+        out keeps the window unsettled, so the leaser waits out the full
+        quarantine.
+
+        Args:
+            window_index: Index of the window in L1's RDMA window pool.
+
+        Returns:
+            ``True`` if the window is settled; ``False`` if it is not, or the
+            native client cannot tell.
+        """
+        if not isinstance(self._client, WindowSettledConnector):
+            return False
+        return bool(self._client.rdma_window_settled(window_index))
 
     def submit_store_task(
         self,

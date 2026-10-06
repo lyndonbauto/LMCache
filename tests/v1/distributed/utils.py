@@ -25,7 +25,8 @@ class PipelinedNativeClientStub:
     generation to its landed layers. It reports ``MAX_SLOTS`` as its slot
     limit and ``MAX_RECORD_BYTES`` as its record cap. Setting ``init_error``
     makes pipelined fetch not ready, with that reason, and the slot limit 0,
-    as the native client reports then.
+    as the native client reports then. Windows in ``settled_windows`` report
+    that no write into them can still land.
     """
 
     NODE_NAME = "BB9000000000001"
@@ -41,6 +42,7 @@ class PipelinedNativeClientStub:
         self.issued: list[tuple[list[str], list[tuple[int, str, int, int, int]]]] = []
         self.finished: list[int] = []
         self.abandoned: list[int] = []
+        self.settled_windows: set[int] = set()
 
     def event_fd(self) -> int:
         return self._efd.fileno()
@@ -100,3 +102,6 @@ class PipelinedNativeClientStub:
         if generation in self.active:
             self.active.discard(generation)
             self.abandoned.append(generation)
+
+    def rdma_window_settled(self, window_index: int) -> bool:
+        return window_index in self.settled_windows

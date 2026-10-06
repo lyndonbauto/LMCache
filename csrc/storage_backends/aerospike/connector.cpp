@@ -922,6 +922,14 @@ void AerospikeNativeConnector::abandon_pipelined_fetch(uint16_t generation) {
   }
   pipelined_rdma_->abandon_request(generation);
 }
+
+bool AerospikeNativeConnector::rdma_window_settled(
+    uint32_t window_index) const {
+  if (!pipelined_rdma_) {
+    return false;
+  }
+  return pipelined_rdma_->window_settled(window_index);
+}
 #endif
 
 ShardPlan AerospikeNativeConnector::plan(size_t payload_bytes) const {
