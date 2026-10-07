@@ -1,0 +1,12 @@
+{
+ "tag": "E_timeline_qp16_warm2",
+ "warmup": "Warm-up request 2 of session E_timeline_qp16 (retrieve warm-up after re-registration). Say hello.",
+ "requests": [
+  {
+   "ttft_s": 0.11063284400006523,
+   "total_s": 0.2413073040006566,
+   "out_tokens": 16,
+   "error": ""
+  }
+ ]
+}

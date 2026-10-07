@@ -1,0 +1,54 @@
+{
+ "tag": "E_timeline_qp16_L8192_c1",
+ "length": 8192,
+ "prefix_length": 0,
+ "suffix_salt": 0,
+ "concurrency": 1,
+ "n": 4,
+ "ids": [
+  0,
+  1,
+  2,
+  3
+ ],
+ "max_tokens": 128,
+ "wall_s": 5.156047531996592,
+ "requests": [
+  {
+   "ttft_s": 0.24292868100019405,
+   "total_s": 1.3481118859999697,
+   "out_tokens": 128,
+   "error": "",
+   "id": 0
+  },
+  {
+   "ttft_s": 0.20041127399963443,
+   "total_s": 1.268413474001136,
+   "out_tokens": 128,
+   "error": "",
+   "id": 1
+  },
+  {
+   "ttft_s": 0.19766010700186598,
+   "total_s": 1.2598565790030989,
+   "out_tokens": 128,
+   "error": "",
+   "id": 2
+  },
+  {
+   "ttft_s": 0.20310599400181673,
+   "total_s": 1.2788078300000052,
+   "out_tokens": 128,
+   "error": "",
+   "id": 3
+  }
+ ],
+ "metrics_delta": {
+  "vllm:prefix_cache_hits_total": 0.0,
+  "vllm:external_prefix_cache_queries_total": 32768.0,
+  "vllm:external_prefix_cache_hits_total": 32764.0,
+  "vllm:prompt_tokens_total": 32768.0,
+  "vllm:generation_tokens_total": 512.0,
+  "lmcache_mp_num_deferred_retrieves_total{outcome=\"pipelined\"}": 4.0
+ }
+}

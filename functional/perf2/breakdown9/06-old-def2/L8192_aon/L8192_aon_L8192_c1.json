@@ -1,0 +1,53 @@
+{
+ "tag": "L8192_aon_L8192_c1",
+ "length": 8192,
+ "prefix_length": 0,
+ "suffix_salt": 0,
+ "concurrency": 1,
+ "n": 4,
+ "ids": [
+  0,
+  1,
+  2,
+  3
+ ],
+ "max_tokens": 128,
+ "wall_s": 3.3212613930008956,
+ "requests": [
+  {
+   "ttft_s": 0.19201913899451029,
+   "total_s": 0.8753365049997228,
+   "out_tokens": 128,
+   "error": "",
+   "id": 0
+  },
+  {
+   "ttft_s": 0.1213589580002008,
+   "total_s": 0.8114594990038313,
+   "out_tokens": 128,
+   "error": "",
+   "id": 1
+  },
+  {
+   "ttft_s": 0.1213028350030072,
+   "total_s": 0.8114323879999574,
+   "out_tokens": 128,
+   "error": "",
+   "id": 2
+  },
+  {
+   "ttft_s": 0.1261730480036931,
+   "total_s": 0.8168840560028912,
+   "out_tokens": 128,
+   "error": "",
+   "id": 3
+  }
+ ],
+ "metrics_delta": {
+  "vllm:prefix_cache_hits_total": 0.0,
+  "vllm:external_prefix_cache_queries_total": 32768.0,
+  "vllm:external_prefix_cache_hits_total": 32764.0,
+  "vllm:prompt_tokens_total": 32768.0,
+  "vllm:generation_tokens_total": 512.0
+ }
+}

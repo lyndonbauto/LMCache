@@ -1,0 +1,53 @@
+{
+ "tag": "L8192_aon_store_8192_0-3",
+ "length": 8192,
+ "prefix_length": 0,
+ "suffix_salt": 0,
+ "concurrency": 8,
+ "n": 4,
+ "ids": [
+  0,
+  1,
+  2,
+  3
+ ],
+ "max_tokens": 128,
+ "wall_s": 2.899498571998265,
+ "requests": [
+  {
+   "ttft_s": 1.0222726850006438,
+   "total_s": 2.8696316280002065,
+   "out_tokens": 128,
+   "error": "",
+   "id": 0
+  },
+  {
+   "ttft_s": 1.5115182990011817,
+   "total_s": 2.8880522639992705,
+   "out_tokens": 128,
+   "error": "",
+   "id": 1
+  },
+  {
+   "ttft_s": 0.5036211879996699,
+   "total_s": 2.861983851998957,
+   "out_tokens": 128,
+   "error": "",
+   "id": 2
+  },
+  {
+   "ttft_s": 2.0250652819995594,
+   "total_s": 2.8969467759998224,
+   "out_tokens": 128,
+   "error": "",
+   "id": 3
+  }
+ ],
+ "metrics_delta": {
+  "vllm:prefix_cache_hits_total": 0.0,
+  "vllm:external_prefix_cache_queries_total": 32768.0,
+  "vllm:external_prefix_cache_hits_total": 0.0,
+  "vllm:prompt_tokens_total": 32768.0,
+  "vllm:generation_tokens_total": 512.0
+ }
+}

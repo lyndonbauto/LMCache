@@ -1,0 +1,12 @@
+00:13:25 used_mb=47620 avail_mb=193989
+00:13:35 used_mb=108511 avail_mb=133099
+00:13:45 used_mb=132705 avail_mb=108904
+00:13:55 used_mb=133721 avail_mb=107889
+00:14:05 used_mb=137154 avail_mb=104455
+00:14:15 used_mb=138824 avail_mb=102785
+00:14:25 used_mb=137926 avail_mb=103683
+00:14:35 used_mb=18052 avail_mb=223557
+00:14:45 used_mb=70067 avail_mb=171542
+00:14:55 used_mb=130453 avail_mb=111156
+00:15:05 used_mb=135752 avail_mb=105857
+00:15:15 used_mb=132089 avail_mb=109521

@@ -1,0 +1,12 @@
+{
+ "tag": "L8192_aon_warm1",
+ "warmup": "Warm-up request 1 of session L8192_aon (after vLLM start). Say hello.",
+ "requests": [
+  {
+   "ttft_s": 0.10309829999823705,
+   "total_s": 0.1711896019987762,
+   "out_tokens": 16,
+   "error": ""
+  }
+ ]
+}

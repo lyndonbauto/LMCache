@@ -1,0 +1,12 @@
+{
+ "tag": "E_timeline_qp16_warm2",
+ "warmup": "Warm-up request 2 of session E_timeline_qp16 (prime 1 after LMCache restart). Say hello.",
+ "requests": [
+  {
+   "ttft_s": 0.05732299200099078,
+   "total_s": 0.1895847510022577,
+   "out_tokens": 16,
+   "error": ""
+  }
+ ]
+}

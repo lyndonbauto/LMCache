@@ -1,0 +1,12 @@
+2026-10-06T23:55:00Z section precheck started
+2026-10-06T23:55:01Z precheck ok: ports free, rxe0 active, VRAM 285 MB, free disk 588 GB, CAP=64 WINDOW_COUNT=8 window_bytes=2147483648 (windows 16 GB), L1 general 100 GB
+2026-10-06T23:55:01Z section precheck finished
+2026-10-06T23:55:01Z section qpstore:8192 started
+started: pid 23970, service 127.0.0.1:3700, log /root/lmc-work/functional/perf2/breakdown9/03-new-B2/asd-kvsink-bp-perf.log
+2026-10-06T23:55:03Z aero-kvsink-bp started on a device namespace: file /mnt/scratch/perf-aero/lmcache.dat filesize 16G; ; storage engine reported: storage-engine=memory storage-engine.direct-files=false storage-engine.filesize=0; free: / 588 GB, data dir 4823 GB
+2026-10-06T23:55:04Z session L8192_aon (aon) started; L1 100 GB; VRAM 285 MB; free: / 588 GB, data dir 4823 GB
+2026-10-06T23:57:34Z session L8192_aon host memory: min available 123187 MB
+2026-10-06T23:57:34Z session L8192_aon rc=0; asd read_bytes (disk) during it: 0 MiB; 2 points; errors: 0; LMCache stops:       2 stopped (TERM) exit=143
+2026-10-06T23:57:34Z store check L8192_aon: objects 8450 (want 8320 = 4 prompts x 32 chunks x 65 records), data_used_bytes 4362631520 (25%), stop_writes false, client_write_error 0; DEVICE_OVERLOAD lines 0 (D-26), L1 refusals 0, 'Failed to batched allocate' 0 (D-25)
+2026-10-06T23:57:34Z section qpstore:8192 finished
+##### PERF DONE 23:57:34 VRAM 285 MB

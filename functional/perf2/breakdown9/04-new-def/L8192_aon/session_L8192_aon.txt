@@ -1,0 +1,22 @@
+=== L8192_aon start mode=aon layerwise=false L1=100GB extra='--no-l1-use-lazy --l2-adapter {"type":"aerospike","hosts":"127.0.0.1:3700","namespace":"lmcache","set_name":"kv_chunks"}' 00:00:19
+=== L8192_aon LMCache up (pid 73059) 00:00:41
+=== listen_check L8192_aon lmcache: ok (all listeners on loopback; allowed: tcp:22 udp:4791 )
+=== L8192_aon vLLM up (pid 73185) GPU KV cache size: 1,275,776 tokens; cudagraph: cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2 00:01:24
+=== listen_check L8192_aon vllm: ok (all listeners on loopback; allowed: tcp:22 udp:4791 )
+warmup L8192_aon_warm1: ok
+=== L8192_aon store len=8192 ids=0-3 conc=8 00:01:25
+point L8192_aon_store_8192_0-3: n=4 errors=0 wall=2.79s ttft_p50~1.896s ext_hit_tokens=0 out_tokens=[128]
+=== L8192_aon outcomes store_8192_0-3: ; LMCache error lines: 0 00:01:29
+L2 settled at 8450 objects
+=== L8192_aon store done: objects=8450 data_used_bytes=4362631520 00:01:39
+=== L8192_aon LMCache server pid 73059 stopped (TERM) exit=143 00:01:47
+=== L8192_aon LMCache up (pid 73666) 00:02:10
+=== listen_check L8192_aon lmcache: ok (all listeners on loopback; allowed: tcp:22 udp:4791 )
+warmup L8192_aon_warm2: ok
+=== L8192_aon vLLM re-registered 5 s after the restart (short primes sent: 1) 00:02:15
+warmup L8192_aon_warm3: ok
+=== L8192_aon point L8192_c1 len=8192 pre=0 c=1 n=4 00:02:17
+point L8192_aon_L8192_c1: n=4 errors=0 wall=3.31s ttft_p50~0.124s ext_hit_tokens=32764 out_tokens=[128]
+=== L8192_aon outcomes L8192_c1: not_deferred:4; LMCache error lines: 0 00:02:22
+=== L8192_aon done 00:02:22
+=== L8192_aon LMCache server pid 73666 stopped (TERM) exit=143 00:02:35

@@ -1,0 +1,20 @@
+2026-10-06T23:47:14Z breakdown9: 01-old-def: old; at most 128 writes in flight, 4 MiB per path,32 placement threads
+2026-10-06T23:47:43Z breakdown9: 01-old-def: stream: 25.11 s, 189.00 GiB landed, 7.528 GiB/s, failed rows 0
+2026-10-06T23:49:50Z breakdown9: 01-old-def: point E_timeline_qp16_L8192_c1: n=4 errors=0 wall=4.94s ttft_p50~0.177s ext_hit_tokens=32764 out_tokens=[128]
+2026-10-06T23:52:16Z breakdown9: 02-new-B1: new; at most 128 writes in flight, 1 MiB per path,32 placement threads
+2026-10-06T23:52:45Z breakdown9: 02-new-B1: stream: 25.15 s, 161.31 GiB landed, 6.414 GiB/s, failed rows 0
+2026-10-06T23:54:59Z breakdown9: 02-new-B1: point E_timeline_qp16_L8192_c1: n=4 errors=0 wall=5.31s ttft_p50~0.226s ext_hit_tokens=32764 out_tokens=[128]
+2026-10-06T23:57:35Z breakdown9: 03-new-B2: new; at most 128 writes in flight, 2 MiB per path,32 placement threads
+2026-10-06T23:58:04Z breakdown9: 03-new-B2: stream: 25.13 s, 168.75 GiB landed, 6.715 GiB/s, failed rows 0
+2026-10-07T00:00:14Z breakdown9: 03-new-B2: point E_timeline_qp16_L8192_c1: n=4 errors=0 wall=5.17s ttft_p50~0.214s ext_hit_tokens=32764 out_tokens=[128]
+2026-10-07T00:02:36Z breakdown9: 04-new-def: new; at most 128 writes in flight, 4 MiB per path,32 placement threads
+2026-10-07T00:03:05Z breakdown9: 04-new-def: stream: 25.11 s, 171.12 GiB landed, 6.815 GiB/s, failed rows 0
+2026-10-07T00:05:17Z breakdown9: 04-new-def: point E_timeline_qp16_L8192_c1: n=4 errors=0 wall=5.16s ttft_p50~0.203s ext_hit_tokens=32764 out_tokens=[128]
+2026-10-07T00:07:52Z breakdown9: 05-new-C32: new; at most 32 writes in flight, 4 MiB per path,32 placement threads
+2026-10-07T00:08:21Z breakdown9: 05-new-C32: stream: 25.15 s, 156.41 GiB landed, 6.219 GiB/s, failed rows 0
+2026-10-07T00:10:33Z breakdown9: 05-new-C32: point E_timeline_qp16_L8192_c1: n=4 errors=0 wall=5.32s ttft_p50~0.234s ext_hit_tokens=32764 out_tokens=[128]
+2026-10-07T00:12:45Z breakdown9: 06-old-def2: old; at most 128 writes in flight, 4 MiB per path,32 placement threads
+2026-10-07T00:13:14Z breakdown9: 06-old-def2: stream: 25.11 s, 187.75 GiB landed, 7.476 GiB/s, failed rows 0
+2026-10-07T00:15:21Z breakdown9: 06-old-def2: point E_timeline_qp16_L8192_c1: n=4 errors=0 wall=5.13s ttft_p50~0.179s ext_hit_tokens=32764 out_tokens=[128]
+2026-10-07T00:15:22Z breakdown9: server stopped, data deleted
+2026-10-07T00:15:22Z breakdown9: BREAKDOWN9 DONE

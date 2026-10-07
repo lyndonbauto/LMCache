@@ -1,0 +1,17 @@
+=== E_timeline_qp16 start mode=lw layerwise=true L1=116GB extra='--no-l1-use-lazy --pipelined-fetch --pipelined-max-chunks 64 --l2-adapter {"type":"aerospike","hosts":"127.0.0.1:3700","namespace":"lmcache","set_name":"kv_chunks","rdma":{"transport":"RC","device_name":"rxe0","gid_index":1,"queue_pairs":16,"window_count":8,"window_bytes":2147483648}}' 23:47:44
+=== E_timeline_qp16 LMCache up (pid 67713) 23:48:09
+=== listen_check E_timeline_qp16 lmcache: ok (all listeners on loopback; allowed: tcp:22 udp:4791 )
+=== E_timeline_qp16 vLLM up (pid 67861) GPU KV cache size: 1,275,776 tokens; cudagraph: cudagraph_mode from FULL_AND_PIECEWISE to PIECEWISE. 23:48:49
+=== listen_check E_timeline_qp16 vllm: ok (all listeners on loopback; allowed: tcp:22 udp:4791 )
+warmup E_timeline_qp16_warm1: ok
+=== E_timeline_qp16 LMCache server pid 67713 stopped (TERM) exit=143 23:48:52
+=== E_timeline_qp16 LMCache up (pid 68213) 23:49:17
+=== listen_check E_timeline_qp16 lmcache: ok (all listeners on loopback; allowed: tcp:22 udp:4791 )
+warmup E_timeline_qp16_warm2: ok
+=== E_timeline_qp16 vLLM re-registered 4 s after the restart (short primes sent: 1) 23:49:21
+warmup E_timeline_qp16_warm3: ok
+=== E_timeline_qp16 point L8192_c1 len=8192 pre=0 c=1 n=4 23:49:23
+point E_timeline_qp16_L8192_c1: n=4 errors=0 wall=4.94s ttft_p50~0.177s ext_hit_tokens=32764 out_tokens=[128]
+=== E_timeline_qp16 outcomes L8192_c1: pipelined:4; LMCache error lines: 0 23:49:29
+=== E_timeline_qp16 done 23:49:29
+=== E_timeline_qp16 LMCache server pid 68213 stopped (TERM) exit=143 23:49:50

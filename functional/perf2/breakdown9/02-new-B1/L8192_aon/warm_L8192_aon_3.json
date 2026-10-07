@@ -1,0 +1,12 @@
+{
+ "tag": "L8192_aon_warm3",
+ "warmup": "Warm-up request 3 of session L8192_aon (retrieve warm-up after re-registration). Say hello.",
+ "requests": [
+  {
+   "ttft_s": 0.13309586600007606,
+   "total_s": 0.19840174400087562,
+   "out_tokens": 16,
+   "error": ""
+  }
+ ]
+}

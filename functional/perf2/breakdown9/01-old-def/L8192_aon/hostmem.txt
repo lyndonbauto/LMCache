@@ -1,0 +1,15 @@
+23:44:49 used_mb=43033 avail_mb=198576
+23:44:59 used_mb=103668 avail_mb=137942
+23:45:09 used_mb=110736 avail_mb=130874
+23:45:19 used_mb=111730 avail_mb=129879
+23:45:29 used_mb=115603 avail_mb=126007
+23:45:39 used_mb=114992 avail_mb=126617
+23:45:49 used_mb=118251 avail_mb=123359
+23:45:59 used_mb=118231 avail_mb=123379
+23:46:09 used_mb=118245 avail_mb=123364
+23:46:19 used_mb=15069 avail_mb=226541
+23:46:29 used_mb=61077 avail_mb=180533
+23:46:39 used_mb=118363 avail_mb=123247
+23:46:49 used_mb=114675 avail_mb=126935
+23:46:59 used_mb=114675 avail_mb=126934
+23:47:09 used_mb=114663 avail_mb=126947

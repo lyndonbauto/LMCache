@@ -1,0 +1,12 @@
+{
+ "tag": "L8192_aon_warm2",
+ "warmup": "Warm-up request 2 of session L8192_aon (prime 1 after LMCache restart). Say hello.",
+ "requests": [
+  {
+   "ttft_s": 0.040367092999076704,
+   "total_s": 0.11257914499947219,
+   "out_tokens": 16,
+   "error": ""
+  }
+ ]
+}
