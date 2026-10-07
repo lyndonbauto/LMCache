@@ -36,7 +36,7 @@ from lmcache.v1.mp_observability.event_bus import (
 )
 from lmcache.v1.multiprocess.layer_progress import (
     DaemonLayerLaunchEventPool,
-    LayerProgressRecord,
+    LayerProgressPublisher,
 )
 from lmcache.v1.multiprocess.layerwise_schedule import LayerLaunch, LayerwiseSchedule
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
@@ -760,7 +760,7 @@ def transfer_kv_layerwise_h2d(
     memory_objs_by_group: Sequence[Sequence[MemoryObj | None]],
     skip_first_n_tokens: int,
     schedule: LayerwiseSchedule,
-    progress: LayerProgressRecord,
+    progress: LayerProgressPublisher,
     event_pool: DaemonLayerLaunchEventPool,
     retrieve_generation: int,
     *,
@@ -774,6 +774,10 @@ def transfer_kv_layerwise_h2d(
     staging. Overlap is between attention on layer *L* and the transfer
     stream work for layer *L+1*.
 
+    Every layer is launched inside one ``progress.launching()``, since
+    whole-object staging keeps a batch in the shared staging slots from one
+    layer to the next.
+
     Args:
         cache_context: Registered worker cache context on the daemon.
         block_ids_gpu: Staged GPU block-id tensors per kernel group.
@@ -781,7 +785,7 @@ def transfer_kv_layerwise_h2d(
             for skipped prefix chunks).
         skip_first_n_tokens: Tokens to skip at the start of the retrieve range.
         schedule: Global per-layer launch order for this layout.
-        progress: Shared progress record for this worker instance.
+        progress: This retrieve's progress publisher.
         event_pool: IPC events recorded after each ordinal on ``cache_context.stream``.
         retrieve_generation: Generation tag shared with the worker waiter.
         transfer_key: Same retrieve identity as the bulk path; reserved for
@@ -789,7 +793,8 @@ def transfer_kv_layerwise_h2d(
 
     Raises:
         ValueError: If a batch contains null memory objects on H2D.
-        RuntimeError: If the native extension lacks layer-range support.
+        RuntimeError: If the native extension lacks layer-range support, or
+            ``progress`` refuses the launch because the retrieve was stopped.
     """
     del transfer_key
 
@@ -810,9 +815,10 @@ def transfer_kv_layerwise_h2d(
         retrieve_generation,
         staging=staging,
     )
-    retrieve.begin()
-    for launch in schedule.launches:
-        retrieve.launch_layer(launch.layer_id)
+    with progress.launching():
+        retrieve.begin()
+        for launch in schedule.launches:
+            retrieve.launch_layer(launch.layer_id)
 
 
 class LayerStaging(Enum):
@@ -1030,7 +1036,7 @@ class LayerwiseH2DRetrieve:
         objects: MemoryObjectLookup,
         skip_first_n_tokens: int,
         schedule: LayerwiseSchedule,
-        progress: LayerProgressRecord,
+        progress: LayerProgressPublisher,
         event_pool: DaemonLayerLaunchEventPool,
         retrieve_generation: int,
         *,
@@ -1047,7 +1053,9 @@ class LayerwiseH2DRetrieve:
             skip_first_n_tokens: Tokens to skip at the start of the retrieve
                 range.
             schedule: Global per-layer launch order for this layout.
-            progress: Shared progress record for this worker instance.
+            progress: This retrieve's progress publisher: the worker's
+                record itself, or this retrieve's share of it when several
+                are in flight.
             event_pool: IPC events recorded after each ordinal on
                 ``cache_context.stream``.
             retrieve_generation: Generation the worker waits on for this
@@ -1167,7 +1175,9 @@ class LayerwiseH2DRetrieve:
         Records the layer's completion event on the transfer stream *before*
         advancing the watermark, so a worker that observes the watermark never
         waits on an event that was not yet recorded. On any failure the
-        retrieve is marked failed before the exception propagates.
+        retrieve is marked failed before the exception propagates. The
+        staging, kernel, event and watermark all happen inside
+        ``progress.launching()``.
 
         Args:
             layer_id: Global layer index. Must be the next layer in schedule
@@ -1175,7 +1185,9 @@ class LayerwiseH2DRetrieve:
 
         Raises:
             RuntimeError: If :meth:`begin` has not run, the retrieve already
-                failed, or every scheduled layer was already launched.
+                failed, or every scheduled layer was already launched; or if
+                ``progress`` refuses the launch because the retrieve was
+                stopped (nothing is copied then).
             ValueError: If ``layer_id`` is not the next layer in schedule order.
                 The retrieve is left unchanged so the caller can report it.
         """
@@ -1191,13 +1203,14 @@ class LayerwiseH2DRetrieve:
                 f"got {layer_id}"
             )
         ordinal = self._next_ordinal
-        try:
-            self._launch_scheduled(expected)
-            self._event_pool.record_ordinal(ordinal, self._cache_context.stream)
-            self._progress.report_launch_recorded(ordinal + 1)
-        except Exception:
-            self.mark_failed()
-            raise
+        with self._progress.launching():
+            try:
+                self._launch_scheduled(expected)
+                self._event_pool.record_ordinal(ordinal, self._cache_context.stream)
+                self._progress.report_launch_recorded(ordinal + 1)
+            except Exception:
+                self.mark_failed()
+                raise
         self._next_ordinal += 1
         if self._next_ordinal == self._schedule.launch_count():
             self._state = _RetrieveState.COMPLETE
@@ -1223,8 +1236,10 @@ class LayerwiseH2DRetrieve:
         queued on the transfer stream. The worker reports a flagged retrieve's
         blocks to vLLM for recompute, so no copy may still be landing in them.
 
-        Assumes this process is the record's only writer, which holds because
-        the MP server serialises retrieves per worker.
+        Assumes this process is the record's only writer. With several
+        retrieves in flight, ``progress`` is this retrieve's share, whose
+        ``read`` reports this retrieve's own generation, and whose failure
+        stops the step's other retrieves.
         """
         copies_queued = self._state is not _RetrieveState.NOT_BEGUN
         self._state = _RetrieveState.FAILED

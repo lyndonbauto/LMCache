@@ -13,8 +13,11 @@
 //
 //   - one active fetch per window, named by a non-zero generation;
 //   - the fetch split into one batch per layer, in plan order, each tagged
-//     with its position as the server-side priority, so layer 0 is placed
-//     first even though every layer is in flight at once;
+//     with a server-side priority that rises with every batch the table
+//     issues. Layer 0 is placed first even though every layer is in flight
+//     at once, and with several fetches in flight every layer of an older
+//     fetch is placed before any layer of a newer one, so a stream of new
+//     fetches cannot starve an old fetch's late layers;
 //   - per-slot results folded into per-layer readiness;
 //   - results for a fetch that is no longer active dropped, so a batch still
 //     in flight after abandon cannot be credited to the window's next fetch.
@@ -69,8 +72,8 @@ struct LayerBatch {
   // Unique for the table's lifetime, unlike the generation, which wraps.
   uint64_t token = 0;
   uint32_t layer_id = 0;
-  // The layer's position in the plan: 0 for the first layer. Lower is
-  // placed first by the server.
+  // The low 32 bits of `token`: rises with plan order within a fetch and
+  // across fetches. Lower is placed first by the server.
   uint32_t priority = 0;
   // Indices into the plan's slots, in plan order.
   std::vector<uint32_t> slot_indices;

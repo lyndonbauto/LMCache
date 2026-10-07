@@ -93,13 +93,15 @@ BegunFetch SinkFetchTable::begin(const std::vector<SinkSlot>& slots) {
   fetch.generation = begun.generation;
   fetch.first_token = next_token_;
   begun.batches.reserve(layer_order.size());
-  for (size_t priority = 0; priority < layer_order.size(); ++priority) {
+  for (uint32_t layer_id : layer_order) {
     LayerBatch batch;
     batch.generation = begun.generation;
     batch.token = next_token_++;
-    batch.layer_id = layer_order[priority];
-    batch.priority = static_cast<uint32_t>(priority);
-    batch.slot_indices = std::move(slots_per_layer[batch.layer_id]);
+    batch.layer_id = layer_id;
+    // Tokens rise across fetches, so every layer of an older fetch is placed
+    // before any layer of a newer one; truncation wraps after 2^32 batches.
+    batch.priority = static_cast<uint32_t>(batch.token);
+    batch.slot_indices = std::move(slots_per_layer[layer_id]);
     begun.batches.push_back(std::move(batch));
   }
   fetch.last_token = next_token_ - 1;

@@ -51,7 +51,7 @@ from lmcache.v1.layerwise.request_fetch import (
 from lmcache.v1.memory_management import MemoryObj
 from lmcache.v1.multiprocess.layer_progress import (
     DaemonLayerLaunchEventPool,
-    LayerProgressRecord,
+    LayerProgressPublisher,
 )
 from lmcache.v1.multiprocess.layerwise_schedule import LayerwiseSchedule
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
@@ -176,7 +176,7 @@ class PipelinedLoadRequest:
         objects: The objects to copy from; read at load time.
         skip_first_n_tokens: Tokens not to write at the start of the range.
         schedule: The registered layer launch schedule.
-        progress: The worker's shared layer progress record.
+        progress: This retrieve's layer progress publisher.
         event_pool: The daemon's per-layer launch events.
         retrieve_generation: The worker's generation for this retrieve; the
             pump numbers its loads independently, so the sink maps one to
@@ -189,7 +189,7 @@ class PipelinedLoadRequest:
     objects: ObjectTable
     skip_first_n_tokens: int
     schedule: LayerwiseSchedule
-    progress: LayerProgressRecord
+    progress: LayerProgressPublisher
     event_pool: DaemonLayerLaunchEventPool
     retrieve_generation: int
     transfer_key: str

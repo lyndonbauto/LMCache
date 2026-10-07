@@ -1024,6 +1024,16 @@ class StorageManager:
         _, adapter = self._first_ready_pipelined_adapter("a pipelined record cap")
         return adapter.pipelined_max_record_bytes()
 
+    def pipelined_window_count(self) -> int:
+        """Return how many RDMA windows L1 reserves for pipelined fetches.
+
+        At most this many pipelined fetches can hold a window at once.
+
+        Returns:
+            The number of windows; 0 when no adapter enables RDMA reception.
+        """
+        return self._l1_manager.get_rdma_window_count()
+
     def pipelined_window_placer(
         self,
         group_layout_descs: Mapping[int, MemoryLayoutDesc],

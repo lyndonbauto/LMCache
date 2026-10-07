@@ -24,19 +24,24 @@ Publication invariant (seqlock on the legacy three-field layout):
     retried. This prevents a waiter from observing a new generation paired
     with a previous retrieve's watermark.
 
-Concurrent retrieves on one worker instance are serialized by the MP server's
-affinity pool (one in-flight blocking retrieve per worker identity). The shared
-record therefore tracks a single active retrieve generation at a time.
+The record holds a single generation. A worker waits only on its latest
+retrieve's generation, so when several of its retrieves are in flight at once
+(a pipelined fetch runs off the request thread), the daemon publishes through
+:class:`~lmcache.v1.multiprocess.retrieve_progress.ConcurrentRetrieveProgress`,
+which reports the latest generation with the smallest watermark of every
+retrieve still loading.
 """
 
 # Standard
 from collections.abc import Callable
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from multiprocessing import resource_tracker, shared_memory
 import os
 import struct
 import sys
 import time
+from typing import Protocol
 
 # First Party
 from lmcache import torch_dev, torch_device_type
@@ -243,6 +248,51 @@ class LayerProgressRecord:
         if record_generation < generation:
             self.begin_retrieve(generation)
         self.mark_retrieve_failed()
+
+    def launching(self) -> AbstractContextManager[None]:
+        """Guard one launch's use of the shared GPU staging; a no-op here.
+
+        A bare record serves one retrieve at a time, so no other launch can
+        interleave with this one.
+
+        Returns:
+            A context manager that does nothing.
+        """
+        return nullcontext()
+
+
+class LayerProgressPublisher(Protocol):
+    """The daemon's writer side of one retrieve's layer progress.
+
+    :class:`LayerProgressRecord` implements it for a worker whose retrieves
+    run one at a time;
+    :class:`~lmcache.v1.multiprocess.retrieve_progress.RetrieveProgress` for
+    one of several retrieves in flight at once.
+    """
+
+    def read(self) -> LayerProgressSnapshot:
+        """Return the progress as this retrieve sees it."""
+        ...
+
+    def begin_retrieve(self, generation: int) -> None:
+        """Start retrieve ``generation``, with nothing loaded yet."""
+        ...
+
+    def report_launch_recorded(self, watermark: int) -> None:
+        """Publish that this retrieve's launches through ``watermark`` are recorded."""
+        ...
+
+    def fail_retrieve(self, generation: int) -> None:
+        """Publish that retrieve ``generation`` failed."""
+        ...
+
+    def launching(self) -> AbstractContextManager[None]:
+        """Hold the worker's shared GPU staging for one launch.
+
+        Every copy that stages through the cache context's temporary buffers
+        runs inside it, so two retrieves' launches never interleave there.
+        """
+        ...
 
 
 class LayerLaunchEventPool:

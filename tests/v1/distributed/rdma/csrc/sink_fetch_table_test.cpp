@@ -90,7 +90,9 @@ void test_one_batch_per_layer_in_plan_order() {
             begun.batches[2].layer_id == 1,
         "layers come in order of first appearance");
   for (uint32_t i = 0; i < begun.batches.size(); ++i) {
-    check(begun.batches[i].priority == i, "priority is the layer's ordinal");
+    check(i == 0 ||
+              begun.batches[i].priority > begun.batches[i - 1].priority,
+          "priority rises in plan order");
     check(begun.batches[i].generation == begun.generation,
           "every batch quotes the fetch's generation");
   }
@@ -165,6 +167,15 @@ void test_one_fetch_per_window() {
   table.finish(second.generation);
   check(!table.has_active_request(), "finishing frees both windows");
   table.begin(plan({0}, 0));
+}
+
+void test_older_fetch_is_placed_first() {
+  std::cout << "every layer of an older fetch is placed first\n";
+  SinkFetchTable table(kWindowBytes, 2);
+  const BegunFetch older = table.begin(plan({0, 1, 2}, 0));
+  const BegunFetch newer = table.begin(plan({0, 1, 2}, 1));
+  check(older.batches.back().priority < newer.batches.front().priority,
+        "the older fetch's last layer outranks the newer fetch's first");
 }
 
 void test_malformed_plans_are_refused() {
@@ -251,6 +262,7 @@ int main() {
   test_layer_is_ready_only_when_every_slot_landed();
   test_failed_slot_makes_layer_unservable();
   test_one_fetch_per_window();
+  test_older_fetch_is_placed_first();
   test_malformed_plans_are_refused();
   test_constructor_rejects_empty_ranges();
   test_finish_and_abandon();

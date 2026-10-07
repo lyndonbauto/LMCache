@@ -3,11 +3,17 @@
 
 # Standard
 from collections.abc import Iterable
-from dataclasses import dataclass
+from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import wait as wait_futures
+from contextlib import AbstractContextManager, nullcontext
+from dataclasses import dataclass, field
 from multiprocessing import shared_memory
 from typing import Any, Sequence
 import threading
 import time
+
+# Third Party
+import torch
 
 # First Party
 from lmcache import torch_dev
@@ -46,6 +52,7 @@ from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.layer_progress import (
     DaemonLayerLaunchEventPool,
+    LayerProgressPublisher,
     LayerProgressRecord,
     attach_layer_progress_shm,
 )
@@ -76,6 +83,11 @@ from lmcache.v1.multiprocess.pipelined_loading import (
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
 from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.retrieve_progress import (
+    ConcurrentRetrieveProgress,
+    RetrieveProgress,
+    RetrieveState,
+)
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
@@ -194,6 +206,39 @@ def all_null_chunk_masks(
     return masks
 
 
+def _private_block_ids(block_ids_gpu: list[torch.Tensor]) -> list[torch.Tensor]:
+    """Copy staged block ids out of the cache context's shared staging buffer.
+
+    ``downsample_and_stage_block_ids`` returns views of one buffer per cache
+    context, which the next retrieve or store overwrites. A fetch that
+    outlives its request needs its own copy. The copies are queued on the
+    current stream, after the staging copy.
+
+    Args:
+        block_ids_gpu: The staged views, one per kernel group.
+
+    Returns:
+        Private copies, one per kernel group.
+    """
+    return [ids.clone() for ids in block_ids_gpu]
+
+
+def _entry_staging(entry: "ContextEntry") -> AbstractContextManager[Any]:
+    """Hold ``entry``'s GPU staging for a transfer.
+
+    Args:
+        entry: The worker's registration.
+
+    Returns:
+        The worker's staging lock when its retrieves may run in the
+        background, otherwise a no-op.
+    """
+    progress = getattr(entry, "retrieve_progress", None)
+    if progress is None:
+        return nullcontext()
+    return progress.staging()
+
+
 def _publish_layerwise_retrieve_terminal(
     ctx: MPCacheServerContext,
     entry: "ContextEntry | None",
@@ -202,12 +247,18 @@ def _publish_layerwise_retrieve_terminal(
 ) -> None:
     """Publish that layerwise retrieve ``retrieve_generation`` failed.
 
-    Uses :meth:`LayerProgressRecord.fail_retrieve`, so a newer retrieve's
+    Through the entry's :class:`ConcurrentRetrieveProgress` when it has one,
+    which also stops the step's other in-flight retrieves; otherwise with
+    :meth:`LayerProgressRecord.fail_retrieve`. Either way a newer retrieve's
     record is never touched. Callers publish only before any layer copy of
     this retrieve was queued, or after ``LayerwiseH2DRetrieve.mark_failed``
     already drained them.
     """
     if not ctx.use_layerwise or retrieve_generation <= 0:
+        return
+    retrieve_progress = getattr(entry, "retrieve_progress", None)
+    if retrieve_progress is not None:
+        retrieve_progress.fail_generation(retrieve_generation)
         return
     progress = entry.layer_progress if entry is not None else None
     shm_to_close: shared_memory.SharedMemory | None = None
@@ -240,6 +291,106 @@ class _DeferredKeys:
     outcome: PipelinedOutcome = PipelinedOutcome.NOT_DEFERRED
 
 
+class _InflightFetches:
+    """The background pipelined fetches of one worker; thread-safe."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._futures: set[Future[None]] = set()
+
+    def add(self, future: Future[None]) -> None:
+        """Track ``future`` until it is done."""
+        with self._lock:
+            self._futures.add(future)
+        future.add_done_callback(self._discard)
+
+    def wait(self, timeout_seconds: float) -> int:
+        """Wait for every tracked fetch to end.
+
+        Args:
+            timeout_seconds: Longest to wait in total.
+
+        Returns:
+            How many fetches were still running when the wait gave up.
+        """
+        with self._lock:
+            pending = set(self._futures)
+        if not pending:
+            return 0
+        _, not_done = wait_futures(pending, timeout=timeout_seconds)
+        return len(not_done)
+
+    def _discard(self, future: Future[None]) -> None:
+        with self._lock:
+            self._futures.discard(future)
+
+
+@dataclass(frozen=True)
+class _RetrieveEnd:
+    """What a retrieve releases and reports when it ends.
+
+    Attributes:
+        key: The retrieve's key.
+        instance_id: The worker instance.
+        model_name: The registered model.
+        transfer_key: The retrieve's observability key.
+        read_keys: Keys read-locked for this retrieve and read by it.
+        unread_locked: Keys locked for it that it did not read; released too.
+        fetched_in_window: Deferred keys delivered from an RDMA window.
+        expected_retained: How many objects a full hit reads.
+        num_chunks: Chunks in the retrieve's range.
+        total_bytes: Bytes read from L1.
+        outcome: How the deferred keys were served.
+        deferred_count: How many deferred keys the retrieve claimed.
+    """
+
+    key: IPCCacheServerKey
+    instance_id: int
+    model_name: str
+    transfer_key: str
+    read_keys: tuple[ObjectKey, ...]
+    unread_locked: tuple[ObjectKey, ...]
+    fetched_in_window: tuple[ObjectKey, ...]
+    expected_retained: int
+    num_chunks: int
+    total_bytes: int
+    outcome: PipelinedOutcome
+    deferred_count: int
+
+
+@dataclass(frozen=True)
+class _DeferredFetchJob:
+    """One retrieve's pipelined fetch, handed to the fetch pool.
+
+    Attributes:
+        entry: The worker's registration.
+        progress: The retrieve's share of the worker's progress record.
+        obj_keys_per_obj_group: The request's keys, one list per object
+            group.
+        block_ids_gpu: The destination blocks, copied out of the cache
+            context's shared staging buffer, which the next retrieve or
+            store overwrites.
+        memory_objs_by_group: The L1 objects, ``None`` where deferred.
+        keys_to_fetch: The deferred keys to fetch.
+        skip_first_n_tokens: Tokens not to write at the start of the range.
+        retrieve_generation: The worker's generation for the retrieve.
+        end: What to release and report when the fetch ends; its
+            ``read_keys`` are the L1 part's.
+        started: ``time.perf_counter()`` when the retrieve arrived.
+    """
+
+    entry: "ContextEntry"
+    progress: RetrieveProgress
+    obj_keys_per_obj_group: list[list[ObjectKey]]
+    block_ids_gpu: list[torch.Tensor]
+    memory_objs_by_group: list[list[MemoryObj | None]]
+    keys_to_fetch: tuple[ObjectKey, ...]
+    skip_first_n_tokens: int
+    retrieve_generation: int
+    end: _RetrieveEnd
+    started: float
+
+
 @dataclass
 class ContextEntry:
     """Registered cache context metadata for a single worker instance.
@@ -266,6 +417,9 @@ class ContextEntry:
         layer_progress: Shared progress record for layerwise retrieve waits.
         daemon_layer_event_pool: Daemon-owned IPC events recorded per ordinal.
         layer_progress_shm: Attached shared-memory segment backing ``layer_progress``.
+        retrieve_progress: Publishes ``layer_progress`` for every retrieve in
+            flight, and guards the cache context's GPU staging; set with it.
+        inflight_fetches: The pipelined fetches running in the background.
     """
 
     cache_context: BaseCacheContext
@@ -278,6 +432,8 @@ class ContextEntry:
     layer_progress: LayerProgressRecord | None = None
     daemon_layer_event_pool: DaemonLayerLaunchEventPool | None = None
     layer_progress_shm: shared_memory.SharedMemory | None = None
+    retrieve_progress: ConcurrentRetrieveProgress | None = None
+    inflight_fetches: _InflightFetches = field(default_factory=_InflightFetches)
 
 
 class LMCacheDrivenTransferModule(InstanceLivenessTarget):
@@ -308,6 +464,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         # empty_cache (leaf-lock invariant: no thread holds two locks).
         self._lock = threading.Lock()
         self._fetch_models = FetchModelRegistry()
+        # Runs pipelined fetches off the request thread; one thread per RDMA
+        # window, since a fetch holds one. Created on the first deferred
+        # fetch; None while no window exists.
+        self._fetch_pool: ThreadPoolExecutor | None = None
+        self._fetch_pool_lock = threading.Lock()
 
         # Route finish_write / finish_read_prefetched through a C++ host
         # callback so the driver thread doesn't acquire the GIL.
@@ -514,6 +675,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         if not entries:
             return
         for entry in entries:
+            self._stop_inflight_fetches(entry)
             if entry.layer_progress_shm is not None:
                 entry.layer_progress_shm.close()
                 entry.layer_progress_shm = None
@@ -567,6 +729,10 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             entries = list(self._cache_contexts.values())
             self._cache_contexts.clear()
         self._release_entries(entries)
+        with self._fetch_pool_lock:
+            pool, self._fetch_pool = self._fetch_pool, None
+        if pool is not None:
+            pool.shutdown(wait=True)
 
     @request_handler(RequestType.REGISTER_KV_CACHE)
     def register_kv_cache(
@@ -708,6 +874,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         layer_progress: LayerProgressRecord | None = None
         layer_progress_shm: shared_memory.SharedMemory | None = None
         daemon_layer_event_pool: DaemonLayerLaunchEventPool | None = None
+        retrieve_progress: ConcurrentRetrieveProgress | None = None
         response_handles = []
         if self._ctx.use_layerwise:
             engine_layers = [list(group.layer_indices) for group in engine_group_infos]
@@ -734,6 +901,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
             layer_progress_shm = attach_layer_progress_shm(instance_id)
             layer_progress = LayerProgressRecord.from_shared_memory(layer_progress_shm)
+            retrieve_progress = ConcurrentRetrieveProgress(
+                layer_progress, launch_count, cache_context.stream.synchronize
+            )
 
         with self._lock:
             self._cache_contexts[instance_id] = ContextEntry(
@@ -747,6 +917,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 layer_progress=layer_progress,
                 daemon_layer_event_pool=daemon_layer_event_pool,
                 layer_progress_shm=layer_progress_shm,
+                retrieve_progress=retrieve_progress,
             )
 
         logger.info(
@@ -982,16 +1153,17 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     ]
 
                     # NOTE: batch_size must stay 1 for store.
-                    transfer_kv_per_object_group(
-                        cache_context,
-                        block_ids_per_group_gpu,
-                        memory_objs,
-                        object_group_id=obj_group_id,
-                        batch_size=1,
-                        skip_first_n_tokens=0,
-                        direction=lmcache_native.TransferDirection.D2H,
-                        transfer_key=transfer_key,
-                    )
+                    with _entry_staging(entry):
+                        transfer_kv_per_object_group(
+                            cache_context,
+                            block_ids_per_group_gpu,
+                            memory_objs,
+                            object_group_id=obj_group_id,
+                            batch_size=1,
+                            skip_first_n_tokens=0,
+                            direction=lmcache_native.TransferDirection.D2H,
+                            transfer_key=transfer_key,
+                        )
 
                 store_succeeded = True
             except Exception:
@@ -1227,6 +1399,8 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             claimed: tuple[ObjectKey, ...] = ()
             outcome = PipelinedOutcome.NOT_DEFERRED
             fetched_in_window: tuple[ObjectKey, ...] = ()
+            share: RetrieveProgress | None = None
+            handed_off = False
             try:
                 claimed = self._claim_deferred_keys(
                     key, obj_keys_per_obj_group, group_skips, skipped_groups
@@ -1273,16 +1447,17 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         memory_objs_by_group[obj_group_id] = memory_objs
 
                         if not layerwise_active:
-                            transfer_kv_per_object_group(
-                                cache_context,
-                                block_ids_per_group_gpu,
-                                memory_objs,
-                                object_group_id=obj_group_id,
-                                batch_size=cache_context.max_batch_size,
-                                skip_first_n_tokens=skip_first_n_tokens,
-                                direction=lmcache_native.TransferDirection.H2D,
-                                transfer_key=transfer_key,
-                            )
+                            with _entry_staging(entry):
+                                transfer_kv_per_object_group(
+                                    cache_context,
+                                    block_ids_per_group_gpu,
+                                    memory_objs,
+                                    object_group_id=obj_group_id,
+                                    batch_size=cache_context.max_batch_size,
+                                    skip_first_n_tokens=skip_first_n_tokens,
+                                    direction=lmcache_native.TransferDirection.H2D,
+                                    transfer_key=transfer_key,
+                                )
                         prefetched_keys.extend(l1_keys)
 
                 if layerwise_active and retrieve_succeeded:
@@ -1292,14 +1467,57 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             "retrieve_generation from the worker"
                         )
                     schedule = entry.layerwise_schedule
-                    progress = entry.layer_progress
+                    record = entry.layer_progress
                     event_pool = entry.daemon_layer_event_pool
-                    if schedule is None or progress is None or event_pool is None:
+                    if schedule is None or record is None or event_pool is None:
                         raise RuntimeError(
                             "layerwise retrieve missing schedule or progress state"
                         )
+                    progress: LayerProgressPublisher = record
+                    concurrent = getattr(entry, "retrieve_progress", None)
+                    if concurrent is not None:
+                        share = concurrent.register(retrieve_generation)
+                        progress = share
                     delivery = DeferredLoad.WHOLE
-                    if keys_to_fetch:
+                    pool = (
+                        self._deferred_fetch_pool()
+                        if keys_to_fetch and share is not None
+                        else None
+                    )
+                    if pool is not None and share is not None:
+                        # The fetch holds the request until its last layer
+                        # lands; run it off the request thread so the
+                        # worker's next retrieve can start (D-27).
+                        job = _DeferredFetchJob(
+                            entry=entry,
+                            progress=share,
+                            obj_keys_per_obj_group=obj_keys_per_obj_group,
+                            block_ids_gpu=_private_block_ids(block_ids_per_group_gpu),
+                            memory_objs_by_group=memory_objs_by_group,
+                            keys_to_fetch=keys_to_fetch,
+                            skip_first_n_tokens=skip_first_n_tokens,
+                            retrieve_generation=retrieve_generation,
+                            end=_RetrieveEnd(
+                                key=key,
+                                instance_id=instance_id,
+                                model_name=model_name,
+                                transfer_key=transfer_key,
+                                read_keys=tuple(prefetched_keys),
+                                unread_locked=deferred.locked,
+                                fetched_in_window=(),
+                                expected_retained=expected_retained,
+                                num_chunks=num_chunks,
+                                total_bytes=total_bytes,
+                                outcome=PipelinedOutcome.FAILED,
+                                deferred_count=len(claimed),
+                            ),
+                            started=st,
+                        )
+                        entry.inflight_fetches.add(
+                            pool.submit(self._run_deferred_fetch, job)
+                        )
+                        handed_off = True
+                    elif keys_to_fetch:
                         table = ObjectTable(memory_objs_by_group)
                         deferred_fetch = fetch_deferred_objects(
                             self._ctx.storage_manager,
@@ -1327,7 +1545,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         outcome = deferred_fetch.outcome
                         if delivery is DeferredLoad.PIPELINED:
                             fetched_in_window = keys_to_fetch
-                    if delivery is DeferredLoad.WHOLE:
+                    if not handed_off and delivery is DeferredLoad.WHOLE:
                         transfer_kv_layerwise_h2d(
                             cache_context,
                             block_ids_per_group_gpu,
@@ -1354,40 +1572,27 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     )
             finally:
                 event_backend.record_event(event, cache_context.stream)
-                retrieved_count = len(set(prefetched_keys).union(fetched_in_window))
-                read_keys = set(prefetched_keys)
-                prefetched_keys.extend(k for k in deferred.locked if k not in read_keys)
-                if prefetched_keys:
-                    submit_callback_to_stream(
-                        cache_context.cupy_stream,
-                        "finish_read_prefetched",
-                        prefetched_keys,
+                if not handed_off:
+                    if share is not None:
+                        share.close()
+                    self._end_retrieve(
+                        cache_context,
+                        _RetrieveEnd(
+                            key=key,
+                            instance_id=instance_id,
+                            model_name=model_name,
+                            transfer_key=transfer_key,
+                            read_keys=tuple(prefetched_keys),
+                            unread_locked=deferred.locked,
+                            fetched_in_window=fetched_in_window,
+                            expected_retained=expected_retained,
+                            num_chunks=num_chunks,
+                            total_bytes=total_bytes,
+                            outcome=outcome,
+                            deferred_count=len(claimed),
+                        ),
                     )
-                num_tokens = (
-                    num_chunks * self._ctx.chunk_size
-                    if retrieved_count == expected_retained
-                    else 0
-                )
-                self._ctx.event_bus.publish_on_stream(
-                    cache_context.cupy_stream,
-                    Event(
-                        event_type=EventType.MP_RETRIEVE_END,
-                        session_id=key.request_id,
-                        metadata={
-                            "retrieved_count": retrieved_count,
-                            "device": str(cache_context.device),
-                            "engine_id": instance_id,
-                            "model_name": model_name,
-                            "cache_salt": key.cache_salt,
-                            "total_bytes": total_bytes,
-                            "num_tokens": num_tokens,
-                            "transfer_key": transfer_key,
-                            "pipelined_outcome": outcome.value,
-                            "deferred_count": len(claimed),
-                        },
-                    ),
-                )
-        if retrieve_succeeded:
+        if retrieve_succeeded and not handed_off:
             tokens_retrieved = num_chunks * self._ctx.chunk_size
             ed = time.perf_counter()
             logger.info(
@@ -1400,6 +1605,199 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             event_backend.export_event(event, cache_context.device),
             retrieve_succeeded,
         )
+
+    def _end_retrieve(self, cache_context: BaseCacheContext, end: _RetrieveEnd) -> None:
+        """Release a retrieve's read locks and publish its ``MP_RETRIEVE_END``.
+
+        Both are stream-ordered after the retrieve's copies, so the locks are
+        released only once nothing reads the objects.
+
+        Args:
+            cache_context: The worker's cache context.
+            end: What the retrieve read, locked and delivered.
+        """
+        read = set(end.read_keys)
+        retrieved_count = len(read.union(end.fetched_in_window))
+        release = list(end.read_keys)
+        release.extend(k for k in end.unread_locked if k not in read)
+        if release:
+            submit_callback_to_stream(
+                cache_context.cupy_stream, "finish_read_prefetched", release
+            )
+        num_tokens = (
+            end.num_chunks * self._ctx.chunk_size
+            if retrieved_count == end.expected_retained
+            else 0
+        )
+        self._ctx.event_bus.publish_on_stream(
+            cache_context.cupy_stream,
+            Event(
+                event_type=EventType.MP_RETRIEVE_END,
+                session_id=end.key.request_id,
+                metadata={
+                    "retrieved_count": retrieved_count,
+                    "device": str(cache_context.device),
+                    "engine_id": end.instance_id,
+                    "model_name": end.model_name,
+                    "cache_salt": end.key.cache_salt,
+                    "total_bytes": end.total_bytes,
+                    "num_tokens": num_tokens,
+                    "transfer_key": end.transfer_key,
+                    "pipelined_outcome": end.outcome.value,
+                    "deferred_count": end.deferred_count,
+                },
+            ),
+        )
+
+    def _deferred_fetch_pool(self) -> ThreadPoolExecutor | None:
+        """Return the pool that runs pipelined fetches, creating it once.
+
+        Returns:
+            A pool with one thread per RDMA window, or ``None`` when L1 has
+            no windows (the fetch then runs on the request thread).
+        """
+        with self._fetch_pool_lock:
+            if self._fetch_pool is None:
+                windows = self._ctx.storage_manager.pipelined_window_count()
+                if windows <= 0:
+                    return None
+                self._fetch_pool = ThreadPoolExecutor(
+                    max_workers=windows,
+                    thread_name_prefix="lmcache-pipelined-fetch",
+                )
+            return self._fetch_pool
+
+    def _run_deferred_fetch(self, job: _DeferredFetchJob) -> None:
+        """Run one retrieve's pipelined fetch on a fetch-pool thread.
+
+        Fetches the deferred objects layer by layer (or whole, if refused)
+        and loads every layer of the request, then releases the request's
+        read locks and publishes its ``MP_RETRIEVE_END``. A failure is
+        published through the retrieve's progress, which stops the step's
+        other retrieves; the worker then reports the step's blocks for
+        recompute. Never raises.
+
+        Args:
+            job: The retrieve's state, handed over by :meth:`retrieve`.
+        """
+        entry = job.entry
+        cache_context = entry.cache_context
+        end = job.end
+        read_keys = list(end.read_keys)
+        outcome = PipelinedOutcome.FAILED
+        fetched_in_window: tuple[ObjectKey, ...] = ()
+        succeeded = False
+        with (
+            torch_dev.device(cache_context.device),
+            torch_dev.stream(cache_context.stream),
+        ):
+            try:
+                schedule = entry.layerwise_schedule
+                event_pool = entry.daemon_layer_event_pool
+                if schedule is None or event_pool is None:
+                    raise RuntimeError("layerwise retrieve missing schedule state")
+                if job.progress.state is RetrieveState.STOPPED:
+                    raise RuntimeError(
+                        f"retrieve generation {job.retrieve_generation} was "
+                        "stopped before its fetch started"
+                    )
+                world_size = end.key.world_size
+                table = ObjectTable(job.memory_objs_by_group)
+                deferred_fetch = fetch_deferred_objects(
+                    self._ctx.storage_manager,
+                    self._ctx.pipelined_models.find(end.model_name, world_size),
+                    job.obj_keys_per_obj_group,
+                    job.keys_to_fetch,
+                    self._pipelined_sink_factory,
+                    PipelinedLoadRequest(
+                        cache_context=cache_context,
+                        block_ids_gpu=job.block_ids_gpu,
+                        objects=table,
+                        skip_first_n_tokens=job.skip_first_n_tokens,
+                        schedule=schedule,
+                        progress=job.progress,
+                        event_pool=event_pool,
+                        retrieve_generation=job.retrieve_generation,
+                        transfer_key=end.transfer_key,
+                    ),
+                    self._group_layout_descs(end.model_name, world_size),
+                    self._ctx.pipelined_fetch,
+                )
+                read_keys.extend(deferred_fetch.locked_keys)
+                outcome = deferred_fetch.outcome
+                if deferred_fetch.load is DeferredLoad.PIPELINED:
+                    fetched_in_window = job.keys_to_fetch
+                else:
+                    transfer_kv_layerwise_h2d(
+                        cache_context,
+                        job.block_ids_gpu,
+                        table.by_group(),
+                        job.skip_first_n_tokens,
+                        schedule,
+                        job.progress,
+                        event_pool,
+                        job.retrieve_generation,
+                        transfer_key=end.transfer_key,
+                    )
+                succeeded = True
+            except Exception:
+                logger.exception(
+                    "Pipelined fetch for request %s failed", end.key.request_id
+                )
+                try:
+                    job.progress.fail_retrieve(job.retrieve_generation)
+                except Exception:
+                    logger.exception("Publishing the fetch failure failed")
+            finally:
+                job.progress.close()
+                self._end_retrieve(
+                    cache_context,
+                    _RetrieveEnd(
+                        key=end.key,
+                        instance_id=end.instance_id,
+                        model_name=end.model_name,
+                        transfer_key=end.transfer_key,
+                        read_keys=tuple(read_keys),
+                        unread_locked=end.unread_locked,
+                        fetched_in_window=fetched_in_window,
+                        expected_retained=end.expected_retained,
+                        num_chunks=end.num_chunks,
+                        total_bytes=end.total_bytes,
+                        outcome=outcome,
+                        deferred_count=end.deferred_count,
+                    ),
+                )
+        if succeeded:
+            logger.info(
+                "Retrieved %d tokens in %.3f seconds (pipelined fetch)",
+                end.num_chunks * self._ctx.chunk_size,
+                time.perf_counter() - job.started,
+            )
+
+    def _stop_inflight_fetches(self, entry: ContextEntry) -> None:
+        """Stop a worker's background fetches and wait for them to end.
+
+        Called before its KV cache and progress segment are released, so no
+        fetch copies into them afterwards (D-28).
+
+        Args:
+            entry: The worker's registration, being released.
+        """
+        progress = getattr(entry, "retrieve_progress", None)
+        if progress is not None:
+            progress.stop_all()
+        inflight = getattr(entry, "inflight_fetches", None)
+        if inflight is None:
+            return
+        config = self._ctx.pipelined_fetch
+        left = inflight.wait(
+            config.layer_timeout_seconds + config.whole_load_timeout_seconds
+        )
+        if left:
+            logger.error(
+                "%d pipelined fetch(es) still running while their worker unregisters",
+                left,
+            )
 
     def _publish_token_bindings(
         self, key: IPCCacheServerKey, obj_keys: list[ObjectKey]
