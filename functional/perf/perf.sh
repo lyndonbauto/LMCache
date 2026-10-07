@@ -41,6 +41,8 @@
 #   qpstore:<L>, qplw:<L>:<qp>, timeline:<qp>
 #              the queue-pair scan (functional/perf2): see sec_qpstore
 #   idle       wait for the GPU to be idle and print USED_VRAM
+#   resume:<L> after a host reboot, restart the server on qpstore:<L>'s data
+#              file without deleting it
 # Environment: LENGTHS ("8192 16384 32768 65536 130816"), CONCS ("1 2 4 8 16
 #   32"), CAP (--pipelined-max-chunks, default 64 = 16k, the longest prompt of
 #   phase 1), WINDOW_COUNT (8), L1_GEN_GB (100: general L1; lw adds the
@@ -153,7 +155,8 @@ aero_start() {
   [ "${2:-}" = smoke ] && fs_gb=8
   [ "${2:-}" = smoke2 ] && fs_gb=32
   bash $H/kvsink_server.sh stop >/dev/null
-  rm -f "$DATA_FILE"; mkdir -p "$DATA_DIR"
+  [ "${KEEP_DATA:-0}" = 1 ] || rm -f "$DATA_FILE"
+  mkdir -p "$DATA_DIR"
   local avail; avail=$(free_gb "$DATA_DIR")
   if [ $((avail - fs_gb)) -lt "$MIN_FREE_GB" ]; then
     progress "refusing: a ${fs_gb}G data file would leave $((avail - fs_gb)) GB free (< $MIN_FREE_GB)"; return 1
@@ -409,6 +412,14 @@ sec_timeline() {
   kill "$toploop" 2>/dev/null; pkill -P "$toploop" 2>/dev/null
 }
 sec_idle() { progress "idle: $(wait_idle)"; }
+# resume:<len>: restart the server on the data file a qpstore:<len> left (after
+# a host reboot), without deleting it, and log its record count.
+sec_resume() {
+  [ -f "$DATA_FILE" ] || { progress "resume: no data file $DATA_FILE"; return 1; }
+  KEEP_DATA=1 aero_start "$1" || return 1
+  sleep 5
+  progress "resume: $(python3 $H/as_info.py "$KVSINK_PORT" namespace/lmcache | tr ';' '\n' | grep -E '^(objects|data_used_bytes)=' | paste -sd' ')"
+}
 
 mkdir -p $S
 for sec in "$@"; do
@@ -416,7 +427,8 @@ for sec in "$@"; do
   case $sec in cached:*) sec_cached "${sec#cached:}";; cached2:*) sec_cached2 "${sec#cached2:}";;
     finish:*) sec_finish "${sec#finish:}";;
     lwwait:*) sec_lwwait "${sec#lwwait:}";; qpstore:*) sec_qpstore "${sec#qpstore:}";;
-    qplw:*) sec_qplw "${sec#qplw:}";; timeline:*) sec_timeline "${sec#timeline:}";; *) "sec_$sec";; esac
+    qplw:*) sec_qplw "${sec#qplw:}";; timeline:*) sec_timeline "${sec#timeline:}";;
+    resume:*) sec_resume "${sec#resume:}";; *) "sec_$sec";; esac
   progress "section $sec finished"
 done
 echo "##### PERF DONE $(date -u +%T) $(wait_idle)"
