@@ -78,9 +78,11 @@ from lmcache.v1.multiprocess.pipelined_loading import (
     fetch_deferred_objects,
 )
 from lmcache.v1.multiprocess.pipelined_sink import MultiprocessPipelinedSinkFactory
+from lmcache.v1.multiprocess.retrieve_sequencer import RetrieveLaunchSequencer
 from lmcache.v1.multiprocess.transfer_context.worker_transfer import (
     LAYERWISE_WAIT_MARGIN_SECONDS,
 )
+from lmcache.v1.platform.base.transfer_gate import TransferGate
 
 # Local
 from .aerospike_harness import WINDOW_BYTES, FabricFreeClient, fabric_free_connector
@@ -432,15 +434,20 @@ class _Daemon:
         schedule = _schedule()
         launches = schedule.launch_count()
         staging = _Staging()
+        cache_context = staging.cache_context()
         request = PipelinedLoadRequest(
-            cache_context=staging.cache_context(),
+            cache_context=cache_context,
             block_ids_gpu=[torch.arange(NUM_CHUNKS) for _ in KERNEL_LAYERS],
             objects=table,
             skip_first_n_tokens=0,
             schedule=schedule,
-            progress=progress,
-            event_pool=DaemonLayerLaunchEventPool(
-                [object()] * launches, _FakeEventBackend(), launches
+            sequencer=RetrieveLaunchSequencer(
+                cache_context.stream,
+                progress,
+                DaemonLayerLaunchEventPool(
+                    [object()] * launches, _FakeEventBackend(), launches
+                ),
+                TransferGate(),
             ),
             retrieve_generation=RETRIEVE_GENERATION,
             transfer_key="retrieve-key",

@@ -108,8 +108,7 @@ class MultiprocessPipelinedSinkFactory:
             request.objects,
             request.skip_first_n_tokens,
             request.schedule,
-            request.progress,
-            request.event_pool,
+            request.sequencer,
             request.retrieve_generation,
         )
         return PipelinedRetrieveSink(request.schedule, launcher)

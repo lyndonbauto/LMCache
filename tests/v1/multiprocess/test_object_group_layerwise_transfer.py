@@ -36,6 +36,22 @@ from lmcache.v1.multiprocess.layerwise_schedule import LayerwiseSchedule
 from lmcache.v1.multiprocess.layerwise_sink import MultiprocessLayerLoadSink
 from lmcache.v1.multiprocess.pipelined_loading import ObjectTable, PipelinedLoadRequest
 from lmcache.v1.multiprocess.pipelined_sink import MultiprocessPipelinedSinkFactory
+from lmcache.v1.multiprocess.retrieve_sequencer import RetrieveLaunchSequencer
+from lmcache.v1.platform.base.transfer_gate import TransferGate
+
+
+def _seq(
+    cache_context: object,
+    progress: LayerProgressRecord,
+    event_pool: DaemonLayerLaunchEventPool,
+) -> RetrieveLaunchSequencer:
+    """A sequencer for one cache context's retrieves, publishing to ``progress``."""
+    return RetrieveLaunchSequencer(
+        cache_context.stream,  # type: ignore[attr-defined]
+        progress,
+        event_pool,
+        TransferGate(),
+    )
 
 
 def _make_cache_context() -> MagicMock:
@@ -114,8 +130,7 @@ def _make_retrieve_on(
         object_group_transfer.FixedMemoryObjects([[MagicMock()]]),
         0,
         schedule,
-        progress,
-        _RecordingEventPool(schedule.launch_count()),
+        _seq(cache_context, progress, _RecordingEventPool(schedule.launch_count())),
         retrieve_generation,
         staging=object_group_transfer.LayerStaging.WHOLE_OBJECT,
     )
@@ -240,14 +255,18 @@ class _RealStaging:
         staging: object_group_transfer.LayerStaging,
     ) -> object_group_transfer.LayerwiseH2DRetrieve:
         """Build a retrieve reading its one chunk's object from ``objects``."""
+        cache_context = self.cache_context()
         return object_group_transfer.LayerwiseH2DRetrieve(
-            self.cache_context(),
+            cache_context,
             [torch.tensor([0, 1]), torch.tensor([0, 1])],
             objects,
             0,
             schedule,
-            LayerProgressRecord(bytearray(LayerProgressRecord.RECORD_SIZE)),
-            _RecordingEventPool(schedule.launch_count()),
+            _seq(
+                cache_context,
+                LayerProgressRecord(bytearray(LayerProgressRecord.RECORD_SIZE)),
+                _RecordingEventPool(schedule.launch_count()),
+            ),
             1,
             staging=staging,
         )
@@ -466,8 +485,7 @@ def test_transfer_kv_layerwise_records_before_watermark(
         memory_objs,
         0,
         schedule,
-        progress,
-        pool,
+        _seq(cache_context, progress, pool),
         1,
         transfer_key="k",
     )
@@ -561,8 +579,7 @@ def test_transfer_kv_layerwise_batch_setup_once_per_batch(
         memory_objs,
         0,
         schedule,
-        progress,
-        pool,
+        _seq(cache_context, progress, pool),
         1,
         transfer_key="k",
     )
@@ -926,14 +943,18 @@ def test_a_one_batch_retrieve_stages_each_layer_at_its_own_launch(
         object_group_transfer.device_ops, "multi_layer_block_kv_transfer", check_kernel
     )
 
+    cache_context = real.cache_context()
     object_group_transfer.transfer_kv_layerwise_h2d(
-        real.cache_context(),
+        cache_context,
         [torch.tensor([0, 1]), torch.tensor([0, 1])],
         [[real.memory_obj]],
         0,
         schedule,
-        LayerProgressRecord(bytearray(LayerProgressRecord.RECORD_SIZE)),
-        _RecordingEventPool(schedule.launch_count()),
+        _seq(
+            cache_context,
+            LayerProgressRecord(bytearray(LayerProgressRecord.RECORD_SIZE)),
+            _RecordingEventPool(schedule.launch_count()),
+        ),
         1,
         transfer_key="k",
     )
@@ -982,14 +1003,14 @@ def test_per_layer_staging_rejects_gds_objects_before_publishing() -> None:
     """GDS objects only transfer whole, so per-layer setup refuses them."""
     schedule = LayerwiseSchedule([[0, 1]])
     progress = LayerProgressRecord(bytearray(LayerProgressRecord.RECORD_SIZE))
+    cache_context = _make_cache_context()
     retrieve = object_group_transfer.LayerwiseH2DRetrieve(
-        _make_cache_context(),
+        cache_context,
         [torch.tensor([0, 1]), torch.tensor([0, 1])],
         object_group_transfer.FixedMemoryObjects([[MagicMock(spec=GDSMemoryObject)]]),
         0,
         schedule,
-        progress,
-        _RecordingEventPool(schedule.launch_count()),
+        _seq(cache_context, progress, _RecordingEventPool(schedule.launch_count())),
         1,
     )
 
@@ -1083,28 +1104,28 @@ def test_every_batch_is_staged_from_its_own_chunks(
     schedule = LayerwiseSchedule([[0, 2], [1, 3]])
     progress = LayerProgressRecord(bytearray(LayerProgressRecord.RECORD_SIZE))
     pool = _RecordingEventPool(schedule.launch_count())
+    cache_context = real.cache_context()
+    sequencer = _seq(cache_context, progress, pool)
 
     if path == "transfer_kv_layerwise_h2d":
         object_group_transfer.transfer_kv_layerwise_h2d(
-            real.cache_context(),
+            cache_context,
             real.block_ids(),
             [real.objects],
             0,
             schedule,
-            progress,
-            pool,
+            sequencer,
             1,
             transfer_key="retrieve-key",
         )
     else:
         retrieve = object_group_transfer.LayerwiseH2DRetrieve(
-            real.cache_context(),
+            cache_context,
             real.block_ids(),
             object_group_transfer.FixedMemoryObjects([real.objects]),
             0,
             schedule,
-            progress,
-            pool,
+            sequencer,
             1,
             staging=(
                 object_group_transfer.LayerStaging.WHOLE_OBJECT
@@ -1225,14 +1246,16 @@ def _pipelined_request(
     progress: LayerProgressRecord,
     retrieve_generation: int,
 ) -> PipelinedLoadRequest:
+    cache_context = real.cache_context()
     return PipelinedLoadRequest(
-        cache_context=real.cache_context(),
+        cache_context=cache_context,
         block_ids_gpu=[torch.tensor([0, 1]), torch.tensor([0, 1])],
         objects=table,
         skip_first_n_tokens=0,
         schedule=schedule,
-        progress=progress,
-        event_pool=_RecordingEventPool(schedule.launch_count()),
+        sequencer=_seq(
+            cache_context, progress, _RecordingEventPool(schedule.launch_count())
+        ),
         retrieve_generation=retrieve_generation,
         transfer_key="retrieve-key",
     )

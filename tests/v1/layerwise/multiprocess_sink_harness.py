@@ -51,6 +51,8 @@ from lmcache.v1.multiprocess.object_group_transfer import (
     FixedMemoryObjects,
     LayerwiseH2DRetrieve,
 )
+from lmcache.v1.multiprocess.retrieve_sequencer import RetrieveLaunchSequencer
+from lmcache.v1.platform.base.transfer_gate import TransferGate
 
 #: Hybrid layout: kernel groups hold global layers [0, 2] and [1, 3], so the
 #: schedule interleaves them as 0, 1, 2, 3. Covers every layer the suite uses.
@@ -247,15 +249,20 @@ def multiprocess_sink_harness() -> tuple[
         record = LayerProgressRecord(bytearray(LayerProgressRecord.RECORD_SIZE))
         observer.track(fetch_generation, _LoadRecord(record, retrieve_generation))
         launch_count = schedule.launch_count()
+        cache_context = _cache_context()
         return LayerwiseH2DRetrieve(
-            _cache_context(),
+            cache_context,
             [torch.tensor([0]), torch.tensor([0])],
             FixedMemoryObjects([[]]),
             0,
             schedule,
-            record,
-            DaemonLayerLaunchEventPool(
-                [object()] * launch_count, _NoopEventBackend(), launch_count
+            RetrieveLaunchSequencer(
+                cache_context.stream,
+                record,
+                DaemonLayerLaunchEventPool(
+                    [object()] * launch_count, _NoopEventBackend(), launch_count
+                ),
+                TransferGate(),
             ),
             retrieve_generation,
         )

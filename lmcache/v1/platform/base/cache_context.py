@@ -25,12 +25,30 @@ from lmcache.v1.gpu_connector.utils import (
     get_concrete_engine_kv_shape_from_shape_desc,
     get_engine_kv_shape_description,
 )
+from lmcache.v1.platform.base.transfer_gate import TransferGate
 import lmcache.lmcache_native as lmcache_native
 
 if TYPE_CHECKING:
     # First Party
     from lmcache.v1.kv_layer_groups import KVLayerGroupsManager
     from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+
+
+def _flatten_block_ids(
+    block_ids_per_group: list[list[int]],
+) -> tuple[array.array, list[int]]:
+    """Concatenate per-group block IDs.
+
+    Returns:
+        The IDs as one int64 array, and ``offsets`` where group ``i`` spans
+        ``[offsets[i], offsets[i + 1])``.
+    """
+    offsets = [0]
+    flat: array.array = array.array("q")
+    for view_block_ids in block_ids_per_group:
+        flat.extend(view_block_ids)
+        offsets.append(len(flat))
+    return flat, offsets
 
 
 class BaseCacheContext(ABC):
@@ -67,6 +85,7 @@ class BaseCacheContext(ABC):
         self.kv_layer_groups_manager_ = kv_layer_groups_manager
         self.block_ids_buffer_ = block_ids_buffer
         self.lmcache_tokens_per_chunk = lmcache_tokens_per_chunk
+        self._transfer_gate = TransferGate()
 
     # ------------------------------------------------------------------
     # Abstract -- subclasses MUST implement
@@ -138,6 +157,12 @@ class BaseCacheContext(ABC):
     def device(self) -> torch.device:
         """Returns the device where KV-cache tensors live."""
         return self.device_
+
+    @property
+    def transfer_gate(self) -> TransferGate:
+        """Returns the gate every transfer holds while it enqueues a unit
+        that uses :attr:`stream` and the temp staging buffers."""
+        return self._transfer_gate
 
     @property
     def kv_tensors(self) -> list[torch.Tensor]:
@@ -255,12 +280,7 @@ class BaseCacheContext(ABC):
 
         Returns one non-overlapping view per LMCache group.
         """
-        offsets = [0]
-        flat: array.array = array.array("q")
-        for view_block_ids in block_ids_per_group:
-            flat.extend(view_block_ids)
-            offsets.append(len(flat))
-
+        flat, offsets = _flatten_block_ids(block_ids_per_group)
         total = offsets[-1]
         if total > self.block_ids_buffer_.shape[0]:
             raise ValueError(
@@ -274,6 +294,31 @@ class BaseCacheContext(ABC):
         return [
             self.block_ids_buffer_[offsets[i] : offsets[i + 1]]
             for i in range(len(block_ids_per_group))
+        ]
+
+    def stage_owned_block_ids(
+        self, block_ids_per_group: list[list[int]]
+    ) -> list[torch.Tensor]:
+        """Stage per-group block IDs into a new device tensor.
+
+        Unlike :meth:`stage_block_ids`, no later staging call overwrites the
+        result, so a transfer that keeps launching kernels while other
+        transfers stage theirs can still read it. The tensor is allocated
+        and copied on the current stream.
+
+        Args:
+            block_ids_per_group: Block IDs, indexed by LMCache group.
+
+        Returns:
+            One non-overlapping view per LMCache group.
+        """
+        flat, offsets = _flatten_block_ids(block_ids_per_group)
+        staged = torch.empty(offsets[-1], dtype=torch.long, device=self.device_)
+        if offsets[-1]:
+            cpu_tensor = torch.frombuffer(flat, dtype=torch.long)
+            staged.copy_(cpu_tensor, non_blocking=True)
+        return [
+            staged[offsets[i] : offsets[i + 1]] for i in range(len(block_ids_per_group))
         ]
 
     # ------------------------------------------------------------------

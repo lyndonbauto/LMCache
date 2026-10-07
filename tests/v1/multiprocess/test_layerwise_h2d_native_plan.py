@@ -21,6 +21,7 @@ from lmcache.v1.multiprocess.layer_progress import (
     LayerProgressRecord,
 )
 from lmcache.v1.multiprocess.layerwise_schedule import LayerwiseSchedule
+from lmcache.v1.multiprocess.retrieve_sequencer import RetrieveLaunchSequencer
 
 pytest.importorskip("cupy", reason="GPU cache context tests require cupy")
 
@@ -168,11 +169,15 @@ def _retrieve(
         object_group_transfer.FixedMemoryObjects([objects]),  # type: ignore[list-item]
         skip_first_n_tokens,
         schedule,
-        LayerProgressRecord(bytearray(LayerProgressRecord.RECORD_SIZE)),
-        DaemonLayerLaunchEventPool(
-            [object()] * count,
-            _NoEventBackend(),  # type: ignore[arg-type]
-            count,
+        RetrieveLaunchSequencer(
+            context.stream,
+            LayerProgressRecord(bytearray(LayerProgressRecord.RECORD_SIZE)),
+            DaemonLayerLaunchEventPool(
+                [object()] * count,
+                _NoEventBackend(),  # type: ignore[arg-type]
+                count,
+            ),
+            context.transfer_gate,
         ),
         1,
         staging=staging,

@@ -15,6 +15,7 @@ import grpc
 from lmcache.logging import init_logger
 from lmcache.v1.multiprocess.affinity_pool import AffinityThreadPool
 from lmcache.v1.multiprocess.config import MPServerConfig
+from lmcache.v1.multiprocess.deferred_response import DeferredResponse
 from lmcache.v1.multiprocess.engine_module import EngineModule
 from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
 from lmcache.v1.multiprocess.request_handler import (
@@ -118,6 +119,8 @@ class _GeneratedServicer:
                 raise NotImplementedError(
                     f"{registered.handler_type.name} handlers are not supported"
                 )
+            if isinstance(result, DeferredResponse):
+                result = result.result()
             return registered.response_encoder(result)
         except NotImplementedError as exc:
             context.abort(grpc.StatusCode.UNIMPLEMENTED, str(exc))

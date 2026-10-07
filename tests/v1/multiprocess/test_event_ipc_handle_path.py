@@ -14,6 +14,7 @@ import torch
 
 # First Party
 from lmcache.v1.multiprocess.futures import DeviceMessagingFuture, MessagingFuture
+from lmcache.v1.platform.base.transfer_gate import TransferGate
 
 
 class _FakeEventBackend:
@@ -257,6 +258,7 @@ def test_server_store_and_retrieve_delegate_event_ordering(
             ),
         ),
         calculate_num_blocks=lambda chunk_size, group_idx: 1,
+        transfer_gate=TransferGate(),
     )
     entry = lmcache_driven_transfer.ContextEntry(
         cache_context=cast(Any, cache_context),

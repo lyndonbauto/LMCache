@@ -49,11 +49,8 @@ from lmcache.v1.layerwise.request_fetch import (
     objects_to_place,
 )
 from lmcache.v1.memory_management import MemoryObj
-from lmcache.v1.multiprocess.layer_progress import (
-    DaemonLayerLaunchEventPool,
-    LayerProgressRecord,
-)
 from lmcache.v1.multiprocess.layerwise_schedule import LayerwiseSchedule
+from lmcache.v1.multiprocess.retrieve_sequencer import RetrieveLaunchSequencer
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 
 logger = init_logger(__name__)
@@ -172,12 +169,11 @@ class PipelinedLoadRequest:
     Attributes:
         cache_context: The worker's registered KV cache.
         block_ids_gpu: The destination blocks, staged as
-            ``downsample_and_stage_block_ids`` returns them.
+            ``downsample_and_stage_owned_block_ids`` returns them.
         objects: The objects to copy from; read at load time.
         skip_first_n_tokens: Tokens not to write at the start of the range.
         schedule: The registered layer launch schedule.
-        progress: The worker's shared layer progress record.
-        event_pool: The daemon's per-layer launch events.
+        sequencer: The worker's launch sequencer, which publishes progress.
         retrieve_generation: The worker's generation for this retrieve; the
             pump numbers its loads independently, so the sink maps one to
             the other.
@@ -189,8 +185,7 @@ class PipelinedLoadRequest:
     objects: ObjectTable
     skip_first_n_tokens: int
     schedule: LayerwiseSchedule
-    progress: LayerProgressRecord
-    event_pool: DaemonLayerLaunchEventPool
+    sequencer: RetrieveLaunchSequencer
     retrieve_generation: int
     transfer_key: str
 

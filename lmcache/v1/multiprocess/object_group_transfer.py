@@ -35,12 +35,10 @@ from lmcache.v1.mp_observability.event_bus import (
     get_event_bus,
     is_observability_enabled,
 )
-from lmcache.v1.multiprocess.layer_progress import (
-    DaemonLayerLaunchEventPool,
-    LayerProgressRecord,
-)
 from lmcache.v1.multiprocess.layerwise_schedule import LayerLaunch, LayerwiseSchedule
+from lmcache.v1.multiprocess.retrieve_sequencer import RetrieveLaunchSequencer
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
+from lmcache.v1.platform.base.transfer_gate import StagingSlots
 from lmcache.v1.platform.ops_types import (
     BatchStep,
     KernelGroupSpec,
@@ -160,6 +158,45 @@ def downsample_and_stage_block_ids(
           [13, 14, 17, 18], # swa attention group only needs the last 2 block per chunk
         ]
     """
+    _cut_block_ids(cache_context, block_ids)
+    return cache_context.stage_block_ids(block_ids)
+
+
+def downsample_and_stage_owned_block_ids(
+    cache_context: BaseCacheContext,
+    block_ids: list[list[int]],
+) -> list[torch.Tensor]:
+    """Cut the block id lists like :func:`downsample_and_stage_block_ids`,
+    staging them into a new tensor the caller owns.
+
+    The shared staging buffer is rewritten by every store and retrieve, so a
+    transfer that keeps enqueuing kernels after its handler moved on (a
+    layerwise retrieve running beside others) must read its block ids from
+    a tensor nobody else stages into.
+
+    Args:
+        cache_context: The cache context containing the KV cache information.
+        block_ids: The original block id lists, indexed by LMCache KV group
+            index. Cut in place.
+
+    Returns:
+        The cut block ids on the device, one view per LMCache KV group.
+
+    Raises:
+        ValueError: If a kernel group's block id list is not a whole number of
+            chunks.
+    """
+    _cut_block_ids(cache_context, block_ids)
+    return cache_context.stage_owned_block_ids(block_ids)
+
+
+def _cut_block_ids(cache_context: BaseCacheContext, block_ids: list[list[int]]) -> None:
+    """Drop, in place, the per-chunk blocks a sliding window does not need.
+
+    Raises:
+        ValueError: If a kernel group's block id list is not a whole number of
+            chunks.
+    """
     num_kernel_groups = cache_context.kv_layer_groups_manager.num_kernel_groups
     for kernel_group_id in range(num_kernel_groups):
         subchunk_sw_size_tokens = (
@@ -191,10 +228,6 @@ def downsample_and_stage_block_ids(
             new_block_ids.extend(chunk_block_ids[-keep_blocks_per_chunk:])
 
         block_ids[kernel_group_id] = new_block_ids
-
-    # Stage the cut block ids into GPU tensors
-    block_ids_gpu = cache_context.stage_block_ids(block_ids)
-    return block_ids_gpu
 
 
 def recalculate_blocks_to_skip(
@@ -788,8 +821,7 @@ def transfer_kv_layerwise_h2d(
     memory_objs_by_group: Sequence[Sequence[MemoryObj | None]],
     skip_first_n_tokens: int,
     schedule: LayerwiseSchedule,
-    progress: LayerProgressRecord,
-    event_pool: DaemonLayerLaunchEventPool,
+    sequencer: RetrieveLaunchSequencer,
     retrieve_generation: int,
     *,
     transfer_key: str,
@@ -809,8 +841,8 @@ def transfer_kv_layerwise_h2d(
             for skipped prefix chunks).
         skip_first_n_tokens: Tokens to skip at the start of the retrieve range.
         schedule: Global per-layer launch order for this layout.
-        progress: Shared progress record for this worker instance.
-        event_pool: IPC events recorded after each ordinal on ``cache_context.stream``.
+        sequencer: The worker's launch sequencer; it publishes progress and
+            orders these launches after older in-flight retrieves'.
         retrieve_generation: Generation tag shared with the worker waiter.
         transfer_key: Same retrieve identity as the bulk path; reserved for
             future phase-timing on this path (not emitted today).
@@ -818,6 +850,7 @@ def transfer_kv_layerwise_h2d(
     Raises:
         ValueError: If a batch contains null memory objects on H2D.
         RuntimeError: If the native extension lacks layer-range support.
+        RetrieveAbortedError: If another retrieve's failure stopped this one.
     """
     del transfer_key
 
@@ -833,8 +866,7 @@ def transfer_kv_layerwise_h2d(
         FixedMemoryObjects(memory_objs_by_group),
         skip_first_n_tokens,
         schedule,
-        progress,
-        event_pool,
+        sequencer,
         retrieve_generation,
         staging=staging,
     )
@@ -1036,6 +1068,12 @@ class LayerwiseH2DRetrieve:
     3. :meth:`mark_failed` publishes a failure so every worker waiting on this
        retrieve wakes with an error instead of hanging.
 
+    Progress goes through the worker's
+    :class:`~lmcache.v1.multiprocess.retrieve_sequencer.RetrieveLaunchSequencer`,
+    so other retrieves of the same worker may be in flight on other threads:
+    a launch waits until every older one has enqueued the same ordinal, and
+    is enqueued holding the cache context's transfer gate.
+
     Layers must be launched in :class:`LayerwiseSchedule` order. Launches share
     ``cache_context.stream`` and the worker's wait is a watermark over schedule
     ordinals, so launching out of order would make an earlier layer look ready
@@ -1064,8 +1102,7 @@ class LayerwiseH2DRetrieve:
         objects: MemoryObjectLookup,
         skip_first_n_tokens: int,
         schedule: LayerwiseSchedule,
-        progress: LayerProgressRecord,
-        event_pool: DaemonLayerLaunchEventPool,
+        sequencer: RetrieveLaunchSequencer,
         retrieve_generation: int,
         *,
         staging: LayerStaging = LayerStaging.PER_LAYER,
@@ -1081,9 +1118,8 @@ class LayerwiseH2DRetrieve:
             skip_first_n_tokens: Tokens to skip at the start of the retrieve
                 range.
             schedule: Global per-layer launch order for this layout.
-            progress: Shared progress record for this worker instance.
-            event_pool: IPC events recorded after each ordinal on
-                ``cache_context.stream``.
+            sequencer: The worker's launch sequencer, which owns its progress
+                record and launch events.
             retrieve_generation: Generation the worker waits on for this
                 retrieve. Distinct from any transport fetch generation.
             staging: How host bytes reach GPU staging. Defaults to
@@ -1103,8 +1139,7 @@ class LayerwiseH2DRetrieve:
         self._objects = objects
         self._skip_first_n_tokens = skip_first_n_tokens
         self._schedule = schedule
-        self._progress = progress
-        self._event_pool = event_pool
+        self._sequencer = sequencer
         self._retrieve_generation = retrieve_generation
         self._staging = staging
         self._state = _RetrieveState.NOT_BEGUN
@@ -1143,6 +1178,8 @@ class LayerwiseH2DRetrieve:
             ValueError: If a batch contains null memory objects on H2D; or,
                 with per-layer staging, if any memory object is a GDS object
                 or a staging view has an unsupported layout.
+            RetrieveAbortedError: If another retrieve's failure stopped this
+                one before it began.
         """
         if self._state is not _RetrieveState.NOT_BEGUN:
             raise RuntimeError(
@@ -1200,7 +1237,7 @@ class LayerwiseH2DRetrieve:
                     kernel_group_id: self._kernel_group_spec(kernel_group_id)
                     for kernel_group_id in kernel_groups
                 }
-        self._progress.begin_retrieve(self._retrieve_generation)
+        self._sequencer.begin(self._retrieve_generation)
         self._state = _RetrieveState.IN_PROGRESS
 
     def launch_layer(self, layer_id: int) -> None:
@@ -1208,8 +1245,10 @@ class LayerwiseH2DRetrieve:
 
         Records the layer's completion event on the transfer stream *before*
         advancing the watermark, so a worker that observes the watermark never
-        waits on an event that was not yet recorded. On any failure the
-        retrieve is marked failed before the exception propagates.
+        waits on an event that was not yet recorded. Blocks first until every
+        older in-flight retrieve of the worker has launched the same ordinal.
+        On any failure the retrieve is marked failed before the exception
+        propagates.
 
         Args:
             layer_id: Global layer index. Must be the next layer in schedule
@@ -1220,6 +1259,8 @@ class LayerwiseH2DRetrieve:
                 failed, or every scheduled layer was already launched.
             ValueError: If ``layer_id`` is not the next layer in schedule order.
                 The retrieve is left unchanged so the caller can report it.
+            RetrieveAbortedError: If another retrieve's failure stopped this
+                one. Nothing of this layer was queued.
         """
         if self._state is not _RetrieveState.IN_PROGRESS:
             raise RuntimeError(
@@ -1233,48 +1274,40 @@ class LayerwiseH2DRetrieve:
                 f"got {layer_id}"
             )
         ordinal = self._next_ordinal
-        try:
+
+        def enqueue(slots: StagingSlots) -> None:
+            if slots is StagingSlots.OVERWRITTEN:
+                self._resident_batch.clear()
             self._launch_scheduled(expected)
-            self._event_pool.record_ordinal(ordinal, self._cache_context.stream)
-            self._progress.report_launch_recorded(ordinal + 1)
+
+        try:
+            self._sequencer.launch(self._retrieve_generation, ordinal, enqueue)
         except Exception:
             self.mark_failed()
             raise
         self._next_ordinal += 1
         if self._next_ordinal == self._schedule.launch_count():
             self._state = _RetrieveState.COMPLETE
+            self._sequencer.complete(self._retrieve_generation)
 
     def mark_failed(self) -> None:
         """Publish that this retrieve failed, waking every worker waiter.
 
-        Safe to call in any state and more than once. The record's current
-        generation decides what happens:
+        Safe to call in any state and more than once. Delegates to
+        :meth:`RetrieveLaunchSequencer.fail
+        <lmcache.v1.multiprocess.retrieve_sequencer.RetrieveLaunchSequencer.fail>`:
+        while this retrieve is unfinished, every other in-flight retrieve of
+        the worker is stopped too, and the failure is published once their
+        copies have landed. The worker reports a flagged retrieve's blocks to
+        vLLM for recompute, so no copy may still be landing in them.
 
-        - older than this retrieve's (never published): this generation is
-          published first, so the failure is attributed to this retrieve
-          rather than to whatever the record last held;
-        - equal: the failure flag is set;
-        - newer: nothing is written. A newer retrieve owns the record, and a
-          late failure from this one must neither fail nor rewind it.
-
-        Marking a completed retrieve failed is allowed and conservative: a
-        waiter that has not yet returned falls back to a full load instead of
-        trusting it.
-
-        Before setting the flag, waits for every copy this retrieve already
-        queued on the transfer stream. The worker reports a flagged retrieve's
-        blocks to vLLM for recompute, so no copy may still be landing in them.
-
-        Assumes this process is the record's only writer, which holds because
-        the MP server serialises retrieves per worker.
+        Marking a completed retrieve failed is allowed and conservative: if it
+        still owns the record, a waiter that has not yet returned falls back
+        to a full load instead of trusting it. A newer retrieve's record is
+        never touched.
         """
-        copies_queued = self._state is not _RetrieveState.NOT_BEGUN
         self._state = _RetrieveState.FAILED
-        if self._progress.read().generation > self._retrieve_generation:
-            return
-        if copies_queued:
-            self._cache_context.stream.synchronize()
-        self._progress.fail_retrieve(self._retrieve_generation)
+        self._sequencer.fail(self._retrieve_generation)
 
     def wait_for_copies(self) -> None:
         """Block until every copy this retrieve has queued has finished.
