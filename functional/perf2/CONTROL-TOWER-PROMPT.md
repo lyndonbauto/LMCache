@@ -78,7 +78,10 @@ to subagents. Today's tasks, in order:
     `/mnt/scratch/perf-aero/`.
   - `docker start aero-kvsink-bp lmc-c`.
   - Pull `prototype-stage-1b` into the box's LMCache tree (`git status` must be clean).
-    Only `functional/` changed since `07c13847`, so LMCache doesn't need a rebuild.
+    The container's native extension was built at `07c13847`, and `bf69253b` has product
+    commits after it that break `register_kv_cache` (`KeyError: 'dtypes'`). Either rebuild
+    LMCache (`scripts/build_client_lmcache.sh`) or check out `4461293f` (product code of
+    `07c13847`, current harness), as on 2026-10-07.
 - Log every host change in `functional/HOST-CHANGES.md` under a new "Droplet
   165.245.134.42 (from the 2026-10-05 snapshot)" section.
 - **Hugging Face token:** use the token in `/root/lmc-work/hf/token` on the box. Pass it as
