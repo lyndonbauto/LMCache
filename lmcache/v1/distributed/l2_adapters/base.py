@@ -479,6 +479,24 @@ class L2AdapterInterface(ABC):
             f"{type(self).__name__} has no layer-pipelined fetch path"
         )
 
+    def rdma_window_settled(self, window_index: int) -> bool:
+        """Report whether no write into an RDMA window can still land.
+
+        The window leaser quarantines a window after an abandoned fetch,
+        for the adapter's fetch timeout, because writes already sent may
+        still arrive. A backend that knows every write it sent into the
+        window was answered can end that quarantine early. The default
+        returns ``False``: the full quarantine applies.
+
+        Args:
+            window_index: Index of the window in L1's RDMA window pool.
+
+        Returns:
+            ``True`` only if every fetch begun in the window has ended and
+            none can still write into it.
+        """
+        return False
+
     def layer_arrival_source(self) -> LayerArrivalSource:
         """Return a source that fetches and reports layers for this backend.
 

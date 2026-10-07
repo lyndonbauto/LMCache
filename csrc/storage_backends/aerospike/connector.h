@@ -262,10 +262,19 @@ class AerospikeNativeConnector : public ConnectorBase<WorkerAerospikeConn> {
 
   // Abandon fetch `generation` without waiting; no-op if it is not active.
   // Rows already sent may still be written until the fetch timeout, so the
-  // caller must not reuse the window before then.
+  // caller must not reuse the window before then, unless
+  // rdma_window_settled() says no write can still land.
   //
   // Thread safety: safe to call concurrently.
   void abandon_pipelined_fetch(uint16_t generation);
+
+  // Whether every batch begun in RDMA window `window_index` has ended and
+  // none left a write that may still land: every row was answered OK, or
+  // its record or region was missing. False when pipelined fetch is not
+  // ready and for an index past the last window.
+  //
+  // Thread safety: safe to call concurrently.
+  bool rdma_window_settled(uint32_t window_index) const;
 #endif
 
  protected:

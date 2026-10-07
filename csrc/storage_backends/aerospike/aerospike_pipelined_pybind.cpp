@@ -114,7 +114,10 @@ void bind_pipelined_fetch(py::module& module,
            py::arg("generation"))
       .def("abandon_pipelined_fetch",
            &AerospikeNativeConnector::abandon_pipelined_fetch,
-           py::arg("generation"));
+           py::arg("generation"))
+      .def("rdma_window_settled",
+           &AerospikeNativeConnector::rdma_window_settled,
+           py::arg("window_index"));
 }
 
 }  // namespace aerospike_pipelined_pybind

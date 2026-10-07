@@ -17,7 +17,10 @@
 //     first even though every layer is in flight at once;
 //   - per-slot results folded into per-layer readiness;
 //   - results for a fetch that is no longer active dropped, so a batch still
-//     in flight after abandon cannot be credited to the window's next fetch.
+//     in flight after abandon cannot be credited to the window's next fetch;
+//   - per window, whether every batch begun in it has ended with no write
+//     left on the wire, so an abandoned window can be reused before its
+//     timeout-based quarantine ends.
 //
 // Issuing the batches is the driver's job (connector_sink_fetch.h). Keeping
 // this class free of the client means every rule above runs in the logic
@@ -63,11 +66,23 @@ struct SinkSlot {
   size_t length = 0;
 };
 
+// How a batch from begin() ended, as far as writes into its window go.
+enum class BatchEnd : uint8_t {
+  // Every row the batch sent got a definite answer from the server, so none
+  // of its writes can still land. Also a batch that was never sent.
+  kSettled,
+  // A row timed out, got no answer, or the batch failed outright: one of
+  // its writes may still land.
+  kMayStillWrite,
+};
+
 // The rows of one layer, sent as one batch read.
 struct LayerBatch {
   uint16_t generation = kNoGeneration;
   // Unique for the table's lifetime, unlike the generation, which wraps.
   uint64_t token = 0;
+  // The window the batch writes into.
+  uint32_t window = 0;
   uint32_t layer_id = 0;
   // The layer's position in the plan: 0 for the first layer. Lower is
   // placed first by the server.
@@ -136,6 +151,21 @@ class SinkFetchTable {
   // Drop fetch `generation`; no-op if it is not active.
   void abandon(uint16_t generation);
 
+  // Record that a batch begun in `window` will not be sent again: it was
+  // read, skipped because its fetch was no longer active, or failed. Every
+  // batch begin() returns must be reported exactly once.
+  //
+  // Throws std::out_of_range if `window` is not a window of this table, and
+  // std::logic_error if the window has no batch outstanding.
+  void on_batch_done(uint32_t window, BatchEnd end);
+
+  // Whether no batch begun in `window` is still outstanding, and none ended
+  // with BatchEnd::kMayStillWrite since the window's last begin(). A window
+  // that never had a fetch is settled.
+  //
+  // Throws std::out_of_range if `window` is not a window of this table.
+  bool window_settled(uint32_t window) const;
+
   uint32_t max_slots_per_request() const { return max_slots_; }
 
  private:
@@ -164,6 +194,10 @@ class SinkFetchTable {
   mutable std::mutex mu_;
   // Active fetch per window; generation kNoGeneration when idle.
   std::vector<Fetch> windows_;
+  // Per window, kept apart from Fetch because abandon() clears the fetch
+  // while its batches are still queued or on the wire.
+  std::vector<uint32_t> outstanding_batches_;
+  std::vector<uint8_t> may_still_write_;
   uint16_t last_generation_ = kNoGeneration;
   uint64_t next_token_ = 1;
 };

@@ -27,6 +27,8 @@ struct LaunchVar {
   int total_blocks;          // number of block ids for this launch
   int num_objects;           // chunks in this batch (1-4)
   int skip_prefix_n_blocks;
+  int layer_offset = 0;  // first layer of the kernel group's layer axis
+  int n_layers = -1;     // layers from layer_offset; -1 means all of them
 };
 
 // One batch: its staging copies and kernel launches. For H2D the staging runs

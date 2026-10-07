@@ -264,6 +264,51 @@ def test_an_abandoned_window_is_quarantined_for_the_fetch_timeout(
     assert leaser.lease(OBJECT_BYTES).window_index == lease.window_index
 
 
+def test_a_settled_window_ends_its_quarantine_early(
+    clock: _FakeClock,
+) -> None:
+    settled: set[int] = set()
+    mgr = _l1(1)
+    try:
+        leaser = RdmaWindowLeaser(
+            mgr, _rdma_config(1), clock, window_settled=settled.__contains__
+        )
+        lease = leaser.lease(OBJECT_BYTES)
+        leaser.release(lease, FetchOutcome.ABANDONED)
+        clock.now += 1
+        with pytest.raises(LayerwiseContractError):
+            leaser.lease(OBJECT_BYTES)
+
+        settled.add(lease.window_index)
+
+        again = leaser.lease(OBJECT_BYTES)
+        assert again.window_index == lease.window_index
+        leaser.release(again, FetchOutcome.ABANDONED)
+        settled.clear()
+        with pytest.raises(LayerwiseContractError):
+            leaser.lease(OBJECT_BYTES)
+    finally:
+        mgr.close()
+
+
+def test_an_unsettled_window_still_reopens_after_the_fetch_timeout(
+    clock: _FakeClock,
+) -> None:
+    mgr = _l1(1)
+    try:
+        leaser = RdmaWindowLeaser(
+            mgr, _rdma_config(1), clock, window_settled=lambda _: False
+        )
+        lease = leaser.lease(OBJECT_BYTES)
+        leaser.release(lease, FetchOutcome.ABANDONED)
+
+        clock.now += FETCH_TIMEOUT
+
+        assert leaser.lease(OBJECT_BYTES).window_index == lease.window_index
+    finally:
+        mgr.close()
+
+
 def test_a_quarantined_window_is_passed_over(
     two_windows: tuple[L1Manager, RdmaWindowLeaser],
 ) -> None:

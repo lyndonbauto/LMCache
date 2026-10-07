@@ -180,8 +180,7 @@ def _request(table: ObjectTable) -> PipelinedLoadRequest:
         objects=table,
         skip_first_n_tokens=0,
         schedule=mock,
-        progress=mock,
-        event_pool=mock,
+        sequencer=mock,
         retrieve_generation=7,
         transfer_key="t",
     )

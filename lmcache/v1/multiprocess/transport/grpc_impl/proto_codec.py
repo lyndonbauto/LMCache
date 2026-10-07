@@ -26,6 +26,7 @@ import msgspec
 import torch
 
 # First Party
+from lmcache.v1.multiprocess.deferred_response import response_annotation
 from lmcache.v1.multiprocess.transport.grpc_impl.codecs import (
     get_message_codec_registry,
 )
@@ -594,10 +595,13 @@ def compile_response_encoder(
     message_cls: Any,
     handler: Callable[..., Any],
 ) -> tuple[ResponseEncoder, Any]:
-    """Compile a protobuf response encoder from a handler return annotation."""
+    """Compile a protobuf response encoder from a handler return annotation.
+
+    A ``DeferredResponse[R]`` annotation encodes ``R``.
+    """
     sig = inspect.signature(handler)
     hints = get_type_hints(handler)
-    response_type = hints.get("return", sig.return_annotation)
+    response_type = response_annotation(hints.get("return", sig.return_annotation))
     if response_type is inspect.Signature.empty:
         response_type = Any
     encoder = compile_response_encoder_for_type(message_cls, response_type)

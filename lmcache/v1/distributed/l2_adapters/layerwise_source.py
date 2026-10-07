@@ -113,6 +113,21 @@ class PipelinedFetchConnector(Protocol):
 
 
 @runtime_checkable
+class WindowSettledConnector(Protocol):
+    """The native report of whether an RDMA window can still be written.
+
+    Matches ``rdma_window_settled`` on ``lmcache_aerospike.LMCacheAerospikeClient``
+    built with ``LMCACHE_AEROSPIKE_RDMA``. Kept apart from
+    :class:`PipelinedFetchConnector` so that a connector without it still
+    fetches; its abandoned windows then wait out the full quarantine.
+    """
+
+    def rdma_window_settled(self, window_index: int) -> bool:
+        """Return whether no write of any fetch begun in the window can land."""
+        ...
+
+
+@runtime_checkable
 class PlannedFetchConnector(Protocol):
     """The native entry point that issues a caller-planned fetch.
 

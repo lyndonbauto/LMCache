@@ -9,7 +9,9 @@ which is safe because they were just read from L2 and can be read again.
 
 A window released after an abandoned fetch is quarantined instead: the NIC can
 still perform writes that were on the wire, and a new fetch must not have its
-objects in bytes a late write can reach.
+objects in bytes a late write can reach. The quarantine lasts the fetch
+timeout, or ends sooner once the transport reports that every write it sent
+into the window was answered.
 
 See "Window lifecycle" in
 ``docs/design/v1/layerwise/track-a-questions-for-track-c.md`` (W1 and W3).
@@ -31,6 +33,18 @@ from lmcache.v1.distributed.l2_adapters.rdma_registration import L1RdmaConfig
 from lmcache.v1.layerwise.contract import LayerwiseContractError, PlanTooLargeError
 
 logger = init_logger(__name__)
+
+
+def never_settled(window_index: int) -> bool:
+    """Window probe for a transport that cannot tell when writes stop.
+
+    Args:
+        window_index: Ignored.
+
+    Returns:
+        Always ``False``, so every quarantine lasts the full fetch timeout.
+    """
+    return False
 
 
 class FetchOutcome(enum.Enum):
@@ -82,6 +96,12 @@ class RdmaWindowLeaser:
     run at once (W3). A retrieve that finds every window leased, quarantined
     or pinned is refused and falls back to a whole-object load.
 
+    A quarantine ends when ``fetch_timeout_seconds`` has passed since the
+    abandon, or earlier once ``window_settled`` reports that no write of any
+    fetch begun in the window can still land. Without the early end, a few
+    stalled fetches would quarantine every window for the full timeout and
+    send every retrieve to the whole-object path meanwhile.
+
     Choosing a window, among those neither leased nor quarantined:
 
     1. an empty window, if any;
@@ -100,6 +120,7 @@ class RdmaWindowLeaser:
         l1_manager: L1Manager,
         rdma_config: L1RdmaConfig,
         clock: Callable[[], float] = time.monotonic,
+        window_settled: Callable[[int], bool] = never_settled,
     ) -> None:
         """Create a leaser over the windows ``l1_manager`` reserves.
 
@@ -110,6 +131,10 @@ class RdmaWindowLeaser:
                 which is ``fetch_timeout_seconds``: once that has passed since
                 an abandon, no write of the abandoned fetch can still land.
             clock: Monotonic time source in seconds, injectable for tests.
+            window_settled: Given a window index, whether the transport
+                knows no write into that window can still land. Called with
+                the leaser's lock held, so it must not call the leaser. The
+                default never ends a quarantine early.
 
         Raises:
             ValueError: If RDMA is not enabled in ``rdma_config``, or the L1
@@ -129,6 +154,7 @@ class RdmaWindowLeaser:
         self._offsets = plan.window_offsets()
         self._quarantine_seconds = rdma_config.fetch_timeout_seconds
         self._clock = clock
+        self._window_settled = window_settled
         self._lock = threading.Lock()
         # Windows never released sort first, as least recently used.
         self._released_at = [float("-inf")] * plan.window_count
@@ -169,7 +195,7 @@ class RdmaWindowLeaser:
             candidates = [
                 i
                 for i in range(len(self._offsets))
-                if i not in self._outstanding and self._quarantined_until[i] <= now
+                if i not in self._outstanding and not self._is_quarantined(i, now)
             ]
             if not candidates:
                 raise LayerwiseContractError(
@@ -201,7 +227,8 @@ class RdmaWindowLeaser:
         The window's objects stay in L1 either way. After
         :attr:`FetchOutcome.ABANDONED` the caller is expected to have aborted
         the fetch's write reservations already; the window is not leased
-        again until ``fetch_timeout_seconds`` has passed.
+        again until ``fetch_timeout_seconds`` has passed or the transport
+        reports the window settled.
 
         Args:
             lease: An outstanding lease, as returned by :meth:`lease`.
@@ -223,6 +250,21 @@ class RdmaWindowLeaser:
                 self._quarantined_until[lease.window_index] = (
                     now + self._quarantine_seconds
                 )
+
+    def _is_quarantined(self, window_index: int, now: float) -> bool:
+        """Whether ``window_index`` is still quarantined; ends it early once
+        the transport reports the window settled. Holds the lock."""
+        if self._quarantined_until[window_index] <= now:
+            return False
+        if not self._window_settled(window_index):
+            return True
+        logger.debug(
+            "RDMA window %d settled %.3f s before its quarantine ended",
+            window_index,
+            self._quarantined_until[window_index] - now,
+        )
+        self._quarantined_until[window_index] = float("-inf")
+        return False
 
     def _grant(self, window_index: int) -> WindowLease:
         """Record and return a new lease of ``window_index``. Holds the lock."""

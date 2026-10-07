@@ -252,6 +252,13 @@ void AerospikeSinkFetchDriver::abandon_request(uint16_t generation) {
   }
 }
 
+bool AerospikeSinkFetchDriver::window_settled(uint32_t window_index) const {
+  if (!table_ || window_index >= registration_.window_count) {
+    return false;
+  }
+  return table_->window_settled(window_index);
+}
+
 void AerospikeSinkFetchDriver::shutdown() {
   {
     std::lock_guard<std::mutex> lock(mu_);
@@ -300,8 +307,9 @@ void AerospikeSinkFetchDriver::run_worker() {
       queued = std::move(queue_.front());
       queue_.pop_front();
     }
+    sink::BatchEnd end = sink::BatchEnd::kMayStillWrite;
     try {
-      execute(queued);
+      end = execute(queued);
     } catch (const std::exception& e) {
       std::fprintf(stderr, "LMCache Aerospike sink fetch: layer %u: %s\n",
                    queued.batch.layer_id, e.what());
@@ -310,20 +318,34 @@ void AerospikeSinkFetchDriver::run_worker() {
                                queued.batch.token);
       }
     }
+    table_->on_batch_done(queued.batch.window, end);
   }
 }
+
+namespace {
+
+// Whether a row with this final result had its write either land before
+// the answer (AEROSPIKE_OK) or never start (the record or region is
+// missing). Any other result, a timeout above all, leaves it unknown.
+bool row_cannot_write_later(as_status result) {
+  return result == AEROSPIKE_OK || result == AEROSPIKE_ERR_RECORD_NOT_FOUND ||
+         result == AEROSPIKE_ERR_SINK_UNKNOWN_REGION;
+}
+
+}  // namespace
 
 // A row that fails with AEROSPIKE_ERR_SINK_UNKNOWN_REGION found no usable
 // region on its node: the node restarted, reclaimed the sink, never had it, or
 // dropped it after a failed write. The row's bytes are not complete either
 // way, and a retry rewrites the same destination, so those rows get one retry
 // after the sink is refreshed; every other failure is final for the slot.
-void AerospikeSinkFetchDriver::execute(const QueuedBatch& queued) {
+sink::BatchEnd AerospikeSinkFetchDriver::execute(const QueuedBatch& queued) {
   const sink::LayerBatch& batch = queued.batch;
+  sink::BatchEnd end = sink::BatchEnd::kSettled;
   std::vector<uint32_t> pending = batch.slot_indices;
   for (int attempt = 0; attempt < 2 && !pending.empty(); ++attempt) {
     if (!table_->is_active(batch.generation, batch.token)) {
-      return;
+      return end;
     }
     uint64_t seen_epoch = 0;
     {
@@ -333,6 +355,9 @@ void AerospikeSinkFetchDriver::execute(const QueuedBatch& queued) {
     const std::vector<as_status> results = read_rows(queued, pending);
     std::vector<uint32_t> unknown_region;
     for (size_t i = 0; i < pending.size(); ++i) {
+      if (!row_cannot_write_later(results[i])) {
+        end = sink::BatchEnd::kMayStillWrite;
+      }
       if (results[i] == AEROSPIKE_ERR_SINK_UNKNOWN_REGION && attempt == 0) {
         unknown_region.push_back(pending[i]);
         continue;
@@ -345,6 +370,7 @@ void AerospikeSinkFetchDriver::execute(const QueuedBatch& queued) {
     }
     pending = std::move(unknown_region);
   }
+  return end;
 }
 
 std::vector<as_status> AerospikeSinkFetchDriver::read_rows(

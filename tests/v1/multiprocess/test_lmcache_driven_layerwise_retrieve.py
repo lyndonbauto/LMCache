@@ -13,20 +13,26 @@ plain layerwise path. Kernels, streams and the progress record are mocked.
 
 # Standard
 from collections.abc import Iterator
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+import threading
 
 # Third Party
 import pytest
 
 # First Party
+from lmcache.v1.multiprocess.deferred_response import DeferredResponse
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
+from lmcache.v1.multiprocess.retrieve_sequencer import RetrieveLaunchSequencer
+from lmcache.v1.platform.base.transfer_gate import TransferGate
 
 NUM_GROUPS = 2
 NUM_CHUNKS = 3
 GENERATION = 7
+JOIN_SECONDS = 5.0
 KEYS = [[f"g{g}c{c}" for c in range(NUM_CHUNKS)] for g in range(NUM_GROUPS)]
 ALL_KEYS = [k for group in KEYS for k in group]
 
@@ -37,8 +43,7 @@ class _LayerwiseCall:
 
     objects_by_group: list[list[str]]
     schedule: object
-    progress: object
-    event_pool: object
+    sequencer: object
     generation: int
 
 
@@ -51,7 +56,13 @@ class _Harness:
     released: list[str] = field(default_factory=list)
 
     def retrieve(self, generation: int = GENERATION) -> bool:
-        _handle, ok = self.module.retrieve(
+        _handle, ok = self.start_retrieve(generation).result(timeout=JOIN_SECONDS)
+        return ok
+
+    def start_retrieve(
+        self, generation: int = GENERATION
+    ) -> DeferredResponse[tuple[bytes, bool]]:
+        return self.module.start_retrieve(
             key=SimpleNamespace(
                 request_id="req", cache_salt="salt", world_size=1, worker_id=0
             ),
@@ -61,7 +72,6 @@ class _Harness:
             skip_first_n_tokens=0,
             retrieve_generation=generation,
         )
-        return ok
 
     @property
     def progress(self) -> MagicMock:
@@ -81,6 +91,9 @@ def make_harness(monkeypatch: pytest.MonkeyPatch):
     def build(missing: frozenset[str] = frozenset()) -> _Harness:
         monkeypatch.setattr(mod, "DeviceHostFuncDispatcher", MagicMock())
         monkeypatch.setattr(mod, "downsample_and_stage_block_ids", lambda cc, b: b)
+        monkeypatch.setattr(
+            mod, "downsample_and_stage_owned_block_ids", lambda cc, b: b
+        )
         monkeypatch.setattr(mod, "torch_dev", MagicMock())
 
         ctx = MagicMock()
@@ -98,13 +111,18 @@ def make_harness(monkeypatch: pytest.MonkeyPatch):
         )
         cache_context = MagicMock(kv_layer_groups_manager=kvlgm, max_batch_size=8)
         cache_context.calculate_num_blocks.return_value = 1
+        progress = MagicMock()
+        event_pool = MagicMock()
         entry = SimpleNamespace(
             cache_context=cache_context,
             model_name="m",
             event_backend=MagicMock(),
             layerwise_schedule=MagicMock(),
-            layer_progress=MagicMock(),
-            daemon_layer_event_pool=MagicMock(),
+            layer_progress=progress,
+            daemon_layer_event_pool=event_pool,
+            retrieve_sequencer=RetrieveLaunchSequencer(
+                cache_context.stream, progress, event_pool, TransferGate()
+            ),
         )
         monkeypatch.setattr(module, "get_and_touch_context_entry", lambda _id: entry)
         h = _Harness(module=module, entry=entry)
@@ -116,17 +134,18 @@ def make_harness(monkeypatch: pytest.MonkeyPatch):
         ctx.storage_manager.read_prefetched_results.side_effect = read
 
         def layerwise_transfer(
-            cc, block_ids, objs_by_group, skip, schedule, progress, pool, gen, **kw
+            cc, block_ids, objs_by_group, skip, schedule, sequencer, gen, **kw
         ):
             h.layerwise_calls.append(
                 _LayerwiseCall(
                     objects_by_group=[[o.name for o in g] for g in objs_by_group],
                     schedule=schedule,
-                    progress=progress,
-                    event_pool=pool,
+                    sequencer=sequencer,
                     generation=gen,
                 )
             )
+            # A real transfer completes the retrieve once its last layer is queued.
+            sequencer.complete(gen)
 
         monkeypatch.setattr(mod, "transfer_kv_layerwise_h2d", layerwise_transfer)
 
@@ -155,8 +174,7 @@ def test_one_layerwise_transfer_carries_every_object_and_the_generation(
     [call] = h.layerwise_calls
     assert call.objects_by_group == KEYS
     assert call.schedule is h.entry.layerwise_schedule
-    assert call.progress is h.entry.layer_progress
-    assert call.event_pool is h.entry.daemon_layer_event_pool
+    assert call.sequencer is h.entry.retrieve_sequencer
     assert call.generation == GENERATION
     assert h.group_transfers == []
     h.progress.fail_retrieve.assert_not_called()
@@ -189,6 +207,44 @@ def test_a_transfer_that_raises_publishes_the_failure_for_this_generation(
 
     h.progress.fail_retrieve.assert_called_once_with(GENERATION)
     assert sorted(h.released) == sorted(ALL_KEYS)
+
+
+def test_a_later_retrieve_is_answered_while_an_earlier_one_still_loads(
+    make_harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The handler hands layer loading off, so one worker's retrieves overlap
+    instead of queueing behind each other on its request thread."""
+    h = make_harness()
+    first_loading = threading.Event()
+    finish_first = threading.Event()
+    owned_stagings: list[object] = []
+
+    def stage_owned(cc, block_ids):
+        owned_stagings.append(block_ids)
+        return block_ids
+
+    def transfer(cc, block_ids, objs_by_group, skip, schedule, sequencer, gen, **kw):
+        if gen == GENERATION:
+            first_loading.set()
+            finish_first.wait(JOIN_SECONDS)
+        sequencer.complete(gen)
+
+    monkeypatch.setattr(mod, "downsample_and_stage_owned_block_ids", stage_owned)
+    monkeypatch.setattr(mod, "transfer_kv_layerwise_h2d", transfer)
+
+    first = h.start_retrieve(GENERATION)
+    assert first_loading.wait(JOIN_SECONDS)
+    second = h.start_retrieve(GENERATION + 1)
+
+    assert second.result(timeout=JOIN_SECONDS)[1] is True
+    with pytest.raises(FutureTimeoutError):
+        first.result(timeout=0.2)
+    finish_first.set()
+    assert first.result(timeout=JOIN_SECONDS)[1] is True
+    # Each retrieve stages its own block IDs; the shared buffer is rewritten
+    # by every later transfer while it loads.
+    assert len(owned_stagings) == 2
+    h.progress.fail_retrieve.assert_not_called()
 
 
 def test_a_layerwise_retrieve_without_a_generation_is_refused(make_harness) -> None:

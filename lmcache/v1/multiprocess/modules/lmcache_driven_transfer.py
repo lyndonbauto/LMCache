@@ -3,11 +3,15 @@
 
 # Standard
 from collections.abc import Iterable
-from dataclasses import dataclass
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass, field
 from multiprocessing import shared_memory
 from typing import Any, Sequence
 import threading
 import time
+
+# Third Party
+import torch
 
 # First Party
 from lmcache import torch_dev
@@ -41,6 +45,7 @@ from lmcache.v1.multiprocess.custom_types import (
     KVCache,
     RegisterKvCacheResponse,
 )
+from lmcache.v1.multiprocess.deferred_response import DeferredResponse
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.engine_module import InstanceLivenessTarget
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
@@ -60,6 +65,7 @@ from lmcache.v1.multiprocess.native_completion import (
 )
 from lmcache.v1.multiprocess.object_group_transfer import (
     downsample_and_stage_block_ids,
+    downsample_and_stage_owned_block_ids,
     per_layer_staging_ranges,
     transfer_kv_layerwise_h2d,
     transfer_kv_per_object_group,
@@ -76,6 +82,7 @@ from lmcache.v1.multiprocess.pipelined_loading import (
 )
 from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
 from lmcache.v1.multiprocess.request_handler import request_handler
+from lmcache.v1.multiprocess.retrieve_sequencer import RetrieveLaunchSequencer
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
 from lmcache.v1.platform.base.event_ipc import (
     EventIPCBackend,
@@ -85,6 +92,12 @@ from lmcache.v1.platform.cache_context import create_cache_context
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
+
+#: Threads that run layerwise retrieves after their handler returned. Each
+#: blocks while its layers arrive; one per retrieve in flight across workers.
+#: The pool must start retrieves in submission order: a running retrieve
+#: waits for older ones of its worker, which must not be queued behind it.
+_LAYERWISE_RETRIEVE_THREADS = 32
 
 
 def get_layout_desc(
@@ -202,12 +215,18 @@ def _publish_layerwise_retrieve_terminal(
 ) -> None:
     """Publish that layerwise retrieve ``retrieve_generation`` failed.
 
-    Uses :meth:`LayerProgressRecord.fail_retrieve`, so a newer retrieve's
-    record is never touched. Callers publish only before any layer copy of
-    this retrieve was queued, or after ``LayerwiseH2DRetrieve.mark_failed``
-    already drained them.
+    A registered worker's failure goes through its
+    :class:`RetrieveLaunchSequencer`, which first stops the worker's other
+    in-flight retrieves. Without a registration nothing of this daemon is in
+    flight for the worker, so the record is written directly with
+    :meth:`LayerProgressRecord.fail_retrieve`, which never touches a newer
+    retrieve's record.
     """
     if not ctx.use_layerwise or retrieve_generation <= 0:
+        return
+    sequencer = getattr(entry, "retrieve_sequencer", None)
+    if sequencer is not None:
+        sequencer.fail(retrieve_generation)
         return
     progress = entry.layer_progress if entry is not None else None
     shm_to_close: shared_memory.SharedMemory | None = None
@@ -222,6 +241,28 @@ def _publish_layerwise_retrieve_terminal(
     finally:
         if shm_to_close is not None:
             shm_to_close.close()
+
+
+def _sequencer_of(entry: "ContextEntry") -> RetrieveLaunchSequencer:
+    """Return a layerwise worker's launch sequencer.
+
+    Raises:
+        RuntimeError: If the worker registered without layerwise state.
+    """
+    if entry.retrieve_sequencer is None:
+        raise RuntimeError("layerwise retrieve on a worker with no launch sequencer")
+    return entry.retrieve_sequencer
+
+
+def _event_backend_of(entry: "ContextEntry") -> EventIPCBackend:
+    """Return a registered worker's event backend.
+
+    Raises:
+        RuntimeError: If the registration has none.
+    """
+    if entry.event_backend is None:
+        raise RuntimeError("Registered cache context has no event backend")
+    return entry.event_backend
 
 
 @dataclass(frozen=True)
@@ -266,6 +307,9 @@ class ContextEntry:
         layer_progress: Shared progress record for layerwise retrieve waits.
         daemon_layer_event_pool: Daemon-owned IPC events recorded per ordinal.
         layer_progress_shm: Attached shared-memory segment backing ``layer_progress``.
+        retrieve_sequencer: Orders the launches of this worker's in-flight
+            layerwise retrieves and is the only writer of ``layer_progress``
+            and ``daemon_layer_event_pool``. Set when layerwise is on.
     """
 
     cache_context: BaseCacheContext
@@ -278,6 +322,38 @@ class ContextEntry:
     layer_progress: LayerProgressRecord | None = None
     daemon_layer_event_pool: DaemonLayerLaunchEventPool | None = None
     layer_progress_shm: shared_memory.SharedMemory | None = None
+    retrieve_sequencer: RetrieveLaunchSequencer | None = None
+
+
+@dataclass
+class _RetrieveRun:
+    """One retrieve's state, from its handler to wherever it finishes.
+
+    A layerwise retrieve starts on the client's affinity thread and finishes
+    on the layerwise retrieve pool; the fields carry what the finish needs.
+    """
+
+    key: IPCCacheServerKey
+    instance_id: int
+    entry: ContextEntry
+    event: object
+    transfer_key: str
+    started: float
+    num_chunks: int
+    expected_retained: int
+    skip_first_n_tokens: int
+    retrieve_generation: int
+    obj_keys_per_obj_group: list[list[ObjectKey]]
+    block_ids_per_group_gpu: list[torch.Tensor]
+    layerwise_active: bool
+    memory_objs_by_group: list[list[MemoryObj | None]]
+    prefetched_keys: list[ObjectKey] = field(default_factory=list)
+    total_bytes: int = 0
+    succeeded: bool = True
+    deferred: _DeferredKeys = field(default_factory=_DeferredKeys)
+    claimed: tuple[ObjectKey, ...] = ()
+    outcome: PipelinedOutcome = PipelinedOutcome.NOT_DEFERRED
+    fetched_in_window: tuple[ObjectKey, ...] = ()
 
 
 class LMCacheDrivenTransferModule(InstanceLivenessTarget):
@@ -308,6 +384,10 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         # empty_cache (leaf-lock invariant: no thread holds two locks).
         self._lock = threading.Lock()
         self._fetch_models = FetchModelRegistry()
+        self._layerwise_retrieve_pool = ThreadPoolExecutor(
+            max_workers=_LAYERWISE_RETRIEVE_THREADS,
+            thread_name_prefix="lmcache-layerwise-retrieve",
+        )
 
         # Route finish_write / finish_read_prefetched through a C++ host
         # callback so the driver thread doesn't acquire the GIL.
@@ -559,6 +639,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
 
     def close(self) -> None:
         """Release GPU resources owned by this module."""
+        # Retrieves still loading layers enqueue completions and touch the
+        # cache contexts, so they finish before either goes away.
+        self._layerwise_retrieve_pool.shutdown(wait=True)
         # Stop the drain thread before storage_manager.close() so any
         # in-flight completions reach a live storage manager.
         self._device_host_func_dispatcher.stop()
@@ -708,6 +791,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         layer_progress: LayerProgressRecord | None = None
         layer_progress_shm: shared_memory.SharedMemory | None = None
         daemon_layer_event_pool: DaemonLayerLaunchEventPool | None = None
+        retrieve_sequencer: RetrieveLaunchSequencer | None = None
         response_handles = []
         if self._ctx.use_layerwise:
             engine_layers = [list(group.layer_indices) for group in engine_group_infos]
@@ -734,6 +818,12 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             )
             layer_progress_shm = attach_layer_progress_shm(instance_id)
             layer_progress = LayerProgressRecord.from_shared_memory(layer_progress_shm)
+            retrieve_sequencer = RetrieveLaunchSequencer(
+                cache_context.stream,
+                layer_progress,
+                daemon_layer_event_pool,
+                cache_context.transfer_gate,
+            )
 
         with self._lock:
             self._cache_contexts[instance_id] = ContextEntry(
@@ -747,6 +837,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 layer_progress=layer_progress,
                 daemon_layer_event_pool=daemon_layer_event_pool,
                 layer_progress_shm=layer_progress_shm,
+                retrieve_sequencer=retrieve_sequencer,
             )
 
         logger.info(
@@ -982,16 +1073,17 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     ]
 
                     # NOTE: batch_size must stay 1 for store.
-                    transfer_kv_per_object_group(
-                        cache_context,
-                        block_ids_per_group_gpu,
-                        memory_objs,
-                        object_group_id=obj_group_id,
-                        batch_size=1,
-                        skip_first_n_tokens=0,
-                        direction=lmcache_native.TransferDirection.D2H,
-                        transfer_key=transfer_key,
-                    )
+                    with cache_context.transfer_gate.hold():
+                        transfer_kv_per_object_group(
+                            cache_context,
+                            block_ids_per_group_gpu,
+                            memory_objs,
+                            object_group_id=obj_group_id,
+                            batch_size=1,
+                            skip_first_n_tokens=0,
+                            direction=lmcache_native.TransferDirection.D2H,
+                            transfer_key=transfer_key,
+                        )
 
                 store_succeeded = True
             except Exception:
@@ -1045,7 +1137,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         requires_client_affinity=True,
     )
     @_lmcache_nvtx_annotate
-    def retrieve(
+    def start_retrieve(
         self,
         key: IPCCacheServerKey,
         instance_id: int,
@@ -1053,8 +1145,17 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         event_ipc_handle: bytes,
         skip_first_n_tokens: int = 0,
         retrieve_generation: int = 0,
-    ) -> tuple[bytes, bool]:
-        """Retrieve the CPU KV cache and put into GPU blocks.
+    ) -> DeferredResponse[tuple[bytes, bool]]:
+        """Retrieve the CPU KV cache into GPU blocks; the RETRIEVE handler.
+
+        Runs on the client's affinity thread, so everything that must follow
+        the worker's request order happens here: staging the block ids,
+        ordering after the worker's producer event, claiming deferred keys,
+        reading the L1 objects and, for a layerwise retrieve, admitting it to
+        the worker's launch sequencer. A layerwise retrieve then loads its
+        layers on the layerwise retrieve pool, so the thread is free for the
+        worker's next request while those layers arrive; the response is sent
+        when it finishes. Every other retrieve finishes before this returns.
 
         Args:
             key: The IPC key for the KV cache blocks.
@@ -1071,10 +1172,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 progress; ignored when layerwise mode is disabled.
 
         Returns:
-            A tuple where the first element is the IPC handle of the event
-            that signals the completion of the retrieve operation, and the
-            second element indicates whether the key was successfully retrieved.
-            The event handle is empty when no device work was submitted.
+            Resolves to a tuple where the first element is the IPC handle of
+            the event that signals the completion of the retrieve operation,
+            and the second element indicates whether the key was successfully
+            retrieved. The event handle is empty when no device work was
+            submitted.
 
         Raises:
             RuntimeError: If the backend does not support IPC event handles.
@@ -1104,7 +1206,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             _publish_layerwise_retrieve_terminal(
                 self._ctx, None, instance_id, retrieve_generation
             )
-            return b"", False
+            return DeferredResponse.resolved((b"", False))
         cache_context = entry.cache_context
         model_name = entry.model_name
         event_backend = entry.event_backend
@@ -1179,12 +1281,23 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     self._ctx, entry, instance_id, retrieve_generation
                 )
                 event_backend.record_event(event, cache_context.stream)
-                return event_backend.export_event(event, cache_context.device), False
+                return DeferredResponse.resolved(
+                    (event_backend.export_event(event, cache_context.device), False)
+                )
 
-            # Cut and stage all block_ids to GPU once before the transfer
-            block_ids_per_group_gpu = downsample_and_stage_block_ids(
-                cache_context, gpu_block_ids
+            layerwise_active = (
+                self._ctx.use_layerwise
+                and getattr(entry, "layerwise_schedule", None) is not None
+                and getattr(entry, "retrieve_sequencer", None) is not None
             )
+            # A layerwise retrieve keeps launching after this thread moved on
+            # to the worker's next request, which restages the shared buffer.
+            stage_block_ids = (
+                downsample_and_stage_owned_block_ids
+                if layerwise_active
+                else downsample_and_stage_block_ids
+            )
+            block_ids_per_group_gpu = stage_block_ids(cache_context, gpu_block_ids)
             producer_event = event_backend.import_event(
                 event_ipc_handle, cache_context.device
             )
@@ -1205,38 +1318,36 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                 first_in_window_chunk(num_chunks, window)
                 for window in attn_desc.num_chunks_in_sw
             ]
-            expected_retained = sum(
-                num_chunks - skip
-                for g, skip in enumerate(group_skips)
-                if g not in skipped_groups
+            run = _RetrieveRun(
+                key=key,
+                instance_id=instance_id,
+                entry=entry,
+                event=event,
+                transfer_key=transfer_key,
+                started=st,
+                num_chunks=num_chunks,
+                expected_retained=sum(
+                    num_chunks - skip
+                    for g, skip in enumerate(group_skips)
+                    if g not in skipped_groups
+                ),
+                skip_first_n_tokens=skip_first_n_tokens,
+                retrieve_generation=retrieve_generation,
+                obj_keys_per_obj_group=obj_keys_per_obj_group,
+                block_ids_per_group_gpu=block_ids_per_group_gpu,
+                layerwise_active=layerwise_active,
+                memory_objs_by_group=[[] for _ in range(num_object_groups)],
             )
-
-            prefetched_keys: list[ObjectKey] = []
-            total_bytes = 0
-            retrieve_succeeded = True
-            memory_objs_by_group: list[list[MemoryObj | None]] = [
-                [] for _ in range(num_object_groups)
-            ]
-            layerwise_active = (
-                self._ctx.use_layerwise
-                and getattr(entry, "layerwise_schedule", None) is not None
-                and getattr(entry, "layer_progress", None) is not None
-                and getattr(entry, "daemon_layer_event_pool", None) is not None
-            )
-            deferred = _DeferredKeys()
-            claimed: tuple[ObjectKey, ...] = ()
-            outcome = PipelinedOutcome.NOT_DEFERRED
-            fetched_in_window: tuple[ObjectKey, ...] = ()
+            handed_off = False
             try:
-                claimed = self._claim_deferred_keys(
+                run.claimed = self._claim_deferred_keys(
                     key, obj_keys_per_obj_group, group_skips, skipped_groups
                 )
-                deferred = self._resolve_deferred_keys(
-                    key, model_name, claimed, layerwise_active
+                run.deferred = self._resolve_deferred_keys(
+                    key, model_name, run.claimed, layerwise_active
                 )
-                keys_to_fetch = deferred.to_fetch
-                outcome = deferred.outcome
-                fetch_set = frozenset(keys_to_fetch)
+                run.outcome = run.deferred.outcome
+                fetch_set = frozenset(run.deferred.to_fetch)
                 for obj_group_id in range(num_object_groups):
                     if obj_group_id in skipped_groups:
                         continue
@@ -1252,7 +1363,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             or len(window_objs) != len(l1_keys)
                         ):
                             logger.error("Some keys not found during retrieve!")
-                            retrieve_succeeded = False
+                            run.succeeded = False
                             if layerwise_active:
                                 _publish_layerwise_retrieve_terminal(
                                     self._ctx,
@@ -1262,7 +1373,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                                 )
                             break
 
-                        total_bytes += sum(mo.get_size() for mo in window_objs)
+                        run.total_bytes += sum(mo.get_size() for mo in window_objs)
 
                         l1_objs = iter(window_objs)
                         memory_objs: list[MemoryObj | None] = [None] * skip
@@ -1270,136 +1381,74 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                             None if k in fetch_set else next(l1_objs)
                             for k in in_window_keys
                         )
-                        memory_objs_by_group[obj_group_id] = memory_objs
+                        run.memory_objs_by_group[obj_group_id] = memory_objs
 
                         if not layerwise_active:
-                            transfer_kv_per_object_group(
-                                cache_context,
-                                block_ids_per_group_gpu,
-                                memory_objs,
-                                object_group_id=obj_group_id,
-                                batch_size=cache_context.max_batch_size,
-                                skip_first_n_tokens=skip_first_n_tokens,
-                                direction=lmcache_native.TransferDirection.H2D,
-                                transfer_key=transfer_key,
-                            )
-                        prefetched_keys.extend(l1_keys)
+                            with cache_context.transfer_gate.hold():
+                                transfer_kv_per_object_group(
+                                    cache_context,
+                                    block_ids_per_group_gpu,
+                                    memory_objs,
+                                    object_group_id=obj_group_id,
+                                    batch_size=cache_context.max_batch_size,
+                                    skip_first_n_tokens=skip_first_n_tokens,
+                                    direction=lmcache_native.TransferDirection.H2D,
+                                    transfer_key=transfer_key,
+                                )
+                        run.prefetched_keys.extend(l1_keys)
 
-                if layerwise_active and retrieve_succeeded:
+                if layerwise_active and run.succeeded:
                     if retrieve_generation <= 0:
                         raise ValueError(
                             "layerwise retrieve requires a positive "
                             "retrieve_generation from the worker"
                         )
-                    schedule = entry.layerwise_schedule
-                    progress = entry.layer_progress
-                    event_pool = entry.daemon_layer_event_pool
-                    if schedule is None or progress is None or event_pool is None:
-                        raise RuntimeError(
-                            "layerwise retrieve missing schedule or progress state"
-                        )
-                    delivery = DeferredLoad.WHOLE
-                    if keys_to_fetch:
-                        table = ObjectTable(memory_objs_by_group)
-                        deferred_fetch = fetch_deferred_objects(
-                            self._ctx.storage_manager,
-                            self._ctx.pipelined_models.find(model_name, key.world_size),
-                            obj_keys_per_obj_group,
-                            keys_to_fetch,
-                            self._pipelined_sink_factory,
-                            PipelinedLoadRequest(
-                                cache_context=cache_context,
-                                block_ids_gpu=block_ids_per_group_gpu,
-                                objects=table,
-                                skip_first_n_tokens=skip_first_n_tokens,
-                                schedule=schedule,
-                                progress=progress,
-                                event_pool=event_pool,
-                                retrieve_generation=retrieve_generation,
-                                transfer_key=transfer_key,
-                            ),
-                            self._group_layout_descs(model_name, key.world_size),
-                            self._ctx.pipelined_fetch,
-                        )
-                        prefetched_keys.extend(deferred_fetch.locked_keys)
-                        memory_objs_by_group = table.by_group()
-                        delivery = deferred_fetch.load
-                        outcome = deferred_fetch.outcome
-                        if delivery is DeferredLoad.PIPELINED:
-                            fetched_in_window = keys_to_fetch
-                    if delivery is DeferredLoad.WHOLE:
-                        transfer_kv_layerwise_h2d(
-                            cache_context,
-                            block_ids_per_group_gpu,
-                            memory_objs_by_group,
-                            skip_first_n_tokens,
-                            schedule,
-                            progress,
-                            event_pool,
-                            retrieve_generation,
-                            transfer_key=transfer_key,
-                        )
+                    future = self._hand_off_layerwise_retrieve(run)
+                    handed_off = True
+                    return DeferredResponse(future)
             except Exception as exc:
-                logger.exception("Cannot retrieve keys due to exception")
-                retrieve_succeeded = False
-                if claimed:
-                    outcome = (
-                        PipelinedOutcome.SHARED_KEYS_BUSY
-                        if isinstance(exc, SharedKeysBusyError)
-                        else PipelinedOutcome.FAILED
-                    )
-                if layerwise_active:
-                    _publish_layerwise_retrieve_terminal(
-                        self._ctx, entry, instance_id, retrieve_generation
-                    )
+                self._note_retrieve_failure(run, exc)
             finally:
-                event_backend.record_event(event, cache_context.stream)
-                retrieved_count = len(set(prefetched_keys).union(fetched_in_window))
-                read_keys = set(prefetched_keys)
-                prefetched_keys.extend(k for k in deferred.locked if k not in read_keys)
-                if prefetched_keys:
-                    submit_callback_to_stream(
-                        cache_context.cupy_stream,
-                        "finish_read_prefetched",
-                        prefetched_keys,
-                    )
-                num_tokens = (
-                    num_chunks * self._ctx.chunk_size
-                    if retrieved_count == expected_retained
-                    else 0
-                )
-                self._ctx.event_bus.publish_on_stream(
-                    cache_context.cupy_stream,
-                    Event(
-                        event_type=EventType.MP_RETRIEVE_END,
-                        session_id=key.request_id,
-                        metadata={
-                            "retrieved_count": retrieved_count,
-                            "device": str(cache_context.device),
-                            "engine_id": instance_id,
-                            "model_name": model_name,
-                            "cache_salt": key.cache_salt,
-                            "total_bytes": total_bytes,
-                            "num_tokens": num_tokens,
-                            "transfer_key": transfer_key,
-                            "pipelined_outcome": outcome.value,
-                            "deferred_count": len(claimed),
-                        },
-                    ),
-                )
-        if retrieve_succeeded:
-            tokens_retrieved = num_chunks * self._ctx.chunk_size
-            ed = time.perf_counter()
-            logger.info(
-                "Retrieved %d tokens in %.3f seconds",
-                tokens_retrieved,
-                ed - st,
-            )
+                if not handed_off:
+                    self._end_retrieve_on_stream(run)
+        return DeferredResponse.resolved(self._retrieve_response(run))
 
-        return (
-            event_backend.export_event(event, cache_context.device),
-            retrieve_succeeded,
-        )
+    def retrieve(
+        self,
+        key: IPCCacheServerKey,
+        instance_id: int,
+        gpu_block_ids: list[list[int]],
+        event_ipc_handle: bytes,
+        skip_first_n_tokens: int = 0,
+        retrieve_generation: int = 0,
+    ) -> tuple[bytes, bool]:
+        """Retrieve the CPU KV cache into GPU blocks, blocking until done.
+
+        Same as :meth:`start_retrieve`, waiting for its response.
+
+        Args:
+            key: See :meth:`start_retrieve`.
+            instance_id: See :meth:`start_retrieve`.
+            gpu_block_ids: See :meth:`start_retrieve`.
+            event_ipc_handle: See :meth:`start_retrieve`.
+            skip_first_n_tokens: See :meth:`start_retrieve`.
+            retrieve_generation: See :meth:`start_retrieve`.
+
+        Returns:
+            The completion event's IPC handle and whether the key was
+            retrieved; see :meth:`start_retrieve`.
+
+        Raises:
+            RuntimeError: If the backend does not support IPC event handles.
+        """
+        return self.start_retrieve(
+            key,
+            instance_id,
+            gpu_block_ids,
+            event_ipc_handle,
+            skip_first_n_tokens,
+            retrieve_generation,
+        ).result()
 
     def _publish_token_bindings(
         self, key: IPCCacheServerKey, obj_keys: list[ObjectKey]
@@ -1670,4 +1719,212 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             model_name,
             model.adapter_id,
             model.max_record_bytes,
+        )
+
+    def _hand_off_layerwise_retrieve(
+        self, run: _RetrieveRun
+    ) -> "Future[tuple[bytes, bool]]":
+        """Admit a layerwise retrieve and queue its layer loading on the pool.
+
+        Called on the client's affinity thread, so the worker's retrieves are
+        admitted in the order it sent them.
+
+        Args:
+            run: The retrieve, with its L1 objects read.
+
+        Returns:
+            Resolves to the retrieve's response.
+
+        Raises:
+            ValueError: If the generation is not newer than every generation
+                the worker's sequencer has seen.
+            RuntimeError: If the pool no longer accepts work. The retrieve
+                has been failed in the sequencer.
+        """
+        sequencer = _sequencer_of(run.entry)
+        sequencer.admit(run.retrieve_generation)
+        try:
+            return self._layerwise_retrieve_pool.submit(
+                self._finish_layerwise_retrieve, run
+            )
+        except BaseException:
+            sequencer.release(run.retrieve_generation)
+            raise
+
+    def _finish_layerwise_retrieve(self, run: _RetrieveRun) -> tuple[bytes, bool]:
+        """Load a handed-off layerwise retrieve's layers and finish it.
+
+        Runs on the layerwise retrieve pool. Releases the retrieve from its
+        sequencer after its completion event and key releases are queued.
+
+        Args:
+            run: The admitted retrieve.
+
+        Returns:
+            The retrieve's response; see :meth:`start_retrieve`.
+        """
+        cache_context = run.entry.cache_context
+        try:
+            with (
+                torch_dev.device(cache_context.device),
+                torch_dev.stream(cache_context.stream),
+            ):
+                try:
+                    self._load_layers(run)
+                except Exception as exc:
+                    self._note_retrieve_failure(run, exc)
+                finally:
+                    self._end_retrieve_on_stream(run)
+        finally:
+            _sequencer_of(run.entry).release(run.retrieve_generation)
+        return self._retrieve_response(run)
+
+    def _load_layers(self, run: _RetrieveRun) -> None:
+        """Copy a layerwise retrieve's objects to the GPU, layer by layer.
+
+        Deferred keys are fetched with the pipelined fetch, which loads each
+        layer as it lands, or whole; whole objects go through one layerwise
+        transfer.
+
+        Args:
+            run: The admitted retrieve. Its keys, objects and outcome are
+                updated with what the fetch locked and delivered.
+
+        Raises:
+            RetrieveAbortedError: If another retrieve's failure stopped it.
+            Exception: Whatever the fetch or the transfer raises.
+        """
+        entry = run.entry
+        cache_context = entry.cache_context
+        schedule = entry.layerwise_schedule
+        if schedule is None:
+            raise RuntimeError("layerwise retrieve has no launch schedule")
+        sequencer = _sequencer_of(entry)
+        keys_to_fetch = run.deferred.to_fetch
+        delivery = DeferredLoad.WHOLE
+        if keys_to_fetch:
+            table = ObjectTable(run.memory_objs_by_group)
+            deferred_fetch = fetch_deferred_objects(
+                self._ctx.storage_manager,
+                self._ctx.pipelined_models.find(entry.model_name, run.key.world_size),
+                run.obj_keys_per_obj_group,
+                keys_to_fetch,
+                self._pipelined_sink_factory,
+                PipelinedLoadRequest(
+                    cache_context=cache_context,
+                    block_ids_gpu=run.block_ids_per_group_gpu,
+                    objects=table,
+                    skip_first_n_tokens=run.skip_first_n_tokens,
+                    schedule=schedule,
+                    sequencer=sequencer,
+                    retrieve_generation=run.retrieve_generation,
+                    transfer_key=run.transfer_key,
+                ),
+                self._group_layout_descs(entry.model_name, run.key.world_size),
+                self._ctx.pipelined_fetch,
+            )
+            run.prefetched_keys.extend(deferred_fetch.locked_keys)
+            run.memory_objs_by_group = table.by_group()
+            delivery = deferred_fetch.load
+            run.outcome = deferred_fetch.outcome
+            if delivery is DeferredLoad.PIPELINED:
+                run.fetched_in_window = keys_to_fetch
+        if delivery is DeferredLoad.WHOLE:
+            transfer_kv_layerwise_h2d(
+                cache_context,
+                run.block_ids_per_group_gpu,
+                run.memory_objs_by_group,
+                run.skip_first_n_tokens,
+                schedule,
+                sequencer,
+                run.retrieve_generation,
+                transfer_key=run.transfer_key,
+            )
+
+    def _note_retrieve_failure(self, run: _RetrieveRun, exc: Exception) -> None:
+        """Record that a retrieve raised; call from the ``except`` clause.
+
+        Args:
+            run: The failed retrieve.
+            exc: What it raised.
+        """
+        logger.exception("Cannot retrieve keys due to exception")
+        run.succeeded = False
+        if run.claimed:
+            run.outcome = (
+                PipelinedOutcome.SHARED_KEYS_BUSY
+                if isinstance(exc, SharedKeysBusyError)
+                else PipelinedOutcome.FAILED
+            )
+        if run.layerwise_active:
+            _publish_layerwise_retrieve_terminal(
+                self._ctx, run.entry, run.instance_id, run.retrieve_generation
+            )
+
+    def _end_retrieve_on_stream(self, run: _RetrieveRun) -> None:
+        """Queue a retrieve's completion event, key releases and end event.
+
+        Call with the cache context's stream current, after the retrieve
+        queued its last copy (or failed).
+
+        Args:
+            run: The finished retrieve. Its keys to release are completed
+                with the deferred keys it locked but never read.
+        """
+        entry = run.entry
+        cache_context = entry.cache_context
+        _event_backend_of(entry).record_event(run.event, cache_context.stream)
+        retrieved_count = len(set(run.prefetched_keys).union(run.fetched_in_window))
+        read_keys = set(run.prefetched_keys)
+        run.prefetched_keys.extend(k for k in run.deferred.locked if k not in read_keys)
+        if run.prefetched_keys:
+            submit_callback_to_stream(
+                cache_context.cupy_stream,
+                "finish_read_prefetched",
+                run.prefetched_keys,
+            )
+        num_tokens = (
+            run.num_chunks * self._ctx.chunk_size
+            if retrieved_count == run.expected_retained
+            else 0
+        )
+        self._ctx.event_bus.publish_on_stream(
+            cache_context.cupy_stream,
+            Event(
+                event_type=EventType.MP_RETRIEVE_END,
+                session_id=run.key.request_id,
+                metadata={
+                    "retrieved_count": retrieved_count,
+                    "device": str(cache_context.device),
+                    "engine_id": run.instance_id,
+                    "model_name": entry.model_name,
+                    "cache_salt": run.key.cache_salt,
+                    "total_bytes": run.total_bytes,
+                    "num_tokens": num_tokens,
+                    "transfer_key": run.transfer_key,
+                    "pipelined_outcome": run.outcome.value,
+                    "deferred_count": len(run.claimed),
+                },
+            ),
+        )
+
+    def _retrieve_response(self, run: _RetrieveRun) -> tuple[bytes, bool]:
+        """Log a finished retrieve and build its response.
+
+        Args:
+            run: The retrieve, its completion event already queued.
+
+        Returns:
+            The completion event's IPC handle and whether it succeeded.
+        """
+        if run.succeeded:
+            logger.info(
+                "Retrieved %d tokens in %.3f seconds",
+                run.num_chunks * self._ctx.chunk_size,
+                time.perf_counter() - run.started,
+            )
+        cache_context = run.entry.cache_context
+        return (
+            _event_backend_of(run.entry).export_event(run.event, cache_context.device),
+            run.succeeded,
         )

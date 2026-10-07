@@ -440,3 +440,16 @@ def test_storage_manager_without_adapters_has_no_slot_limit() -> None:
     with _storage_manager([]) as sm:
         with pytest.raises(LayerwiseContractError, match="no L2 adapters"):
             sm.pipelined_max_slots_per_request()
+
+
+def test_a_window_is_settled_only_when_the_native_client_says_so() -> None:
+    client = PipelinedNativeClientStub()
+    client.settled_windows.add(1)
+    with _native_adapter(client) as adapter:
+        assert adapter.rdma_window_settled(1)
+        assert not adapter.rdma_window_settled(0)
+
+
+def test_a_client_that_cannot_tell_never_reports_a_window_settled() -> None:
+    with _native_adapter(_PlainClient()) as adapter:
+        assert not adapter.rdma_window_settled(0)

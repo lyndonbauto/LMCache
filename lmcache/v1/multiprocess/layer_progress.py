@@ -24,9 +24,13 @@ Publication invariant (seqlock on the legacy three-field layout):
     retried. This prevents a waiter from observing a new generation paired
     with a previous retrieve's watermark.
 
-Concurrent retrieves on one worker instance are serialized by the MP server's
-affinity pool (one in-flight blocking retrieve per worker identity). The shared
-record therefore tracks a single active retrieve generation at a time.
+Several retrieves of one worker may be in flight in the daemon at once, but
+the record tracks a single generation: the daemon's
+:class:`~lmcache.v1.multiprocess.retrieve_sequencer.RetrieveLaunchSequencer`
+is its only writer, publishes only the newest retrieve that has begun, and
+lets that retrieve enqueue an ordinal only after every older one in flight
+has. The worker waits on its newest generation, so a published ordinal
+covers all of them.
 """
 
 # Standard
@@ -363,8 +367,9 @@ class LayerProgressWaiter:
             snapshot = self._record.read()
             progress = (snapshot.generation, snapshot.watermark)
             if progress != last_progress:
-                # Retrieves on one worker run one at a time, so a wait queued
-                # behind older generations must not time out while they move.
+                # Older generations may own the record until this one begins,
+                # so a wait queued behind them must not time out while they
+                # move.
                 last_progress = progress
                 deadline = self._monotonic() + self._wait_timeout_seconds
             if snapshot.generation > generation:

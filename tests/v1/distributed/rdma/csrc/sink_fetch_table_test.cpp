@@ -12,7 +12,9 @@
 //     slot makes its layer unservable for good;
 //   - one fetch per window, and results for a fetch that is no longer active
 //     -- including one whose generation was reused after it wrapped -- never
-//     count toward the window's next fetch.
+//     count toward the window's next fetch;
+//   - a window is settled only once every batch begun in it ended, and none
+//     ended with a write that may still land.
 //
 // Usage: sink_fetch_table_test    (takes no arguments)
 
@@ -27,6 +29,7 @@
 
 namespace {
 
+using lmcache::connector::sink::BatchEnd;
 using lmcache::connector::sink::BegunFetch;
 using lmcache::connector::sink::kNoGeneration;
 using lmcache::connector::sink::PlanTooLargeError;
@@ -244,6 +247,54 @@ void test_stale_batch_after_generation_wraps() {
         "the new batch's result counts");
 }
 
+// An abandoned window may be reused once every batch begun in it ended with
+// no write left on the wire, without waiting out the fetch timeout.
+void test_abandoned_window_settles_when_every_batch_ends() {
+  std::cout << "abandoned window settles when every batch ends\n";
+  SinkFetchTable table(kWindowBytes, 2);
+  check(table.window_settled(0), "a window with no fetch is settled");
+  const BegunFetch begun = table.begin(plan({0, 1, 2}, 1));
+  for (const auto& batch : begun.batches) {
+    check(batch.window == 1, "every batch names the fetch's window");
+  }
+  check(!table.window_settled(1), "batches are outstanding");
+  check(table.window_settled(0), "other windows are unaffected");
+  table.abandon(begun.generation);
+  table.on_batch_done(1, BatchEnd::kSettled);
+  table.on_batch_done(1, BatchEnd::kSettled);
+  check(!table.window_settled(1), "one batch is still outstanding");
+  table.on_batch_done(1, BatchEnd::kSettled);
+  check(table.window_settled(1), "every batch ended without a late write");
+}
+
+void test_a_batch_that_may_still_write_unsettles_until_next_begin() {
+  std::cout << "a batch that may still write unsettles until next begin\n";
+  SinkFetchTable table(kWindowBytes, 1);
+  const BegunFetch first = table.begin(plan({0, 1}));
+  table.abandon(first.generation);
+  table.on_batch_done(0, BatchEnd::kMayStillWrite);
+  table.on_batch_done(0, BatchEnd::kSettled);
+  check(!table.window_settled(0),
+        "a timed-out row keeps the window unsettled after its batches end");
+  const BegunFetch second = table.begin(plan({0}));
+  table.on_batch_done(0, BatchEnd::kSettled);
+  check(table.window_settled(0), "the window's next fetch starts afresh");
+  table.finish(second.generation);
+}
+
+void test_batch_done_is_checked() {
+  std::cout << "batch done is checked\n";
+  SinkFetchTable table(kWindowBytes, 1);
+  check_throws<std::out_of_range>(
+      [&] { table.on_batch_done(1, BatchEnd::kSettled); },
+      "a window past the last");
+  check_throws<std::out_of_range>([&] { table.window_settled(1); },
+                                  "settled for a window past the last");
+  check_throws<std::logic_error>(
+      [&] { table.on_batch_done(0, BatchEnd::kSettled); },
+      "a window with no batch outstanding");
+}
+
 }  // namespace
 
 int main() {
@@ -255,6 +306,9 @@ int main() {
   test_constructor_rejects_empty_ranges();
   test_finish_and_abandon();
   test_stale_batch_after_generation_wraps();
+  test_abandoned_window_settles_when_every_batch_ends();
+  test_a_batch_that_may_still_write_unsettles_until_next_begin();
+  test_batch_done_is_checked();
   if (failures != 0) {
     std::cout << failures << " check(s) failed\n";
     return 1;

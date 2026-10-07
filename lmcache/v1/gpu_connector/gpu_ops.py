@@ -18,6 +18,41 @@ import lmcache.lmcache_native as lmcache_native
 _SINGLE_COPY_ALIGNMENT = 1 << 62
 
 
+def _range_source_tensor(memory_obj: MemoryObj) -> torch.Tensor:
+    """Return the host tensor a byte-range staging copy reads.
+
+    Raises:
+        ValueError: If ``memory_obj`` is a GDS object (those transfer whole
+            objects only) or has no backing tensor.
+    """
+    if isinstance(memory_obj, GDSMemoryObject):
+        raise ValueError("GDS memory objects cannot be staged by byte range")
+    src_tensor = memory_obj.raw_tensor
+    if src_tensor is None:
+        raise ValueError(
+            "memory_obj.raw_tensor is None; ensure the MemoryObj has been allocated."
+        )
+    return src_tensor
+
+
+def _check_byte_range(
+    memory_obj: MemoryObj, gpu_buffer: torch.Tensor, byte_offset: int, nbytes: int
+) -> None:
+    """Reject a byte range that is empty, negative, or past either buffer.
+
+    Raises:
+        ValueError: If the range is invalid for ``memory_obj`` or ``gpu_buffer``.
+    """
+    if byte_offset < 0 or nbytes <= 0:
+        raise ValueError(f"invalid byte range: offset={byte_offset}, nbytes={nbytes}")
+    end = byte_offset + nbytes
+    if end > memory_obj.get_size() or end > gpu_buffer.nbytes:
+        raise ValueError(
+            f"byte range [{byte_offset}, {end}) exceeds memory_obj nbytes="
+            f"{memory_obj.get_size()} or gpu_buffer nbytes={gpu_buffer.nbytes}"
+        )
+
+
 # Helper functions
 def lmcache_memcpy_async_h2d(
     memory_obj: MemoryObj,
@@ -87,21 +122,9 @@ def lmcache_memcpy_async_h2d_range(
             objects only), has no backing tensor, or if the range is empty,
             negative, or runs past the end of either buffer.
     """
-    if isinstance(memory_obj, GDSMemoryObject):
-        raise ValueError("GDS memory objects cannot be staged by byte range")
-    src_tensor = memory_obj.raw_tensor
-    if src_tensor is None:
-        raise ValueError(
-            "memory_obj.raw_tensor is None; ensure the MemoryObj has been allocated."
-        )
-    if byte_offset < 0 or nbytes <= 0:
-        raise ValueError(f"invalid byte range: offset={byte_offset}, nbytes={nbytes}")
+    src_tensor = _range_source_tensor(memory_obj)
+    _check_byte_range(memory_obj, gpu_buffer, byte_offset, nbytes)
     end = byte_offset + nbytes
-    if end > memory_obj.get_size() or end > gpu_buffer.nbytes:
-        raise ValueError(
-            f"byte range [{byte_offset}, {end}) exceeds memory_obj nbytes="
-            f"{memory_obj.get_size()} or gpu_buffer nbytes={gpu_buffer.nbytes}"
-        )
     if isinstance(memory_obj.parent(), LazyMemoryAllocator):
         # The host offset is the allocator's virtual offset of the range start;
         # the native copy splits at pin-chunk boundaries relative to it.
@@ -222,4 +245,52 @@ def build_staging_copies(
             copies.append(
                 device_ops.StagingCopy(host_ptr, gpu_ptr, mem_obj_size, host_offset)
             )
+    return copies
+
+
+def build_h2d_range_staging_copies(
+    memory_obj: MemoryObj,
+    gpu_buffer: torch.Tensor,
+    byte_ranges: Sequence[tuple[int, int]],
+) -> list[StagingCopy]:
+    """Build native ``StagingCopy`` descriptors for byte ranges of one object.
+
+    The plan counterpart of :func:`lmcache_memcpy_async_h2d_range`: each
+    ``(offset, length)`` range of ``memory_obj`` lands at the same offsets of
+    ``gpu_buffer``. The descriptors are meant for
+    ``device_ops.execute_object_group_transfer`` with
+    ``LazyMemoryAllocator.PIN_CHUNK_SIZE`` as its host alignment, so a lazy
+    object's copy splits at pin-chunk boundaries; any other host object
+    carries host offset 0, which splits only a range longer than a pin chunk.
+
+    Args:
+        memory_obj: Host memory object to read from.
+        gpu_buffer: Contiguous device buffer laid out byte-for-byte like the
+            memory object (for example an object-group staging buffer).
+        byte_ranges: ``(offset, length)`` pairs, in bytes, in both buffers.
+
+    Returns:
+        One ``device_ops.StagingCopy`` per range, in input order.
+
+    Raises:
+        ValueError: If ``memory_obj`` is a GDS object or has no backing
+            tensor, or if a range is empty, negative, or runs past the end of
+            either buffer.
+    """
+    src_tensor = _range_source_tensor(memory_obj)
+    is_lazy = isinstance(memory_obj.parent(), LazyMemoryAllocator)
+    host_ptr = memory_obj.data_ptr if is_lazy else src_tensor.data_ptr()
+    host_base = memory_obj.meta.address if is_lazy else 0
+    gpu_ptr = gpu_buffer.data_ptr()
+    copies: list[StagingCopy] = []
+    for offset, length in byte_ranges:
+        _check_byte_range(memory_obj, gpu_buffer, offset, length)
+        copies.append(
+            device_ops.StagingCopy(
+                gpu_ptr + offset,
+                host_ptr + offset,
+                length,
+                host_base + offset if is_lazy else 0,
+            )
+        )
     return copies

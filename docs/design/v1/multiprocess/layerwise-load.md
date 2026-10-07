@@ -92,8 +92,10 @@ worker: layer 7 wait raises LayerProgressRetrieveFailedError
 ```
 
 Handing blocks back is safe only if nothing will write them again.
-`LayerwiseH2DRetrieve.mark_failed` therefore synchronises the transfer stream
-before it sets the flag, so every copy the retrieve queued has landed first.
+`LayerwiseH2DRetrieve.mark_failed` therefore stops every retrieve of the
+worker still in flight and synchronises the transfer stream before it sets
+the flag, so every copy already queued has landed first and none follows
+(see [Concurrent retrieves per worker](#concurrent-retrieves-per-worker)).
 Every other wait error keeps raising, which stops the engine: after a
 generation or progress timeout, or with a stale generation, the daemon's
 state is unknown and it may still be copying into these blocks, so a
@@ -135,9 +137,11 @@ retrieve.mark_failed()         # publish failure under G; waiters raise
 watermark stays a tight bound. `transfer_kv_layerwise_h2d` is now a thin loop
 over `launch_layer` and behaves exactly as before.
 
-`mark_failed` never touches a record that already holds a newer generation,
-and the worker's waiter honours a failure flag only under its own generation,
-so one retrieve's failure cannot fail or rewind the next.
+A failure that arrives after its retrieve completed never touches a record
+that already holds a newer generation, and the worker's waiter honours a
+failure flag only under its own generation, so a late failure cannot fail or
+rewind the next retrieve. A failure while the retrieve is still in flight
+does fail the newer retrieves in flight with it, on purpose; see below.
 
 `layerwise_sink.MultiprocessLayerLoadSink` presents this as the
 `LayerLoadSink` contract so `LayerArrivalPump` can drive it from a transport's
@@ -162,6 +166,66 @@ through `tests/v1/layerwise/multiprocess_sink_harness.py`. See
 [`../layerwise/track-b-acceptance.md`](../layerwise/track-b-acceptance.md)
 (implementation log) for the decisions behind this split.
 
+## Concurrent retrieves per worker
+
+vLLM submits every retrieve of a step before the forward pass. `RETRIEVE`
+runs on the client's affinity thread (one thread per worker, FIFO), so a
+handler that held the thread for a whole pipelined fetch made the step's
+retrieves run one after another: the step waited for the sum of their
+fetches (ledger D-27). The handler now returns a `DeferredResponse` instead:
+
+```text
+affinity thread (in order)          layerwise pool (32 threads)
+  RETRIEVE g=5: read L1, stage IDs,
+                admit(5), submit  ──▶ fetch + launch layers of 5
+  RETRIEVE g=6: read L1, stage IDs,
+                admit(6), submit  ──▶ fetch + launch layers of 6
+  (thread free)                       each response sent when its future resolves
+```
+
+- **Transport.** A blocking handler annotated `-> DeferredResponse[R]` may
+  return before its work is done. The ZMQ server sends `R` when the future
+  resolves; the gRPC server waits on it. Signature checks and the gRPC
+  encoder read `R` from the annotation. Non-layerwise retrieves return
+  `DeferredResponse.resolved(...)` and behave as before.
+- **One writer of the record.** The worker still waits on its newest
+  generation only, reading one record and one event per ordinal that every
+  generation reuses. `RetrieveLaunchSequencer` (one per registered worker)
+  is the only writer. Retrieve `g` may enqueue ordinal `k` only after every
+  older retrieve in flight has enqueued `k`; all launches share one stream,
+  so the event the newest retrieve records after `k` covers every older
+  retrieve's `k` too. Only the newest begun retrieve (the *owner*) records
+  events and moves the watermark; older ones enqueue without recording.
+- **Admission order.** Generations are admitted on the affinity thread in
+  the order the worker sent them, before the pool can begin any of them, so
+  ordinal ordering never waits on a retrieve that arrives later.
+- **Failure.** One retrieve failing while in flight stops all of the
+  worker's retrieves in flight (they raise `RetrieveAbortedError` at their
+  next launch), waits out any enqueue under way, drains the stream, and
+  publishes the failure under the newest generation. The worker then hands
+  every block of the step back to vLLM (see *What vLLM sees* above), so no
+  retrieve may copy into those blocks afterwards. A handler that ends
+  without completing its retrieve fails it on release, so newer ones never
+  wait for it forever.
+- **Shared buffers.** Every enqueue holds the cache context's
+  `TransferGate`: transfers share the stream and the temp staging buffers.
+  A layerwise retrieve stages its block IDs into its own device tensor
+  (`stage_owned_block_ids`), because the shared block-ID buffer is
+  rewritten by every later store or retrieve while it is still launching.
+  `WHOLE_OBJECT` staging reuses a batch already resident in the staging
+  slots only if no other transfer held the gate since (`StagingSlots`).
+
+Limits:
+
+- A failure published under a generation older than the step's newest, when
+  the newest has not begun yet, reaches the worker only through the
+  retrieves' futures, not through the layer waits.
+- CacheBlend and the qstore module enqueue on the stream without the gate.
+- Unregistering a worker while one of its retrieves runs on the pool is not
+  guarded (as before, when it ran on the affinity thread).
+- Overlap only helps while the fetch path has spare bandwidth (ledger D-30);
+  the speedup is not yet measured.
+
 ## Staging vs overlap
 
 Per-layer kernels read from GPU staging buffers. How those buffers are filled is
@@ -182,6 +246,15 @@ in the `(kv_size, num_layers, slots, hidden)` layout, or one block in the
 `(num_layers, slots, hidden)` layout, so it costs `kv_size` range copies per
 chunk instead of one copy per object. GDS objects transfer whole only and are
 refused in `PER_LAYER` mode.
+
+On a CUDA or ROCm context, `PER_LAYER` makes one native call per layer. It
+hands every batch's range copies and one-layer kernel launches to
+`execute_object_group_transfer` as one plan. Before, it made one
+Python-to-native call per range copy and one per batch kernel: 288 calls per
+layer for 128 chunks with `kv_size` 2. The executor runs a batch's copies
+before its kernel, and one batch after another, which the shared staging
+slots require. An extension without `LaunchVar`'s `layer_offset` and
+`n_layers`, or a non-CUDA context, keeps the per-call loop.
 
 Overlap is therefore:
 

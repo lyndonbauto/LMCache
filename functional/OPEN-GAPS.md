@@ -186,6 +186,13 @@ D-14 (concurrent writers mix segments) has its own decision record:
 - **Proposed change**: stop at the first miss (sequential batches), or keep
   one batch but skip the reads of keys past the first miss when results
   arrive in order.
+- **Decision (2026-10-06): won't fix.** The Aerospike lookup is one
+  header-only batch read of every key (`do_batch_exists` in
+  `connector.cpp`, no bins), so a key past the gap costs a metadata check
+  inside the same round trip. Sequential batches would add round trips to
+  every lookup. Stopping at the first miss would also break `SPARSE`
+  (sliding-window) lookups and multi-adapter prefetch policies, which use
+  hits after a gap.
 - **Owner**: unassigned (L2 lookup in the storage manager).
 - **Evidence**: `stage2/lkp03/` (chunk-2 gap: chunks 3-5 looked up, not used).
 

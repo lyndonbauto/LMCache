@@ -22,6 +22,10 @@ from lmcache.v1.multiprocess.custom_types import (
     get_customized_decoder,
     get_customized_encoder,
 )
+from lmcache.v1.multiprocess.deferred_response import (
+    DeferredResponse,
+    response_annotation,
+)
 from lmcache.v1.multiprocess.futures import (
     MessagingFuture,
 )
@@ -563,7 +567,8 @@ class MessageQueueServer(RequestServer):
     ) -> Any:
         """
         Call the blocking handler in a separate thread and send the response
-        back to the client.
+        back to the client. A handler that returns a ``DeferredResponse`` has
+        its response sent when that resolves, not when the handler returns.
 
         Args:
             handler_entry (BlockingRequestHandler[Any]): The handler entry.
@@ -577,6 +582,9 @@ class MessageQueueServer(RequestServer):
         def _notify_response(fut: Future):
             try:
                 response = fut.result()
+                if isinstance(response, DeferredResponse):
+                    response.add_done_callback(_notify_response)
+                    return
                 response_cls = handler_entry.get_response_class()
                 b_response = msgspec_encode(response, cls=response_cls)
                 frames_to_send = (
@@ -710,7 +718,7 @@ class MessageQueueServer(RequestServer):
                 )
                 return False
 
-        return_ann = hints.get("return", sig.return_annotation)
+        return_ann = response_annotation(hints.get("return", sig.return_annotation))
         expected_return_cls = get_response_class(request_type)
         if not same_type(return_ann, expected_return_cls):
             logger.error(

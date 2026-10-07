@@ -479,7 +479,8 @@ int64_t calculate_kernel_section_bytes(
     }
     const PageBufferShapeDesc& desc =
         kernel_group_specs[launch.group_idx].shape_desc;
-    const int64_t block_bytes = static_cast<int64_t>(desc.kv_size) * desc.nl *
+    const int layers = (launch.n_layers < 0) ? desc.nl : launch.n_layers;
+    const int64_t block_bytes = static_cast<int64_t>(desc.kv_size) * layers *
                                 desc.bs * desc.nh * desc.hs * desc.element_size;
     const int64_t moved_blocks =
         static_cast<int64_t>(launch.total_blocks) - launch.skip_prefix_n_blocks;
@@ -624,7 +625,7 @@ void execute_object_group_transfer(
             paged_buffer_ptrs_tensor, std::move(lmcache_objects_ptrs),
             block_ids, device, direction, group.shape_desc,
             group.lmcache_chunk_size, group.engine_kv_format,
-            launch.skip_prefix_n_blocks);
+            launch.skip_prefix_n_blocks, launch.layer_offset, launch.n_layers);
       }
     }
     if (!is_h2d) {

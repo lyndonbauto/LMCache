@@ -160,13 +160,16 @@ PYBIND11_MODULE(cuda_ops, m) {
   py::class_<LaunchVar>(m, "LaunchVar")
       .def(
           py::init([](int group_idx, int64_t block_ids_offset, int total_blocks,
-                      int num_objects, int skip_prefix_n_blocks) {
-            return LaunchVar{group_idx, block_ids_offset, total_blocks,
-                             num_objects, skip_prefix_n_blocks};
+                      int num_objects, int skip_prefix_n_blocks,
+                      int layer_offset, int n_layers) {
+            return LaunchVar{group_idx,   block_ids_offset,     total_blocks,
+                             num_objects, skip_prefix_n_blocks, layer_offset,
+                             n_layers};
           }),
           py::arg("group_idx"), py::arg("block_ids_offset"),
           py::arg("total_blocks"), py::arg("num_objects"),
-          py::arg("skip_prefix_n_blocks"));
+          py::arg("skip_prefix_n_blocks"), py::arg("layer_offset") = 0,
+          py::arg("n_layers") = -1);
   py::class_<BatchStep>(m, "BatchStep")
       .def(py::init([](std::vector<StagingCopy> staging,
                        std::vector<LaunchVar> launches) {

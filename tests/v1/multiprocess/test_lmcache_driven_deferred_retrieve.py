@@ -118,6 +118,7 @@ def _harness(
     """
     monkeypatch.setattr(mod, "DeviceHostFuncDispatcher", MagicMock())
     monkeypatch.setattr(mod, "downsample_and_stage_block_ids", lambda cc, b: b)
+    monkeypatch.setattr(mod, "downsample_and_stage_owned_block_ids", lambda cc, b: b)
     monkeypatch.setattr(mod, "torch_dev", MagicMock())
 
     ctx = MagicMock()
@@ -148,6 +149,7 @@ def _harness(
         layerwise_schedule=MagicMock() if layerwise else None,
         layer_progress=MagicMock() if layerwise else None,
         daemon_layer_event_pool=MagicMock() if layerwise else None,
+        retrieve_sequencer=MagicMock() if layerwise else None,
     )
     monkeypatch.setattr(module, "get_and_touch_context_entry", lambda _id: entry)
 
