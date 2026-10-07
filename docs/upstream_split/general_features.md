@@ -176,6 +176,13 @@ unchanged.
   (parameters documented in the header).
 - **Binding.** `csrc/cuda/pybind.cpp`: `py::arg("layer_offset") = 0,
   py::arg("n_layers") = -1`.
+- **Plan executor.** The `LaunchVar` plan entry gets the same two fields,
+  with the same defaults (`csrc/cuda/transfer_plan_types.cuh`, and the
+  `LaunchVar` binding in `pybind.cpp`). `execute_object_group_transfer`
+  passes them to the kernel, and its kernel-phase byte count covers only
+  those layers. This lets GF-3 stage and launch one layer of every batch in
+  one native call. Existing plans don't set the fields, so they still move
+  every layer.
 - **Device ops.** `lmcache/v1/platform/base/device_ops.py` passes the range
   through. `lmcache/v1/platform/musa/device_ops.py` and
   `lmcache/v1/platform/rbln/device_ops.py` raise `NotImplementedError` for a
@@ -186,7 +193,8 @@ unchanged.
 
 **Commits.** `34f0c898` (kernel range), `3a839927` (route through
 `DeviceOps`), `f5ff2bbb` (guard `layer_offset` on stride-sensitive layouts in
-tests), and parts of `061fb52a`.
+tests), parts of `061fb52a`, and the `csrc/cuda` hunks of `4954fb10`
+(`LaunchVar` layer range).
 
 **Tests.** `tests/v1/test_mp_mem_kernels.py` (+164).
 
@@ -199,7 +207,7 @@ tests), and parts of `061fb52a`.
   must be re-ported.
 - **New upstream path.** Upstream #5308 moved the LMCache-driven transfer to
   `cudaMemcpyBatchAsync`. Check that the layer range still applies on that
-  path.
+  path, both on the kernel and on the plan executor's `LaunchVar`.
 
 **Likely pushback.**
 
@@ -289,8 +297,13 @@ BF-4 ([bug_fixes.md](bug_fixes.md)), because they re-record exported events.
 > **Library half → PR-G4,** a library PR after PR-G2 and PR-G3.
 >
 > - **Contents:** `object_group_transfer.py` (`LayerwiseH2DRetrieve` and
->   per-layer staging, +833; it imports only GF-2 and `gpu_ops`) and
->   `lmcache_memcpy_async_h2d_range` in `gpu_ops.py` (+77).
+>   per-layer staging, +833; it imports only GF-2 and `gpu_ops`), and two
+>   helpers in `gpu_ops.py`: `lmcache_memcpy_async_h2d_range` (+77) and
+>   `build_h2d_range_staging_copies`. The one-call-per-layer path needs
+>   PR-G2's `LaunchVar` layer range. Without it, the retrieve falls back to
+>   one call per copy.
+> - **Ship** `test_layerwise_h2d_native_plan.py` as is. It imports only GF-2
+>   and this PR, and it needs CUDA and `cupy`.
 > - **Exclude `per_layer_staging_ranges`.** Only AS-M3 calls it, so it moves
 >   to PR-A11.
 > - **Reword** the `MemoryObjectLookup` docstring that points at
@@ -356,6 +369,22 @@ time, publishing each layer's progress (GF-2) as it lands.
     16-copy layer).
   - Lazy-allocator objects split at pin-chunk boundaries.
   - GDS objects are refused.
+- **One native call per layer.** On a CUDA or ROCm cache context, when the
+  extension has GF-1's `LaunchVar` layer range, a `PER_LAYER` launch
+  builds a plan and calls `execute_object_group_transfer` once.
+  - The plan has, for each batch, the layer's range copies and a one-layer
+    kernel launch.
+  - The executor runs each batch's copies before its kernel, and finishes
+    one batch before starting the next, so batches can still share the
+    staging slots.
+  - Before, a layer took one Python-to-native call per plane, per chunk,
+    plus one per batch for the kernel: about 290 calls per layer for 128
+    chunks.
+  - `gpu_ops.build_h2d_range_staging_copies` builds the copy entries with
+    the same checks and pin-chunk rule as `lmcache_memcpy_async_h2d_range`.
+  - `_HAS_NATIVE_LAYER_LAUNCHES` checks for the extension by building a
+    `LaunchVar` with the new keywords. An older build, a CPU context, and
+    `WHOLE_OBJECT` mode keep making one call per copy and per kernel.
 - **`lmcache_driven_transfer.retrieve`** takes the layerwise path when the
   server context has `use_layerwise`.
   `_publish_layerwise_retrieve_terminal` marks completion or failure.
@@ -381,6 +410,8 @@ time, publishing each layer's progress (GF-2) as it lands.
 - `5e3d5443`: the faster copy.
 - `1138782d`: report only failures, after the copies land.
 - `356ff7c7`: per-layer staging for every non-GDS retrieve.
+- `4954fb10`: one native call per layer (Python and test hunks; its
+  `csrc/cuda` hunks go to GF-1).
 
 **Tests.**
 
@@ -389,6 +420,11 @@ time, publishing each layer's progress (GF-2) as it lands.
   and `test_a_one_batch_retrieve_stages_each_layer_at_its_own_launch`, which
   failed before `356ff7c7`).
 - `tests/v1/multiprocess/test_layerwise_gpu_overlap.py`.
+- `tests/v1/multiprocess/test_layerwise_h2d_native_plan.py`: needs a CUDA
+  GPU and `cupy`. It drives a real `GPUCacheContext` (two kernel groups,
+  six chunks in batches of four, with and without a token skip). One
+  native call per layer must write the same KV as whole-object staging,
+  including when each layer lands in host memory just before its launch.
 
 **Upstream overlap.**
 
