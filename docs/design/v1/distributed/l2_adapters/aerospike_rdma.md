@@ -66,7 +66,7 @@ row->read_all_bins = true;
 row->sink = sink;
 row->sink_offset = slab_offset;   // relative to l1_base
 row->sink_length = record_bytes;  // must equal the value's size
-row->sink_priority = layer_ordinal;
+row->sink_priority = batch_token;  // rises per layer batch, across fetches
 row->result = AEROSPIKE_NO_RESPONSE;
 aerospike_batch_read(&as, &err, &policy, records);
 ```
@@ -85,8 +85,12 @@ Four properties drive the design:
    node a plan names is nominal.
 4. **Priority orders placement per sink.** Each node queues sink writes per
    region by `sink_priority` (lower first) and round-robins across regions.
-   LMCache sets it to the layer's ordinal in the plan, so every layer is in
-   flight at once but layer 0 is placed first.
+   LMCache sets it to the batch's token (low 32 bits), which rises with every
+   layer batch the table issues. Every layer is in flight at once but layer 0
+   is placed first. With several fetches in flight, every layer of an older
+   fetch is placed before any layer of a newer one. That matches the driver's
+   FIFO batch queue, and a stream of new fetches cannot starve an old fetch's
+   late layers, which its worker is blocked on (D-27).
 
 The sink wire format (field 46 on each batch row: region, offset, length,
 priority) and the per-node registration (`kv-sink-register`,
@@ -359,7 +363,7 @@ native classes is deliberate:
 issue(slots)
   └─ table.begin(slots)            validate, pick window, allocate generation
        -> one LayerBatch per layer, in order of first appearance:
-          {generation, token, layer_id, priority = ordinal, slot_indices}
+          {generation, token, layer_id, priority = (uint32) token, slot_indices}
   └─ queue the batches, return the generation     (no I/O on this thread)
 
 worker (16 threads)

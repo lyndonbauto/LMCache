@@ -7,15 +7,17 @@ when it cannot), and release every lock it holds after the copies.
 """
 
 # Standard
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import cast
 from unittest.mock import MagicMock
+import threading
 
 # Third Party
 import pytest
+import torch
 
 # First Party
 from lmcache.v1.distributed.api import ResidentKeys
@@ -33,6 +35,7 @@ from lmcache.v1.multiprocess.pipelined_loading import (
     PipelinedOutcome,
     PipelinedSinkFactory,
 )
+from lmcache.v1.multiprocess.retrieve_progress import ConcurrentRetrieveProgress
 
 NUM_GROUPS = 2
 NUM_CHUNKS = 3
@@ -40,6 +43,7 @@ CHUNK_SIZE = 256
 KEYS = [[f"g{g}c{c}" for c in range(NUM_CHUNKS)] for g in range(NUM_GROUPS)]
 DEFERRED = [KEYS[g][NUM_CHUNKS - 1] for g in range(NUM_GROUPS)]
 L1_KEYS = [KEYS[g][c] for g in range(NUM_GROUPS) for c in range(NUM_CHUNKS - 1)]
+LAUNCH_COUNT = 4
 
 
 def _obj(name: str) -> MagicMock:
@@ -83,16 +87,21 @@ class _Harness:
         [end] = self.retrieve_end
         return end["pipelined_outcome"]
 
-    def retrieve(self) -> bool:
+    entry: SimpleNamespace = field(default_factory=SimpleNamespace)
+
+    def retrieve(self, generation: int = 1) -> bool:
         _handle, ok = self.module.retrieve(
             key=SimpleNamespace(
-                request_id="req", cache_salt="salt", world_size=1, worker_id=0
+                request_id=f"req{generation}",
+                cache_salt="salt",
+                world_size=1,
+                worker_id=0,
             ),
             instance_id=1,
             gpu_block_ids=[[1, 2, 3] for _ in range(NUM_GROUPS)],
             event_ipc_handle=b"x",
             skip_first_n_tokens=0,
-            retrieve_generation=1,
+            retrieve_generation=generation,
         )
         return ok
 
@@ -108,6 +117,8 @@ def _harness(
     sink_factory: PipelinedSinkFactory | None = None,
     missing_from_l1: Iterable[str] = (),
     busy: Iterable[str] = (),
+    background: bool = False,
+    fetch_hook: Callable[[], None] = lambda: None,
 ) -> _Harness:
     """Build a module over mocks, with ``deferred`` left in L2 by the lookup.
 
@@ -115,9 +126,21 @@ def _harness(
     ``loaded`` are the keys a whole load finds (default: all of them).
     ``missing_from_l1`` are keys the L1 read cannot find, and ``busy`` are
     deferred keys another request is still fetching.
+
+    With ``background``, the worker has a concurrent progress tracker and L1
+    two RDMA windows, so a pipelined fetch runs on the fetch pool; every
+    retrieve then finds ``deferred`` left in L2 again. ``fetch_hook`` runs
+    inside each fetch, before it returns or raises.
     """
     monkeypatch.setattr(mod, "DeviceHostFuncDispatcher", MagicMock())
-    monkeypatch.setattr(mod, "downsample_and_stage_block_ids", lambda cc, b: b)
+    if background:
+        monkeypatch.setattr(
+            mod,
+            "downsample_and_stage_block_ids",
+            lambda cc, b: [torch.tensor(ids) for ids in b],
+        )
+    else:
+        monkeypatch.setattr(mod, "downsample_and_stage_block_ids", lambda cc, b: b)
     monkeypatch.setattr(mod, "torch_dev", MagicMock())
 
     ctx = MagicMock()
@@ -125,8 +148,12 @@ def _harness(
     ctx.use_layerwise = layerwise
     ctx.resolve_obj_keys.return_value = KEYS
     ctx.pipelined_fetch = PipelinedFetchConfig(enabled=True)
-    ctx.session_manager.get.return_value = _Session(deferred)
+    if background:
+        ctx.session_manager.get.side_effect = lambda *_a, **_k: _Session(deferred)
+    else:
+        ctx.session_manager.get.return_value = _Session(deferred)
     storage = ctx.storage_manager
+    storage.pipelined_window_count.return_value = 2 if background else 0
 
     factory = _SinkFactory() if sink_factory is None else sink_factory
     module = mod.LMCacheDrivenTransferModule(ctx, pipelined_sink_factory=factory)
@@ -149,6 +176,12 @@ def _harness(
         layer_progress=MagicMock() if layerwise else None,
         daemon_layer_event_pool=MagicMock() if layerwise else None,
     )
+    if background:
+        entry.retrieve_progress = ConcurrentRetrieveProgress(
+            entry.layer_progress, LAUNCH_COUNT, lambda: None
+        )
+        entry.inflight_fetches = mod.InflightFetches()
+    h.entry = entry
     monkeypatch.setattr(module, "get_and_touch_context_entry", lambda _id: entry)
 
     missing = set(missing_from_l1)
@@ -187,7 +220,9 @@ def _harness(
     ):
         assert config is ctx.pipelined_fetch
         h.fetches.append((tuple(keys_to_fetch), request.objects.by_group()))
+        fetch_hook()
         if delivery is DeferredLoad.PIPELINED:
+            request.progress.report_launch_recorded(LAUNCH_COUNT)
             return DeferredFetchResult(PipelinedOutcome.PIPELINED, ())
         placed = {}
         for g, group in enumerate(keys_per_group):
@@ -360,3 +395,61 @@ def test_a_busy_shared_key_under_recompute_is_reported(monkeypatch):
 
     assert h.fetches == []
     assert h.outcome() == "shared_keys_busy"
+
+
+def test_a_background_fetch_returns_before_its_fetch_ends(monkeypatch):
+    release = threading.Event()
+    h = _harness(monkeypatch, background=True, fetch_hook=lambda: release.wait(5))
+
+    assert h.retrieve() is True
+
+    # The retrieve returned while its fetch is still blocked: nothing is
+    # released or reported yet, and the worker sees the retrieve loading.
+    assert h.retrieve_end == []
+    assert h.released == []
+    assert h.entry.retrieve_progress.loading_count() == 1
+    h.entry.layer_progress.begin_retrieve.assert_called_once_with(1)
+
+    release.set()
+    assert h.entry.inflight_fetches.wait(5) == 0
+
+    assert sorted(h.released) == sorted(L1_KEYS)
+    [end] = h.retrieve_end
+    assert end["pipelined_outcome"] == "pipelined"
+    assert end["num_tokens"] == NUM_CHUNKS * CHUNK_SIZE
+    h.entry.layer_progress.report_launch_recorded.assert_called_with(LAUNCH_COUNT)
+    h.entry.layer_progress.fail_retrieve.assert_not_called()
+
+
+def test_two_background_fetches_of_one_worker_overlap(monkeypatch):
+    both_in_flight = threading.Barrier(2, timeout=5)
+    h = _harness(monkeypatch, background=True, fetch_hook=both_in_flight.wait)
+
+    assert h.retrieve(generation=1) is True
+    assert h.retrieve(generation=2) is True
+
+    # Each fetch passes the barrier only once the other is in flight too.
+    assert h.entry.inflight_fetches.wait(10) == 0
+    assert not both_in_flight.broken
+    assert len(h.fetches) == 2
+    assert [end["pipelined_outcome"] for end in h.retrieve_end] == [
+        "pipelined",
+        "pipelined",
+    ]
+    h.entry.layer_progress.fail_retrieve.assert_not_called()
+
+
+def test_a_failed_background_fetch_flags_its_step_and_releases_locks(monkeypatch):
+    def fail() -> None:
+        raise RuntimeError("fabric down")
+
+    h = _harness(monkeypatch, background=True, fetch_hook=fail)
+
+    assert h.retrieve() is True
+    assert h.entry.inflight_fetches.wait(5) == 0
+
+    h.entry.layer_progress.fail_retrieve.assert_called_once_with(1)
+    assert sorted(h.released) == sorted(L1_KEYS)
+    [end] = h.retrieve_end
+    assert end["pipelined_outcome"] == "failed"
+    assert end["num_tokens"] == 0

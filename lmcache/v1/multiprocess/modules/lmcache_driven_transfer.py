@@ -291,8 +291,12 @@ class _DeferredKeys:
     outcome: PipelinedOutcome = PipelinedOutcome.NOT_DEFERRED
 
 
-class _InflightFetches:
-    """The background pipelined fetches of one worker; thread-safe."""
+class InflightFetches:
+    """The background pipelined fetches of one worker; thread-safe.
+
+    :meth:`LMCacheDrivenTransferModule.retrieve` adds each fetch it hands to
+    the fetch pool; unregistering the worker waits for them.
+    """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -433,7 +437,7 @@ class ContextEntry:
     daemon_layer_event_pool: DaemonLayerLaunchEventPool | None = None
     layer_progress_shm: shared_memory.SharedMemory | None = None
     retrieve_progress: ConcurrentRetrieveProgress | None = None
-    inflight_fetches: _InflightFetches = field(default_factory=_InflightFetches)
+    inflight_fetches: InflightFetches = field(default_factory=InflightFetches)
 
 
 class LMCacheDrivenTransferModule(InstanceLivenessTarget):

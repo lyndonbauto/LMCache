@@ -458,6 +458,26 @@ replaced. The pump blocks until every layer is loaded, so it runs on its own
 worker thread, never on the request handler. The placer runs before the pump
 and can refuse too (see "Window ownership"), so one handler covers both.
 
+**Concurrent retrieves of one worker (D-27).** The retrieve handler is
+blocking and pinned to one thread per vLLM worker. So it claims and resolves
+the deferred keys, copies the L1 hits, stages block ids and registers its
+generation, then hands the fetch to a pool of `window_count` threads
+(`LMCacheDrivenTransferModule._run_deferred_fetch`) and returns. Without the
+hand-off, a worker's second retrieve waited for the first one's last layer.
+Several fetches of one worker can then load at once, so three pieces of
+worker state that assumed one retrieve are shared explicitly:
+
+| Shared state | Rule |
+|---|---|
+| Progress record (one generation, one watermark) | `ConcurrentRetrieveProgress` (`lmcache/v1/multiprocess/retrieve_progress.py`) shows the latest generation with the *minimum* watermark over every retrieve still loading. A step's forward pass waits for all its retrieves, so loading retrieves are always one step's. |
+| GPU staging buffers, block-id staging buffer | One per-worker lock around each layer's stage and kernel launch, and around stores; the network wait runs outside it. A background fetch clones its staged block ids. |
+| Per-ordinal launch events | Recorded on the one transfer stream after each launch, so the last recording of an ordinal covers every launch queued before it. |
+
+One failure stops every loading retrieve of the worker, drains the stream and
+then flags the published generation. The connector already recomputes every
+retrieve of the step when a wait fails. Unregister stops in-flight fetches and
+waits for them before the KV cache and progress segment are released.
+
 On fallback the whole-object load goes into **fresh objects in general L1**,
 never into the window objects of the failed fetch. An abandoned fetch's
 window is quarantined because RDMA writes may still land in it; a fallback

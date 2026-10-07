@@ -332,9 +332,12 @@ EXP_FULL=("point len=8192 c=1" "point len=8192 c=4")
 EXP_PART=("point pre=2048 len=8192 c=1" "point pre=2048 len=8192 c=4"
   "point pre=8192 len=8192 c=1" "point pre=8192 len=8192 c=4")
 # EXP_PART_POINTS ("|"-separated steps) replaces the partial-hit points;
-# EXP_STORE_LENS ("8192 2048") the prefix lengths exp2_aon stores (ids 0-3).
+# EXP_STORE_LENS ("8192 2048") the prefix lengths exp2_aon stores (ids 0-3);
+# EXP_STORES ("|"-separated store steps) replaces those stores, and
+# EXP_CHECK_N (4) is then the 8k prompt count store_check expects.
+# EXP_FS_PCT (200) sizes exp_start's data file (FS_PCT, see aero_start).
 [ -n "${EXP_PART_POINTS:-}" ] && IFS='|' read -ra EXP_PART <<< "$EXP_PART_POINTS"
-sec_exp_start() { FS_PCT=200 aero_start 8192; }
+sec_exp_start() { FS_PCT=${EXP_FS_PCT:-200} aero_start 8192; }
 sec_exp_aon() {
   session E_aon aon "$L1_GEN_GB" "$AON_L2" "store len=8192 ids=0-3 conc=4" "store len=2048 ids=0-3 conc=4" \
     "${EXP_FULL[@]}" "${EXP_PART[@]}"
@@ -363,9 +366,13 @@ sec_exp_timeline() {
 # full hits. perf_session.sh now salts the suffix per session and point.
 sec_exp2_aon() {
   local stores=() l
-  for l in ${EXP_STORE_LENS:-8192 2048}; do stores+=("store len=$l ids=0-3 conc=4"); done
+  if [ -n "${EXP_STORES:-}" ]; then
+    IFS='|' read -ra stores <<< "$EXP_STORES"
+  else
+    for l in ${EXP_STORE_LENS:-8192 2048}; do stores+=("store len=$l ids=0-3 conc=4"); done
+  fi
   session E_aon2 aon "$L1_GEN_GB" "$AON_L2" "${stores[@]}" "${EXP_PART[@]}"
-  store_check E_aon2 8192 4
+  store_check E_aon2 8192 "${EXP_CHECK_N:-4}"
 }
 sec_exp2_tcplw() { session E_tcplw2 lw "$L1_GEN_GB" "$AON_L2" "${EXP_PART[@]}"; }
 sec_exp2_lw() { STOP_ON_ENGINE_STOP=1 session E_lw2 lw $((L1_GEN_GB + WIN_GB)) "$LW_L2" "${EXP_PART[@]}"; }
