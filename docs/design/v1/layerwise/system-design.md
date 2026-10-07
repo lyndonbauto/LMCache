@@ -683,3 +683,106 @@ driving the load path from a fake source. Nobody should assume the answer.
 The pump polls per layer. At 60+ layers and a 100 microsecond interval this is
 fine, but it has not been measured against a real fetch. If it costs, the
 contract can grow a blocking wait without changing its shape.
+
+## 12. Admission of layerwise loads into steps
+
+In layerwise mode the connector reports no async load, so vLLM schedules every
+cache-hit request into the next step, and that step's forward pass waits at
+each layer for the slowest of its loads. When the fetch path is
+bandwidth-bound (Soft-RoCE: about 7.5 GiB/s aggregate), all of a step's
+fetches finish together, so every request in the step gets TTFT of about the
+whole batch's transfer time: under a burst of c requests, p50 is close to the
+maximum and grows linearly with c (`functional/perf2/D27-AB.md`).
+
+`LayerwiseAdmissionGate` (`lmcache/integration/vllm/layerwise_admission.py`)
+bounds the bytes one step may start loading, so a burst is split into groups
+and the first groups get their first token early. The total transfer time is
+the same; only who waits for whom changes.
+
+```text
+budget 4 GiB, 8 requests x 1 GiB (8k tokens, Llama-3.1-8B: 128 KiB per token), c = 8
+
+step 1: admit r0..r3 (4 GiB)    r4..r7 -> (None, True): vLLM keeps them waiting
+        forward: layer waits until r0..r3 landed
+step 2: admit r4..r7            decode r0..r3 rides along and waits for them
+step 3: decode all 8
+```
+
+**Where it decides.** `LMCacheMPConnector.get_num_new_matched_tokens`, once
+the lookup result is known. A request whose load does not fit gets
+`(None, True)`, the answer the connector already gives while a lookup is
+pending. vLLM then leaves it in its waiting queue (no blocks allocated,
+nothing loading) and asks again next step. Nothing about the request is
+recorded before it is admitted, so asking again is harmless.
+
+**Rules.**
+
+- vLLM asks in its scheduling order. The gate admits while the step's
+  admitted bytes plus the request's fit `lmcache.mp.layerwise_inflight_budget_bytes`.
+- FIFO: once one request is held, every later request of the step is held, so
+  small requests cannot overtake a large one.
+- The first loading request of a step is always admitted, so a request larger
+  than the budget cannot starve. Requests that load nothing (misses, full vLLM
+  hits) do not pass through the gate.
+- `0` disables the gate: every request is admitted, exactly as before. The
+  default is 4 GiB. The gate is off when layerwise load is off.
+
+**Size of a request.** The tokens it loads times the KV bytes per token from
+vLLM's KV cache config (summed over every layer of every group). The lookup
+reply (`QUERY_PREFETCH_STATUS`) is a chunk count shared by every engine, so
+the deferred part's `FetchModel.request_bytes` would need a protocol change.
+The estimate equals the deferred bytes when every hit comes from L2, and
+over-counts L1-resident hits, which only makes admission more conservative.
+
+**Why the budget is per step.** A step's layerwise loads all end inside that
+step: its forward pass cannot finish before every layer has arrived, failed,
+fallen back to a whole-object load, or been abandoned, and the worker runs
+steps one after another (also under async scheduling, where the scheduler
+plans step N+1 while N runs, but the worker starts N+1's retrieves only after
+N's forward pass returns). So the bytes being fetched at any time are the
+bytes admitted into the current step. The gate resets in
+`build_connector_meta`, once per step. Nothing carries over, so no exit path
+of a request (success, failure, fallback, abort, preemption,
+`FREE_LOOKUP_LOCKS`, `END_SESSION`) can leak budget and deadlock admission.
+A held request that is aborted is simply not asked about again.
+
+**Trade-off: inter-token latency.** The step that loads group 2 also carries
+group 1's next decode token, and that forward pass waits at each layer for
+group 2's loads. So group 1's second token is delayed by group 2's transfer
+time: TTFT improves for the early groups, and their inter-token latency gets
+one long gap right after the first token. With k groups, the first group's
+decode is stalled k - 1 times. The mean inter-token latency over a long
+output hides this; the largest gap shows it. A smaller budget means more
+groups: a lower p50 TTFT and more decode stalls, each as long as one group's
+transfer. `functional/perf2/LW-ADMISSION.md` measures both.
+
+**Async scheduling delays each group's first token by one step.** With
+`--async-scheduling`, vLLM's engine core submits step N+1 before it turns
+step N's output into tokens (`EngineCore.step_with_batch_queue`). With the
+in-process executor (`UniProcExecutor`), submitting runs the forward pass on
+the engine thread, and a layerwise forward blocks that thread at each layer
+until the step's loads land. So step N's first tokens leave only after step
+N+1's whole transfer:
+
+```text
+8k, c = 4, budget 1 GiB (one request per step), TTFT per request (s)
+
+sync   0.19  0.35  0.50  0.65    each request's token leaves after its own load
+async  0.35  0.50  0.63  0.64    ... after the next request's load (the last
+                                 one has no layerwise step behind it)
+```
+
+Without admission the burst is one step, so the lag does not show. With
+admission it costs every group but the last one group's transfer time.
+On the droplet (`functional/perf2/LW-ADMISSION.md`), 8k c=4 at 1 GiB has
+TTFT p50 0.57 s with async scheduling and 0.43 s without (aon: 0.46 s).
+
+**Limits.**
+
+- Under async scheduling, admission pays the one-step lag above. Removing it
+  needs the layerwise wait off the engine thread (a GPU-side wait on the
+  load's event), not a different budget.
+- The budget counts bytes per step, not bandwidth: it does not know how fast
+  the fetch path is, so the right value depends on the deployment.
+- Admission does not start fetches early (at lookup). A held request's fetch
+  starts only when it is scheduled.

@@ -10,6 +10,7 @@ import pytest
 
 if TYPE_CHECKING:
     # First Party
+    from lmcache.integration.vllm.layerwise_admission import LayerwiseAdmissionGate
     from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
 
 
@@ -18,11 +19,10 @@ def test_scheduler_reports_synchronous_load_when_layerwise_enabled() -> None:
     pytest.importorskip("vllm")
 
     # Third Party
-    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
     from vllm.v1.request import RequestStatus
 
     # First Party
-    from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
+    from lmcache.integration.vllm.layerwise_admission import LayerwiseAdmissionGate
     from lmcache.integration.vllm.lmcache_mp_metadata import LMCacheMPRequestTracker
 
     class _Request:
@@ -38,15 +38,10 @@ def test_scheduler_reports_synchronous_load_when_layerwise_enabled() -> None:
     request = _Request()
     tracker = LMCacheMPRequestTracker(request)  # type: ignore[arg-type]
 
-    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
-    connector.use_layerwise = True
-    connector._role = KVConnectorRole.SCHEDULER
-    connector._hit_alignment_tokens = 1
-    connector._connector_stats = MagicMock()
+    connector = _scheduler_connector(
+        LayerwiseAdmissionGate(0), {request.request_id: 32}
+    )
     connector.request_trackers = {request.request_id: tracker}
-    connector.scheduler_adapter = MagicMock()
-    connector.scheduler_adapter.lmcache_tokens_per_chunk = 16
-    connector.scheduler_adapter.check_lookup_result.return_value = 32
 
     need_to_load, load_async = connector.get_num_new_matched_tokens(
         request,  # type: ignore[arg-type]
@@ -55,6 +50,114 @@ def test_scheduler_reports_synchronous_load_when_layerwise_enabled() -> None:
 
     assert need_to_load is not None and need_to_load > 0
     assert load_async is False
+
+
+def _scheduler_connector(
+    gate: "LayerwiseAdmissionGate", hits: dict[str, int]
+) -> "LMCacheMPConnector":
+    """Build a layerwise scheduler connector over a mocked adapter.
+
+    ``hits`` maps a request ID to the tokens its lookup matched; one KV byte
+    per token, so a request's admission size is its tokens to load.
+    """
+    # Third Party
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
+
+    # First Party
+    from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
+
+    connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
+    connector.use_layerwise = True
+    connector._role = KVConnectorRole.SCHEDULER
+    connector._hit_alignment_tokens = 1
+    connector._connector_stats = MagicMock()
+    connector._kv_bytes_per_token = 1
+    connector._admission = gate
+    connector.lazy_offload = False
+    connector.request_trackers = {}
+    connector.scheduler_adapter = MagicMock()
+    connector.scheduler_adapter.lmcache_tokens_per_chunk = 16
+    connector.scheduler_adapter.check_lookup_result.side_effect = hits.get
+    return connector
+
+
+def _waiting_request(request_id: str, num_tokens: int) -> object:
+    # Third Party
+    from vllm.v1.request import RequestStatus
+
+    class _Request:
+        status = RequestStatus.WAITING
+        num_computed_tokens = 0
+        num_preemptions = 0
+        cache_salt = ""
+        mm_features: list[object] = []
+
+    request = _Request()
+    request.request_id = request_id  # type: ignore[attr-defined]
+    request.prompt_token_ids = list(range(num_tokens))  # type: ignore[attr-defined]
+    request.all_token_ids = list(range(num_tokens))  # type: ignore[attr-defined]
+    return request
+
+
+def test_a_request_past_the_budget_waits_for_the_next_step() -> None:
+    """Held: vLLM keeps it waiting (no blocks, nothing loads) and asks again;
+    nothing about it is recorded until it is admitted."""
+    pytest.importorskip("vllm")
+    # First Party
+    from lmcache.integration.vllm.layerwise_admission import LayerwiseAdmissionGate
+
+    gate = LayerwiseAdmissionGate(32)
+    connector = _scheduler_connector(gate, {"a": 32, "b": 32})
+    first = _waiting_request("a", 48)
+    second = _waiting_request("b", 48)
+
+    assert connector.get_num_new_matched_tokens(first, 0) == (32, False)  # type: ignore[arg-type]
+    assert connector.get_num_new_matched_tokens(second, 0) == (None, True)  # type: ignore[arg-type]
+    held = connector.request_trackers["b"]
+    assert held.num_stored_tokens == 0
+    assert held.num_lmcache_hit_tokens == 0
+
+    gate.end_step()
+
+    assert connector.get_num_new_matched_tokens(second, 0) == (32, False)  # type: ignore[arg-type]
+    assert held.num_stored_tokens == 32
+    assert held.num_lmcache_hit_tokens == 32
+
+
+def test_a_lookup_miss_does_not_use_the_steps_first_admission() -> None:
+    """Only requests that load count; a large one after a miss still runs."""
+    pytest.importorskip("vllm")
+    # First Party
+    from lmcache.integration.vllm.layerwise_admission import LayerwiseAdmissionGate
+
+    gate = LayerwiseAdmissionGate(16)
+    connector = _scheduler_connector(gate, {"miss": 0, "big": 64})
+
+    assert connector.get_num_new_matched_tokens(_waiting_request("miss", 48), 0) == (
+        0,
+        False,
+    )  # type: ignore[arg-type]
+    assert connector.get_num_new_matched_tokens(_waiting_request("big", 80), 0) == (
+        64,
+        False,
+    )  # type: ignore[arg-type]
+    assert gate.admitted_bytes == 64
+
+
+def test_with_the_budget_off_every_hit_is_scheduled_at_once() -> None:
+    pytest.importorskip("vllm")
+    # First Party
+    from lmcache.integration.vllm.layerwise_admission import LayerwiseAdmissionGate
+
+    hits = {f"r{i}": 32 for i in range(8)}
+    connector = _scheduler_connector(LayerwiseAdmissionGate(0), hits)
+
+    results = [
+        connector.get_num_new_matched_tokens(_waiting_request(rid, 48), 0)  # type: ignore[arg-type]
+        for rid in hits
+    ]
+
+    assert results == [(32, False)] * 8
 
 
 def _worker_connector(

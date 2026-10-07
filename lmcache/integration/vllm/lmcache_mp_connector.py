@@ -46,6 +46,10 @@ from lmcache.integration.vllm.kv_cache_groups import (
     get_tokens_per_block,
     layer_names_to_global_index,
 )
+from lmcache.integration.vllm.layerwise_admission import (
+    DEFAULT_LAYERWISE_INFLIGHT_BUDGET_BYTES,
+    LayerwiseAdmissionGate,
+)
 from lmcache.integration.vllm.lazy_offload_manager import LazyOffloadManager
 from lmcache.integration.vllm.lmcache_mp_metadata import (
     LMCacheMPConnectorMetadata,
@@ -176,6 +180,36 @@ def _iter_kv_cache_specs(kv_cache_config: "KVCacheConfig | None") -> Iterable[An
             yield from per_layer_specs.values()
         else:
             yield group_spec
+
+
+def _kv_bytes_per_token(kv_cache_config: "KVCacheConfig | None") -> int:
+    """Return the KV cache bytes one token occupies across every layer.
+
+    Args:
+        kv_cache_config: vLLM's resolved KV cache group configuration.
+
+    Returns:
+        The bytes per token summed over every layer of every group, or 0
+        when no configuration is available.
+    """
+    if kv_cache_config is None:
+        return 0
+    total = 0
+    for group in kv_cache_config.kv_cache_groups:
+        group_spec = group.kv_cache_spec
+        per_layer_specs = getattr(group_spec, "kv_cache_specs", None)
+        if isinstance(per_layer_specs, dict):
+            total += sum(
+                spec.page_size_bytes // spec.block_size
+                for spec in per_layer_specs.values()
+            )
+        else:
+            total += (
+                len(group.layer_names)
+                * group_spec.page_size_bytes
+                // group_spec.block_size
+            )
+    return total
 
 
 def get_group_tokens_per_block(
@@ -482,6 +516,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
       heartbeat pings.
     - lmcache.mp.eager_prefetch: submit the LMCache lookup when a request
       enters vLLM's waiting queue. Disabled by default.
+    - lmcache.mp.layerwise_inflight_budget_bytes: in layerwise mode, the
+      bytes of loads one scheduler step may start (default 4 GiB). Requests
+      past it wait in vLLM's queue for a later step; the first request of a
+      step is always admitted. 0 admits every request at once.
     """
 
     def __init__(
@@ -640,6 +678,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
             self.request_trackers: dict[str, LMCacheMPRequestTracker] = {}
+            self._kv_bytes_per_token = _kv_bytes_per_token(kv_cache_config)
+            self._admission = LayerwiseAdmissionGate(
+                self._layerwise_inflight_budget_bytes(vllm_config)
+            )
 
             # GPU block pool reference
             self._gpu_block_pool: "BlockPool | None" = None
@@ -1175,11 +1217,23 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         ret = self.scheduler_adapter.check_lookup_result(request.request_id)
         if ret is None:
             return None, True
-        assert tracker.lookup_started_at is not None
-        self._connector_stats.record_lookup(
-            time.monotonic() - tracker.lookup_started_at
-        )
-        tracker.lookup_started_at = None
+        if tracker.lookup_started_at is not None:
+            self._connector_stats.record_lookup(
+                time.monotonic() - tracker.lookup_started_at
+            )
+            tracker.lookup_started_at = None
+
+        # A request held for a later step is asked again from scratch, so
+        # nothing below may run for it before it is admitted.
+        tokens_to_load = self._tokens_to_load(request, num_computed_tokens, ret)
+        if (
+            self.use_layerwise
+            and tokens_to_load > 0
+            and not self._admission.admit(
+                request.request_id, tokens_to_load * self._kv_bytes_per_token
+            )
+        ):
+            return None, True
 
         # Save the vLLM hit count even when LMCache misses. It is rounded
         # down to a boundary aligned for every engine group (a full-prompt
@@ -1201,14 +1255,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         tracker.num_lmcache_hit_tokens = ret
 
-        need_to_load = max(0, ret - num_computed_tokens)
-
-        # In full-prompt-hit case, we need to recompute the last token.
-        # Without this, num_computed_tokens would equal request.num_tokens,
-        # causing num_new_tokens to be 0 and triggering the
-        # `assert num_new_tokens > 0` in the scheduler.
-        if ret == len(request.all_token_ids):
-            need_to_load = max(0, need_to_load - 1)
+        need_to_load = tokens_to_load
 
         logger.debug(
             "vLLM hit is: %d, Need to load is %d", num_computed_tokens, need_to_load
@@ -1356,6 +1403,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         # Report block allocation deltas to LMCache for observability
         self._report_block_allocation_deltas(scheduler_output)
+
+        # This step's layerwise loads end inside its forward pass, before
+        # the worker runs the next step.
+        self._admission.end_step()
 
         return metadata
 
@@ -1735,3 +1786,63 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 "[KVConnector] Cleaned up request_tracker for request %s",
                 request_id,
             )
+
+    @staticmethod
+    def _tokens_to_load(
+        request: "Request", num_computed_tokens: int, hit_tokens: int
+    ) -> int:
+        """Return the tokens a request loads from LMCache.
+
+        On a full-prompt hit the last token is recomputed, not loaded:
+        otherwise ``num_computed_tokens`` would equal the request's token
+        count, and vLLM requires at least one new token per scheduled
+        request.
+
+        Args:
+            request: The request.
+            num_computed_tokens: Tokens vLLM already has locally.
+            hit_tokens: Tokens LMCache's lookup matched.
+
+        Returns:
+            The tokens to load; 0 if none.
+        """
+        need_to_load = max(0, hit_tokens - num_computed_tokens)
+        if hit_tokens == len(request.all_token_ids):
+            need_to_load = max(0, need_to_load - 1)
+        return need_to_load
+
+    def _layerwise_inflight_budget_bytes(self, vllm_config: "VllmConfig") -> int:
+        """Return the admission budget for layerwise loads; 0 disables it.
+
+        Args:
+            vllm_config: The vLLM configuration.
+
+        Returns:
+            ``lmcache.mp.layerwise_inflight_budget_bytes``, or 0 when
+            layerwise load is off or the KV bytes per token are unknown.
+
+        Raises:
+            ValueError: If the configured budget is negative.
+        """
+        assert vllm_config.kv_transfer_config is not None
+        budget = int(
+            vllm_config.kv_transfer_config.get_from_extra_config(
+                "lmcache.mp.layerwise_inflight_budget_bytes",
+                DEFAULT_LAYERWISE_INFLIGHT_BUDGET_BYTES,
+            )
+        )
+        if budget < 0:
+            raise ValueError(
+                "lmcache.mp.layerwise_inflight_budget_bytes must be "
+                f"non-negative, got {budget}"
+            )
+        if not self.use_layerwise:
+            return 0
+        if budget > 0 and self._kv_bytes_per_token <= 0:
+            logger.warning(
+                "lmcache.mp.layerwise_inflight_budget_bytes is set but the KV "
+                "cache bytes per token are unknown; admitting every layerwise "
+                "load at once"
+            )
+            return 0
+        return budget
