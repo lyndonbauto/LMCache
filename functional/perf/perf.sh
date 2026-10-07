@@ -379,7 +379,9 @@ sec_exp2_aon() {
   store_check E_aon2 8192 "${EXP_CHECK_N:-4}"
 }
 sec_exp2_tcplw() { session E_tcplw2 lw "$L1_GEN_GB" "$AON_L2" "${EXP_PART[@]}"; }
-sec_exp2_lw() { STOP_ON_ENGINE_STOP=1 session E_lw2 lw $((L1_GEN_GB + WIN_GB)) "$LW_L2" "${EXP_PART[@]}"; }
+# EXP_LW_TAG (empty) suffixes exp2_lw's session name; the partial-hit suffix
+# salt is derived from it, so reruns on one data file need distinct tags.
+sec_exp2_lw() { STOP_ON_ENGINE_STOP=1 session E_lw2${EXP_LW_TAG:-} lw $((L1_GEN_GB + WIN_GB)) "$LW_L2" "${EXP_PART[@]}"; }
 sec_exp_stop() { aero_stop_delete; }
 # Queue-pair scan (perf2 step 4), on one data file per length:
 #   qpstore:<len>    start the server, store prompts 0-31, aon points (CONCS)

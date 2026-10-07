@@ -17,6 +17,11 @@
 #            4 of 2k and 16k): pre=8192 len=8192 at c = 1 2 4 8 16 32, and the
 #            day-2 points pre=2048 / 16384 len=8192 at c = 1 and 4; own data
 #            file, stopped and deleted at the end
+#   lw8@<G>, lw16@<G>   lw8 / lw16 with LW_ADMIT_BUDGET = G GiB (0: off), in
+#            lw8_b<G> / lw16_b<G>, so one store serves several budgets
+#   partstart   part's stores and aon points, server left running
+#   partlw@<G>  part's lw points with LW_ADMIT_BUDGET = G GiB, in partlw_b<G>
+#   partstop    stop part's server and delete its data file
 set -u
 LABEL=${1:?usage: lwaon3.sh <label>}
 T=/root/lmc-work/LMCache
@@ -29,14 +34,28 @@ export CONCS=${CONCS:-1 2 4 8 16 32}
 mkdir -p $O
 say() { echo "$(date -u +%FT%TZ) lwaon3 $LABEL: $*" | tee -a $O/progress.log; }
 points() { grep -h '^point' $1/*/session_*.txt 2>/dev/null | grep -v store | cut -c1-110 | paste -sd';'; }
+part_env() {
+  export EXP_FS_PCT=300 EXP_CHECK_N=32
+  export EXP_STORES="store len=8192 ids=0-31 conc=8|store len=2048 ids=0-3 conc=4|store len=16384 ids=0-3 conc=4"
+  export EXP_PART_POINTS="point pre=8192 len=8192 c=1|point pre=8192 len=8192 c=2|point pre=8192 len=8192 c=4|point pre=8192 len=8192 c=8|point pre=8192 len=8192 c=16|point pre=8192 len=8192 c=32|point pre=2048 len=8192 c=1|point pre=2048 len=8192 c=4|point pre=16384 len=8192 c=1|point pre=16384 len=8192 c=4"
+}
 
 say "LMCache $(git -C $T log --oneline -1 | cut -c1-60); server env: $PERF_ASD_ENV; queue_pairs $QUEUE_PAIRS"
 for s in $STEPS; do
-  d=$O/$s
+  base=${s%%@*}
+  if [ "$base" != "$s" ]; then
+    g=${s#*@}
+    d=$O/${base}_b$g
+    export LW_ADMIT_BUDGET=$((g << 30))
+  else
+    g=""
+    d=$O/$s
+    unset LW_ADMIT_BUDGET
+  fi
   export PERF_OUT=$d
   mkdir -p $d
-  say "$s started"
-  case $s in
+  say "$s started (LW_ADMIT_BUDGET=${LW_ADMIT_BUDGET:-unset})"
+  case $base in
     store8) $PERF precheck qpstore:8192 > $d/run.txt 2>&1 ;;
     lw8) $PERF qplw:8192:16 > $d/run.txt 2>&1 ;;
     store16) $PERF qpstore:16384 > $d/run.txt 2>&1 ;;
@@ -49,6 +68,9 @@ for s in $STEPS; do
       EXP_STORES="store len=8192 ids=0-31 conc=8|store len=2048 ids=0-3 conc=4|store len=16384 ids=0-3 conc=4" \
       EXP_PART_POINTS="point pre=8192 len=8192 c=1|point pre=8192 len=8192 c=2|point pre=8192 len=8192 c=4|point pre=8192 len=8192 c=8|point pre=8192 len=8192 c=16|point pre=8192 len=8192 c=32|point pre=2048 len=8192 c=1|point pre=2048 len=8192 c=4|point pre=16384 len=8192 c=1|point pre=16384 len=8192 c=4" \
         $PERF precheck exp_start exp2_aon exp2_lw exp_stop > $d/run.txt 2>&1 ;;
+    partstart) part_env; $PERF precheck exp_start exp2_aon > $d/run.txt 2>&1 ;;
+    partlw) part_env; EXP_LW_TAG=_b${g:-x} $PERF exp2_lw > $d/run.txt 2>&1 ;;
+    partstop) part_env; $PERF exp_stop > $d/run.txt 2>&1 ;;
     *) say "unknown step $s"; continue ;;
   esac
   say "$s done: $(points $d)"
