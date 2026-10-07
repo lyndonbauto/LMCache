@@ -7,6 +7,8 @@ Sends ``n`` prompts of exactly ``--length`` tokens to vLLM's OpenAI
 
 - ``ttft_s``: first streamed token time minus send time;
 - ``total_s``: last streamed token time minus send time;
+- ``max_gap_s``: the longest wait between two streamed chunks after the
+  first one (0.0 with fewer than two);
 - ``out_tokens``: completion tokens from the final usage chunk.
 
 Prompts are token-ID lists (so their length is exact): prompt ``i`` of
@@ -37,7 +39,7 @@ Output JSON schema::
      "concurrency": int,
      "n": int, "wall_s": float,
      "requests": [{"id": int, "ttft_s": float, "total_s": float,
-                   "out_tokens": int, "error": str}],
+                   "max_gap_s": float, "out_tokens": int, "error": str}],
      "metrics_delta": {"<metric>{<labels>}": float}}
 """
 
@@ -169,7 +171,8 @@ async def one_request(
     """Send one streaming completion and time it.
 
     Returns:
-        ``ttft_s``, ``total_s``, ``out_tokens`` and ``error`` ("" on success).
+        ``ttft_s``, ``total_s``, ``max_gap_s``, ``out_tokens`` and ``error``
+        ("" on success).
     """
     body = {
         "model": MODEL,
@@ -182,6 +185,7 @@ async def one_request(
     }
     t0 = time.perf_counter()
     t_first = t_last = 0.0
+    max_gap = 0.0
     out_tokens = 0
     error = ""
     try:
@@ -211,6 +215,8 @@ async def one_request(
                         now = time.perf_counter()
                         if t_first == 0.0:
                             t_first = now
+                        else:
+                            max_gap = max(max_gap, now - t_last)
                         t_last = now
     except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as e:
         error = f"{type(e).__name__}: {e}"[:300]
@@ -219,6 +225,7 @@ async def one_request(
     return {
         "ttft_s": t_first - t0 if t_first else -1.0,
         "total_s": t_last - t0 if t_last else -1.0,
+        "max_gap_s": max_gap,
         "out_tokens": out_tokens,
         "error": error,
     }

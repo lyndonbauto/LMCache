@@ -30,7 +30,9 @@
 # lmcache.mp.layerwise_wait_timeout_seconds default, 5 s; a timeout stops
 # vLLM's engine, section 7 / D-24), STOP_ON_ENGINE_STOP (0; 1: if vLLM is
 # dead after a point, write engine_stopped_<tag>.txt and skip the remaining
-# steps), PERF_MODEL (default MODEL: the weights to serve under MODEL's name).
+# steps), PERF_MODEL (default MODEL: the weights to serve under MODEL's name),
+# LW_ADMIT_BUDGET (unset: the connector's lmcache.mp.layerwise_inflight_budget_bytes
+# default; 0 admits every layerwise load at once).
 # Before each point, a dead vLLM is restarted (with a fresh LMCache server).
 set -u
 OUT=$1; TAG=$2; MODE=$3; shift 3
@@ -91,6 +93,7 @@ stop_server() {
 start_vllm() {
   local kv=() wait_cfg=""
   [ -n "${LW_WAIT_TIMEOUT:-}" ] && wait_cfg=",\"lmcache.mp.layerwise_wait_timeout_seconds\":$LW_WAIT_TIMEOUT"
+  [ -n "${LW_ADMIT_BUDGET:-}" ] && wait_cfg="$wait_cfg,\"lmcache.mp.layerwise_inflight_budget_bytes\":$LW_ADMIT_BUDGET"
   if [ "$CONNECTOR" = 1 ]; then
     kv=(--kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\",\
 \"kv_connector_module_path\":\"lmcache.integration.vllm.lmcache_mp_connector\",\

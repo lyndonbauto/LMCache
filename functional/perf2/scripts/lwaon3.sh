@@ -25,7 +25,7 @@ PERF="bash $T/functional/perf/perf.sh"
 STEPS=${STEPS:-store8 lw8 store16 lw16 stop part}
 export DATA_DIR=/mnt/scratch/perf-aero PERF_ASD=/root/lmc-work/asd-3f3940e42/asd QUEUE_PAIRS=16
 export PERF_ASD_ENV=${SINK_ENV:-KV_SINK_STATS=1}
-export CONCS="1 2 4 8 16 32"
+export CONCS=${CONCS:-1 2 4 8 16 32}
 mkdir -p $O
 say() { echo "$(date -u +%FT%TZ) lwaon3 $LABEL: $*" | tee -a $O/progress.log; }
 points() { grep -h '^point' $1/*/session_*.txt 2>/dev/null | grep -v store | cut -c1-110 | paste -sd';'; }

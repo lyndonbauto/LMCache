@@ -127,6 +127,7 @@ session() {
   local memloop=$!
   timeout 21600 docker exec -e LMC_EXTRA="$extra" -e L1_GB="$l1" -e STOP_GRACE="$STOP_GRACE" \
     -e LW_WAIT_TIMEOUT="${SESSION_LW_WAIT:-}" -e STOP_ON_ENGINE_STOP="${STOP_ON_ENGINE_STOP:-0}" \
+    -e LW_ADMIT_BUDGET="${LW_ADMIT_BUDGET:-}" \
     -e L2_PORT="$KVSINK_PORT" -e PERF_MODEL="${PERF_MODEL:-}" lmc-c bash $TREE_CTR/functional/perf/perf_session.sh $W/$name "$name" "$mode" "$@" \
     > $S/$name/session_$name.txt 2>&1
   local rc=$? rb1; rb1=$(asd_read_bytes)
