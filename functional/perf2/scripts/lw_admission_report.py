@@ -2,8 +2,9 @@
 """Layerwise admission grid: TTFT and inter-token latency per byte budget.
 
 Reads lwaon3.sh's runs under ``<root>``: the admission build's lw points
-(label ``1e``; budget G GiB from the step or session suffix ``_b<G>``, 0 =
-cap off) and the controls, aon and lw of a reference build (label ``1c``).
+(label ``1e``; budget from the step or session suffix ``_b<G>`` in GiB or
+``_b<N>m`` in MiB, 0 = cap off) and the controls, aon and lw of a reference
+build (label ``1c``).
 Validity follows lwaon_report.point_row. Prints two tables, one row per
 (cached + new, c):
 
@@ -29,7 +30,7 @@ import numpy as np
 # First Party
 from lwaon_report import point_row  # type: ignore[import-not-found]
 
-BUDGET_RE = re.compile(r"_b(\d+)$")
+BUDGET_RE = re.compile(r"_b(\d+)(m?)$")
 Row = dict[str, str | float | int]
 Key = tuple[int, int, int]
 
@@ -67,8 +68,8 @@ def collect(base: Path) -> list[Row]:
         base: The build's results directory (``<root>/<label>``).
 
     Returns:
-        One row per point with mode, session, budget (GiB, -1 when the step
-        and session carry no ``_b<G>`` suffix) and the gap stats added.
+        One row per point with mode, session, budget (MiB, -1 when the step
+        and session carry no budget suffix) and the gap stats added.
     """
     rows: list[Row] = []
     if not base.is_dir():
@@ -84,7 +85,7 @@ def collect(base: Path) -> list[Row]:
             m = BUDGET_RE.search(stepdir.name) or BUDGET_RE.search(session)
             row = point_row(f)
             row.update(gap_stats(f))
-            row.update(mode=mode, session=session, budget=int(m[1]) if m else -1)
+            row.update(mode=mode, session=session, budget=_budget_mib(m))
             rows.append(row)
     return rows
 
@@ -129,12 +130,20 @@ def main(root: str, label: str, control: str) -> None:
         print("| " + " | ".join(cols) + " |")
 
 
+def _budget_mib(m: re.Match[str] | None) -> int:
+    if m is None:
+        return -1
+    return int(m[1]) if m[2] else int(m[1]) << 10
+
+
 def _key(row: Row) -> Key:
     return int(row["prefix"]), int(row["length"]), int(row["c"])
 
 
 def _bname(budget: int) -> str:
-    return "off" if budget == 0 else f"{budget}G"
+    if budget == 0:
+        return "off"
+    return f"{budget >> 10}G" if budget % 1024 == 0 else f"{budget}M"
 
 
 def _shape(k: Key) -> str:

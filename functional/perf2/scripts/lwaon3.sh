@@ -17,8 +17,8 @@
 #            4 of 2k and 16k): pre=8192 len=8192 at c = 1 2 4 8 16 32, and the
 #            day-2 points pre=2048 / 16384 len=8192 at c = 1 and 4; own data
 #            file, stopped and deleted at the end
-#   lw8@<G>, lw16@<G>   lw8 / lw16 with LW_ADMIT_BUDGET = G GiB (0: off), in
-#            lw8_b<G> / lw16_b<G>, so one store serves several budgets
+#   lw8@<G>, lw16@<G>   lw8 / lw16 with LW_ADMIT_BUDGET = G GiB (0: off; <N>m:
+#            N MiB), in lw8_b<G> / lw16_b<G>, so one store serves several budgets
 #   partstart   part's stores and aon points, server left running
 #   partlw@<G>  part's lw points with LW_ADMIT_BUDGET = G GiB, in partlw_b<G>
 #   partstop    stop part's server and delete its data file
@@ -46,7 +46,10 @@ for s in $STEPS; do
   if [ "$base" != "$s" ]; then
     g=${s#*@}
     d=$O/${base}_b$g
-    export LW_ADMIT_BUDGET=$((g << 30))
+    case $g in
+      *m) export LW_ADMIT_BUDGET=$((${g%m} << 20)) ;;
+      *) export LW_ADMIT_BUDGET=$((g << 30)) ;;
+    esac
   else
     g=""
     d=$O/$s
