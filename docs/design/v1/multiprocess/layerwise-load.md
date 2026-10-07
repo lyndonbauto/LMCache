@@ -183,6 +183,15 @@ in the `(kv_size, num_layers, slots, hidden)` layout, or one block in the
 chunk instead of one copy per object. GDS objects transfer whole only and are
 refused in `PER_LAYER` mode.
 
+On a CUDA or ROCm context, `PER_LAYER` makes one native call per layer. It
+hands every batch's range copies and one-layer kernel launches to
+`execute_object_group_transfer` as one plan. Before, it made one
+Python-to-native call per range copy and one per batch kernel: 288 calls per
+layer for 128 chunks with `kv_size` 2. The executor runs a batch's copies
+before its kernel, and one batch after another, which the shared staging
+slots require. An extension without `LaunchVar`'s `layer_offset` and
+`n_layers`, or a non-CUDA context, keeps the per-call loop.
+
 Overlap is therefore:
 
 - **Yes** between attention on layer *L* and the daemon stream processing layer

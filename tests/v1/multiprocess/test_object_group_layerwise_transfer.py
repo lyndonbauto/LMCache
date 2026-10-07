@@ -1046,6 +1046,10 @@ def test_range_copy_rejects_bad_ranges(offset: int, nbytes: int) -> None:
         gpu_ops.lmcache_memcpy_async_h2d_range(
             memory_obj, torch.zeros(16, dtype=torch.uint8), offset, nbytes
         )
+    with pytest.raises(ValueError):
+        gpu_ops.build_h2d_range_staging_copies(
+            memory_obj, torch.zeros(16, dtype=torch.uint8), [(offset, nbytes)]
+        )
 
 
 def test_a_non_positive_generation_is_rejected() -> None:

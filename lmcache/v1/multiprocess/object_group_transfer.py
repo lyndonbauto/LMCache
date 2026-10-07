@@ -22,6 +22,7 @@ import torch
 from lmcache import device_ops
 from lmcache.logging import init_logger
 from lmcache.v1.gpu_connector.gpu_ops import (
+    build_h2d_range_staging_copies,
     build_staging_copies,
     lmcache_memcpy_async_d2h,
     lmcache_memcpy_async_h2d,
@@ -40,7 +41,12 @@ from lmcache.v1.multiprocess.layer_progress import (
 )
 from lmcache.v1.multiprocess.layerwise_schedule import LayerLaunch, LayerwiseSchedule
 from lmcache.v1.platform.base.cache_context import BaseCacheContext
-from lmcache.v1.platform.ops_types import PageBufferShapeDesc
+from lmcache.v1.platform.ops_types import (
+    BatchStep,
+    KernelGroupSpec,
+    PageBufferShapeDesc,
+    StagingCopy,
+)
 import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
@@ -48,6 +54,25 @@ _HAS_NATIVE_OBJECT_GROUP_TRANSFER: bool = hasattr(
     device_ops, "execute_object_group_transfer"
 )
 _HAS_TRANSFER_PHASE_TIMING: bool = hasattr(device_ops, "pop_completed_phase_timings")
+
+
+def _native_runs_layer_subranges() -> bool:
+    """Whether the native plan executor can run a launch over a layer subrange.
+
+    Older builds have ``execute_object_group_transfer`` but a ``LaunchVar``
+    without ``layer_offset`` / ``n_layers``; constructing one with them is
+    the only way to tell.
+    """
+    if not _HAS_NATIVE_OBJECT_GROUP_TRANSFER:
+        return False
+    try:
+        device_ops.LaunchVar(0, 0, 0, 1, 0, layer_offset=0, n_layers=1)
+    except (TypeError, NotImplementedError):
+        return False
+    return True
+
+
+_HAS_NATIVE_LAYER_LAUNCHES: bool = _native_runs_layer_subranges()
 
 
 def batched_iteration_with_skip(
@@ -627,6 +652,8 @@ class _LayerwiseKernelLaunchParams:
 
     recalculated_skip_blocks: int
     block_ids_curr_batch: torch.Tensor
+    #: Where ``block_ids_curr_batch`` starts in the kernel group's block ids.
+    block_ids_offset: int
     tmp_gpu_buffer_data_ptrs: tuple[int, ...]
     #: Per slot, where this kernel group's staging region starts inside the
     #: slot's object group buffer, in bytes. Per-layer staging adds a layer's
@@ -729,6 +756,7 @@ def _build_layerwise_batch_descriptors(
                     _LayerwiseKernelLaunchParams(
                         recalculated_skip_blocks=recalculated_skip_blocks,
                         block_ids_curr_batch=block_ids_curr_batch,
+                        block_ids_offset=start_block_pos,
                         tmp_gpu_buffer_data_ptrs=tmp_gpu_buffer_data_ptrs,
                         staging_region_offsets=tuple(
                             _staging_region_offset(data_ptr, buffer)
@@ -1020,6 +1048,12 @@ class LayerwiseH2DRetrieve:
     from ``objects`` at each launch, so one swapped in between layers is the
     one the next layer copies from.
 
+    On a CUDA (or ROCm) cache context whose native extension supports layer
+    subranges, a per-layer launch is one native call: every batch's range
+    copies and layer kernel go to ``execute_object_group_transfer`` as one
+    plan, in the same stream order as the per-call path. Otherwise each copy
+    and kernel is its own call.
+
     Not thread-safe: all calls must come from one thread.
     """
 
@@ -1087,6 +1121,9 @@ class LayerwiseH2DRetrieve:
         #: Per-layer byte ranges per kernel group; filled by begin, and only
         #: for :attr:`LayerStaging.PER_LAYER`.
         self._plane_geometry: dict[int, _LayerPlaneGeometry] = {}
+        #: Kernel group index -> native plan spec; filled by begin only when
+        #: a per-layer launch runs as one native plan. Empty means per-call.
+        self._native_kernel_group_specs: dict[int, KernelGroupSpec] = {}
         #: (object group, batch start) pairs staged whole; only used for
         #: :attr:`LayerStaging.WHOLE_OBJECT`: per object group, the start index
         #: of the batch whose objects its staging slots hold now.
@@ -1158,6 +1195,11 @@ class LayerwiseH2DRetrieve:
                 )
                 for kernel_group_id in kernel_groups
             }
+            if _HAS_NATIVE_LAYER_LAUNCHES and cache_context.device.type == "cuda":
+                self._native_kernel_group_specs = {
+                    kernel_group_id: self._kernel_group_spec(kernel_group_id)
+                    for kernel_group_id in kernel_groups
+                }
         self._progress.begin_retrieve(self._retrieve_generation)
         self._state = _RetrieveState.IN_PROGRESS
 
@@ -1252,6 +1294,9 @@ class LayerwiseH2DRetrieve:
         """
         kernel_group_id = launch.kernel_group_index
         object_group_id = self._kernel_to_object_group[kernel_group_id]
+        if kernel_group_id in self._native_kernel_group_specs:
+            self._run_layer_plan(launch, object_group_id)
+            return
         constants = self._launch_constants[kernel_group_id]
         layer_ranges: tuple[tuple[int, int], ...] = ()
         if self._staging is LayerStaging.PER_LAYER:
@@ -1283,6 +1328,93 @@ class LayerwiseH2DRetrieve:
                 launch.position_in_group,
                 1,
             )
+
+    def _run_layer_plan(self, launch: LayerLaunch, object_group_id: int) -> None:
+        """Stage one layer of every batch and run its kernels in one native call.
+
+        Builds, per batch, the layer's range copies and its one-layer kernel
+        launch, then hands the whole layer to ``execute_object_group_transfer``,
+        which issues it on the current stream with the GIL released once. The
+        executor stages a batch before its kernel and finishes that batch
+        before the next, so batches can share the staging slots. Every object
+        is read and checked before anything is queued.
+
+        Args:
+            launch: The scheduled layer to transfer.
+            object_group_id: The object group owning ``launch``'s kernel group.
+
+        Raises:
+            ValueError: If a position has no object, or an object cannot be
+                staged by byte range.
+        """
+        kernel_group_id = launch.kernel_group_index
+        layer_ranges = self._plane_geometry[kernel_group_id].byte_ranges(
+            launch.position_in_group
+        )
+        batch_steps: list[BatchStep] = []
+        for batch_descriptor in self._batch_descriptors_by_object_group[
+            object_group_id
+        ]:
+            launch_params = batch_descriptor.launch_params_by_kernel_group[
+                kernel_group_id
+            ]
+            memory_objs = self._batch_objects(object_group_id, batch_descriptor)
+            staging: list[StagingCopy] = []
+            for chunk_idx, memory_obj in enumerate(memory_objs):
+                region_offset = launch_params.staging_region_offsets[chunk_idx]
+                staging.extend(
+                    build_h2d_range_staging_copies(
+                        memory_obj,
+                        batch_descriptor.object_group_buffers[chunk_idx],
+                        [(region_offset + offset, n) for offset, n in layer_ranges],
+                    )
+                )
+            layer_launch = device_ops.LaunchVar(
+                0,
+                launch_params.block_ids_offset,
+                launch_params.block_ids_curr_batch.shape[0],
+                len(memory_objs),
+                launch_params.recalculated_skip_blocks,
+                layer_offset=launch.position_in_group,
+                n_layers=1,
+            )
+            batch_steps.append(device_ops.BatchStep(staging, [layer_launch]))
+        if not batch_steps:
+            return
+        device_ops.execute_object_group_transfer(
+            lmcache_native.TransferDirection.H2D,
+            self._cache_context.device,
+            LazyMemoryAllocator.PIN_CHUNK_SIZE,
+            [self._native_kernel_group_specs[kernel_group_id]],
+            batch_steps,
+        )
+
+    def _kernel_group_spec(self, kernel_group_id: int) -> KernelGroupSpec:
+        """Build the native plan's spec for one kernel group, once per retrieve.
+
+        Args:
+            kernel_group_id: The kernel group to describe.
+
+        Returns:
+            The kernel arguments that do not vary by batch or layer, with every
+            staging slot's kernel-group view and the group's block ids.
+        """
+        cache_context = self._cache_context
+        block_ids = self._block_ids_gpu[kernel_group_id]
+        return device_ops.KernelGroupSpec(
+            cache_context.get_kernel_group_kv_pointers(kernel_group_id).data_ptr(),
+            [
+                cache_context.get_temp_kernel_group_buffer(
+                    slot, kernel_group_id
+                ).data_ptr()
+                for slot in range(cache_context.max_batch_size)
+            ],
+            cache_context.get_shape_desc(kernel_group_id),
+            cache_context.get_slots_per_chunk_in_sw(kernel_group_id),
+            cache_context.get_engine_kv_format(kernel_group_id),
+            block_ids.data_ptr(),
+            block_ids.numel(),
+        )
 
     def _stage_layer(
         self,

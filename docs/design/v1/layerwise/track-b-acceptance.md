@@ -1201,7 +1201,12 @@ staging loop would have been roughly 2x CPU-bound there.
 - **One native call per plane per chunk remains.** Removing the rest of the
   Python cost needs a batched copy per layer in C++ (`execute_object_group_transfer`
   batches whole lazy objects only). Worth measuring first on a native Linux
-  server, since WSL2 overstates per-call cost.
+  server, since WSL2 overstates per-call cost. *Since done:* `LaunchVar`
+  takes a layer range, and a `PER_LAYER` launch now goes to
+  `execute_object_group_transfer` as one plan; see
+  [layerwise-load.md](../multiprocess/layerwise-load.md#staging-vs-overlap).
+  The executor still issues one `cudaMemcpyAsync` per range copy, but from
+  C++ with the GIL released once.
 - **R8 grows with the pipelined path (raise with Track C).** The daemon runs
   one worker's retrieves one at a time, and a pipelined retrieve holds the
   thread for its whole fetch. With several loading requests in one step, the
