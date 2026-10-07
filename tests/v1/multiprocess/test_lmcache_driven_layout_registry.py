@@ -179,6 +179,7 @@ def _registration_module(
         lambda: None,
         raising=False,
     )
+    ctx.storage_manager.pipelined_window_count.return_value = 0
     if sink_factory is None:
         return lmcache_driven_transfer_mod.LMCacheDrivenTransferModule(ctx)
     return lmcache_driven_transfer_mod.LMCacheDrivenTransferModule(ctx, sink_factory)
@@ -374,6 +375,7 @@ def test_unregister_one_shared_gpu_layout_keeps_registry_until_last_instance(
         lambda: None,
         raising=False,
     )
+    ctx.storage_manager.pipelined_window_count.return_value = 0
 
     module = lmcache_driven_transfer_mod.LMCacheDrivenTransferModule(ctx)
     module.register_kv_cache(1, [], "shared-model", 1, EngineType.VLLM, {}, [])

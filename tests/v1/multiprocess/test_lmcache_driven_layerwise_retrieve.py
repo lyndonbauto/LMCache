@@ -19,11 +19,13 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 import threading
+import time
 
 # Third Party
 import pytest
 
 # First Party
+from lmcache.v1.layerwise.deferral import PipelinedFetchConfig
 from lmcache.v1.multiprocess.deferred_response import DeferredResponse
 from lmcache.v1.multiprocess.modules import lmcache_driven_transfer as mod
 from lmcache.v1.multiprocess.retrieve_sequencer import RetrieveLaunchSequencer
@@ -86,9 +88,12 @@ def _obj(name: str) -> MagicMock:
 
 @pytest.fixture
 def make_harness(monkeypatch: pytest.MonkeyPatch):
-    """Build a layerwise module over mocks; ``missing`` keys are not in L1."""
+    """Build a layerwise module over mocks; ``missing`` keys are not in L1.
 
-    def build(missing: frozenset[str] = frozenset()) -> _Harness:
+    ``windows`` is how many RDMA windows the storage manager reports.
+    """
+
+    def build(missing: frozenset[str] = frozenset(), windows: int = 0) -> _Harness:
         monkeypatch.setattr(mod, "DeviceHostFuncDispatcher", MagicMock())
         monkeypatch.setattr(mod, "downsample_and_stage_block_ids", lambda cc, b: b)
         monkeypatch.setattr(
@@ -100,6 +105,8 @@ def make_harness(monkeypatch: pytest.MonkeyPatch):
         ctx.chunk_size = 256
         ctx.use_layerwise = True
         ctx.resolve_obj_keys.return_value = KEYS
+        ctx.pipelined_fetch = PipelinedFetchConfig()
+        ctx.storage_manager.pipelined_window_count.return_value = windows
         module = mod.LMCacheDrivenTransferModule(ctx)
 
         kvlgm = SimpleNamespace(
@@ -116,13 +123,16 @@ def make_harness(monkeypatch: pytest.MonkeyPatch):
         entry = SimpleNamespace(
             cache_context=cache_context,
             model_name="m",
+            world_size=1,
             event_backend=MagicMock(),
             layerwise_schedule=MagicMock(),
             layer_progress=progress,
+            layer_progress_shm=None,
             daemon_layer_event_pool=event_pool,
             retrieve_sequencer=RetrieveLaunchSequencer(
                 cache_context.stream, progress, event_pool, TransferGate()
             ),
+            inflight_retrieves=mod.InflightRetrieves(),
         )
         monkeypatch.setattr(module, "get_and_touch_context_entry", lambda _id: entry)
         h = _Harness(module=module, entry=entry)
@@ -244,6 +254,121 @@ def test_a_later_retrieve_is_answered_while_an_earlier_one_still_loads(
     # Each retrieve stages its own block IDs; the shared buffer is rewritten
     # by every later transfer while it loads.
     assert len(owned_stagings) == 2
+    h.progress.fail_retrieve.assert_not_called()
+
+
+def _blocking_transfer(
+    release: threading.Event, started: list[int], lock: threading.Lock
+):
+    """A layerwise transfer that records its generation, then waits for
+    ``release`` before completing."""
+
+    def transfer(cc, block_ids, objs_by_group, skip, schedule, sequencer, gen, **kw):
+        with lock:
+            started.append(gen)
+        release.wait(JOIN_SECONDS)
+        sequencer.complete(gen)
+
+    return transfer
+
+
+def _wait_for(predicate, timeout: float = JOIN_SECONDS) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return predicate()
+
+
+def test_retrieves_beyond_the_window_count_wait_for_a_thread(
+    make_harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One pool thread per RDMA window: a retrieve past the window count
+    waits for a running one to finish instead of loading at once, where it
+    would be refused a window and fall back to a whole load."""
+    h = make_harness(windows=2)
+    release, started, lock = threading.Event(), [], threading.Lock()
+    monkeypatch.setattr(
+        mod, "transfer_kv_layerwise_h2d", _blocking_transfer(release, started, lock)
+    )
+
+    futures = [h.start_retrieve(GENERATION + i) for i in range(3)]
+
+    assert _wait_for(lambda: len(started) == 2)
+    with pytest.raises(FutureTimeoutError):
+        futures[2].result(timeout=0.2)
+    assert sorted(started) == [GENERATION, GENERATION + 1]
+    release.set()
+    assert [f.result(timeout=JOIN_SECONDS)[1] for f in futures] == [True] * 3
+    assert started[2] == GENERATION + 2
+    h.progress.fail_retrieve.assert_not_called()
+
+
+def test_without_rdma_windows_retrieves_load_at_once(
+    make_harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = make_harness(windows=0)
+    release, started, lock = threading.Event(), [], threading.Lock()
+    monkeypatch.setattr(
+        mod, "transfer_kv_layerwise_h2d", _blocking_transfer(release, started, lock)
+    )
+
+    futures = [h.start_retrieve(GENERATION + i) for i in range(3)]
+
+    assert _wait_for(lambda: len(started) == 3)
+    release.set()
+    assert [f.result(timeout=JOIN_SECONDS)[1] for f in futures] == [True] * 3
+
+
+def test_unregistering_a_worker_stops_its_loading_retrieve_and_waits_for_it(
+    make_harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D-28: the worker's KV cache is released only after its retrieve on the
+    pool has stopped, so no copy lands in released memory."""
+    h = make_harness()
+    loading = threading.Event()
+    done_when_closed: list[bool] = []
+
+    def transfer(cc, block_ids, objs_by_group, skip, schedule, sequencer, gen, **kw):
+        sequencer.begin(gen)
+        loading.set()
+        # Stand-in for waiting on the next layer: the stop shows at its launch.
+        assert _wait_for(lambda: h.progress.fail_retrieve.called)
+        sequencer.launch(gen, 0, lambda slots: None)
+
+    monkeypatch.setattr(mod, "transfer_kv_layerwise_h2d", transfer)
+    first = h.start_retrieve(GENERATION)
+    assert loading.wait(JOIN_SECONDS)
+
+    def close() -> None:
+        try:
+            first.result(timeout=0)
+        except FutureTimeoutError:
+            done_when_closed.append(False)
+        else:
+            done_when_closed.append(True)
+
+    h.entry.cache_context.close.side_effect = close
+    monkeypatch.setitem(h.module._cache_contexts, 1, h.entry)
+
+    h.module.unregister_kv_cache(1)
+
+    assert done_when_closed == [True]
+    assert first.result(timeout=0)[1] is False
+    h.progress.fail_retrieve.assert_called_with(GENERATION)
+
+
+def test_unregistering_an_idle_worker_does_not_publish_a_failure(
+    make_harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    h = make_harness()
+    assert h.retrieve() is True
+    monkeypatch.setitem(h.module._cache_contexts, 1, h.entry)
+
+    h.module.unregister_kv_cache(1)
+
+    h.entry.cache_context.close.assert_called_once_with()
     h.progress.fail_retrieve.assert_not_called()
 
 

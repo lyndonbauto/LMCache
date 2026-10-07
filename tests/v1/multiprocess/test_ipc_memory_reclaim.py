@@ -50,6 +50,7 @@ def _module(monkeypatch) -> LMCacheDrivenTransferModule:
     monkeypatch.setattr(gpu_mod, "DeviceHostFuncDispatcher", MagicMock())
     ctx = MagicMock(name="ctx")
     ctx.use_layerwise = False
+    ctx.storage_manager.pipelined_window_count.return_value = 0
     return LMCacheDrivenTransferModule(ctx)
 
 

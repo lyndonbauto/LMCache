@@ -71,6 +71,9 @@ class _NoopDispatcher:
 class _FakeStorageManager:
     """Minimal storage surface used by the server handle-path test."""
 
+    def pipelined_window_count(self) -> int:
+        return 0
+
     def finish_write(self, keys: list[object]) -> None:
         return None
 

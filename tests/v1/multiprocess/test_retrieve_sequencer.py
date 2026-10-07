@@ -301,6 +301,39 @@ def test_releasing_an_unfinished_retrieve_fails_it_and_frees_newer_ones() -> Non
     assert f.published() == (5, 0, True)
 
 
+def test_stopping_all_stops_the_newest_retrieve_too() -> None:
+    """Releasing the worker stops every retrieve, including the one that owns
+    the record, and publishes the failure after the stream drains."""
+    f = _Fixture()
+    f.sequencer.admit(4)
+    f.sequencer.admit(5)
+    f.sequencer.begin(4)
+    f.sequencer.begin(5)
+    f.launch(4, 0)
+    f.launch(5, 0)
+
+    f.sequencer.stop_all()
+
+    assert f.published() == (5, 1, True)
+    assert f.stream.drains == 1
+    for generation in (4, 5):
+        with pytest.raises(RetrieveAbortedError):
+            f.launch(generation, 1)
+
+
+def test_stopping_all_with_nothing_in_flight_changes_nothing() -> None:
+    f = _Fixture()
+    f.sequencer.begin(4)
+    for ordinal in range(LAUNCHES):
+        f.launch(4, ordinal)
+    f.sequencer.complete(4)
+
+    f.sequencer.stop_all()
+
+    assert f.published() == (4, LAUNCHES, False)
+    assert f.stream.drains == 0
+
+
 def test_releasing_a_completed_retrieve_changes_nothing() -> None:
     f = _Fixture()
     f.sequencer.begin(4)

@@ -134,6 +134,7 @@ def _make_module(monkeypatch, num_chunks, num_chunks_in_sw, group_kinds=()):
         yield [MagicMock(get_size=MagicMock(return_value=10)) for _ in keys]
 
     ctx.storage_manager.read_prefetched_results = MagicMock(side_effect=fake_read)
+    ctx.storage_manager.pipelined_window_count.return_value = 0
     monkeypatch.setattr(mod, "DeviceHostFuncDispatcher", MagicMock())
     module = LMCacheDrivenTransferModule(ctx)
     module.get_and_touch_context_entry = MagicMock(return_value=entry)

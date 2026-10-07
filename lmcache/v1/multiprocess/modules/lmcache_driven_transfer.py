@@ -4,6 +4,7 @@
 # Standard
 from collections.abc import Iterable
 from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import wait as wait_futures
 from dataclasses import dataclass, field
 from multiprocessing import shared_memory
 from typing import Any, Sequence
@@ -93,11 +94,75 @@ import lmcache.lmcache_native as lmcache_native
 
 logger = init_logger(__name__)
 
-#: Threads that run layerwise retrieves after their handler returned. Each
-#: blocks while its layers arrive; one per retrieve in flight across workers.
-#: The pool must start retrieves in submission order: a running retrieve
-#: waits for older ones of its worker, which must not be queued behind it.
+#: Threads that run layerwise retrieves after their handler returned when L1
+#: reserves no RDMA windows. With windows, the pool has one thread per window
+#: (see ``_layerwise_retrieve_threads``). Each thread blocks while its layers
+#: arrive. The pool must start retrieves in submission order: a running
+#: retrieve waits for older ones of its worker, which must not be queued
+#: behind it.
 _LAYERWISE_RETRIEVE_THREADS = 32
+
+
+def _layerwise_retrieve_threads(window_count: int) -> int:
+    """Size the layerwise retrieve pool.
+
+    A pipelined fetch holds one RDMA window for its whole load, and a
+    retrieve that finds every window leased is refused and loads whole
+    objects instead, under the whole-load timeout. One thread per window
+    makes a retrieve beyond the window count wait for a thread, and so for
+    a window, rather than be refused.
+
+    Args:
+        window_count: RDMA windows L1 reserves; 0 when no adapter enables
+            RDMA reception.
+
+    Returns:
+        ``window_count`` if positive, else ``_LAYERWISE_RETRIEVE_THREADS``.
+    """
+    return window_count if window_count > 0 else _LAYERWISE_RETRIEVE_THREADS
+
+
+class InflightRetrieves:
+    """The layerwise retrieves of one worker still on the pool; thread-safe.
+
+    :meth:`LMCacheDrivenTransferModule.start_retrieve` adds each retrieve it
+    hands to the layerwise retrieve pool; releasing the worker's
+    registration waits for them.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._futures: set[Future[tuple[bytes, bool]]] = set()
+
+    def add(self, future: "Future[tuple[bytes, bool]]") -> None:
+        """Track ``future`` until it is done.
+
+        Args:
+            future: A retrieve's future from the layerwise retrieve pool.
+        """
+        with self._lock:
+            self._futures.add(future)
+        future.add_done_callback(self._discard)
+
+    def wait(self, timeout_seconds: float) -> int:
+        """Wait for every tracked retrieve to end.
+
+        Args:
+            timeout_seconds: Longest to wait in total.
+
+        Returns:
+            How many retrieves were still running when the wait gave up.
+        """
+        with self._lock:
+            pending = set(self._futures)
+        if not pending:
+            return 0
+        _, not_done = wait_futures(pending, timeout=timeout_seconds)
+        return len(not_done)
+
+    def _discard(self, future: "Future[tuple[bytes, bool]]") -> None:
+        with self._lock:
+            self._futures.discard(future)
 
 
 def get_layout_desc(
@@ -310,6 +375,8 @@ class ContextEntry:
         retrieve_sequencer: Orders the launches of this worker's in-flight
             layerwise retrieves and is the only writer of ``layer_progress``
             and ``daemon_layer_event_pool``. Set when layerwise is on.
+        inflight_retrieves: This worker's layerwise retrieves handed to the
+            layerwise retrieve pool and not yet done.
     """
 
     cache_context: BaseCacheContext
@@ -323,6 +390,7 @@ class ContextEntry:
     daemon_layer_event_pool: DaemonLayerLaunchEventPool | None = None
     layer_progress_shm: shared_memory.SharedMemory | None = None
     retrieve_sequencer: RetrieveLaunchSequencer | None = None
+    inflight_retrieves: InflightRetrieves = field(default_factory=InflightRetrieves)
 
 
 @dataclass
@@ -385,7 +453,9 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         self._lock = threading.Lock()
         self._fetch_models = FetchModelRegistry()
         self._layerwise_retrieve_pool = ThreadPoolExecutor(
-            max_workers=_LAYERWISE_RETRIEVE_THREADS,
+            max_workers=_layerwise_retrieve_threads(
+                ctx.storage_manager.pipelined_window_count()
+            ),
             thread_name_prefix="lmcache-layerwise-retrieve",
         )
 
@@ -594,6 +664,7 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         if not entries:
             return
         for entry in entries:
+            self._stop_inflight_retrieves(entry)
             if entry.layer_progress_shm is not None:
                 entry.layer_progress_shm.close()
                 entry.layer_progress_shm = None
@@ -1744,12 +1815,14 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         sequencer = _sequencer_of(run.entry)
         sequencer.admit(run.retrieve_generation)
         try:
-            return self._layerwise_retrieve_pool.submit(
+            future = self._layerwise_retrieve_pool.submit(
                 self._finish_layerwise_retrieve, run
             )
         except BaseException:
             sequencer.release(run.retrieve_generation)
             raise
+        run.entry.inflight_retrieves.add(future)
+        return future
 
     def _finish_layerwise_retrieve(self, run: _RetrieveRun) -> tuple[bytes, bool]:
         """Load a handed-off layerwise retrieve's layers and finish it.
@@ -1928,3 +2001,26 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
             _event_backend_of(run.entry).export_event(run.event, cache_context.device),
             run.succeeded,
         )
+
+    def _stop_inflight_retrieves(self, entry: ContextEntry) -> None:
+        """Stop a worker's layerwise retrieves on the pool and wait for them.
+
+        Called before the worker's KV cache and progress segment are
+        released, so no retrieve copies into them or records into them
+        afterwards (D-28). A retrieve still queued on the pool fails at its
+        begin; one loading layers fails at its next launch.
+
+        Args:
+            entry: The worker's registration, being released.
+        """
+        if entry.retrieve_sequencer is not None:
+            entry.retrieve_sequencer.stop_all()
+        config = self._ctx.pipelined_fetch
+        left = entry.inflight_retrieves.wait(
+            config.layer_timeout_seconds + config.whole_load_timeout_seconds
+        )
+        if left:
+            logger.error(
+                "%d layerwise retrieve(s) still running while their worker is released",
+                left,
+            )

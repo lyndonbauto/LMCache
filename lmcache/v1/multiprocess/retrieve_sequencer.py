@@ -290,6 +290,23 @@ class RetrieveLaunchSequencer:
             self._progress.fail_retrieve(target)
             self._owner = max(self._owner, target)
 
+    def stop_all(self) -> None:
+        """Stop every in-flight retrieve, as if the newest of them failed.
+
+        For releasing the worker: each stopped retrieve raises
+        :class:`RetrieveAbortedError` on its next call, and the failure is
+        published once the stream has drained, as in :meth:`fail`. Does
+        nothing when no retrieve is in flight.
+        """
+        with self._cond:
+            newest = max(self._in_flight, default=0)
+            if newest:
+                # fail() stops every retrieve but the one failing; here that
+                # one stops as well.
+                self._aborted.add(newest)
+        if newest:
+            self.fail(newest)
+
     def release(self, generation: int) -> None:
         """Forget a retrieve whose handler is done.
 

@@ -175,7 +175,7 @@ retrieves run one after another: the step waited for the sum of their
 fetches (ledger D-27). The handler now returns a `DeferredResponse` instead:
 
 ```text
-affinity thread (in order)          layerwise pool (32 threads)
+affinity thread (in order)          layerwise pool (one thread per RDMA window)
   RETRIEVE g=5: read L1, stage IDs,
                 admit(5), submit  ──▶ fetch + launch layers of 5
   RETRIEVE g=6: read L1, stage IDs,
@@ -214,6 +214,28 @@ affinity thread (in order)          layerwise pool (32 threads)
   rewritten by every later store or retrieve while it is still launching.
   `WHOLE_OBJECT` staging reuses a batch already resident in the staging
   slots only if no other transfer held the gate since (`StagingSlots`).
+- **One thread per RDMA window.** The pool has
+  `StorageManager.pipelined_window_count()` threads (32 when there are no
+  windows). Each pipelined fetch leases a window for its whole retrieve, and
+  a fetch that finds every window leased is refused and loads whole, under
+  `whole_load_timeout_seconds` (1.5 s). With 32 threads over 8 windows, the
+  9th concurrent retrieve was refused; its whole load of an 8k-16k prompt
+  timed out, and the failure stopped every retrieve of the step (c=16 and
+  c=32 failed most requests). With one thread per window, a retrieve past
+  the window count waits on the pool for a thread instead. The pool is FIFO
+  and admission is in generation order, so the waiting retrieve is newer than
+  every running one, and no running retrieve waits on it: this cannot
+  deadlock.
+- **Unregister.** Releasing a worker first stops its retrieves on the pool
+  (`RetrieveLaunchSequencer.stop_all`: each raises `RetrieveAbortedError` at
+  its next launch) and waits for them, up to `layer_timeout_seconds +
+  whole_load_timeout_seconds`, before closing its cache context. A retrieve
+  still copying into released memory would corrupt it (ledger D-28).
+- **Fetch order.** Each fetch already asks the server for layer 0 first
+  (per-layer priority), and launches are layer-major across retrieves, the
+  order the forward pass consumes them. Ordering the server's queue by
+  request instead (all of the oldest retrieve first) would delay the newest
+  retrieve's layer 0, which the step also waits on, so it is not done.
 
 Limits:
 
@@ -221,8 +243,10 @@ Limits:
   the newest has not begun yet, reaches the worker only through the
   retrieves' futures, not through the layer waits.
 - CacheBlend and the qstore module enqueue on the stream without the gate.
-- Unregistering a worker while one of its retrieves runs on the pool is not
-  guarded (as before, when it ran on the affinity thread).
+- A retrieve that outlives the unregister wait is logged as an error; its
+  memory is released anyway.
+- The pool is per module, not per worker: with several workers, one worker's
+  retrieves can hold every thread while another's wait.
 - Overlap only helps while the fetch path has spare bandwidth (ledger D-30);
   the speedup is not yet measured.
 

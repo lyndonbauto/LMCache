@@ -128,6 +128,7 @@ def _harness(
     ctx.pipelined_fetch = PipelinedFetchConfig(enabled=True)
     ctx.session_manager.get.return_value = _Session(deferred)
     storage = ctx.storage_manager
+    storage.pipelined_window_count.return_value = 0
 
     factory = _SinkFactory() if sink_factory is None else sink_factory
     module = mod.LMCacheDrivenTransferModule(ctx, pipelined_sink_factory=factory)
@@ -150,6 +151,7 @@ def _harness(
         layer_progress=MagicMock() if layerwise else None,
         daemon_layer_event_pool=MagicMock() if layerwise else None,
         retrieve_sequencer=MagicMock() if layerwise else None,
+        inflight_retrieves=mod.InflightRetrieves(),
     )
     monkeypatch.setattr(module, "get_and_touch_context_entry", lambda _id: entry)
 
