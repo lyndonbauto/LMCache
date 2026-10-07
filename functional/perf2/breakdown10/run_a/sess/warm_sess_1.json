@@ -1,0 +1,12 @@
+{
+ "tag": "sess_warm1",
+ "warmup": "Warm-up request 1 of session sess (after vLLM start). Say hello.",
+ "requests": [
+  {
+   "ttft_s": 0.08933811899987631,
+   "total_s": 0.15783470599990324,
+   "out_tokens": 16,
+   "error": ""
+  }
+ ]
+}

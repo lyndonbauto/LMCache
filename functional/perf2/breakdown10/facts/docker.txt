@@ -1,0 +1,2 @@
+aero-kvsink-bp: NanoCpus=0 CpuQuota=0 CpuPeriod=0 CpuShares=0 CpusetCpus='' CpusetMems='' NetworkMode=host IpcMode=private PidMode='' Privileged=false Memory=0
+lmc-c: NanoCpus=0 CpuQuota=0 CpuPeriod=0 CpuShares=0 CpusetCpus='' CpusetMems='' NetworkMode=host IpcMode=host PidMode='' Privileged=false Memory=0

@@ -1,0 +1,8 @@
+=== sess start mode=aon layerwise=false L1=100GB extra='--no-l1-use-lazy --l2-adapter {"type":"aerospike","hosts":"127.0.0.1:3700","namespace":"lmcache","set_name":"kv_chunks"}' 15:30:29
+=== sess LMCache up (pid 1759) 15:30:50
+=== listen_check sess lmcache: ok (all listeners on loopback; allowed: tcp:22 udp:4791 )
+=== sess vLLM up (pid 1882) GPU KV cache size: 1,275,776 tokens; cudagraph: cudagraph_mode': <CUDAGraphMode.FULL_AND_PIECEWISE: (2 15:31:31
+=== listen_check sess vllm: ok (all listeners on loopback; allowed: tcp:22 udp:4791 )
+warmup sess_warm1: ok
+=== sess done 15:33:01
+=== sess LMCache server pid 1759 stopped (TERM) exit=143 15:33:16

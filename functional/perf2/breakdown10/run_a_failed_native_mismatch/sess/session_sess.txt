@@ -1,0 +1,35 @@
+=== sess start mode=aon layerwise=false L1=100GB extra='--no-l1-use-lazy --l2-adapter {"type":"aerospike","hosts":"127.0.0.1:3700","namespace":"lmcache","set_name":"kv_chunks"}' 15:22:26
+=== sess LMCache up (pid 432) 15:22:50
+=== listen_check sess lmcache: ok (all listeners on loopback; allowed: tcp:22 udp:4791 )
+=== sess vLLM exited during startup 15:28:35
+(APIServer pid=562)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/openai/api_server.py", line 132, in build_async_engine_client
+(APIServer pid=562)     async with build_async_engine_client_from_engine_args(
+(APIServer pid=562)                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=562)   File "/usr/lib/python3.12/contextlib.py", line 210, in __aenter__
+(APIServer pid=562)     return await anext(self.gen)
+(APIServer pid=562)            ^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=562)   File "/usr/local/lib/python3.12/dist-packages/vllm/entrypoints/openai/api_server.py", line 168, in build_async_engine_client_from_engine_args
+(APIServer pid=562)     async_llm = AsyncLLM.from_vllm_config(
+(APIServer pid=562)                 ^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=562)   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/async_llm.py", line 220, in from_vllm_config
+(APIServer pid=562)     return cls(
+(APIServer pid=562)            ^^^^
+(APIServer pid=562)   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/async_llm.py", line 149, in __init__
+(APIServer pid=562)     self.engine_core = EngineCoreClient.make_async_mp_client(
+(APIServer pid=562)                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=562)   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/core_client.py", line 139, in make_async_mp_client
+(APIServer pid=562)     return AsyncMPClient(*client_args)
+(APIServer pid=562)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=562)   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/core_client.py", line 987, in __init__
+(APIServer pid=562)     super().__init__(
+(APIServer pid=562)   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/core_client.py", line 609, in __init__
+(APIServer pid=562)     with launch_core_engines(
+(APIServer pid=562)          ^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=562)   File "/usr/lib/python3.12/contextlib.py", line 144, in __exit__
+(APIServer pid=562)     next(self.gen)
+(APIServer pid=562)   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/utils.py", line 1194, in launch_core_engines
+(APIServer pid=562)     wait_for_engine_startup(
+(APIServer pid=562)   File "/usr/local/lib/python3.12/dist-packages/vllm/v1/engine/utils.py", line 1253, in wait_for_engine_startup
+(APIServer pid=562)     raise RuntimeError(
+(APIServer pid=562) RuntimeError: Engine core initialization failed. See root cause above. Failed core proc(s): {}
+=== sess LMCache server pid 432 stopped (TERM) exit=143 15:28:48

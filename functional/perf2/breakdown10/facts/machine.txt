@@ -1,0 +1,121 @@
+## uname -r
+6.8.0-138-generic
+## /proc/cmdline
+BOOT_IMAGE=/vmlinuz-6.8.0-138-generic root=UUID=cc6f3ac6-f24d-4276-abe9-c242adec4e04 ro cgroup_enable=memory swapaccount=1 console=tty1 console=ttyS0 net.ifnames=0 biosdevname=0
+## lscpu
+Architecture:                            x86_64
+CPU op-mode(s):                          32-bit, 64-bit
+Address sizes:                           46 bits physical, 57 bits virtual
+Byte Order:                              Little Endian
+CPU(s):                                  20
+On-line CPU(s) list:                     0-19
+Vendor ID:                               GenuineIntel
+BIOS Vendor ID:                          QEMU
+Model name:                              INTEL(R) XEON(R) PLATINUM 8568Y+
+BIOS Model name:                         pc-q35-6.1  CPU @ 2.0GHz
+BIOS CPU family:                         1
+CPU family:                              6
+Model:                                   207
+Thread(s) per core:                      1
+Core(s) per socket:                      20
+Socket(s):                               1
+Stepping:                                2
+BogoMIPS:                                4600.00
+Flags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts mmx fxsr sse sse2 ss ht syscall nx pdpe1gb rdtscp lm constant_tsc arch_perfmon pebs bts rep_good nopl xtopology cpuid tsc_known_freq pni pclmulqdq dtes64 vmx ssse3 fma cx16 pdcm pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand hypervisor lahf_lm abm 3dnowprefetch cpuid_fault ssbd ibrs ibpb stibp ibrs_enhanced tpr_shadow flexpriority ept vpid ept_ad fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves avx_vnni avx512_bf16 wbnoinvd arat vnmi avx512vbmi umip pku ospke waitpkg avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq la57 rdpid bus_lock_detect cldemote movdiri movdir64b overflow_recov succor fsrm md_clear serialize tsxldtrk avx512_fp16 arch_capabilities
+Virtualization:                          VT-x
+Hypervisor vendor:                       KVM
+Virtualization type:                     full
+L1d cache:                               640 KiB (20 instances)
+L1i cache:                               640 KiB (20 instances)
+L2 cache:                                80 MiB (20 instances)
+NUMA node(s):                            1
+NUMA node0 CPU(s):                       0-19
+Vulnerability Gather data sampling:      Not affected
+Vulnerability Indirect target selection: Mitigation; Aligned branch/return thunks
+Vulnerability Itlb multihit:             Not affected
+Vulnerability L1tf:                      Not affected
+Vulnerability Mds:                       Not affected
+Vulnerability Meltdown:                  Not affected
+Vulnerability Mmio stale data:           Unknown: No mitigations
+Vulnerability Reg file data sampling:    Not affected
+Vulnerability Retbleed:                  Not affected
+Vulnerability Spec rstack overflow:      Not affected
+Vulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl
+Vulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization
+Vulnerability Spectre v2:                Mitigation; Enhanced / Automatic IBRS; IBPB conditional; PBRSB-eIBRS SW sequence; BHI SW loop, KVM SW loop
+Vulnerability Srbds:                     Not affected
+Vulnerability Tsa:                       Not affected
+Vulnerability Tsx async abort:           Mitigation; TSX disabled
+Vulnerability Vmscape:                   Not affected
+## rdma_rxe (loaded)
+srcversion 1AE0DE565BFD276050040E6
+file srcversion 1AE0DE565BFD276050040E6
+file /root/rxe-build/v6.11-20261007/rdma_rxe.ko (upstream v6.11 rxe built for MLNX OFED 24.10, functional/HOST-CHANGES.md)
+## workqueue cpumask
+fffff
+/sys/devices/virtual/workqueue/blkcg_punt_bio/cpumask fffff
+/sys/devices/virtual/workqueue/ib-comp-unb-wq/cpumask fffff
+/sys/devices/virtual/workqueue/raid5wq/cpumask fffff
+/sys/devices/virtual/workqueue/scsi_tmf_0/cpumask fffff
+/sys/devices/virtual/workqueue/scsi_tmf_1/cpumask fffff
+/sys/devices/virtual/workqueue/scsi_tmf_2/cpumask fffff
+/sys/devices/virtual/workqueue/scsi_tmf_3/cpumask fffff
+/sys/devices/virtual/workqueue/scsi_tmf_4/cpumask fffff
+/sys/devices/virtual/workqueue/scsi_tmf_5/cpumask fffff
+/sys/devices/virtual/workqueue/scsi_tmf_6/cpumask fffff
+/sys/devices/virtual/workqueue/writeback/cpumask fffff
+## isolcpus / nohz_full
+
+              (null)
+## cpupower
+analyzing CPU 3:
+  no or unknown cpufreq driver is active on this CPU
+  CPUs which run at the same hardware frequency: Not Available
+  CPUs which need to have their frequency coordinated by software: Not Available
+  maximum transition latency:  Cannot determine or is not supported.
+Not Available
+  available cpufreq governors: Not Available
+  Unable to determine current policy
+  current CPU frequency: Unable to call hardware
+  current CPU frequency:  Unable to call to kernel
+  boost state support:
+    Supported: no
+    Active: no
+CPUidle driver: none
+CPUidle governor: menu
+analyzing CPU 18:
+
+CPU 18: No idle states
+
+## cpufreq (cpu0)
+scaling_driver cat: /sys/devices/system/cpu/cpu0/cpufreq/scaling_driver: No such file or directory
+scaling_governor cat: /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor: No such file or directory
+cpuinfo_min_freq cat: /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_min_freq: No such file or directory
+cpuinfo_max_freq cat: /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq: No such file or directory
+scaling_cur_freq cat: /sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq: No such file or directory
+## cpuidle driver
+none
+menu
+menu
+## cpuidle states (cpu0): name latency_us residency_us usage time_us disable
+cat: '/sys/devices/system/cpu/cpu0/cpuidle/state*/name': No such file or directory
+cat: '/sys/devices/system/cpu/cpu0/cpuidle/state*/latency': No such file or directory
+cat: '/sys/devices/system/cpu/cpu0/cpuidle/state*/residency': No such file or directory
+cat: '/sys/devices/system/cpu/cpu0/cpuidle/state*/usage': No such file or directory
+cat: '/sys/devices/system/cpu/cpu0/cpuidle/state*/time': No such file or directory
+cat: '/sys/devices/system/cpu/cpu0/cpuidle/state*/disable': No such file or directory
+state*      
+## free -g
+               total        used        free      shared  buff/cache   available
+Mem:             235           6         229           0           2         229
+Swap:              0           0           0
+## numactl
+available: 1 nodes (0)
+node 0 cpus: 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19
+node 0 size: 241610 MB
+node 0 free: 234616 MB
+node distances:
+## irqbalance
+inactive
+## steal since boot (/proc/stat cpu line)
+cpu  2570 1197 2350 1963659 423 0 45 2 0 0

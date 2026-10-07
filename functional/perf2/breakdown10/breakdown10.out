@@ -1,0 +1,18 @@
+2026-10-07T15:21:58Z breakdown10: building 3f3940e42 in place
+2026-10-07T15:22:06Z breakdown10: tree and 9c16972132 binary restored (0b953fb421486d003e28ccc90dde2d7b)
+2026-10-07T15:22:06Z breakdown10: 3f3940e42 binary 5d2996949bf6f2b78285ff8bc4983f28
+2026-10-07T15:22:07Z breakdown10: e8158149 kvlayers ebba33e598a4ed53356ab57f9859bbd0; old kvlayers 71105b74857c078867a0ec567279e10c
+2026-10-07T15:22:07Z breakdown10: facts: 121 lines; aero-kvsink-bp: NanoCpus=0 CpuQuota=0 CpuPeriod=0 CpuShares=0 CpusetCpus='' CpusetMems='' NetworkMode=host IpcMode=private PidMode='' Privileged=false
+2026-10-07T15:22:19Z breakdown10: q16_t2:  524288 140740 0.00 98.39 		 0.023457
+2026-10-07T15:22:22Z breakdown10: run a: at most 128 writes in flight, 4 MiB per path,32 placement threads
+2026-10-07T15:30:22Z breakdown10: q16_t2:  524288 146711 0.00 102.56 		 0.024452
+2026-10-07T15:30:25Z breakdown10: run a: at most 128 writes in flight, 4 MiB per path,32 placement threads
+2026-10-07T15:31:38Z breakdown10: run a: 2 vLLM/LMCache processes in lmc-c
+2026-10-07T15:33:16Z breakdown10: run a: stream: 20.10 s, 159.84 GiB landed, 7.952 GiB/s, failed rows 0
+breakdown10.sh: line 196: wait: pid 16630 is not a child of this shell
+2026-10-07T15:33:16Z breakdown10: run a: session === sess LMCache server pid 1759 stopped (TERM) exit=143 15:33:16
+2026-10-07T15:33:24Z breakdown10: run b: at most 128 writes in flight, 4 MiB per path,32 placement threads
+2026-10-07T15:33:28Z breakdown10: run b: 0 vLLM/LMCache processes in lmc-c
+2026-10-07T15:33:49Z breakdown10: run b: stream: 20.09 s, 157.38 GiB landed, 7.833 GiB/s, failed rows 0
+2026-10-07T15:33:50Z breakdown10: server stopped, data deleted
+2026-10-07T15:33:50Z breakdown10: BREAKDOWN10 DONE
