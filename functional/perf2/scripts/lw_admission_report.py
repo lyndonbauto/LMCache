@@ -15,7 +15,7 @@ Validity follows lwaon_report.point_row. Prints two tables, one row per
    1)``, in ms, and the p50 / p90 over requests of the largest gap between
    streamed chunks after the first (``max_gap_s``), in s.
 
-Usage: lw_admission_report.py <lwaon3-dir> [--label 1e] [--control 1c]
+Usage: lw_admission_report.py <lwaon3-dir> [--label 1e,1e2] [--control 1c]
 """
 
 # Standard
@@ -95,10 +95,16 @@ def main(root: str, label: str, control: str) -> None:
 
     Args:
         root: The lwaon3 results directory.
-        label: The admission build's label.
+        label: The admission build's labels, comma-separated (runs of the
+            same build; a later label's point replaces an earlier one).
         control: The reference build's label (aon and lw controls).
     """
-    test = [r for r in collect(Path(root) / label) if r["mode"] == "lw"]
+    test = [
+        r
+        for lb in label.split(",")
+        for r in collect(Path(root) / lb)
+        if r["mode"] == "lw"
+    ]
     ctrl = collect(Path(root) / control)
     budgets = sorted({int(r["budget"]) for r in test if int(r["budget"]) >= 0})
     lw: dict[tuple[int, Key], Row] = {
