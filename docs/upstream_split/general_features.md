@@ -40,6 +40,9 @@ and do something with only its stated prerequisites merged. The result:
 - **GF-6 is dissolved.**
 - **Part 2 becomes PR-G6 to PR-G8.** GF-8 and GF-9 move into the L1-windows
   PR in [aerospike_rdma.md](aerospike_rdma.md).
+- **Later addition (2026-10-06): GF-13** (D-27, concurrent retrieves per
+  worker) adds PR-G9, a small transport PR that PR-G5 now needs, and grows
+  PR-G4 and PR-G5.
 
 The [PR plan](#pr-plan) at the end has the details. Every item section
 starts with a **PR** line. No commit cherry-picks cleanly: cut each PR from
@@ -70,6 +73,7 @@ The file has two parts:
 | GF-10 | Prefetch controller: deferred L2 mode | ~+300 | none, but must be rebuilt on prefetch v2 | PR-G8, with GF-11 |
 | GF-11 | `StorageManager.load_into_l1` and `lock_resident_keys` | ~+200 | GF-10 | PR-G8, with GF-10 |
 | GF-12 | Layerwise arrival/sink contract, pump and fakes | ~+1,500 | none, once `__init__` is trimmed | PR-G6 (library); the MP sink follows in PR-G7 |
+| GF-13 | Concurrent layerwise retrieves per worker (D-27) | ~+1,900 | GF-2, GF-3 | **Split:** deferred responses in PR-G9; sequencer, gate and owned staging in PR-G4; module half in PR-G5 |
 
 GF-1 to GF-6 together are **MP layerwise load**: one user-visible feature.
 It is cut into four building blocks (PR-G2 to PR-G4) and one feature PR
@@ -320,23 +324,31 @@ BF-4 ([bug_fixes.md](bug_fixes.md)), because they re-record exported events.
 >   (`test_every_batch_is_staged_from_its_own_chunks`). The trimmed file runs
 >   on CPU with the kernel mocked, plus three CUDA cases.
 >
+> **Also carries GF-13's sequencer, transfer gate and owned block-ID
+> staging:** `LayerwiseH2DRetrieve` takes a `RetrieveLaunchSequencer`
+> instead of the progress record and event pool.
+>
 > **Module half → PR-G5.** The `lmcache_driven_transfer.py` hunks return
 > `RegisterKvCacheResponse` and take `retrieve_generation`, so they can't
-> merge before GF-4.
+> merge before GF-4. With GF-13 the `RETRIEVE` handler also returns a
+> `DeferredResponse`, so PR-G5 needs PR-G9.
 >
 > **Module test: written on `lmcache-pr`.**
 > `tests/v1/multiprocess/test_lmcache_driven_layerwise_retrieve.py` drives
 > `LMCacheDrivenTransferModule.retrieve` with `use_layerwise=True` on the
 > plain path (no pipelined sink, nothing deferred). It runs on CPU with mocks
-> and checks four things:
+> and checks five things:
 >
 > - one `transfer_kv_layerwise_h2d` call carries every object and the
 >   worker's generation;
 > - a key missing from L1 publishes `fail_retrieve(generation)`;
 > - a transfer that raises does the same;
-> - generation 0 is refused.
+> - generation 0 is refused;
+> - a second retrieve's response arrives while the first still loads
+>   (GF-13).
 >
-> It patches only names that PR-G5's module also has. The other module test
+> It patches only names that PR-G5's module also has. It drives the module
+> through `start_retrieve` and the futures it returns. The other module test
 > with layerwise on, `test_lmcache_driven_deferred_retrieve.py`, covers the
 > pipelined path and ships with PR-A11.
 
@@ -385,8 +397,9 @@ time, publishing each layer's progress (GF-2) as it lands.
   - `_HAS_NATIVE_LAYER_LAUNCHES` checks for the extension by building a
     `LaunchVar` with the new keywords. An older build, a CPU context, and
     `WHOLE_OBJECT` mode keep making one call per copy and per kernel.
-- **`lmcache_driven_transfer.retrieve`** takes the layerwise path when the
-  server context has `use_layerwise`.
+- **`lmcache_driven_transfer.start_retrieve`** (the `RETRIEVE` handler;
+  `retrieve` blocks on it) takes the layerwise path when the server context
+  has `use_layerwise`, and hands layer loading to a pool (GF-13).
   `_publish_layerwise_retrieve_terminal` marks completion or failure.
 - **`transfer_context/worker_transfer.py`**: the worker-side
   `wait_for_layer_load`, `_release_layerwise_state` and
@@ -755,6 +768,106 @@ without serving it. The simulated hit-rate distribution in
 
 ---
 
+## GF-13. Concurrent layerwise retrieves per worker (D-27)
+
+> **PR: split three ways.**
+>
+> - **Deferred responses → PR-G9, standalone.** `deferred_response.py`, the
+>   `mq.py` hunks and the two gRPC hunks, with
+>   `test_deferred_response.py`. Nothing in it is layerwise-specific, and
+>   until a handler returns `DeferredResponse` no behavior changes. Its only
+>   caller is PR-G5, so open it just before PR-G5.
+> - **Sequencer, gate and owned staging → PR-G4.** `LayerwiseH2DRetrieve`
+>   and `transfer_kv_layerwise_h2d` now take a `RetrieveLaunchSequencer`
+>   in place of the progress record and event pool, so they can't ship
+>   apart. Adds `retrieve_sequencer.py`,
+>   `platform/base/transfer_gate.py`, `BaseCacheContext.transfer_gate` and
+>   `stage_owned_block_ids`, plus `test_retrieve_sequencer.py` and
+>   `test_stage_owned_block_ids.py`. It needs GF-2's `layer_progress`
+>   (PR-G3) only.
+> - **Module half → PR-G5.** The `start_retrieve` handler, the layerwise
+>   pool, the gate around stores and non-layerwise retrieves, and the
+>   sequencer built at registration. PR-G5 now also needs PR-G9.
+>
+> The `PipelinedLoadRequest.sequencer` field and its sink and harness
+> changes follow AS-M3 (PR-A11) and PR-G7.
+
+**What.** vLLM submits every retrieve of a step before the forward pass, and
+the worker waits on the newest one only. `RETRIEVE` ran on the client's
+affinity thread (one per worker, FIFO), which a pipelined layerwise retrieve
+held for its whole fetch, so the step waited for the sum of its fetches
+(`functional/LEDGER.md` D-27). Now:
+
+- **Deferred response.** A blocking handler annotated
+  `-> DeferredResponse[R]` may return before its work is done. The ZMQ
+  server sends `R` when the future resolves; the gRPC server waits on it;
+  signature checks and the gRPC encoder unwrap `R`.
+- **Hand-off.** The `RETRIEVE` handler (`start_retrieve`) reads L1, stages
+  block IDs and admits the generation on the affinity thread, in the order
+  the worker sent them. Layer loading runs on a 32-thread pool, and the
+  handler returns the pool's future. A blocking `retrieve` wrapper remains
+  for direct callers.
+- **One writer.** `RetrieveLaunchSequencer`, one per registered worker, is
+  the only writer of the progress record and the per-ordinal events.
+  Retrieve `g` enqueues ordinal `k` only after every older in-flight
+  retrieve has, so the newest retrieve's event after `k` covers them all.
+  Only the newest begun retrieve records events and moves the watermark.
+- **Failure.** Any in-flight retrieve failing stops all of the worker's
+  in-flight retrieves (`RetrieveAbortedError`), waits out an enqueue under
+  way, drains the stream, and publishes the failure under the newest
+  generation: the worker hands the whole step's blocks back to vLLM, so no
+  copy may land after. A late failure (the retrieve already completed)
+  still never fails or rewinds a newer one.
+- **Shared buffers.** `TransferGate` (per cache context) serializes every
+  enqueue on the shared stream and temp staging buffers. Its holder tokens
+  tell `WHOLE_OBJECT` staging whether its resident batch was overwritten
+  (`StagingSlots`). Layerwise retrieves stage block IDs into their own
+  device tensor, since the shared buffer is restaged by the next request.
+
+**Where.**
+
+- `lmcache/v1/multiprocess/deferred_response.py` (new), `mq.py`,
+  `transport/grpc_impl/server.py`, `transport/grpc_impl/proto_codec.py`
+- `lmcache/v1/multiprocess/retrieve_sequencer.py` (new),
+  `lmcache/v1/platform/base/transfer_gate.py` (new),
+  `lmcache/v1/platform/base/cache_context.py`,
+  `object_group_transfer.py`, `layer_progress.py` (docstrings)
+- `lmcache/v1/multiprocess/modules/lmcache_driven_transfer.py`
+- `pipelined_loading.py`, `pipelined_sink.py` (AS-M3)
+
+**Commits.** `e63eb56c`.
+
+**Tests.**
+
+- `tests/v1/multiprocess/test_retrieve_sequencer.py`: ordinal order across
+  retrieves on threads, one publisher, failure stops and drains, release of
+  an unfinished retrieve, gate semantics. CPU.
+- `tests/v1/multiprocess/test_deferred_response.py`: a real
+  `MessageQueueServer` with one affinity thread answers a later request
+  while an earlier deferred one is pending.
+- `tests/v1/platform/test_stage_owned_block_ids.py`: CPU and CUDA.
+- `test_lmcache_driven_layerwise_retrieve.py`: a second retrieve's response
+  arrives while the first is still loading.
+
+**Limits (open).**
+
+- A failure published under a generation older than the step's newest, while
+  the newest has not begun, reaches the worker only through the futures.
+- CacheBlend and the qstore module enqueue without the gate.
+- Unregister while a retrieve runs on the pool is unguarded (as it was on
+  the affinity thread).
+- The speedup is not measured (no droplet run); D-30 bandwidth may cap it.
+
+**Likely pushback.**
+
+- **A second thread pool in the module.** The affinity pool can't free its
+  thread any other way without reordering a client's requests.
+- **Ordering across retrieves.** Reviewers will ask why not one record per
+  generation. That would change the worker protocol and GF-2's shared
+  segment; the sequencer keeps both as they are.
+
+---
+
 # Part 2 — Generic in shape, only used by Aerospike RDMA today
 
 ## GF-8. Transport-agnostic memory registration on `L1MemoryDesc`
@@ -1079,11 +1192,12 @@ this ("[3/N] …" #5247, "RFC-4465 step 2" #4940).
 | PR-G1 | Cache simulator: `hash-trace` | GF-7, plus its design doc | none | Feature | `test_trace_hasher.py`, CPU | +735 (+doc) |
 | PR-G2 | MP kernel: transfer a layer sub-range | GF-1, re-ported, without BF-3 hunks | none | Library (kernel API); used by PR-G4 | `test_mp_mem_kernels.py`, CUDA GPU | ~+250 / -15 |
 | PR-G3 | MP layerwise: schedule and cross-process layer progress | GF-2, plus the core of `layerwise-load.md` | none | Library; used by PR-G4, PR-G5 | CPU unit tests; GPU overlap test (ROCm also needs PR-B4) | ~+1,570, +~150 doc |
-| PR-G4 | MP layerwise: daemon per-layer H2D retrieve | GF-3 library half; trimmed tests | PR-G2, PR-G3 | Library; used by PR-G5 | CPU with mocked kernel, plus 3 CUDA cases | ~+1,900 |
-| PR-G5 | MP layerwise load (feature) | GF-3 module half; GF-4, re-ported onto `RequestClient`; GF-5; regression fixes; D-17 guard (written); new `--use-layerwise` config test; module-level test (written) | PR-G4 | **Feature** (`--use-layerwise`, `lmcache.mp.use_layerwise`; off by default) | CPU, vLLM-installed and CUDA tests | ~+1,950 (estimate) |
+| PR-G4 | MP layerwise: daemon per-layer H2D retrieve | GF-3 library half; GF-13 sequencer, transfer gate and owned block-ID staging; trimmed tests | PR-G2, PR-G3 | Library; used by PR-G5 | CPU with mocked kernel, plus 3 CUDA cases | ~+3,050 |
+| PR-G5 | MP layerwise load (feature) | GF-3 module half; GF-13 module half (deferred `RETRIEVE`, layerwise pool); GF-4, re-ported onto `RequestClient`; GF-5; regression fixes; D-17 guard (written); new `--use-layerwise` config test; module-level test (written) | PR-G4, PR-G9 | **Feature** (`--use-layerwise`, `lmcache.mp.use_layerwise`; off by default) | CPU, vLLM-installed and CUDA tests | ~+2,400 (estimate) |
 | PR-G6 | Layerwise arrival/sink contract, pump and fakes | GF-12, with trimmed `__init__` and conftest | none | Library; used by PR-G7, PR-A6, PR-A7, PR-A10 (in production first by PR-A11) | pure Python | ~+3,100 incl. tests |
 | PR-G7 | MP layer load sink | `layerwise_sink.py` and its harness and tests (from AS-M3) | PR-G4, PR-G6 | Library; used by PR-A11 | CPU torch | ~+1,040 |
 | PR-G8 | Storage: deferred L2 lookup and caller-driven L1 load | GF-10 + GF-11, rebuilt on prefetch v2 | none | Library (default off); used by PR-A7, PR-A11 | mock adapter | ~+700 after rewrite |
+| PR-G9 | MP transport: deferred responses for blocking handlers | GF-13 transport part (`DeferredResponse`, ZMQ and gRPC) | none | Library; used by PR-G5 | `test_deferred_response.py`, CPU | ~+200 |
 
 **Before opening PR-G3 to PR-G5,** agree the design against upstream PR
 #4460 with the maintainers. Otherwise both stall.

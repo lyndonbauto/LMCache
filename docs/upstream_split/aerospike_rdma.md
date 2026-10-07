@@ -1327,6 +1327,11 @@ Aerospike records, RDMA windows and slots. `track-c-status.md` reports all
   - `DeferredLoad`, `PipelinedOutcome` and `DeferredFetchResult`.
   - `ObjectTable`, `PipelinedLoadRequest`, the `PipelinedSinkFactory`
     protocol and `check_staging_matches_plan`.
+  - Since `e63eb56c` (GF-13, D-27), `PipelinedLoadRequest` carries the
+    worker's `RetrieveLaunchSequencer` instead of the progress record and
+    event pool, and the pipelined fetch runs on the module's layerwise
+    pool, not the affinity thread. This needs PR-G4 and PR-G5 as extended
+    by GF-13.
 - **Sinks.**
   - `pipelined_sink.py` (new): `PipelinedRetrieveSink` and
     `MultiprocessPipelinedSinkFactory`.
