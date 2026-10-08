@@ -22,8 +22,9 @@
 #   partstart   part's stores and aon points, server left running
 #   partlw@<G>  part's lw points with LW_ADMIT_BUDGET = G GiB, in partlw_b<G>
 #   partstop    stop part's server and delete its data file
-#   aonpw8, aonpw16   aon points again on store8's / store16's data with
-#            vLLM's cudagraph_mode PIECEWISE (the mode lw is forced into)
+#   aon8, aon16   aon points again on store8's / store16's data (no store)
+#   aonpw8, aonpw16   the same with vLLM's cudagraph_mode PIECEWISE (the mode
+#            lw is forced into)
 set -u
 LABEL=${1:?usage: lwaon3.sh <label>}
 T=/root/lmc-work/LMCache
@@ -76,6 +77,8 @@ for s in $STEPS; do
     partstart) part_env; $PERF precheck exp_start exp2_aon > $d/run.txt 2>&1 ;;
     partlw) part_env; EXP_LW_TAG=_b${g:-x} $PERF exp2_lw > $d/run.txt 2>&1 ;;
     partstop) part_env; $PERF exp_stop > $d/run.txt 2>&1 ;;
+    aon8) $PERF qpaon:8192 > $d/run.txt 2>&1 ;;
+    aon16) $PERF qpaon:16384 > $d/run.txt 2>&1 ;;
     aonpw8) VLLM_CGMODE=PIECEWISE $PERF qpaon:8192 > $d/run.txt 2>&1 ;;
     aonpw16) VLLM_CGMODE=PIECEWISE $PERF qpaon:16384 > $d/run.txt 2>&1 ;;
     *) say "unknown step $s"; continue ;;
