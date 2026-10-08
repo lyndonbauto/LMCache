@@ -150,6 +150,49 @@ What it costs:
 - Over 128 output tokens the stall is a small part of the total; for short outputs the
   first-token gain dominates.
 
+## 1c, 1d and 1e side by side (TTFT p50, s, full hits)
+
+Same droplet, server, model and harness. 1d (`f1d1a2c9`, `D27-1D.md`) ran full hits at
+c = 1, 8, 16 and 32 only. `1e off` is 1e with the cap disabled, which is 1d's code path;
+`1e 1G` / `1e 2G` are 1e with that budget under the harness's `--async-scheduling`;
+`1e 2G sync` is 2 GiB with async scheduling off. One run per point.
+
+| tokens | c | aon 1c | lw 1c | lw 1d | lw 1e off | lw 1e 1G | lw 1e 2G | lw 1e 2G sync |
+|---|---|---|---|---|---|---|---|---|
+| 8k | 1 | 0.199 | 0.177 | 0.172 | 0.180 | 0.180 | 0.182 | 0.171 |
+| 8k | 2 | 0.248 | 0.332 | - | 0.341 | 0.338 | 0.321 | 0.268 |
+| 8k | 4 | 0.463 | 0.615 | - | 0.619 | 0.566 | 0.629 | 0.494 |
+| 8k | 8 | 0.805 | 1.199 | 1.200 | 1.219 | 0.845 | 1.038 | 0.772 |
+| 8k | 16 | 1.359 | 2.174 | 2.222 | 2.229 | 1.476 | 1.657 | 1.332 |
+| 8k | 32 | 2.466 | 4.241 | 3.755 | 4.379 | 2.619 | 2.751 | 2.483 |
+| 16k | 1 | 0.398 | 0.341 | 0.330 | 0.317 | - | 0.324 | 0.336 |
+| 16k | 2 | 0.441 | 0.677 | - | 0.466 | - | 0.630 | 0.480 |
+| 16k | 4 | 1.005 | 1.272 | - | 1.206 | - | 1.059 | 0.808 |
+| 16k | 8 | 1.514 | 2.445 | 2.371 | 2.260 | - | 1.673 | 1.402 |
+| 16k | 16 | 2.608 | 4.489 | 4.730 | 4.415 | - | 2.823 | 2.557 |
+| 16k | 32 | 4.915 | 8.194 | 8.833 | 8.770 | - | 5.039 | 4.788 |
+
+lw p50 / aon 1c p50:
+
+| tokens | c | 1c | 1d | 1e off | 1e 1G | 1e 2G | 1e 2G sync |
+|---|---|---|---|---|---|---|---|
+| 8k | 4 | 1.33 | - | 1.34 | 1.22 | 1.36 | 1.07 |
+| 8k | 8 | 1.49 | 1.49 | 1.52 | 1.05 | 1.29 | 0.96 |
+| 8k | 16 | 1.60 | 1.64 | 1.64 | 1.09 | 1.22 | 0.98 |
+| 8k | 32 | 1.72 | 1.52 | 1.78 | 1.06 | 1.12 | 1.01 |
+| 16k | 4 | 1.27 | - | 1.20 | - | 1.05 | 0.80 |
+| 16k | 8 | 1.61 | 1.57 | 1.49 | - | 1.10 | 0.93 |
+| 16k | 16 | 1.72 | 1.81 | 1.69 | - | 1.08 | 0.98 |
+| 16k | 32 | 1.67 | 1.80 | 1.78 | - | 1.03 | 0.97 |
+
+- 1c, 1d and 1e with the cap off are within noise of each other (1.5-1.8x aon at
+  c ≥ 8): 1d fixed the c=16 / 32 failures, not the speed. The outliers (1d 8k c=32
+  faster, 16k c=16 / 32 slower) are single runs.
+- Only 1e with a budget closes the gap: 1.03-1.10x aon at c ≥ 8 under async
+  scheduling (1 GiB at 8k, 2 GiB at 16k), and about 1.0x with async scheduling off.
+- Partial hits (table above) are the same for 1c and 1e at every budget; 1d did not run
+  them.
+
 ## Notes
 
 - One run per point; the day-2 repeats show about 10-30% spread at c = 2-4, which
