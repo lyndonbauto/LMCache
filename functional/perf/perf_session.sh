@@ -33,7 +33,8 @@
 # steps), PERF_MODEL (default MODEL: the weights to serve under MODEL's name),
 # LW_ADMIT_BUDGET (unset: the connector's lmcache.mp.layerwise_inflight_budget_bytes
 # default; 0 admits every layerwise load at once), VLLM_ASYNC (1; 0 serves with
-# --no-async-scheduling).
+# --no-async-scheduling), VLLM_CGMODE (unset: vLLM's default; else the
+# cudagraph_mode to serve with, e.g. PIECEWISE).
 # Before each point, a dead vLLM is restarted (with a fresh LMCache server).
 set -u
 OUT=$1; TAG=$2; MODE=$3; shift 3
@@ -92,8 +93,9 @@ stop_server() {
   SERVER_PID=0
 }
 start_vllm() {
-  local kv=() wait_cfg="" sched=--async-scheduling
+  local kv=() cg=() wait_cfg="" sched=--async-scheduling
   [ "${VLLM_ASYNC:-1}" = 0 ] && sched=--no-async-scheduling
+  [ -n "${VLLM_CGMODE:-}" ] && cg=(--compilation-config "{\"cudagraph_mode\":\"$VLLM_CGMODE\"}")
   [ -n "${LW_WAIT_TIMEOUT:-}" ] && wait_cfg=",\"lmcache.mp.layerwise_wait_timeout_seconds\":$LW_WAIT_TIMEOUT"
   [ -n "${LW_ADMIT_BUDGET:-}" ] && wait_cfg="$wait_cfg,\"lmcache.mp.layerwise_inflight_budget_bytes\":$LW_ADMIT_BUDGET"
   if [ "$CONNECTOR" = 1 ]; then
@@ -104,7 +106,7 @@ start_vllm() {
   fi
   vllm serve "$PERF_MODEL" --served-model-name "$MODEL" --host 127.0.0.1 --port 8000 --seed 0 --no-enable-prefix-caching \
     "$sched" --max-model-len "${MAX_LEN:-131072}" --gpu-memory-utilization "${VLLM_UTIL:-0.9}" \
-    "${kv[@]}" >> "$VLOG" 2>&1 &
+    "${cg[@]}" "${kv[@]}" >> "$VLOG" 2>&1 &
   VLLM_PID=$!
   for _ in $(seq 1800); do
     curl -sf http://127.0.0.1:8000/health >/dev/null && break

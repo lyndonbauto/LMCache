@@ -53,7 +53,7 @@
 #   LW_WINDOWS_GB (32), STORE_BATCH_GB (64), LW_WAIT (by length).
 #   PERF_OUT (/root/lmc-work/functional/perf): the results directory on the
 #   host. PERF_MODEL: weights to serve under the Llama name (perf_session.sh).
-#   LW_ADMIT_BUDGET, VLLM_ASYNC: passed to perf_session.sh.
+#   LW_ADMIT_BUDGET, VLLM_ASYNC, VLLM_CGMODE: passed to perf_session.sh.
 #   CONF_TMPL: the kv-sink config template (default the device-namespace
 #   aerospike-kvsink-bp-perf.conf.in). PERF_ASD: another kv-sink server
 #   binary; PERF_ASD_ENV: NAME=value pairs for its environment.
@@ -128,7 +128,7 @@ session() {
   local memloop=$!
   timeout 21600 docker exec -e LMC_EXTRA="$extra" -e L1_GB="$l1" -e STOP_GRACE="$STOP_GRACE" \
     -e LW_WAIT_TIMEOUT="${SESSION_LW_WAIT:-}" -e STOP_ON_ENGINE_STOP="${STOP_ON_ENGINE_STOP:-0}" \
-    -e LW_ADMIT_BUDGET="${LW_ADMIT_BUDGET:-}" -e VLLM_ASYNC="${VLLM_ASYNC:-1}" \
+    -e LW_ADMIT_BUDGET="${LW_ADMIT_BUDGET:-}" -e VLLM_ASYNC="${VLLM_ASYNC:-1}" -e VLLM_CGMODE="${VLLM_CGMODE:-}" \
     -e L2_PORT="$KVSINK_PORT" -e PERF_MODEL="${PERF_MODEL:-}" lmc-c bash $TREE_CTR/functional/perf/perf_session.sh $W/$name "$name" "$mode" "$@" \
     > $S/$name/session_$name.txt 2>&1
   local rc=$? rb1; rb1=$(asd_read_bytes)
@@ -388,6 +388,8 @@ sec_exp_stop() { aero_stop_delete; }
 #   qpstore:<len>    start the server, store prompts 0-31, aon points (CONCS)
 #                    (STORE_IDS, default 0-31)
 #   qplw:<len>:<qp>  lw points (CONCS) with queue_pairs <qp>
+#   qpaon:<len>      aon points (CONCS) on qpstore:<len>'s data, no store
+#                    (session L<len>_aon2)
 #   timeline:<qp>    E3 at queue_pairs <qp> (8k stored; the pump.py print
 #                    patch is applied and reverted outside this script)
 #   exp_stop         stop the server, delete the data file
@@ -404,6 +406,11 @@ sec_qplw() {
   mapfile -t steps < <(point_steps "$len")
   QUEUE_PAIRS=$qp
   STOP_ON_ENGINE_STOP=1 session L${len}_lw_qp$qp lw $((L1_GEN_GB + WIN_GB)) "$(lw_l2 "$CAP" "$WINDOW_COUNT")" "${steps[@]}"
+}
+sec_qpaon() {
+  local len=$1 steps=()
+  mapfile -t steps < <(point_steps "$len")
+  session L${len}_aon2 aon "$L1_GEN_GB" "$AON_L2" "${steps[@]}"
 }
 sec_timeline() {
   local qp=$1 name=E_timeline_qp$1 pid toploop
@@ -431,7 +438,7 @@ for sec in "$@"; do
   case $sec in cached:*) sec_cached "${sec#cached:}";; cached2:*) sec_cached2 "${sec#cached2:}";;
     finish:*) sec_finish "${sec#finish:}";;
     lwwait:*) sec_lwwait "${sec#lwwait:}";; qpstore:*) sec_qpstore "${sec#qpstore:}";;
-    qplw:*) sec_qplw "${sec#qplw:}";; timeline:*) sec_timeline "${sec#timeline:}";;
+    qplw:*) sec_qplw "${sec#qplw:}";; qpaon:*) sec_qpaon "${sec#qpaon:}";; timeline:*) sec_timeline "${sec#timeline:}";;
     resume:*) sec_resume "${sec#resume:}";; *) "sec_$sec";; esac
   progress "section $sec finished"
 done
