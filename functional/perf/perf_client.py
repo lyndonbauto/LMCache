@@ -171,7 +171,8 @@ async def one_request(
     """Send one streaming completion and time it.
 
     Returns:
-        ``ttft_s``, ``total_s``, ``max_gap_s``, ``out_tokens`` and ``error``
+        ``ttft_s``, ``total_s``, ``max_gap_s``, ``out_tokens``, ``text`` (the
+        generated text, for comparing outputs across runs) and ``error``
         ("" on success).
     """
     body = {
@@ -187,6 +188,7 @@ async def one_request(
     t_first = t_last = 0.0
     max_gap = 0.0
     out_tokens = 0
+    pieces: list[str] = []
     error = ""
     try:
         async with session.post(
@@ -208,6 +210,8 @@ async def one_request(
                     if chunk.get("usage"):
                         out_tokens = int(chunk["usage"].get("completion_tokens", 0))
                     choices = chunk.get("choices") or []
+                    if choices:
+                        pieces.append(choices[0].get("text") or "")
                     if choices and (
                         choices[0].get("text")
                         or choices[0].get("finish_reason") is None
@@ -227,6 +231,7 @@ async def one_request(
         "total_s": t_last - t0 if t_last else -1.0,
         "max_gap_s": max_gap,
         "out_tokens": out_tokens,
+        "text": "".join(pieces),
         "error": error,
     }
 

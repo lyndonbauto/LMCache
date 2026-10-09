@@ -54,7 +54,8 @@
 #   PERF_OUT (/root/lmc-work/functional/perf): the results directory on the
 #   host. PERF_MODEL: weights to serve under the Llama name (perf_session.sh).
 #   LW_ADMIT_BUDGET, VLLM_ASYNC, VLLM_CGMODE, VLLM_EXECUTOR: passed to
-#   perf_session.sh.
+#   perf_session.sh. VLLM_LOGGING_LEVEL (INFO): vLLM's log level (DEBUG
+#   logs each step's CUDA graph mode).
 #   CONF_TMPL: the kv-sink config template (default the device-namespace
 #   aerospike-kvsink-bp-perf.conf.in). PERF_ASD: another kv-sink server
 #   binary; PERF_ASD_ENV: NAME=value pairs for its environment.
@@ -130,7 +131,7 @@ session() {
   timeout 21600 docker exec -e LMC_EXTRA="$extra" -e L1_GB="$l1" -e STOP_GRACE="$STOP_GRACE" \
     -e LW_WAIT_TIMEOUT="${SESSION_LW_WAIT:-}" -e STOP_ON_ENGINE_STOP="${STOP_ON_ENGINE_STOP:-0}" \
     -e LW_ADMIT_BUDGET="${LW_ADMIT_BUDGET:-}" -e VLLM_ASYNC="${VLLM_ASYNC:-1}" -e VLLM_CGMODE="${VLLM_CGMODE:-}" \
-    -e VLLM_EXECUTOR="${VLLM_EXECUTOR:-}" \
+    -e VLLM_EXECUTOR="${VLLM_EXECUTOR:-}" -e VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}" \
     -e L2_PORT="$KVSINK_PORT" -e PERF_MODEL="${PERF_MODEL:-}" lmc-c bash $TREE_CTR/functional/perf/perf_session.sh $W/$name "$name" "$mode" "$@" \
     > $S/$name/session_$name.txt 2>&1
   local rc=$? rb1; rb1=$(asd_read_bytes)
