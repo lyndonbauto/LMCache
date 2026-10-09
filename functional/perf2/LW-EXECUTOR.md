@@ -119,8 +119,9 @@ not wait for a later one.
 - 8k full hits only; 16k and partial hits were not run with `mp`.
 - TP=1, one MI300X, Soft-RoCE at about 7 GiB/s.
 - Absolute numbers are not comparable with the 1c / 1e tables in `LW-ADMISSION.md`:
-  this droplet's aon is slower (8k c=32 p50 2.71 s vs 2.47 s there, c=1 time between
-  tokens 5.5 vs 5.6 ms but lw 8.3 vs 7.6 ms). Compare within this file.
+  this droplet's aon is slower at c=32 (8k p50 2.71 s vs 2.47 s there); at c=1 aon's time
+  between tokens is about the same (5.5 vs 5.6 ms) and lw's is slower (8.3 vs 7.6 ms).
+  Compare within this file.
 
 ## Next
 
