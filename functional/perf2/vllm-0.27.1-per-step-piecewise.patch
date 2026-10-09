@@ -1,0 +1,321 @@
+diff -ruN orig/config/vllm.py patched/config/vllm.py
+--- orig/config/vllm.py	2026-08-11 09:15:38.000000000 +0000
++++ patched/config/vllm.py	2026-10-08 23:13:49.000000000 +0000
+@@ -1408,9 +1408,18 @@
+                 connector_cls = KVConnectorFactory.get_connector_class(
+                     self.kv_transfer_config
+                 )
++                extra_config = self.kv_transfer_config.kv_connector_extra_config
+                 if connector_cls.requires_piecewise_for_cudagraph(
+-                    self.kv_transfer_config.kv_connector_extra_config
+-                ):
++                    extra_config
++                ) and connector_cls.supports_per_step_piecewise(extra_config):
++                    logger.info_once(
++                        "KV connector %s selects PIECEWISE CUDA graphs per step "
++                        "for steps with layerwise operations; keeping "
++                        "cudagraph_mode %s for the others.",
++                        connector_cls.__name__,
++                        self.compilation_config.cudagraph_mode.name,
++                    )
++                elif connector_cls.requires_piecewise_for_cudagraph(extra_config):
+                     logger.warning_once(
+                         "KV connector %s requires PIECEWISE CUDA graph mode "
+                         "due to layerwise async operations that cannot be "
+diff -ruN orig/distributed/kv_transfer/kv_connector/v1/base.py patched/distributed/kv_transfer/kv_connector/v1/base.py
+--- orig/distributed/kv_transfer/kv_connector/v1/base.py	2026-08-11 09:15:38.000000000 +0000
++++ patched/distributed/kv_transfer/kv_connector/v1/base.py	2026-10-08 23:13:43.000000000 +0000
+@@ -639,6 +639,43 @@
+         """
+         return False
+ 
++    @classmethod
++    def supports_per_step_piecewise(cls, extra_config: dict[str, Any]) -> bool:
++        """
++        Check if this connector can name, per step, the steps that need
++        PIECEWISE CUDA graphs.
++
++        When this returns True for a connector whose
++        requires_piecewise_for_cudagraph() is True, vLLM keeps a cudagraph_mode
++        with FULL graphs and asks requires_piecewise_for_step() before each
++        step instead of downgrading the whole run to PIECEWISE.
++
++        Args:
++            extra_config: The kv_connector_extra_config dict from
++                KVTransferConfig.
++
++        Returns:
++            True if requires_piecewise_for_step() is implemented and exact.
++        """
++        return False
++
++    def requires_piecewise_for_step(self, metadata: KVConnectorMetadata) -> bool:
++        """
++        Check if one step needs its layer-by-layer hooks to run.
++
++        Called on the worker before the step's CUDA graph mode is chosen,
++        only when supports_per_step_piecewise() is True. A FULL graph replay
++        skips wait_for_layer_load/save_kv_layer, so this must return True for
++        every step in which either does work; a false True only costs speed.
++
++        Args:
++            metadata: The step's connector metadata from the scheduler.
++
++        Returns:
++            True if the step must not replay a FULL CUDA graph.
++        """
++        return False
++
+     def get_finished_count(self) -> int | None:
+         """
+         Get the count of requests expected to complete send/receive operations
+diff -ruN orig/distributed/kv_transfer/kv_connector/v1/multi_connector.py patched/distributed/kv_transfer/kv_connector/v1/multi_connector.py
+--- orig/distributed/kv_transfer/kv_connector/v1/multi_connector.py	2026-08-11 09:15:38.000000000 +0000
++++ patched/distributed/kv_transfer/kv_connector/v1/multi_connector.py	2026-10-08 23:13:47.000000000 +0000
+@@ -151,6 +151,32 @@
+         return False
+ 
+     @classmethod
++    def supports_per_step_piecewise(cls, extra_config: dict[str, Any]) -> bool:
++        """
++        True if every child that requires PIECEWISE supports the per-step check.
++        """
++        connectors_config = extra_config.get("connectors", [])
++        for conn_config in connectors_config:
++            temp_ktc = KVTransferConfig(**conn_config)
++            connector_cls = KVConnectorFactory.get_connector_class(temp_ktc)
++            child_extra_config = conn_config.get("kv_connector_extra_config", {})
++            if connector_cls.requires_piecewise_for_cudagraph(
++                child_extra_config
++            ) and not connector_cls.supports_per_step_piecewise(child_extra_config):
++                return False
++        return True
++
++    def requires_piecewise_for_step(self, metadata: KVConnectorMetadata) -> bool:
++        """
++        True if any child needs its layer-by-layer hooks in this step.
++        """
++        assert isinstance(metadata, MultiKVConnectorMetadata)
++        return any(
++            c.requires_piecewise_for_step(cm)
++            for c, cm in zip(self._connectors, metadata.metadata)
++        )
++
++    @classmethod
+     def all_children_support_hma(cls, kv_transfer_config: "KVTransferConfig") -> bool:
+         """Return True only if every configured child connector supports HMA."""
+         connectors_config = kv_transfer_config.kv_connector_extra_config.get(
+diff -ruN orig/v1/worker/gpu/cudagraph_utils.py patched/v1/worker/gpu/cudagraph_utils.py
+--- orig/v1/worker/gpu/cudagraph_utils.py	2026-08-11 09:15:38.000000000 +0000
++++ patched/v1/worker/gpu/cudagraph_utils.py	2026-10-08 23:14:26.000000000 +0000
+@@ -368,13 +368,20 @@
+         num_tokens: int,
+         uniform_token_count: int | None,
+         num_active_loras: int,
++        disable_full: bool = False,
+     ) -> BatchExecutionDescriptor:
+-        """Find matching cudagraph descriptor from priority-ordered candidates."""
++        """Find matching cudagraph descriptor from priority-ordered candidates.
++
++        disable_full skips FULL graphs (PIECEWISE or eager still run the
++        layer-by-layer KV connector hooks).
++        """
+ 
+         effective_loras = self._resolve_effective_loras(num_active_loras)
+         key = (num_tokens, effective_loras)
+         if self._graphs_captured and num_tokens > 0 and key in self._candidates:
+             for desc in self._candidates[key]:
++                if disable_full and desc.cg_mode == CUDAGraphMode.FULL:
++                    continue
+                 if _is_compatible(
+                     desc,
+                     num_reqs,
+diff -ruN orig/v1/worker/gpu/dp_utils.py patched/v1/worker/gpu/dp_utils.py
+--- orig/v1/worker/gpu/dp_utils.py	2026-08-11 09:15:38.000000000 +0000
++++ patched/v1/worker/gpu/dp_utils.py	2026-10-08 23:14:17.000000000 +0000
+@@ -22,6 +22,7 @@
+     dp_size: int,
+     dp_rank: int,
+     num_active_loras: int = 0,
++    disable_full: bool = False,
+ ) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
+     """
+     Coordinates the batch descriptor and DP padding across all ranks.
+@@ -72,11 +73,14 @@
+     # Dispatch for the final synced values, use num_reqs instead of synced_num_reqs
+     # so we don't perform request padding for PIECEWISE graphs.
+     # num_active_loras is per-rank and doesn't need cross-rank agreement.
++    # A rank that excluded FULL (disable_full) lowers the min below FULL; the
++    # other ranks then must not pick FULL either.
+     synced_desc = cudagraph_manager.dispatch(
+         num_reqs,
+         synced_num_tokens,
+         synced_uniform_token_count,
+         num_active_loras=num_active_loras,
++        disable_full=disable_full or synced_cg_mode != CUDAGraphMode.FULL,
+     )
+ 
+     # Update num_tokens_across_dp to reflect padded size.
+@@ -94,6 +98,7 @@
+     dp_rank: int,
+     need_eager: bool = False,
+     num_active_loras: int = 0,
++    disable_full: bool = False,
+ ) -> tuple[BatchExecutionDescriptor, torch.Tensor | None]:
+     if need_eager:
+         batch_desc = BatchExecutionDescriptor(
+@@ -112,6 +117,7 @@
+             num_tokens,
+             uniform_token_count,
+             num_active_loras=num_active_loras,
++            disable_full=disable_full,
+         )
+ 
+     if dp_size == 1:
+@@ -126,4 +132,5 @@
+         dp_size,
+         dp_rank,
+         num_active_loras=num_active_loras,
++        disable_full=disable_full,
+     )
+diff -ruN orig/v1/worker/gpu/kv_connector.py patched/v1/worker/gpu/kv_connector.py
+--- orig/v1/worker/gpu/kv_connector.py	2026-08-11 09:15:38.000000000 +0000
++++ patched/v1/worker/gpu/kv_connector.py	2026-10-08 23:14:01.000000000 +0000
+@@ -32,6 +32,9 @@
+     def pre_forward(self, scheduler_output: "SchedulerOutput") -> None:
+         pass
+ 
++    def requires_piecewise_for_step(self, scheduler_output: "SchedulerOutput") -> bool:
++        return False
++
+     def post_forward(
+         self, finished_req_ids: set[str], wait_for_save: bool = True
+     ) -> KVConnectorOutput | None:
+@@ -56,6 +59,14 @@
+         self.kv_connector.register_kv_caches(kv_caches_dict)
+         self.kv_connector.set_host_xfer_buffer_ops(copy_kv_blocks)
+ 
++        kv_transfer_config = vllm_config.kv_transfer_config
++        assert kv_transfer_config is not None
++        extra_config = kv_transfer_config.kv_connector_extra_config
++        connector_cls = type(self.kv_connector)
++        self._per_step_piecewise = connector_cls.requires_piecewise_for_cudagraph(
++            extra_config
++        ) and connector_cls.supports_per_step_piecewise(extra_config)
++
+         self._disabled = False
+ 
+     def pre_forward(self, scheduler_output: "SchedulerOutput") -> None:
+@@ -74,6 +85,15 @@
+             with set_forward_context(None, self.vllm_config):
+                 self.kv_connector.start_load_kv(get_forward_context())
+ 
++    def requires_piecewise_for_step(self, scheduler_output: "SchedulerOutput") -> bool:
++        # Without per-step support the run is already PIECEWISE (global
++        # downgrade in VllmConfig), so there is nothing to exclude.
++        if self._disabled or not self._per_step_piecewise:
++            return False
++        kv_connector_metadata = scheduler_output.kv_connector_metadata
++        assert kv_connector_metadata is not None
++        return self.kv_connector.requires_piecewise_for_step(kv_connector_metadata)
++
+     def post_forward(
+         self, finished_req_ids: set[str], wait_for_save: bool = True
+     ) -> KVConnectorOutput | None:
+diff -ruN orig/v1/worker/gpu/model_runner.py patched/v1/worker/gpu/model_runner.py
+--- orig/v1/worker/gpu/model_runner.py	2026-08-11 09:15:38.000000000 +0000
++++ patched/v1/worker/gpu/model_runner.py	2026-10-08 23:14:21.000000000 +0000
+@@ -1247,6 +1247,12 @@
+             # cross-attention cache with dynamic encoder outputs.
+             skip_compiled = True
+ 
++        # A FULL replay skips the KV connector's layer-by-layer hooks.
++        connector_needs_piecewise = (
++            not dummy_run
++            and self.kv_connector.requires_piecewise_for_step(scheduler_output)
++        )
++
+         batch_desc, num_tokens_across_dp = dispatch_cg_and_sync_dp(
+             self.cudagraph_manager,
+             num_reqs,
+@@ -1256,6 +1262,13 @@
+             self.dp_rank,
+             need_eager=is_profile or skip_compiled,
+             num_active_loras=num_active_loras,
++            disable_full=connector_needs_piecewise,
++        )
++        logger.debug(
++            "V2 batch cg_mode=%s num_tokens=%d connector_needs_piecewise=%s",
++            batch_desc.cg_mode.name,
++            batch_desc.num_tokens,
++            connector_needs_piecewise,
+         )
+ 
+         if batch_desc.num_tokens == 0:
+diff -ruN orig/v1/worker/gpu_model_runner.py patched/v1/worker/gpu_model_runner.py
+--- orig/v1/worker/gpu_model_runner.py	2026-08-11 09:15:38.000000000 +0000
++++ patched/v1/worker/gpu_model_runner.py	2026-10-08 23:14:48.000000000 +0000
+@@ -3944,6 +3944,7 @@
+         force_has_lora: bool | None = None,
+         force_num_active_loras: int | None = None,
+         num_encoder_reqs: int = 0,
++        connector_needs_piecewise: bool = False,
+     ) -> tuple[
+         CUDAGraphMode,
+         BatchDescriptor,
+@@ -3985,7 +3986,10 @@
+             )
+ 
+         cudagraph_mode, batch_descriptor = dispatch_cudagraph(
+-            num_tokens_padded, disable_full=use_cascade_attn or has_encoder_output
++            num_tokens_padded,
++            disable_full=use_cascade_attn
++            or has_encoder_output
++            or connector_needs_piecewise,
+         )
+         num_tokens_padded = batch_descriptor.num_tokens
+         if self.compilation_config.pass_config.enable_sp:
+@@ -4194,10 +4198,23 @@
+                 scheduled_spec_decode_tokens=spec_decode_tokens_copy,
+             )
+ 
++        # A FULL replay skips the KV connector's layer-by-layer hooks.
++        connector_needs_piecewise = False
+         if has_kv_transfer_group():
+             kv_connector_metadata = scheduler_output.kv_connector_metadata
+             assert kv_connector_metadata is not None
+             get_kv_transfer_group().handle_preemptions(kv_connector_metadata)
++            kv_transfer_config = self.vllm_config.kv_transfer_config
++            assert kv_transfer_config is not None
++            connector_cls = type(get_kv_transfer_group())
++            extra_config = kv_transfer_config.kv_connector_extra_config
++            connector_needs_piecewise = (
++                connector_cls.requires_piecewise_for_cudagraph(extra_config)
++                and connector_cls.supports_per_step_piecewise(extra_config)
++                and get_kv_transfer_group().requires_piecewise_for_step(
++                    kv_connector_metadata
++                )
++            )
+ 
+         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+         with (
+@@ -4275,15 +4292,18 @@
+                 max_num_scheduled_tokens=max_num_scheduled_tokens,
+                 use_cascade_attn=cascade_attn_prefix_lens is not None,
+                 num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
++                connector_needs_piecewise=connector_needs_piecewise,
+             )
+ 
+             logger.debug(
+                 "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
+-                "should_ubatch: %s, num_tokens_across_dp: %s",
++                "should_ubatch: %s, num_tokens_across_dp: %s, "
++                "connector_needs_piecewise: %s",
+                 cudagraph_mode,
+                 batch_desc,
+                 should_ubatch,
+                 num_tokens_across_dp,
++                connector_needs_piecewise,
+             )
+ 
+             num_tokens_padded = batch_desc.num_tokens
