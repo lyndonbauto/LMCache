@@ -7,7 +7,8 @@ outputs are as close to aon as lw's ever were; the negative control shows the ch
 catches a broken hook. **Separately, lw partial hits give wrong outputs on about 6-12%
 of requests, with or without this patch and over RDMA or TCP**; aon is exact. That is
 a bug in LMCache's layerwise load, found while checking this patch (see "Partial
-hits").
+hits"). Full hits are exact in the same check (192/192 equal to aon), so the per-step
+gain holds for full-hit workloads.
 
 Plan: `LW-ITL-FIX-PLAN.md` Task B. Raw results: box
 `/root/lmc-work/functional/perf2/lwaon3/{b3,b3pw,b3neg,b4,b4pw,b3p,b3ppw}`.
@@ -136,7 +137,12 @@ do not depend on batch shape, against a no-cache run that sends the same prompts
      worker's stream wait takes effect (ROCm IPC event semantics).
   3. The watermark (copies enqueued) covering an ordinal whose copy depends on data
      not yet in the source buffer.
-- Full hits were not checked in batch-invariant mode; they may be affected too.
+- **Full hits are not affected.** Same check on full hits (`bi5`: 8k and 16k at c=1, 8k
+  at c=4, 16 prompts per point): all 4 lw runs (2 old global PIECEWISE, 2 per-step)
+  equal aon exactly, 192/192. One 8k prompt differs from no-cache in aon and in every
+  lw run alike, so that is the reference (a full hit computes its last prompt token in
+  a separate one-token step), not lw. The bug needs a partial hit: a load that overlaps
+  a large prefill in the same step.
 
 The first comparison (B3 night run) compared aon and lw texts directly and found 13 of
 84 equal. That comparison was invalid: the harness salts the partial-hit suffix with the
@@ -153,6 +159,6 @@ session name, so aon and lw sessions sent different prompts.
 ## Next steps
 
 1. B4 second half: the 1e budget grid (off / 1 / 2 GiB, c = 4-32) with the patch.
-2. lw partial-hit wrong outputs (see "Partial hits"): run the batch-invariant check on
-   full hits, then instrument the daemon's per-layer copy and event recording.
+2. lw partial-hit wrong outputs (see "Partial hits"): instrument the daemon's
+   per-layer copy and event recording for loads that overlap a prefill.
 3. Push `prototype-stage-1f` (needs approval); vLLM upstreaming needs approval.
