@@ -36,6 +36,11 @@
 # --no-async-scheduling), VLLM_CGMODE (unset: vLLM's default; else the
 # cudagraph_mode to serve with, e.g. PIECEWISE), VLLM_EXECUTOR (unset: vLLM's
 # default, uni at TP=1; else --distributed-executor-backend, e.g. mp).
+# PERF_BATCH_INVARIANT (0; 1: VLLM_BATCH_INVARIANT=1, outputs independent of
+# batch shape, for output checks only). PART_SALT_TAG (unset: the session
+# tag): the partial-hit suffix salt is derived from it and the point name, so
+# sessions with the same PART_SALT_TAG send the same partial-hit prompts (only
+# useful when the earlier session did not store them, e.g. nocache).
 # Before each point, a dead vLLM is restarted (with a fresh LMCache server).
 set -u
 OUT=$1; TAG=$2; MODE=$3; shift 3
@@ -46,7 +51,7 @@ mkdir -p "$OUT"
 source "$HARNESS/loopback_env.sh"
 export HF_HOME=${HF_HOME:-/work/hf} HF_HUB_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1
 export LMCACHE_LOG_LEVEL=${LMCACHE_LOG_LEVEL:-DEBUG}
-unset VLLM_BATCH_INVARIANT
+if [ "${PERF_BATCH_INVARIANT:-0}" = 1 ]; then export VLLM_BATCH_INVARIANT=1; else unset VLLM_BATCH_INVARIANT; fi
 MODEL=meta-llama/Llama-3.1-8B-Instruct
 # PERF_MODEL: the weights to serve (e.g. an ungated mirror of the same model);
 # vLLM always serves them under MODEL, which perf_client.py requests.
@@ -228,7 +233,7 @@ for step in "$@"; do
       [ "$CONNECTOR" = 1 ] && { restart_server || exit 1; }
       pname="L${len}_c${c}"; [ "$pre" -gt 0 ] && pname="P${pre}_$pname"
       say "point $pname len=$len pre=$pre c=$c n=$n"
-      salt=0; [ "$pre" -gt 0 ] && salt=$(printf '%s' "$TAG $pname" | cksum | cut -d' ' -f1)
+      salt=0; [ "$pre" -gt 0 ] && salt=$(printf '%s' "${PART_SALT_TAG:-$TAG} $pname" | cksum | cut -d' ' -f1)
       send "$pname" "$len" "0-$((n - 1))" "$c" "$pre" "$salt" || say "point $pname had errors"
       if [ "${STOP_ON_ENGINE_STOP:-0}" = 1 ]; then
         sleep 5

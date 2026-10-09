@@ -55,7 +55,8 @@
 #   host. PERF_MODEL: weights to serve under the Llama name (perf_session.sh).
 #   LW_ADMIT_BUDGET, VLLM_ASYNC, VLLM_CGMODE, VLLM_EXECUTOR: passed to
 #   perf_session.sh. VLLM_LOGGING_LEVEL (INFO): vLLM's log level (DEBUG
-#   logs each step's CUDA graph mode).
+#   logs each step's CUDA graph mode). PERF_BATCH_INVARIANT, PART_SALT_TAG:
+#   passed to perf_session.sh (output checks).
 #   CONF_TMPL: the kv-sink config template (default the device-namespace
 #   aerospike-kvsink-bp-perf.conf.in). PERF_ASD: another kv-sink server
 #   binary; PERF_ASD_ENV: NAME=value pairs for its environment.
@@ -132,6 +133,7 @@ session() {
     -e LW_WAIT_TIMEOUT="${SESSION_LW_WAIT:-}" -e STOP_ON_ENGINE_STOP="${STOP_ON_ENGINE_STOP:-0}" \
     -e LW_ADMIT_BUDGET="${LW_ADMIT_BUDGET:-}" -e VLLM_ASYNC="${VLLM_ASYNC:-1}" -e VLLM_CGMODE="${VLLM_CGMODE:-}" \
     -e VLLM_EXECUTOR="${VLLM_EXECUTOR:-}" -e VLLM_LOGGING_LEVEL="${VLLM_LOGGING_LEVEL:-INFO}" \
+    -e PERF_BATCH_INVARIANT="${PERF_BATCH_INVARIANT:-0}" -e PART_SALT_TAG="${PART_SALT_TAG:-}" \
     -e L2_PORT="$KVSINK_PORT" -e PERF_MODEL="${PERF_MODEL:-}" lmc-c bash $TREE_CTR/functional/perf/perf_session.sh $W/$name "$name" "$mode" "$@" \
     > $S/$name/session_$name.txt 2>&1
   local rc=$? rb1; rb1=$(asd_read_bytes)
@@ -386,6 +388,9 @@ sec_exp2_tcplw() { session E_tcplw2 lw "$L1_GEN_GB" "$AON_L2" "${EXP_PART[@]}"; 
 # EXP_LW_TAG (empty) suffixes exp2_lw's session name; the partial-hit suffix
 # salt is derived from it, so reruns on one data file need distinct tags.
 sec_exp2_lw() { STOP_ON_ENGINE_STOP=1 session E_lw2${EXP_LW_TAG:-} lw $((L1_GEN_GB + WIN_GB)) "$LW_L2" "${EXP_PART[@]}"; }
+# exp2_nocache: the partial-hit points with no cache (stores nothing), as the
+# output reference for an aon or lw session with the same PART_SALT_TAG.
+sec_exp2_nocache() { session E_nocache2${EXP_LW_TAG:-} nocache 1 "" "${EXP_PART[@]}"; }
 sec_exp_stop() { aero_stop_delete; }
 # Queue-pair scan (perf2 step 4), on one data file per length:
 #   qpstore:<len>    start the server, store prompts 0-31, aon points (CONCS)
