@@ -288,3 +288,85 @@ def test_connector_and_adapter_parse_use_layerwise_alike(
     extra_config = {"lmcache.mp.use_layerwise": raw}
     assert is_layerwise_enabled(extra_config) is enabled
     assert LMCacheMPConnector.requires_piecewise_for_cudagraph(extra_config) is enabled
+    assert LMCacheMPConnector.supports_per_step_piecewise(extra_config) is enabled
+
+
+def _step_metadata(*directions: str) -> object:
+    """Connector metadata with one request per entry of *directions*."""
+    # First Party
+    from lmcache.integration.vllm.lmcache_mp_metadata import (
+        LMCacheMPConnectorMetadata,
+        LMCacheMPRequestMetadata,
+    )
+
+    metadata = LMCacheMPConnectorMetadata()
+    for i, direction in enumerate(directions):
+        metadata.add_request_metadata(
+            LMCacheMPRequestMetadata(
+                request_id=f"r{i}",
+                direction=direction,  # type: ignore[arg-type]
+                op=MagicMock(name="op"),
+            )
+        )
+    return metadata
+
+
+@pytest.mark.parametrize(
+    ("directions", "expected"),
+    [
+        ((), False),
+        (("STORE",), False),
+        (("STORE", "STORE"), False),
+        (("RETRIEVE",), True),
+        (("STORE", "RETRIEVE"), True),
+    ],
+)
+def test_a_step_needs_piecewise_only_when_it_retrieves(
+    directions: tuple[str, ...], expected: bool
+) -> None:
+    """Only a step that starts a retrieve runs layer waits; a full-graph
+    replay of it would compute on KV that has not landed."""
+    pytest.importorskip("vllm")
+
+    connector, _ = _worker_connector(RuntimeError("unused"))
+    connector.dispatcher = None
+
+    metadata = _step_metadata(*directions)
+    assert connector.requires_piecewise_for_step(metadata) is expected  # type: ignore[arg-type]
+
+
+def test_no_step_needs_piecewise_when_layerwise_is_off() -> None:
+    pytest.importorskip("vllm")
+
+    connector, _ = _worker_connector(RuntimeError("unused"))
+    connector.use_layerwise = False
+    connector.dispatcher = None
+
+    metadata = _step_metadata("RETRIEVE")
+    assert connector.requires_piecewise_for_step(metadata) is False  # type: ignore[arg-type]
+
+
+def test_every_step_needs_piecewise_with_the_experimental_dispatcher() -> None:
+    """The dispatcher's ``save_kv_layer`` works in every step, stores included."""
+    pytest.importorskip("vllm")
+
+    connector, _ = _worker_connector(RuntimeError("unused"))
+    connector.dispatcher = MagicMock(name="dispatcher")
+
+    metadata = _step_metadata("STORE")
+    assert connector.requires_piecewise_for_step(metadata) is True  # type: ignore[arg-type]
+
+
+def test_per_step_check_rejects_foreign_metadata() -> None:
+    pytest.importorskip("vllm")
+    # Third Party
+    from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+
+    class _Other(KVConnectorMetadata):
+        pass
+
+    connector, _ = _worker_connector(RuntimeError("unused"))
+    connector.dispatcher = None
+
+    with pytest.raises(TypeError):
+        connector.requires_piecewise_for_step(_Other())

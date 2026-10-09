@@ -1543,6 +1543,54 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         return is_layerwise_enabled(extra_config)
 
     @classmethod
+    def supports_per_step_piecewise(cls, extra_config: dict[str, Any]) -> bool:
+        """Tell vLLM it may pick PIECEWISE CUDA graphs per step.
+
+        Only the steps that start a layerwise retrieve run layer waits, and
+        :meth:`requires_piecewise_for_step` names them exactly. A vLLM that
+        supports this hook keeps full CUDA graphs for every other step instead
+        of downgrading the whole run (:meth:`requires_piecewise_for_cudagraph`);
+        a vLLM without it never calls this method and still downgrades.
+
+        Args:
+            extra_config: vLLM ``kv_connector_extra_config`` dict.
+
+        Returns:
+            True when ``lmcache.mp.use_layerwise`` is enabled in extra_config.
+        """
+        return is_layerwise_enabled(extra_config)
+
+    def requires_piecewise_for_step(self, metadata: KVConnectorMetadata) -> bool:
+        """Report whether one step must run its layer hooks (no full graph).
+
+        A full CUDA graph replay skips :meth:`wait_for_layer_load` and
+        :meth:`save_kv_layer`. A step needs them when :meth:`start_load_kv`
+        submits a retrieve, i.e. when ``metadata`` has any ``RETRIEVE``
+        request; a full-hit load schedules one token, so such a step can look
+        like a pure decode batch to vLLM. With the experimental dispatcher on,
+        ``save_kv_layer`` does work in every step, so every step needs them.
+
+        Args:
+            metadata: The step's connector metadata from the scheduler.
+
+        Returns:
+            True if the step must not replay a full CUDA graph.
+
+        Raises:
+            TypeError: If ``metadata`` is not an
+                :class:`LMCacheMPConnectorMetadata`.
+        """
+        if not isinstance(metadata, LMCacheMPConnectorMetadata):
+            raise TypeError(
+                f"expected LMCacheMPConnectorMetadata, got {type(metadata).__name__}"
+            )
+        if self.dispatcher is not None:
+            return True
+        if not self.use_layerwise:
+            return False
+        return any(meta.direction == "RETRIEVE" for meta in metadata.requests)
+
+    @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
         """Defer to vLLM; a connector preference is unsafe for now.
 

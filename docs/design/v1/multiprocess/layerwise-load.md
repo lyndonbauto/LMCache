@@ -351,6 +351,40 @@ slice of performance a single full graph would give. Layerwise overlap (attentio
 on layer *L* while layer *L+1* transfers) is the intended win; forcing full
 graphs would silently break correctness.
 
+The global downgrade is measurable. On an MI300X with Llama-3.1-8B at c=1,
+aon with full graphs decodes at 5.5 ms per token (8k context), while aon
+forced to `PIECEWISE` and lw both decode at 8.3 ms. The per-layer waits
+themselves add 0-0.3 ms (`functional/perf2` c=1 runs, 2026-10-08).
+
+### Per-step piecewise (needs a patched vLLM)
+
+Only a step that starts a retrieve runs layer waits. Every other step,
+including every decode step, could replay a full graph. Two connector hooks
+let a vLLM that supports them choose the mode per step:
+
+```text
+VllmConfig       requires_piecewise_for_cudagraph(extra)  -> True
+                 supports_per_step_piecewise(extra)       -> True
+                 => keep FULL_AND_PIECEWISE (no global downgrade)
+model runner     requires_piecewise_for_step(metadata)    per step
+                 True  -> exclude FULL for this step (PIECEWISE or eager)
+                 False -> any mode, FULL for a pure decode batch
+```
+
+- `supports_per_step_piecewise` returns True when `lmcache.mp.use_layerwise`
+  is set.
+- `requires_piecewise_for_step` returns True when the step's metadata has any
+  `RETRIEVE` request, which is exactly when `start_load_kv` submits one.
+  - The check is per step, not per batch shape: a full-hit load schedules one
+    token, so its step looks like a pure decode batch.
+  - With the experimental dispatcher on, `save_kv_layer` works in every step,
+    so the method returns True for every step.
+
+A vLLM without these hooks never calls them and still downgrades the whole run,
+so the connector is safe on both. Stock vLLM 0.27.1 has neither hook. A local
+patch adds them to `KVConnectorBase_V1`, `MultiConnector`, `VllmConfig` and both
+model runners (V2's `CudaGraphManager.dispatch` gains `disable_full`).
+
 ``LayerProgressWaiter`` still raises if the compute stream is capturing when a
 wait runs; that is an invariant backstop, not operator configuration advice.
 
