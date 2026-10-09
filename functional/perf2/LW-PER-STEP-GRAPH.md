@@ -4,7 +4,10 @@ Result: with a small vLLM patch and two LMCache connector hooks, lw decodes as f
 aon at c=1 (5.49 vs 5.48 ms per token at 8k, 6.22 vs 6.21 ms at 16k), down from 7.6-7.7
 ms with the global PIECEWISE downgrade, and keeps lw's faster first token. Full-hit
 outputs are as close to aon as lw's ever were; the negative control shows the check
-catches a broken hook.
+catches a broken hook. **But partial hits are not safe yet:** in batch-invariant mode,
+lw per-step gave wrong outputs on 4 of 32 partial-hit requests (one from the first
+character), while aon and the old global PIECEWISE lw matched no-cache exactly (see
+"Partial hits").
 
 Plan: `LW-ITL-FIX-PLAN.md` Task B. Raw results: box
 `/root/lmc-work/functional/perf2/lwaon3/{b3,b3pw,b3neg,b4,b4pw,b3p,b3ppw}`.
@@ -97,26 +100,34 @@ reverted (`git checkout --`; the chain checked that no product file stayed chang
 
 So a broken hook fails silently with wrong tokens, and this output check catches it.
 
-### Partial hits: an older lw-vs-aon difference, not from this patch
+### Partial hits: the per-step patch gives wrong outputs (open)
 
-Partial hits (`part` points: 2k, 8k and 16k stored prefixes plus an 8k new suffix) had
-0 errors but lw outputs rarely equal aon's (0-2 of 4 per point). Repeats separate the
-causes:
+Partial hits: 2k, 8k and 16k stored prefixes plus an 8k new suffix, prompts 0-3, c=1,
+and the 8k prefix at c=4. Checked in batch-invariant mode (`PERF_BATCH_INVARIANT=1`),
+where outputs do not depend on batch shape, against a no-cache run that sends the same
+prompts (`PART_SALT_TAG`). Exact equality is the bar. Box results:
+`functional/perf2/lwaon3/{bi,bi2}` on `165.245.136.135`.
 
-| Comparison | c=1 points (P2048, P8192, P16384) | All points |
+| Run | Exact matches | Requests that differ |
 |---|---|---|
-| aon vs aon repeat | 12/12 | 74/84 |
-| lw global PIECEWISE vs lw per-step (same data) | 12/12 | 82/84 |
-| lw global PIECEWISE vs aon | 2/12 | 13/84 |
-| first lw per-step run vs its repeat (new data file) | 3/12 | 18/84 |
+| aon, 2 runs | 32/32 | none |
+| lw global PIECEWISE (old behavior), 1 run | 16/16 | none |
+| lw per-step, run 1 | 13/16 | 16k prefix c=1 from character 0 (junk text); 8k c=1 from character 5; 8k c=4 from character 22 |
+| lw per-step, run 2 | 15/16 | 8k c=4 from character 50 |
 
-- The patch does not change partial-hit outputs: the old global-PIECEWISE behavior
-  gives the same text.
-- lw and aon give different partial-hit outputs, and that predates this patch.
-- The first lw run (its own `part` step and data file) differed from the later two lw
-  runs, while aon is stable across both data files. This needs a look before trusting
-  lw partial-hit outputs; it is not a Task B issue. Next check: one partial-hit prompt
-  at c=1, lw vs aon, with batch-invariant mode, as the functional E2E tests did.
+- 0 errors and no timeouts in every run: the failure is silent, like the negative
+  control.
+- The connector flagged the same steps in all three lw runs (16 eager, 5 PIECEWISE), and
+  none ran FULL. The difference left is that per-step decode steps replay FULL graphs,
+  which skip the per-layer hooks (`wait_for_layer_load`, `save_kv_layer`). Something
+  in a partial-hit load seems to depend on those hooks after the step that starts it.
+  Not yet found.
+- Do not use the per-step mode with partial hits until this is found and fixed. The
+  c=1 timing gain above is measured on full hits only.
+
+The first comparison here (B3 night run) compared aon and lw texts directly and found
+13 of 84 equal. That comparison was invalid: the harness salts the partial-hit suffix
+with the session name, so aon and lw sessions sent different prompts.
 
 ## Limits
 
@@ -129,5 +140,6 @@ causes:
 ## Next steps
 
 1. B4 second half: the 1e budget grid (off / 1 / 2 GiB, c = 4-32) with the patch.
-2. Partial-hit lw-vs-aon difference: the check above.
+2. Find why per-step mode breaks partial hits (see "Partial hits"); repeat the
+   batch-invariant check on full hits too.
 3. Push `prototype-stage-1f` (needs approval); vLLM upstreaming needs approval.
