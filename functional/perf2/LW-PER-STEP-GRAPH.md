@@ -4,11 +4,9 @@ Result: with a small vLLM patch and two LMCache connector hooks, lw decodes as f
 aon at c=1 (5.49 vs 5.48 ms per token at 8k, 6.22 vs 6.21 ms at 16k), down from 7.6-7.7
 ms with the global PIECEWISE downgrade, and keeps lw's faster first token. Full-hit
 outputs are as close to aon as lw's ever were; the negative control shows the check
-catches a broken hook. **Separately, lw partial hits give wrong outputs on about 6-12%
-of requests, with or without this patch and over RDMA or TCP**; aon is exact. That is
-a bug in LMCache's layerwise load, found while checking this patch (see "Partial
-hits"). Full hits are exact in the same check (192/192 equal to aon), so the per-step
-gain holds for full-hit workloads.
+catches a broken hook. Partial hits are correct too: lw equals aon exactly on 96/96
+partial-hit requests. An earlier suspected lw partial-hit bug was a reference artifact:
+aon differs from a no-cache run on exactly the same requests (see "Partial hits").
 
 Plan: `LW-ITL-FIX-PLAN.md` Task B. Raw results: box
 `/root/lmc-work/functional/perf2/lwaon3/{b3,b3pw,b3neg,b4,b4pw,b3p,b3ppw}`.
@@ -101,48 +99,43 @@ reverted (`git checkout --`; the chain checked that no product file stayed chang
 
 So a broken hook fails silently with wrong tokens, and this output check catches it.
 
-### Partial hits: lw gives wrong outputs, with or without this patch (open)
+### Partial hits: lw equals aon; the no-cache reference is not exact
 
-Partial hits: a stored 2k, 8k or 16k prefix plus an 8k new suffix, at c=1, and the 8k
-prefix at c=4. Checked in batch-invariant mode (`PERF_BATCH_INVARIANT=1`), where outputs
-do not depend on batch shape, against a no-cache run that sends the same prompts
-(`PART_SALT_TAG`). Exact equality is the bar. Box results on `165.245.136.135`:
-`functional/perf2/lwaon3/{bi,bi2,bi3,bi4}`.
+Partial hits: a stored 8k or 16k prefix plus an 8k new suffix, at c=1, and the 8k
+prefix at c=4, 16 prompts per point. Checked in batch-invariant mode
+(`PERF_BATCH_INVARIANT=1`) against a no-cache run that sends the same prompts
+(`PART_SALT_TAG`). Box results on `165.245.136.135`: `functional/perf2/lwaon3/{fs,
+fsaon_F1,fsaon_F2}` (decisive), earlier runs in `{bi,bi2,bi3,bi4}`.
 
-| Run | Exact matches |
-|---|---|
-| aon (4 prompts per point), 2 runs | 32/32 |
-| lw global PIECEWISE (old behavior), RDMA, 3 runs | 105/112 |
-| lw per-step, RDMA, 4 runs | 112/128 |
-| lw per-step, plain TCP L2 (`exp2_tcplw`, no RDMA), 2 runs | 88/96 |
+Decisive run (`fs`, `fsaon_*`): two prompt sets (salts F1, F2), each run with
+no-cache, aon and lw per-step, data file 15x the stored prefixes so Aerospike never
+reaches stop-writes.
 
-- **The per-step patch is not the cause.** The old behavior fails too (7 of 112). The
-  first two small runs (16/16 old vs 28/32 per-step) suggested otherwise only by
-  chance. Per-step failed somewhat more often (16 of 128), but on these counts the
-  difference is not established.
-- **The RDMA path is not the cause.** Layerwise over plain TCP fails at the same rate.
-  aon, which reads the same L2 data without layerwise loading, is exact.
-- Failures are silent (0 errors, no timeouts) and look like wrong KV, not drift: some
-  outputs diverge in the first characters and degenerate, others after 80-160
-  characters.
-- Temporary debug logging on the worker (`LWDBG`, `bi3`, reverted) shows the worker
-  follows the wait protocol for bad loads as for good ones: every retrieve gets all 32
-  layer waits in its own step, no retrieve starts while an older one still has waits
-  outstanding, and the wait times look the same. So the wrong bytes most likely come
-  from behind the wait: the daemon's per-layer copies or the event that says a layer
-  has landed.
-- Candidates to check next, none verified:
-  1. A host staging buffer reused before its async H2D copy has run.
-  2. The pooled per-ordinal IPC event re-recorded by the next retrieve before the
-     worker's stream wait takes effect (ROCm IPC event semantics).
-  3. The watermark (copies enqueued) covering an ordinal whose copy depends on data
-     not yet in the source buffer.
-- **Full hits are not affected.** Same check on full hits (`bi5`: 8k and 16k at c=1, 8k
-  at c=4, 16 prompts per point): all 4 lw runs (2 old global PIECEWISE, 2 per-step)
-  equal aon exactly, 192/192. One 8k prompt differs from no-cache in aon and in every
-  lw run alike, so that is the reference (a full hit computes its last prompt token in
-  a separate one-token step), not lw. The bug needs a partial hit: a load that overlaps
-  a large prefill in the same step.
+| Prompt set, point | aon = no-cache | lw = no-cache | lw = aon |
+|---|---|---|---|
+| F1, 16k prefix, c=1 | 14/16 | 14/16 (same 2 requests) | 16/16 |
+| F1, 8k prefix, c=1 | 16/16 | 16/16 | 16/16 |
+| F1, 8k prefix, c=4 | 16/16 | 16/16 | 16/16 |
+| F2, 16k prefix, c=1 | 14/16 | 14/16 (same 2 requests) | 16/16 |
+| F2, 8k prefix, c=1 | 14/16 | 14/16 (same 2 requests) | 16/16 |
+| F2, 8k prefix, c=4 | 16/16 | 16/16 | 16/16 |
+
+- **lw partial hits are correct**: 96/96 equal aon. The differences from no-cache are
+  identical in aon and lw, request by request and down to the first differing
+  character.
+- **The no-cache reference is not exact for partial hits.** A partial hit computes
+  only the suffix against loaded prefix KV; no-cache prefills the whole prompt in one
+  pass. Batch-invariant mode makes outputs independent of batch shape, not of that
+  split, so some greedy outputs differ, sometimes from the first token (near-tied
+  logits on these random-token prompts). About 4% of requests here.
+- **Why it looked like an lw bug**: the earlier aon check had only 32 requests (0
+  differences is likely at a 4-8% rate), and the earlier lw runs compared only with
+  no-cache. In those runs (`bi3`, `bi4`) every lw suffix store also failed with
+  `AEROSPIKE_ERR_SERVER_FULL`, because the data file (`EXP_FS_PCT=300`) filled up
+  during the chain; that did not cause the differences either (the `fs` run had none
+  and the same rate).
+- Full hits (`bi5`, 192/192 lw = aon) behave the same way: one 8k prompt differs from
+  no-cache in aon and every lw run alike.
 
 The first comparison (B3 night run) compared aon and lw texts directly and found 13 of
 84 equal. That comparison was invalid: the harness salts the partial-hit suffix with the
@@ -159,6 +152,6 @@ session name, so aon and lw sessions sent different prompts.
 ## Next steps
 
 1. B4 second half: the 1e budget grid (off / 1 / 2 GiB, c = 4-32) with the patch.
-2. lw partial-hit wrong outputs (see "Partial hits"): instrument the daemon's
-   per-layer copy and event recording for loads that overlap a prefill.
+2. Output checks: compare lw with aon (same prompts), not with no-cache; size the
+   data file for the suffix stores (`EXP_FS_PCT` 1500 for partial-hit chains).
 3. Push `prototype-stage-1f` (needs approval); vLLM upstreaming needs approval.
