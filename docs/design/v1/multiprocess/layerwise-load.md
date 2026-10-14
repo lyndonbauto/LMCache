@@ -333,13 +333,18 @@ The rule (`LoadModePolicy`, `lmcache/v1/layerwise/load_mode.py`) is:
 ```text
 new_chunks = prompt_chunks - hit_chunks
 LAYERWISE  iff  new_chunks >= R * hit_chunks
-               R = --layerwise-min-new-token-ratio (default 0.1)
+               R = --layerwise-min-new-token-ratio (default 0.05)
 ```
 
-A layer of an 8B model moves at about 57k tokens/s on a 7 GiB/s link, and
-prefill computes 5-13k tokens/s. The load therefore hides behind the compute
-only while new/hit is at least about 0.1-0.2. `R = 0` loads every request
-layerwise, which was the behavior before load modes.
+Why R is small: async loads and then prefills, while layerwise overlaps the
+two, so for the request itself layerwise is never slower. On MI300X with
+Llama-3.1-8B at c = 1, every partial hit tested had a lower TTFT layerwise,
+down to 16k cached plus 1k new (new/hit 0.0625: 0.34 s layerwise, 0.59 s
+async). The cost of layerwise falls on the other requests in the batch, which
+wait for its layers; that matters for full and nearly full hits, which have
+almost no prefill of their own. R = 0.05 keeps every tested partial hit
+layerwise and sends full hits async. `R = 0` loads every request layerwise,
+which was the behavior before load modes.
 
 The server decides, not the connector, because the lookup also chooses
 whether to defer L2 hits. A deferred key reaches the GPU only through a

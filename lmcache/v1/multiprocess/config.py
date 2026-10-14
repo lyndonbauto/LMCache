@@ -63,7 +63,7 @@ class MPServerConfig:
     """When True, H2D retrieve launches one kernel per layer in global layer
     order and workers wait per layer instead of on one completion event."""
 
-    layerwise_min_new_token_ratio: float = 0.1
+    layerwise_min_new_token_ratio: float = 0.05
     """With use_layerwise, a request loads layer by layer only if it computes
     at least this many new tokens per cache-hit token; the rest load before
     they are scheduled. 0 loads every request layer by layer. See
@@ -465,12 +465,12 @@ def add_mp_server_args(
     mp_group.add_argument(
         "--layerwise-min-new-token-ratio",
         type=float,
-        default=0.1,
+        default=0.05,
         help="With --use-layerwise, a request loads layer by layer only if "
         "it computes at least this many new tokens per cache-hit token; "
         "others (full or nearly full hits) load before they are scheduled, "
         "as without layerwise. 0 loads every request layer by layer. "
-        "Default is 0.1.",
+        "Default is 0.05.",
     )
     mp_group.add_argument(
         "--pipelined-fetch",

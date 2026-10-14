@@ -18,10 +18,12 @@ from dataclasses import dataclass
 # First Party
 from lmcache.v1.multiprocess.custom_types import LoadMode
 
-#: Default for :attr:`LoadModePolicy.min_new_token_ratio`. A layer of an 8B
-#: model loads at about 57k tokens/s on a 7 GiB/s link and prefill computes
-#: 5-13k tokens/s, so a ratio near 0.1-0.2 is where the load stops hiding.
-DEFAULT_MIN_NEW_TOKEN_RATIO = 0.1
+#: Default for :attr:`LoadModePolicy.min_new_token_ratio`. Layerwise overlaps
+#: the load with the prefill while async does one after the other, so for the
+#: request itself layerwise wins even at 1 new chunk per 16 hit chunks (MI300X,
+#: Llama-3.1-8B, c=1). Only full and nearly full hits, which stall the other
+#: requests' decodes, should load async; the low ratio keeps the rest layerwise.
+DEFAULT_MIN_NEW_TOKEN_RATIO = 0.05
 
 
 @dataclass(frozen=True)

@@ -15,6 +15,7 @@ import uuid
 import pytest
 
 # First Party
+from lmcache.v1.layerwise.load_mode import DEFAULT_MIN_NEW_TOKEN_RATIO
 from lmcache.v1.multiprocess.config import (
     CoordinatorConfig,
     MPServerConfig,
@@ -200,8 +201,12 @@ def test_pipelined_fetch_requires_layerwise():
         _parse_mp(["--pipelined-fetch"])
 
 
-def test_layerwise_min_new_token_ratio_defaults_to_a_tenth():
-    assert _parse_mp([]).layerwise_min_new_token_ratio == 0.1
+def test_layerwise_min_new_token_ratio_defaults_to_the_policy_default():
+    assert (
+        _parse_mp([]).layerwise_min_new_token_ratio
+        == MPServerConfig().layerwise_min_new_token_ratio
+        == DEFAULT_MIN_NEW_TOKEN_RATIO
+    )
 
 
 def test_layerwise_min_new_token_ratio_is_parsed():
