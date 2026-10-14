@@ -5,7 +5,7 @@ on the CPU VM (`lmcache-vm`, vLLM 0.27.1 without deps): `tests/v1/layerwise`,
 `tests/v1/multiprocess` and the connector and adapter tests, 1484 passed, 51
 skipped (GPU, CUDA, cupy or Rust only), 1 failure that predates 1g
 (`test_client.py::test_business_callers_create_clients_through_factory`, a
-source scan of `test_deferred_response.py`). Box runs pending.
+source scan of `test_deferred_response.py`). Box runs done: see Results.
 Plan: `LW-ITL-FIX-PLAN.md` Task C. Evidence: `LW-PER-STEP-GRAPH.md`.
 
 ## As implemented (differences from the design below)
@@ -40,6 +40,72 @@ Plan: `LW-ITL-FIX-PLAN.md` Task C. Evidence: `LW-PER-STEP-GRAPH.md`.
 7. **Harness:** `perf_session.sh` step `mix pre=<P> len=<L> c=<c> n=<n>` (full and
    partial hits at once, results `<name>_full` / `<name>_part`); `perf.sh`
    `LW_RATIO` adds the flag to lw sessions. Box chain: `C:\qq\_layerwise\chain_c.sh`.
+
+## Results (box, 2026-10-14)
+
+`chain_c.sh` on `1a70cf40` (droplet `165.245.143.182`, vLLM 0.27.1 with the
+per-step patch, Soft-RoCE, 16 queue pairs), one 576 GiB data file. Sessions:
+aon, lw at R = 0 (every request layerwise, the 1f behavior), 0.05, 0.1, 0.2, 0.4.
+**0 errors in every session.** Raw results: `lwaon3/c` (local, untracked); table
+script `functional/perf2/scripts/report_c.py`. Time between tokens (TBT) is
+`(total - TTFT) / (tokens - 1)`, median over requests; gap is the longest gap
+between two tokens in the point.
+
+**Full hits are fixed: R = 0.1 matches aon.** 32 prompts per point:
+
+| Point | TBT aon / lw R=0 / lw R=0.1 (ms) | Max gap aon / R=0 / R=0.1 (ms) | TTFT p50 aon / R=0 / R=0.1 (s) |
+|---|---|---|---|
+| 8k c=4 | 6.9 / 7.4 / 6.8 | 18 / 291 / 19 | 0.23 / 0.55 / 0.24 |
+| 8k c=32 | 9.0 / 41.9 / 9.0 | 23 / 592 / 19 | 2.50 / 2.44 / 2.61 |
+| 16k c=4 | 8.4 / 11.8 / 8.3 | 24 / 672 / 21 | 0.41 / 0.75 / 0.44 |
+| 16k c=32 | 9.7 / 76.5 / 9.0 | 35 / 605 / 27 | 4.78 / 4.88 / 5.08 |
+
+Every full hit at R = 0.1 logged `pipelined_outcome=not_deferred` (async); at R = 0
+every one was `pipelined`.
+
+**Partial hits: layerwise beat async at every ratio tested, so R = 0.1 is too high.**
+TTFT p50 at c = 1 (4 prompts), with the mode each R chose (L layerwise, A async):
+
+| Cached + new | new / hit | aon | lw R=0 | R=0.05 | R=0.1 | R=0.2 | R=0.4 |
+|---|---|---|---|---|---|---|---|
+| 16k + 1k | 0.0625 | 0.611 | 0.340 | 0.339 L | 0.593 A | 0.588 A | 0.614 A |
+| 8k + 1k | 0.125 | 0.325 | 0.195 | 0.179 L | 0.181 L | 0.320 A | 0.331 A |
+| 16k + 2k | 0.125 | 0.721 | 0.411 | 0.419 L | 0.408 L | 0.727 A | 0.727 A |
+| 8k + 2k | 0.25 | 0.432 | 0.276 | 0.259 L | 0.270 L | 0.275 L | 0.417 A |
+| 16k + 4k | 0.25 | 1.069 | 0.774 | 0.774 L | 0.764 L | 0.767 L | 1.089 A |
+| 8k + 8k | 1 | 1.216 | 1.071 | 1.052 L | 1.062 L | 1.060 L | 1.062 L |
+| 16k + 8k | 0.5 | 1.877 | 1.566 | 1.557 L | 1.544 L | 1.568 L | 1.542 L |
+
+- The rule switched exactly where `new / hit` crosses R, and an async partial hit
+  got aon's TTFT, as designed.
+- The cost model above (layerwise only pays when the prefill hides the transfer)
+  was too pessimistic. Async is load *then* prefill; layerwise overlaps them, so
+  for the request itself layerwise is never slower. Its cost is to the *other*
+  requests in the batch, which wait for its layers: that is what full hits show.
+- **Recommendation: default R = 0.05** (or lower). It kept every tested partial hit
+  layerwise and every full hit async. Not measured: partial hits with very short
+  suffixes (one or two chunks on a long prefix) at high concurrency, where a
+  layerwise load of a large prefix could stall the batch as full hits did.
+
+**Mixed points are inconclusive** (8 full + 8 partial hits, c = 4 each). Max gaps
+are 0.8-1.6 s in *every* setting, aon included: the partial hits' 8k-token
+prefills, not the loads. Full hits' TTFT was 2.8-3.9 s with lw against 0.30 s with
+aon at 8k + 8k: layerwise partial hits are scheduled at once and their prefills
+run first, while under aon they wait for their loads and the full hits go first.
+Full hits' TBT was better with lw (14-22 ms against aon's 41.7 ms). A fair mixed
+test needs more prompts and staggered arrivals.
+
+**Noise.** `P8192_L8192_c4` ran in the same mode in every lw session and its TTFT
+p50 ranged 2.61-3.63 s, so differences under about 0.5 s at c = 4, n = 8 are noise.
+
+**Unit tests on the box (GPU):** the 11 changed files, 240 passed. Wider run
+(`tests/v1/layerwise`, `tests/v1/multiprocess`, connector and adapter tests): 1550
+passed, 4 failed, 12 errors, 1 skipped; none from 1g. `test_client.py` (see Status)
+and `test_cache_server.py` / `test_mq.py::test_mq_register_kv_cache`, which expect
+`register_kv_cache` to return `None`; it returns `RegisterKvCacheResponse` since
+`b795e69f` (before 1f), and 1g does not touch these tests or that path. The gRPC
+stubs were copied from the VM build (same protobuf 6.33.6 and grpcio 1.78.0), since
+`lmc-c` has no `grpc_tools`.
 
 ## Problem
 
