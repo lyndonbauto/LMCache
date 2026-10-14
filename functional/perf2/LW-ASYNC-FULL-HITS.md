@@ -1,336 +1,149 @@
-# Layerwise: load full hits outside the forward pass (Task C design)
+# Layerwise per-request load mode (Task C): test results
 
-Status: implemented on `prototype-stage-1g` (on 1f's `8191c2ca`). Unit tests pass
-on the CPU VM (`lmcache-vm`, vLLM 0.27.1 without deps): `tests/v1/layerwise`,
-`tests/v1/multiprocess` and the connector and adapter tests, 1484 passed, 51
-skipped (GPU, CUDA, cupy or Rust only), 1 failure that predates 1g
-(`test_client.py::test_business_callers_create_clients_through_factory`, a
-source scan of `test_deferred_response.py`). Box runs done: see Results.
-Plan: `LW-ITL-FIX-PLAN.md` Task C. Evidence: `LW-PER-STEP-GRAPH.md`.
+Code: `prototype-stage-1g` (on 1f's `8191c2ca`; tested at `1a70cf40`, default R
+changed to 0.05 in `18db855b`). Design: `docs/design/v1/multiprocess/layerwise-load.md`
+on 1g, section "Per-request load mode".
 
-## As implemented (differences from the design below)
+With layerwise on, the server now picks a mode for each request at lookup:
 
-1. **The R rule decides the mode, not deferral.** The server computes the mode
-   with `LoadModePolicy` (`lmcache/v1/layerwise/load_mode.py`): LAYERWISE iff
-   `new_chunks >= R * hit_chunks`. `PipelinedDeferral` defers only when that rule
-   says LAYERWISE, and a lookup that deferred anything always reports LAYERWISE.
-   Otherwise the mode comes from the rule, so a refused deferral (no window, too
-   many chunks) with a long suffix still loads layerwise from L1, as on 1f. Why:
-   with "layerwise iff deferred", layerwise over plain TCP (no `--pipelined-fetch`)
-   would never be used, and a full RDMA window pool would turn long partial hits
-   into async loads that cannot overlap the prefill.
-2. **Counts are in chunks of the lookup's prompt**, which is chunk-aligned: a tail
-   shorter than one chunk is not counted. The deferral's hit is the last deferred
-   chunk index plus one; the status query uses
-   `max(requested_tokens // chunk_size, found_chunks)` prompt chunks.
-3. **`--layerwise-min-new-token-ratio`** (server; default 0.1 in the box runs,
-   0.05 since `18db855b` after the sweep in Results; 0 keeps every request
-   layerwise, the 1f behavior). Full hits have 0 new chunks, so they are
-   async at any R > 0.
-4. **Protocol: a new request, not a versioned one.** `QUERY_PREFETCH_STATUS_WITH_MODE`
-   (wire id 34) returns `PrefetchStatusWithMode(found_chunks, load_mode)` or `None`
-   while pending. The scheduler adapter sends it only when
-   `lmcache.mp.use_layerwise` is on, so aon clients and servers are unaffected; a
-   layerwise worker needs a 1g server (deploy together). gRPC carries it as
-   `LookupService.QueryPrefetchStatusWithMode`. With several servers, a request
-   is LAYERWISE if any server says so.
-5. **Mismatch guard** logs a warning and loads the deferred keys whole; no counter.
-6. **Submission order:** a step's layerwise retrieves are submitted before its
-   async ones, so an async H2D copy does not delay the first layers (risk 1 is
-   smaller, not gone: an async copy from an earlier step can still be on the stream).
-7. **Harness:** `perf_session.sh` step `mix pre=<P> len=<L> c=<c> n=<n>` (full and
-   partial hits at once, results `<name>_full` / `<name>_part`); `perf.sh`
-   `LW_RATIO` adds the flag to lw sessions. Box chain: `C:\qq\_layerwise\chain_c.sh`.
+```text
+LAYERWISE  iff  new_chunks >= R * hit_chunks     R = --layerwise-min-new-token-ratio
+ASYNC      otherwise (the aon path: loaded before the request is scheduled)
+```
 
-## Results (box, 2026-10-14)
+## Conclusion
 
-`chain_c.sh` on `1a70cf40` (droplet `165.245.143.182`, vLLM 0.27.1 with the
-per-step patch, Soft-RoCE, 16 queue pairs), one 576 GiB data file. Sessions:
-aon, lw at R = 0 (every request layerwise, the 1f behavior), 0.05, 0.1, 0.2, 0.4.
-**0 errors in every session.** Raw results: `lwaon3/c` (local, untracked); table
-script `functional/perf2/scripts/report_c.py`. Time between tokens (TBT) is
-`(total - TTFT) / (tokens - 1)`, median over requests; gap is the longest gap
-between two tokens in the point.
+The per-request mode keeps what layerwise is good at and removes what it was
+bad at. Before (1f, every request layerwise, R = 0 below):
 
-**Full hits are fixed: R = 0.1 matches aon.** 32 prompts per point:
+- **Full hits stalled the batch.** A full hit has almost nothing to compute, so
+  every decode in its steps waited for each loaded layer: time between tokens
+  (TBT) 41.9 ms at 8k c=32 and 76.5 ms at 16k c=32, with gaps of about 600 ms,
+  against aon's 9-10 ms and 16-35 ms.
+- **Partial hits were faster than aon** (TTFT 0.02-0.31 s lower at c = 1),
+  because the load overlaps the prefill instead of running before it.
 
-| Point | TBT aon / lw R=0 / lw R=0.1 (ms) | Max gap aon / R=0 / R=0.1 (ms) | TTFT p50 aon / R=0 / R=0.1 (s) |
+Now (R = 0.05 or 0.1), full hits load async and partial hits load layerwise:
+
+- **Full hits match aon:** TBT 6.8-9.3 ms, max gap 19-27 ms, TTFT within noise
+  of aon at every concurrency (c = 4-32, 8k and 16k).
+- **Partial hits keep layerwise's TTFT** whenever the rule picks layerwise, with
+  no TBT cost at c = 1.
+- So the new code is at least as good as the better of aon and 1f's layerwise in
+  every full-hit and partial-hit point measured. The mixed points (full and
+  partial hits at once) are inconclusive; see below.
+
+**R = 0.05 is the default** (it was 0.1 in these runs). Layerwise won TTFT for
+every partial hit tested, down to 16k cached + 1k new (new/hit 0.0625: 0.34 s
+layerwise, 0.59 s async). R = 0.1 sends that case async and loses 0.25 s;
+R = 0.05 keeps every tested partial hit layerwise and still sends every full
+hit (0 new chunks) async.
+
+## Setup
+
+- MI300X droplet `165.245.143.182`, Llama-3.1-8B, TP=1, vLLM 0.27.1 with the
+  per-step piecewise patch, `--distributed-executor-backend mp`.
+- LMCache server with an Aerospike kv-sink L2 on `/mnt/scratch` (one 576 GiB data
+  file), Soft-RoCE `rxe0`, 16 queue pairs, `--pipelined-fetch`. L1 is emptied
+  before every point (server restart), so every hit comes from L2.
+- Sessions, one vLLM each: **aon** (layerwise off), and **lw** at R = 0, 0.05,
+  0.1, 0.2, 0.4 (`chain_c.sh`). 0 errors in every session.
+- TTFT and TBT are medians over the point's requests; TBT is
+  `(total - TTFT) / (tokens - 1)`, 128 output tokens. Max gap is the longest gap
+  between two tokens in the point.
+- Raw results: `lwaon3/c` (local, untracked). Tables: `functional/perf2/scripts/report_c.py`.
+- Mode per point from the server log (`pipelined_outcome`): `pipelined` means
+  layerwise; `not_deferred` means async.
+
+## Full hits (32 prompts per point)
+
+Each cell: TTFT (s) / TBT (ms) / max gap (ms), mode (L layerwise, A async). R = 0.05
+was not run for full hits; it picks async for them, as R = 0.1 does.
+
+| Prompt, c | aon | lw R=0 (before) | lw R=0.1 |
 |---|---|---|---|
-| 8k c=4 | 6.9 / 7.4 / 6.8 | 18 / 291 / 19 | 0.23 / 0.55 / 0.24 |
-| 8k c=32 | 9.0 / 41.9 / 9.0 | 23 / 592 / 19 | 2.50 / 2.44 / 2.61 |
-| 16k c=4 | 8.4 / 11.8 / 8.3 | 24 / 672 / 21 | 0.41 / 0.75 / 0.44 |
-| 16k c=32 | 9.7 / 76.5 / 9.0 | 35 / 605 / 27 | 4.78 / 4.88 / 5.08 |
+| 8k, c=4 | 0.233 / 6.9 / 18 A | 0.545 / 7.4 / 291 L | 0.235 / 6.8 / 19 A |
+| 8k, c=8 | 0.274 / 8.7 / 22 A | 0.853 / 9.7 / 562 L | 0.262 / 8.6 / 21 A |
+| 8k, c=16 | 1.276 / 9.0 / 16 A | 1.398 / 18.6 / 602 L | 1.190 / 9.0 / 20 A |
+| 8k, c=32 | 2.498 / 9.0 / 23 A | 2.442 / 41.9 / 592 L | 2.613 / 9.0 / 19 A |
+| 16k, c=4 | 0.409 / 8.4 / 24 A | 0.754 / 11.8 / 672 L | 0.439 / 8.3 / 21 A |
+| 16k, c=8 | 1.053 / 9.5 / 31 A | 1.193 / 19.9 / 599 L | 1.178 / 9.0 / 21 A |
+| 16k, c=16 | 3.400 / 9.0 / 33 A | 2.402 / 33.2 / 640 L | 3.339 / 9.3 / 24 A |
+| 16k, c=32 | 4.780 / 9.7 / 35 A | 4.882 / 76.5 / 605 L | 5.078 / 9.0 / 27 A |
 
-Every full hit at R = 0.1 logged `pipelined_outcome=not_deferred` (async); at R = 0
-every one was `pipelined`.
+## Partial hits (c = 1, 4 prompts per point)
 
-**Partial hits: layerwise beat async at every ratio tested, so R = 0.1 is too high.**
-TTFT p50 at c = 1 (4 prompts), with the mode each R chose (L layerwise, A async):
+Each cell: TTFT (s) / TBT (ms), mode. **Bold**: the rule picked async.
 
-| Cached + new | new / hit | aon | lw R=0 | R=0.05 | R=0.1 | R=0.2 | R=0.4 |
+| Cached + new | new / hit | aon | lw R=0 (before) | R=0.05 | R=0.1 | R=0.2 | R=0.4 |
 |---|---|---|---|---|---|---|---|
-| 16k + 1k | 0.0625 | 0.611 | 0.340 | 0.339 L | 0.593 A | 0.588 A | 0.614 A |
-| 8k + 1k | 0.125 | 0.325 | 0.195 | 0.179 L | 0.181 L | 0.320 A | 0.331 A |
-| 16k + 2k | 0.125 | 0.721 | 0.411 | 0.419 L | 0.408 L | 0.727 A | 0.727 A |
-| 8k + 2k | 0.25 | 0.432 | 0.276 | 0.259 L | 0.270 L | 0.275 L | 0.417 A |
-| 16k + 4k | 0.25 | 1.069 | 0.774 | 0.774 L | 0.764 L | 0.767 L | 1.089 A |
-| 8k + 8k | 1 | 1.216 | 1.071 | 1.052 L | 1.062 L | 1.060 L | 1.062 L |
-| 16k + 8k | 0.5 | 1.877 | 1.566 | 1.557 L | 1.544 L | 1.568 L | 1.542 L |
+| 2k + 1k | 0.5 | 0.134 / 5.0 A | 0.092 / 5.0 L | 0.097 / 5.0 L | 0.100 / 5.0 L | 0.109 / 5.0 L | 0.099 / 5.0 L |
+| 2k + 2k | 1 | 0.176 / 5.1 A | 0.152 / 5.1 L | 0.150 / 5.1 L | 0.152 / 5.1 L | 0.150 / 5.1 L | 0.154 / 5.1 L |
+| 2k + 4k | 2 | 0.319 / 5.3 A | 0.290 / 5.3 L | 0.285 / 5.3 L | 0.280 / 5.3 L | 0.278 / 5.3 L | 0.289 / 5.3 L |
+| 2k + 8k | 4 | 0.694 / 5.6 A | 0.644 / 5.6 L | 0.668 / 5.7 L | 0.672 / 5.7 L | 0.671 / 5.7 L | 0.668 / 5.6 L |
+| 8k + 1k | 0.125 | 0.325 / 5.5 A | 0.195 / 5.5 L | 0.179 / 5.5 L | 0.181 / 5.6 L | **0.320 / 5.5 A** | **0.331 / 5.5 A** |
+| 8k + 2k | 0.25 | 0.432 / 5.6 A | 0.276 / 5.6 L | 0.259 / 5.6 L | 0.270 / 5.6 L | 0.275 / 5.6 L | **0.417 / 5.6 A** |
+| 8k + 4k | 0.5 | 0.656 / 5.8 A | 0.500 / 5.8 L | 0.496 / 5.8 L | 0.492 / 5.8 L | 0.504 / 5.8 L | 0.499 / 5.8 L |
+| 8k + 8k | 1 | 1.216 / 6.2 A | 1.071 / 6.2 L | 1.052 / 6.2 L | 1.062 / 6.2 L | 1.060 / 6.2 L | 1.062 / 6.2 L |
+| 16k + 1k | 0.0625 | 0.611 / 6.2 A | 0.340 / 6.2 L | 0.339 / 6.2 L | **0.593 / 6.3 A** | **0.588 / 6.2 A** | **0.614 / 6.2 A** |
+| 16k + 2k | 0.125 | 0.721 / 6.3 A | 0.411 / 6.3 L | 0.419 / 6.3 L | 0.408 / 6.3 L | **0.727 / 6.3 A** | **0.727 / 6.4 A** |
+| 16k + 4k | 0.25 | 1.069 / 6.5 A | 0.774 / 6.5 L | 0.774 / 6.5 L | 0.764 / 6.5 L | 0.767 / 6.5 L | **1.089 / 6.6 A** |
+| 16k + 8k | 0.5 | 1.877 / 6.9 A | 1.566 / 6.9 L | 1.557 / 7.0 L | 1.544 / 7.0 L | 1.568 / 6.9 L | 1.542 / 6.9 L |
 
-- The rule switched exactly where `new / hit` crosses R, and an async partial hit
-  got aon's TTFT, as designed.
-- The cost model above (layerwise only pays when the prefill hides the transfer)
-  was too pessimistic. Async is load *then* prefill; layerwise overlaps them, so
-  for the request itself layerwise is never slower. Its cost is to the *other*
-  requests in the batch, which wait for its layers: that is what full hits show.
-- **Default R = 0.05** (1g `18db855b`). It kept every tested partial hit
-  layerwise and every full hit async. Not measured: partial hits with very short
-  suffixes (one or two chunks on a long prefix) at high concurrency, where a
-  layerwise load of a large prefix could stall the batch as full hits did.
+- The mode switched exactly where `new / hit` crosses R.
+- Layerwise cells are 0.02-0.31 s faster than async cells for the same request,
+  and every async cell lands at aon's TTFT.
+- TBT does not depend on the mode at c = 1: with no other requests running, a
+  layerwise load delays nobody.
 
-**Mixed points are inconclusive** (8 full + 8 partial hits, c = 4 each). Max gaps
-are 0.8-1.6 s in *every* setting, aon included: the partial hits' 8k-token
-prefills, not the loads. Full hits' TTFT was 2.8-3.9 s with lw against 0.30 s with
-aon at 8k + 8k: layerwise partial hits are scheduled at once and their prefills
-run first, while under aon they wait for their loads and the full hits go first.
-Full hits' TBT was better with lw (14-22 ms against aon's 41.7 ms). A fair mixed
-test needs more prompts and staggered arrivals.
+## Mixed: full and partial hits at once (c = 4 each, 8 prompts each)
 
-**Noise.** `P8192_L8192_c4` ran in the same mode in every lw session and its TTFT
-p50 ranged 2.61-3.63 s, so differences under about 0.5 s at c = 4, n = 8 are noise.
+Each cell: TTFT (s) / TBT (ms), mode.
 
-**Unit tests on the box (GPU):** the 11 changed files, 240 passed. Wider run
-(`tests/v1/layerwise`, `tests/v1/multiprocess`, connector and adapter tests): 1550
-passed, 4 failed, 12 errors, 1 skipped; none from 1g. `test_client.py` (see Status)
-and `test_cache_server.py` / `test_mq.py::test_mq_register_kv_cache`, which expect
-`register_kv_cache` to return `None`; it returns `RegisterKvCacheResponse` since
-`b795e69f` (before 1f), and 1g does not touch these tests or that path. The gRPC
-stubs were copied from the VM build (same protobuf 6.33.6 and grpcio 1.78.0), since
-`lmc-c` has no `grpc_tools`.
+| Point | Stream | aon | lw R=0 | R=0.05 | R=0.1 | R=0.2 | R=0.4 |
+|---|---|---|---|---|---|---|---|
+| 8k + 8k | full hits | 0.303 / 41.7 A | 3.896 / 15.1 L | 3.787 / 14.4 A | 2.784 / 22.0 A | 3.264 / 18.6 A | 3.882 / 14.1 A |
+| 8k + 8k | partial | 3.658 / 18.1 A | 3.747 / 15.7 L | 3.237 / 18.1 L | 3.170 / 18.6 L | 3.328 / 18.4 L | 2.729 / 22.5 L |
+| 16k + 4k | full hits | 1.953 / 21.0 A | 2.754 / 18.2 L | 2.313 / 23.2 A | 2.443 / 23.1 A | 2.946 / 17.6 A | 0.756 / 32.3 A |
+| 16k + 4k | partial | 2.472 / 20.1 A | 2.134 / 21.9 L | 1.957 / 23.5 L | 2.764 / 14.5 L | 2.246 / 19.0 L | 2.857 / 19.1 A |
 
-## Problem
+Inconclusive. Max gaps are 0.8-1.6 s in every column, aon included: they come
+from the partial hits' 8k- and 4k-token prefills, not from loads. At 8k + 8k, full
+hits wait much longer for their first token with layerwise partial hits (2.8-3.9 s
+against aon's 0.30 s), because those partial hits are scheduled at once and their
+prefills run first; under aon the partial hits wait for their own loads and the
+full hits go first. Full hits decode faster in the same runs (TBT 14-22 ms against
+41.7 ms). A fair mixed test needs more prompts and staggered arrivals.
 
-With layerwise load on, every load runs inside a forward pass, and the whole batch
-waits for each layer to arrive. A partial hit with a long new suffix hides that wait
-behind its own prefill. A full hit has one token to compute, so the batch pauses for
-the whole transfer. The c = 4-32 grid (8k and 16k full hits, 0 errors) shows it:
+## Noise
 
-| | aon | lw per-step, budget off | lw per-step, 1 GiB |
-|---|---|---|---|
-| Time between tokens, 8k c=32 | 8.8 ms | 34.3 ms | 40.4 ms |
-| Time between tokens, 16k c=32 | 9.7 ms | 58.0 ms | 75.1 ms |
-| Max gap, 16k c=32 | 27 ms | 6617 ms | 374 ms |
+`8k + 8k, c = 4` (8 prompts) loaded layerwise in every lw session; TTFT ranged
+2.61-3.63 s and TBT 13.0-20.7 ms (aon 2.77 s / 20.6 ms). Differences below about
+0.5 s at c = 4 with 8 prompts are noise. The c = 1 partial-hit points repeat to
+within about 0.03 s where the mode is the same.
 
-aon avoids this because a full hit waits for its KV outside the forward pass, in
-vLLM's `WAITING_FOR_REMOTE_KVS`, while other requests keep decoding. The per-step
-graph fix (Task B) cannot help: the pause is the transfer, not the graph mode.
+## Unit tests
 
-## Proposal
+- **Changed files** (11, on the box with the GPU): 240 passed.
+- **Wider run on the box** (`tests/v1/layerwise`, `tests/v1/multiprocess`, the
+  connector and adapter tests): 1550 passed, 4 failed, 12 errors, 1 skipped, none
+  caused by 1g:
+  - `test_client.py::test_business_callers_create_clients_through_factory`: a
+    source scan that flags `test_deferred_response.py`, unchanged by 1g.
+  - `test_cache_server.py` (2 failed, 12 errors) and `test_mq.py::test_mq_register_kv_cache`:
+    they expect `register_kv_cache` to return `None`; it returns
+    `RegisterKvCacheResponse` since `b795e69f` (before 1f).
+  - The gRPC stubs were copied from the VM build (same protobuf 6.33.6 and
+    grpcio 1.78.0), since `lmc-c` has no `grpc_tools`.
+- **CPU VM** (`lmcache-vm`, vLLM 0.27.1 without deps): 1484 passed, 51 skipped (GPU,
+  CUDA, cupy or Rust only), the same `test_client.py` failure.
 
-Choose the load mode per request:
+## Not tested
 
-- **Layerwise** when the request's own prefill is long enough to hide the transfer.
-- **Async (the aon path)** otherwise. This covers full hits and short new suffixes.
-
-The server's lookup decides, because only it knows both numbers at the point where
-it must commit: the hit length (after the L2 lookup) and the prompt length (the
-lookup carries the token ids). It already makes a related decision there:
-`PipelinedDeferral.accepts` decides whether a lookup's L2 hits are deferred to a
-layer-by-layer fetch at retrieve time or loaded whole now. The rule becomes:
-
-> A request loads layer by layer if and only if its lookup deferred its L2 hits.
-
-So one decision drives everything, and the two sides cannot disagree.
-
-```
-lookup (server)                              scheduler (connector)      worker / daemon
----------------                              ---------------------      ---------------
-L2 lookup: hit_tokens
-new_tokens = prompt_tokens - hit_tokens
-defer iff  new_tokens >= R * hit_tokens
-       and the existing checks pass
-  |-- deferred --> result: hits, LAYERWISE --> load_async=False   --> retrieve with generation > 0
-  |                                            admission gate         layer waits in forward
-  |                                            step needs PIECEWISE
-  '-- loaded whole into L1 -> result: hits, ASYNC --> load_async=True --> retrieve with generation 0
-                                               WAITING_FOR_REMOTE_KVS   one H2D from L1, FULL graphs
-                                               no gate, no flag         finished_recving reported
-```
-
-Why this split:
-
-- An async request's KV is already in L1 when vLLM allocates its blocks, so its retrieve
-  is one H2D copy (about 20-40 ms for 1 GiB). That is exactly what aon does today.
-- Deferral can be refused for existing reasons (no free RDMA window, too many chunks,
-  keys already in L1). Under the rule, those requests go async, which is the right
-  outcome: their KV is in L1 and layer-by-layer loading would save little.
-- It needs no new vLLM change. The per-step patch stays, and flags only steps with a
-  layerwise retrieve.
-
-### The threshold R
-
-Layerwise pays off when prefilling the new tokens takes at least as long as moving
-the hit tokens:
-
-```
-new_tokens / prefill_rate >= hit_tokens * kv_bytes_per_token / link_rate
-R = prefill_rate * kv_bytes_per_token / link_rate
-```
-
-On the MI300X box (Soft-RoCE about 7 GiB/s; Llama-3.1-8B, 128 KiB per token) the
-link moves about 57k tokens/s. The prefill rate comes from aon's partial-hit TTFT
-(1e grid, c=1) minus the prefix load time, so it is derived, not profiled:
-
-| Cached + new | aon TTFT | Load (at 7 GiB/s) | Prefill of 8k new | Prefill rate | R |
-|---|---|---|---|---|---|
-| 2k + 8k | 0.72 s | about 0.04 s | about 0.65 s | about 12.6k tokens/s | about 0.22 |
-| 8k + 8k | 1.24 s | about 0.14 s | about 1.1 s | about 7.4k tokens/s | about 0.13 |
-| 16k + 8k | 1.90 s | about 0.29 s | about 1.6 s | about 5.1k tokens/s | about 0.09 |
-
-So R is about 0.1-0.2 on this box, and it falls as the cached prefix grows, because
-attention over a longer context slows the prefill. A single ratio is therefore an
-approximation; the sweep below checks whether it is good enough. The proposal is a
-server flag `--layerwise-min-new-token-ratio`, default 0.1, which errs toward
-layerwise for borderline requests (they still overlap most of their transfer) and is
-tuned in the measurement step. Full hits have `new_tokens = 1`, so they go async at
-any useful R.
-
-## Changes
-
-### Server (daemon)
-
-1. **Deferral rule.** `PipelinedDeferral.accepts` also gets `prompt_tokens` and
-   applies the R rule. `Lookup` passes `len(key.token_ids)`.
-2. **Lookup result reports the mode.** `QUERY_PREFETCH_STATUS` returns the hit count
-   and whether the lookup deferred (an enum, `LoadMode.LAYERWISE` or `LoadMode.ASYNC`,
-   not a bool). This is an IPC protocol change; old clients must keep working, so
-   either version the message or add a new query and fall back.
-3. **Retrieve with generation 0 on a layerwise context.** `start_retrieve` today sets
-   `layerwise_active` from the context and raises `ValueError` on generation 0. It
-   becomes `layerwise_active = context is layerwise and retrieve_generation > 0`; a
-   generation-0 retrieve takes the existing non-layerwise path (H2D from L1 on the
-   affinity thread, under the `TransferGate`).
-4. **Mismatch guard.** If a generation-0 retrieve still claims deferred keys (it
-   should not), the existing whole-load fallback (`load_into_l1`) would block the
-   worker's affinity thread for the whole RDMA fetch. Log a warning and count it;
-   do not crash.
-
-### Connector, scheduler side
-
-5. `get_num_new_matched_tokens`: read the mode with the hit count. Run the 1e
-   admission gate only for `LAYERWISE`. Return `load_async = need_to_load > 0 and
-   mode is ASYNC`.
-6. The request tracker stores the mode. Retrieve metadata carries it to the worker
-   (`LMCacheMPRequestMetadata` gains a `load_mode` field).
-7. `requires_piecewise_for_step`: True only when some retrieve in the step is
-   `LAYERWISE` (and, as today, in every step when the dispatcher is on).
-
-### Connector and adapter, worker side
-
-8. `start_load_kv`: pass the mode to `submit_retrieve`.
-   `LMCacheDrivenTransferContext.submit_retrieve` assigns a generation, and sets the active generation for layer
-   waits, only for `LAYERWISE`. An async retrieve sends generation 0 and leaves the
-   layerwise waiter untouched, so `wait_for_layer_load` ignores it.
-9. `get_finished`: today it returns `finished_recving = None` whenever layerwise is
-   on, because vLLM asserts on a finished-receiving report for a running request.
-   It becomes: report finished async retrieves (including ones dropped while the
-   server was unhealthy, exactly once, as the aon path already does), and never
-   report layerwise ones. Their futures are still drained so failures are logged.
-
-### Unchanged
-
-- vLLM. The per-step patch is still needed for layerwise steps; async loads add no hook.
-- The aon path when layerwise is off.
-- Failure handling per mode: async loads fail through `get_block_ids_with_load_errors`
-  plus `finished_recving`, as aon does today, including the bypass after a failed
-  async load (`BYPASS_LMCACHE`). Layerwise loads keep their current handling and the
-  vllm#49250 recompute warning.
-
-## Failure paths to cover
-
-| Case | Expected |
-|---|---|
-| Async request aborted while in `WAITING_FOR_REMOTE_KVS` | Existing aon handling; read locks released by the retrieve or by `FREE_LOOKUP_LOCKS` |
-| Async retrieve fails | Blocks reported as load errors; `finished_recving` reported once; request recomputes or fails per policy |
-| Server unhealthy at submit | Async: dropped and reported once (existing). Layerwise: reported through load errors, never in `finished_recving` |
-| Same step has async and layerwise retrieves | Only layerwise ones get generations; step runs PIECEWISE; async H2D shares the stream |
-| Preemption of a layerwise request | Unchanged (lookup again from scratch; the mode may change) |
-| Deferral refused for lack of an RDMA window | Request goes async; no window or budget is held |
-
-## Risks
-
-1. **Stream head-of-line.** Async H2D copies and layerwise layer copies share the
-   context's transfer stream. A 1 GiB async copy enqueued just before a layerwise
-   load delays its first layers by about 20-40 ms. That is far below today's pauses,
-   but if the measurement shows it, split async H2D into per-group units
-   (the gate is already held per unit) or give async copies their own stream.
-2. **Link contention.** Async full-hit fetches (at lookup) and layerwise fetches
-   share the RDMA link, so layerwise prefills may wait longer. This is inherent, not
-   new: today the same bytes move anyway.
-3. **First token for full hits.** Full hits get aon's TTFT, not lw's: at c=1, 8k
-   0.199 vs 0.164 s, 16k 0.379 vs 0.308 s. In exchange, other requests stop pausing.
-4. **Protocol change** to the lookup result: needs compatibility for old clients.
-5. **vLLM scheduler assumptions** about mixing async and synchronous loads from one
-   connector. The API allows it per request, but this path is not exercised today.
-   Budget 1-2 days in the estimate for surprises.
-
-## Measurement and pass criteria
-
-Harness addition: a mixed point that runs full hits and partial hits at the same
-time, for example two `perf_client.py` streams in one session (`point mix=...`),
-reported separately. About half a day.
-
-Runs on the MI300X box, 32 prompts per point, 0 errors required:
-
-- **Full hits at c = 4-32** (the existing grid): time between tokens and max gap close
-  to aon's (9-10 ms, under 40 ms).
-- **Partial hits** (8k prefix plus 8k suffix, c = 1 and 4): TTFT p50 as good as lw today.
-- **Mixed**: full-hit decode close to aon; partial-hit TTFT close to lw.
-- **Threshold sweep**: R at 0.05, 0.1, 0.2, 0.4 on 2k, 8k and 16k prefixes with 1k, 2k,
-  4k and 8k suffixes, to set the default and to check whether one ratio fits all
-  prefix lengths.
-- **Outputs**: lw equals aon on the same prompts (the corrected check from
-  `LW-PER-STEP-GRAPH.md`), full and partial hits.
-
-## PR breakdown
-
-1. **Server**: deferral rule and flag, lookup result mode with compatibility,
-   generation-0 retrieves on layerwise contexts, mismatch guard. Unit tests per item.
-2. **Connector and adapter**: mode in tracker and metadata, async return, gate and
-   piecewise flag only for layerwise, generation only for layerwise,
-   `finished_recving` filtering. Unit tests, including mixed-mode steps and the
-   failure table above.
-3. **Docs and measurement**: `docs/design/v1/multiprocess/layerwise-load.md` section,
-   harness mixed point, box runs, report.
-
-## Estimate
-
-| Item | Days |
-|---|---|
-| PR 1, server | 1-1.5 |
-| PR 2, connector and adapter | 1.5-2 |
-| Tests across both | 1 |
-| Harness mixed point and box runs | 1 |
-| Risk reserve (vLLM scheduler, protocol compatibility) | 0.5-1.5 |
-| **Total** | **5-7** |
-
-Code review is extra. This is about one day more than the earlier rough estimate
-(4-6), because the lookup result needs a protocol change.
-
-## Decisions
-
-1. Approve the design (server decides at lookup; layerwise iff deferred): open.
-2. Branch: `prototype-stage-1g` on top of `prototype-stage-1f` (decided 2026-10-14).
-3. Default R: 0.1, tuned from the sweep (decided 2026-10-14, after the prefill-rate
-   correction above).
-
-## vLLM
-
-Task C itself needs no vLLM change, but it relies on the per-step graph patch from
-Task B for its layerwise steps. The box runs vLLM 0.27.1 with that patch applied
-locally (`functional/perf2/vllm-0.27.1-per-step-piecewise.patch`). The vLLM fork for
-this work is `lyndonbauto/vllm` (local clone `C:\_Projects\vllm`, branch
-`prototype-1`); as of 2026-10-14 that branch equals upstream `main` of 2026-10-08 and
-does not yet have the per-step hooks (`supports_per_step_piecewise`,
-`requires_piecewise_for_step`). Porting the patch there is separate work from this
-design.
+- Partial hits with very short suffixes (one or two chunks on a long prefix) at
+  high concurrency. They load layerwise at R = 0.05, and a large layerwise load
+  can stall other requests' decodes the way full hits did.
+- R = 0.05 for full hits directly (the code path is the same as R = 0.1: 0 new
+  chunks is async at any R > 0).
+- Mixed traffic with realistic arrivals.
+- The output check (lw outputs equal aon's) on 1g.
