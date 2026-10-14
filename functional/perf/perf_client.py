@@ -292,9 +292,12 @@ async def one_request(
                     choices = chunk.get("choices") or []
                     if choices:
                         pieces.append(choices[0].get("text") or "")
+                    # The final chunk counts when nothing came before it: a
+                    # one-token output whose token decodes to "".
                     if choices and (
                         choices[0].get("text")
                         or choices[0].get("finish_reason") is None
+                        or t_first == 0.0
                     ):
                         now = time.perf_counter()
                         if t_first == 0.0:
