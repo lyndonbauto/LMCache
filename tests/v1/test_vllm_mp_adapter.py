@@ -377,7 +377,10 @@ def test_submit_retrieve_request_tracks_returned_future(fake_adapter, monkeypatc
     )
 
     assert transfer_ctx.submit_retrieve.called
-    assert transfer_ctx.submit_retrieve.call_args.kwargs == {"skip_first_n_tokens": 1}
+    assert transfer_ctx.submit_retrieve.call_args.kwargs == {
+        "skip_first_n_tokens": 1,
+        "load_mode": LoadMode.LAYERWISE,
+    }
     assert transfer_ctx.submit_retrieve.call_args.args[1].request_configs == {
         "lmcache.skip_save": True
     }

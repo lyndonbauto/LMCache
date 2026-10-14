@@ -380,10 +380,9 @@ Details:
 
 Limits:
 
-- `QUERY_PREFETCH_STATUS_WITH_MODE` is a new request (wire id 34). A layerwise
-  worker needs a server that knows it, so deploy them together.
-- It has no gRPC binding yet, so layerwise over the gRPC transport fails at
-  the first lookup.
+- `QUERY_PREFETCH_STATUS_WITH_MODE` is a new request (wire id 34, gRPC
+  `LookupService.QueryPrefetchStatusWithMode`). A layerwise worker needs a
+  server that knows it, so deploy them together.
 - An async retrieve's whole H2D is queued on the same stream as the layerwise
   launches, so it can delay a layerwise layer by its copy time. Copying 1 GiB
   takes about 20-40 ms.

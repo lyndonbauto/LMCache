@@ -23,6 +23,21 @@ message QueryPrefetchStatusResponse {
   optional int64 chunk_count = 1;
 }
 
+message PrefetchStatusWithMode {
+  int64 found_chunks = 1;
+  // LoadMode value: "layerwise" or "async".
+  string load_mode = 2;
+}
+
+message QueryPrefetchStatusWithModeRequest {
+  string request_id = 1;
+}
+
+// status is unset while the prefetch is still in progress.
+message QueryPrefetchStatusWithModeResponse {
+  PrefetchStatusWithMode status = 1;
+}
+
 message WaitPrefetchStatusRequest {
   string request_id = 1;
   double timeout = 2;
@@ -57,6 +72,8 @@ service LookupService {
   rpc Lookup(LookupRequest) returns (LookupResponse);
   rpc QueryPrefetchStatus(QueryPrefetchStatusRequest)
       returns (QueryPrefetchStatusResponse);
+  rpc QueryPrefetchStatusWithMode(QueryPrefetchStatusWithModeRequest)
+      returns (QueryPrefetchStatusWithModeResponse);
   rpc WaitPrefetchStatus(WaitPrefetchStatusRequest)
       returns (WaitPrefetchStatusResponse);
   rpc QueryPrefetchLookupHits(QueryPrefetchLookupHitsRequest)

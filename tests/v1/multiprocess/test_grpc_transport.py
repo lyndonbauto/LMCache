@@ -26,6 +26,8 @@ from lmcache.v1.multiprocess.custom_types import (
     CBUnifiedLookupResult,
     IPCCacheServerKey,
     KVCache,
+    LoadMode,
+    PrefetchStatusWithMode,
     PrepareRetrieveResponse,
     PrepareStoreResponse,
     RegisterEngineDrivenContextPayload,
@@ -575,3 +577,40 @@ def test_register_kv_cache_layerwise_response_survives_grpc_round_trip() -> None
     assert response == expected
     assert response.server_use_layerwise is True
     assert response.layer_event_ipc_handles == [b"event-a", b"event-b"]
+
+
+def test_query_prefetch_status_with_mode_survives_grpc_round_trip() -> None:
+    """The status and its load mode cross gRPC; a pending prefetch stays None."""
+    statuses = {
+        "done": PrefetchStatusWithMode(found_chunks=7, load_mode=LoadMode.ASYNC)
+    }
+
+    class _StatusModule:
+        @request_handler(
+            RequestType.QUERY_PREFETCH_STATUS_WITH_MODE, HandlerType.BLOCKING
+        )
+        def query_prefetch_status_with_mode(
+            self, request_id: str
+        ) -> PrefetchStatusWithMode | None:
+            return statuses.get(request_id)
+
+    server = GrpcMultiprocessServer(
+        "grpc://127.0.0.1:0",
+        max_cpu_workers=2,
+        max_gpu_workers=1,
+        grpc_server_workers=4,
+    )
+    server.add_modules([_StatusModule()])
+    server.start()
+    client = GrpcMultiprocessClient(  # type: ignore[abstract]
+        f"grpc://127.0.0.1:{server.bound_port}"
+    )
+    try:
+        done = client.query_prefetch_status_with_mode("done").result(timeout=5)
+        pending = client.query_prefetch_status_with_mode("pending").result(timeout=5)
+    finally:
+        client.close()
+        server.close()
+
+    assert done == PrefetchStatusWithMode(found_chunks=7, load_mode=LoadMode.ASYNC)
+    assert pending is None
