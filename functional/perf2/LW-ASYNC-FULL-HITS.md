@@ -1,7 +1,11 @@
 # Layerwise: load full hits outside the forward pass (Task C design)
 
-Status: implemented on `prototype-stage-1g` (`01c52fdd`, on 1f's `8191c2ca`, not
-pushed); unit tests that need the native extension and the box runs are pending.
+Status: implemented on `prototype-stage-1g` (on 1f's `8191c2ca`). Unit tests pass
+on the CPU VM (`lmcache-vm`, vLLM 0.27.1 without deps): `tests/v1/layerwise`,
+`tests/v1/multiprocess` and the connector and adapter tests, 1484 passed, 51
+skipped (GPU, CUDA, cupy or Rust only), 1 failure that predates 1g
+(`test_client.py::test_business_callers_create_clients_through_factory`, a
+source scan of `test_deferred_response.py`). Box runs pending.
 Plan: `LW-ITL-FIX-PLAN.md` Task C. Evidence: `LW-PER-STEP-GRAPH.md`.
 
 ## As implemented (differences from the design below)
@@ -26,9 +30,9 @@ Plan: `LW-ITL-FIX-PLAN.md` Task C. Evidence: `LW-PER-STEP-GRAPH.md`.
    (wire id 34) returns `PrefetchStatusWithMode(found_chunks, load_mode)` or `None`
    while pending. The scheduler adapter sends it only when
    `lmcache.mp.use_layerwise` is on, so aon clients and servers are unaffected; a
-   layerwise worker needs a 1g server (deploy together). There is no gRPC binding
-   yet, so layerwise over the gRPC transport is not supported. With several
-   servers, a request is LAYERWISE if any server says so.
+   layerwise worker needs a 1g server (deploy together). gRPC carries it as
+   `LookupService.QueryPrefetchStatusWithMode`. With several servers, a request
+   is LAYERWISE if any server says so.
 5. **Mismatch guard** logs a warning and loads the deferred keys whole; no counter.
 6. **Submission order:** a step's layerwise retrieves are submitted before its
    async ones, so an async H2D copy does not delay the first layers (risk 1 is
