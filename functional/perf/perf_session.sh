@@ -30,6 +30,20 @@
 #                                      first. Name M<P>_L<L>_c<c>, results in
 #                                      <name>_full and <name>_part (outcomes
 #                                      and LMCache error counts cover both)
+#   trace file=<f> name=<n> [calib=1]  replay a make_trace.py trace open loop
+#                                      (perf_client.py --trace). The LMCache
+#                                      server is restarted first (L1 empty)
+#                                      and not during the trace; fresh
+#                                      segments are salted per session and
+#                                      name. Writes reqlog_<tag>_<n>.txt (per
+#                                      request: lookup found_count, retrieve
+#                                      outcome) and modes_<tag>_<n>.txt (vLLM
+#                                      "load mode" lines with a load). calib=1:
+#                                      skip the remaining steps if the trace
+#                                      was unstable (report_mixed.py stable)
+#   tracestore file=<f> [inflight=<k>] send a store trace (documents), k in
+#                                      flight (4), then wait until L2 writes
+#                                      stop
 #   restart                            restart the LMCache server only
 #   sleep secs=<s>
 # Environment: LMC_EXTRA (LMCache server flags after the common ones), L1_GB
@@ -218,6 +232,32 @@ send() {
   fi
   return $rc
 }
+# send_trace <name> <file> <inflight> <salt>
+send_trace() {
+  local name=$1 file=$2 inflight=$3 salt=$4 mark=0 vmark=0
+  [ -f "$LOG" ] && mark=$(wc -l < "$LOG")
+  vmark=$(wc -l < "$VLOG")
+  echo "$mark $vmark" > "$OUT/logmark_${TAG}_$name.txt"
+  python "$HERE/perf_client.py" --trace "$file" --max-inflight "$inflight" --suffix-salt "$salt" \
+    --timeout "${SEND_TIMEOUT:-3600}" --metrics-urls "$(metrics_urls)" --tag "${TAG}_$name" \
+    --out "$OUT/${TAG}_$name.json"
+  local rc=$?
+  if [ -f "$LOG" ]; then
+    tail -n +"$((mark + 1))" "$LOG" | grep -oE 'pipelined_outcome=[A-Za-z_]+' | sort | uniq -c \
+      | awk '{printf "%s%s:%s", (NR>1?",":""), substr($2,19), $1}' > "$OUT/outcomes_${TAG}_$name.txt"
+    tail -n +"$((mark + 1))" "$LOG" | grep -cE 'Traceback|ERROR' > "$OUT/lmcerrors_${TAG}_$name.txt"
+    tail -n +"$((mark + 1))" "$LOG" | grep -oE 'MP (lookup/prefetch end: session=cmpl-mx[0-9]+r[0-9]+-[^ ]* found_count=[0-9]+|retrieve end: session=cmpl-mx[0-9]+r[0-9]+-[^ ]* device=[^ ]* retrieved_count=[0-9]+ pipelined_outcome=[A-Za-z_]+)' \
+      > "$OUT/reqlog_${TAG}_$name.txt"
+    say "outcomes $name: $(cat "$OUT/outcomes_${TAG}_$name.txt"); LMCache error lines: $(cat "$OUT/lmcerrors_${TAG}_$name.txt"); \
+request log lines: $(wc -l < "$OUT/reqlog_${TAG}_$name.txt")"
+  fi
+  tail -n +"$((vmark + 1))" "$VLOG" | grep -oE 'Need to load is [1-9][0-9]*, load mode is [a-z]+' | awk '{print $NF}' \
+    | sort | uniq -c | awk '{printf "%s%s:%s", (NR>1?",":""), $2, $1}' > "$OUT/modes_${TAG}_$name.txt"
+  echo " engine_errors:$(tail -n +"$((vmark + 1))" "$VLOG" | grep -cE 'EngineDeadError|LayerProgress[A-Za-z]*TimeoutError')" \
+    >> "$OUT/modes_${TAG}_$name.txt"
+  say "vLLM load modes $name: $(tr -d '\n' < "$OUT/modes_${TAG}_$name.txt")"
+  return $rc
+}
 # engine_stopped: with STOP_ON_ENGINE_STOP=1, true (and engine_stopped_<tag>.txt
 # written) if vLLM is dead after a point; uses the step's c and len.
 engine_stopped() {
@@ -235,10 +275,11 @@ start_vllm || exit 1
 warm "after vLLM start" 600 || exit 1
 for step in "$@"; do
   read -r verb rest <<< "$step"
-  len=8192; ids=0-31; conc=8; c=1; n=""; pre=0
+  len=8192; ids=0-31; conc=8; c=1; n=""; pre=0; file=""; name=""; inflight=4; calib=0
   for kv in $rest; do
     case $kv in len=*) len=${kv#len=};; ids=*) ids=${kv#ids=};; conc=*) conc=${kv#conc=};;
-      pre=*) pre=${kv#pre=};;
+      pre=*) pre=${kv#pre=};; file=*) file=${kv#file=};; name=*) name=${kv#name=};;
+      inflight=*) inflight=${kv#inflight=};; calib=*) calib=${kv#calib=};;
       c=*) c=${kv#c=};; n=*) n=${kv#n=};; secs=*) secs=${kv#secs=};; esac
   done
   case $verb in
@@ -265,6 +306,20 @@ for step in "$@"; do
       send "${pname}_part" "$len" "$n-$((2 * n - 1))" "$c" "$pre" "$salt" || say "mix ${pname}_part had errors"
       wait "$fpid" || say "mix ${pname}_full had errors"
       engine_stopped && break;;
+    trace) [ -n "$file" ] && [ -n "$name" ] || { say "trace needs file= and name=: $step"; exit 1; }
+      ensure_vllm || exit 1
+      [ "$CONNECTOR" = 1 ] && { restart_server || exit 1; }
+      salt=$(printf '%s' "${PART_SALT_TAG:-$TAG} $name" | cksum | cut -d' ' -f1)
+      say "trace $name file=$file salt=$salt"
+      send_trace "$name" "$file" 0 "$salt" || say "trace $name had errors"
+      if [ "$calib" = 1 ] && ! python "$HERE/../perf2/scripts/report_mixed.py" stable "$OUT/${TAG}_$name.json"; then
+        say "trace $name was unstable; skipping the remaining steps"; break
+      fi;;
+    tracestore) [ -n "$file" ] || { say "tracestore needs file=: $step"; exit 1; }
+      say "tracestore file=$file inflight=$inflight"
+      send_trace "store_$(basename "$file" .json)" "$file" "$inflight" 0 || say "tracestore had errors"; settle
+      python "$HARNESS/as_info.py" "$L2_PORT" namespace/lmcache > "$OUT/l2stat_${TAG}_tracestore.txt"
+      say "tracestore done: $(tr ';' '\n' < "$OUT/l2stat_${TAG}_tracestore.txt" | grep -E '^(objects|data_used_bytes)=' | paste -sd' ')";;
     restart) restart_server || exit 1;;
     sleep) sleep "$secs";;
     *) say "unknown step $step"; exit 1;;

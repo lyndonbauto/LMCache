@@ -34,6 +34,8 @@
 #              fio in the kv-sink container (FIO_DIRS)
 #   exp_start, exp_aon, exp_tcplw, exp_nocache, exp_lw, exp_timeline, exp_stop
 #              the lw investigation experiments (LW-EXPERIMENTS.md)
+#   mixed      one mixed-load session (MIX_NAME, MIX_MODE, MIX_STEPS; see
+#              sec_mixed), on exp_start's data file
 #   smoke      a short end-to-end check at 8k (2 prompts): store, aon point,
 #              lw point; validates the device namespace and shared records
 #   smoke2     cached2's 128k setup with one prompt: store, aon c=1 n=1, lw
@@ -396,6 +398,19 @@ sec_exp2_lw() { STOP_ON_ENGINE_STOP=1 session E_lw2${EXP_LW_TAG:-} lw $((L1_GEN_
 # output reference for an aon or lw session with the same PART_SALT_TAG.
 sec_exp2_nocache() { session E_nocache2${EXP_LW_TAG:-} nocache 1 "" "${EXP_PART[@]}"; }
 sec_exp_stop() { aero_stop_delete; }
+# mixed (LW-MIXED-LOAD-PROPOSAL.md): one session M_<MIX_NAME> in MIX_MODE (aon,
+# lw) running MIX_STEPS ("|"-separated perf_session.sh steps, e.g. tracestore
+# and trace), on exp_start's data file; L1 and L2 as exp2_aon / exp2_lw. A
+# vLLM engine stop does not end the session (the next trace restarts vLLM).
+sec_mixed() {
+  local steps=()
+  IFS='|' read -ra steps <<< "${MIX_STEPS:?MIX_STEPS is required}"
+  case ${MIX_MODE:?MIX_MODE is required} in
+    aon) session "M_${MIX_NAME:?}" aon "$L1_GEN_GB" "$AON_L2" "${steps[@]}";;
+    lw) session "M_${MIX_NAME:?}" lw $((L1_GEN_GB + WIN_GB)) "$LW_L2" "${steps[@]}";;
+    *) progress "mixed: unknown MIX_MODE $MIX_MODE"; return 1;;
+  esac
+}
 # Queue-pair scan (perf2 step 4), on one data file per length:
 #   qpstore:<len>    start the server, store prompts 0-31, aon points (CONCS)
 #                    (STORE_IDS, default 0-31)

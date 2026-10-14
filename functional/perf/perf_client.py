@@ -27,11 +27,20 @@ Prometheus counters from ``--metrics-urls`` are scraped before and after the
 point and their deltas stored (vLLM's external prefix cache hit tokens,
 LMCache's deferred retrieves by outcome).
 
+With ``--trace`` (a file from ``make_trace.py``), requests are sent open-loop
+at their trace times (``--max-inflight`` caps requests in flight; 0 = no cap),
+each with its own prompt and ``max_tokens``, and the header
+``X-Request-Id: mx<salt>r<i>`` (vLLM's request id becomes
+``cmpl-mx<salt>r<i>-...``, which the LMCache server log shows). Document
+segments are the same in every run; fresh segments are seeded by
+``--suffix-salt``.
+
 Usage::
 
     python perf_client.py --length 8192 --ids 0-3 --concurrency 1 \\
         --out point.json --metrics-urls http://127.0.0.1:8000/metrics
     python perf_client.py --warmup "Warm-up 1" --out warm.json
+    python perf_client.py --trace S1_r1.json --suffix-salt 7 --out trace.json
 
 Output JSON schema::
 
@@ -41,6 +50,13 @@ Output JSON schema::
      "requests": [{"id": int, "ttft_s": float, "total_s": float,
                    "max_gap_s": float, "out_tokens": int, "error": str}],
      "metrics_delta": {"<metric>{<labels>}": float}}
+
+With ``--trace``, ``requests`` entries also have ``cls``, ``t_sched`` (trace
+time), ``send_lag_s`` (actual minus scheduled send), ``rid``,
+``prompt_tokens``, ``hit_tokens``, ``src``, ``max_tokens`` and ``gaps_ms``
+(every wait between streamed chunks after the first, in ms), and the top
+level has ``trace`` (the trace file), ``scenario``, ``rate`` and
+``duration``.
 """
 
 # Standard
@@ -64,7 +80,16 @@ METRIC_PREFIXES = (
     "vllm:prompt_tokens_total",
     "vllm:generation_tokens_total",
     "lmcache_mp_num_deferred_retrieves_total",
+    "lmcache_mp_lookup_hit_l1_tokens_total",
+    "lmcache_mp_lookup_hit_l2_tokens_total",
+    "lmcache_mp_lookup_hit_tokens_total",
+    "lmcache_mp_lookup_requested_tokens_total",
+    "lmcache_mp_l1_evicted_chunks_total",
+    "lmcache_mp_l2_prefetch_load_completed_chunks_total",
+    "lmcache_mp_l2_store_completed_objects_chunks_total",
+    "vllm:num_preemptions_total",
 )
+DOC_FIRST_TOKEN = 990
 SAMPLE_RE = re.compile(r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+([-+0-9.eE]+|NaN)")
 LABEL_DROP_RE = re.compile(r'(engine|model_name|job|instance)="[^"]*",?')
 
@@ -117,6 +142,49 @@ def partial_prompt_tokens(
     return prompt_tokens(prefix, idx) + [int(t) for t in tail]
 
 
+def doc_tokens(length: int, doc: int) -> np.ndarray:
+    """Return the tokens of trace document ``doc`` of a given length.
+
+    The first token (``DOC_FIRST_TOKEN``) is used by no other prompt family,
+    so documents share no prefix with sweep or warm-up prompts.
+    """
+    rng = np.random.default_rng([length, doc, 31337])
+    toks = rng.integers(1000, 128000, size=length)
+    toks[0] = DOC_FIRST_TOKEN
+    return toks
+
+
+def trace_prompt(
+    segments: list[list[int | str]], salt: int, docs: dict[tuple[int, int], np.ndarray]
+) -> list[int]:
+    """Build a trace prompt from its segments.
+
+    Args:
+        segments: ``["d", length, doc]`` or ``["f", n, key]`` entries.
+        salt: Seed for fresh segments (one per run).
+        docs: Cache of document tokens, filled as documents are built.
+
+    Returns:
+        The prompt's token IDs.
+
+    Raises:
+        ValueError: On an unknown segment kind.
+    """
+    parts: list[np.ndarray] = []
+    for kind, n, key in segments:
+        if kind == "d":
+            k = (int(n), int(key))
+            if k not in docs:
+                docs[k] = doc_tokens(*k)
+            parts.append(docs[k])
+        elif kind == "f":
+            rng = np.random.default_rng([salt, int(key), int(n), 4711])
+            parts.append(rng.integers(1000, 128000, size=int(n)))
+        else:
+            raise ValueError(f"unknown segment kind {kind!r}")
+    return [int(t) for t in np.concatenate(parts)]
+
+
 def parse_ids(spec: str) -> list[int]:
     """Parse ``"0-3"`` or ``"0,2,5"`` (or a mix) into a list of indices.
 
@@ -167,13 +235,22 @@ async def one_request(
     prompt: list[int] | str,
     max_tokens: int,
     timeout: float,
-) -> dict[str, float | int | str]:
+    request_id: str = "",
+) -> dict[str, float | int | str | list[float]]:
     """Send one streaming completion and time it.
 
+    Args:
+        session: The HTTP session.
+        url: vLLM's base URL.
+        prompt: Token IDs or text.
+        max_tokens: Output tokens (``ignore_eos`` is set, so exactly this many).
+        timeout: Total request timeout in seconds.
+        request_id: Sent as ``X-Request-Id`` if non-empty.
+
     Returns:
-        ``ttft_s``, ``total_s``, ``max_gap_s``, ``out_tokens``, ``text`` (the
-        generated text, for comparing outputs across runs) and ``error``
-        ("" on success).
+        ``ttft_s``, ``total_s``, ``max_gap_s``, ``gaps_ms`` (every gap, ms),
+        ``out_tokens``, ``text`` (the generated text, for comparing outputs
+        across runs) and ``error`` ("" on success).
     """
     body = {
         "model": MODEL,
@@ -187,13 +264,16 @@ async def one_request(
     t0 = time.perf_counter()
     t_first = t_last = 0.0
     max_gap = 0.0
+    gaps: list[float] = []
     out_tokens = 0
     pieces: list[str] = []
     error = ""
+    headers = {"X-Request-Id": request_id} if request_id else {}
     try:
         async with session.post(
             f"{url}/v1/completions",
             json=body,
+            headers=headers,
             timeout=aiohttp.ClientTimeout(total=timeout),
         ) as r:
             if r.status != 200:
@@ -221,6 +301,7 @@ async def one_request(
                             t_first = now
                         else:
                             max_gap = max(max_gap, now - t_last)
+                            gaps.append(round((now - t_last) * 1000, 2))
                         t_last = now
     except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as e:
         error = f"{type(e).__name__}: {e}"[:300]
@@ -230,14 +311,84 @@ async def one_request(
         "ttft_s": t_first - t0 if t_first else -1.0,
         "total_s": t_last - t0 if t_last else -1.0,
         "max_gap_s": max_gap,
+        "gaps_ms": gaps,
         "out_tokens": out_tokens,
         "text": "".join(pieces),
         "error": error,
     }
 
 
+async def run_trace(args: argparse.Namespace) -> dict:
+    """Replay a ``make_trace.py`` trace open-loop and return the result dict."""
+    with open(args.trace) as f:
+        trace = json.load(f)
+    metrics_urls = [u for u in args.metrics_urls.split(",") if u]
+    docs: dict[tuple[int, int], np.ndarray] = {}
+    gate = asyncio.Semaphore(args.max_inflight) if args.max_inflight > 0 else None
+    results: list[dict] = []
+    conn = aiohttp.TCPConnector(limit=0)
+    async with aiohttp.ClientSession(connector=conn) as session:
+
+        async def fire(req: dict, prompt: list[int], t0: float) -> None:
+            rid = f"mx{args.suffix_salt}r{req['i']}"
+            if gate is not None:
+                await gate.acquire()
+            try:
+                lag = time.perf_counter() - t0 - req["t"]
+                res = await one_request(
+                    session, args.url, prompt, req["max_tokens"], args.timeout, rid
+                )
+            finally:
+                if gate is not None:
+                    gate.release()
+            res.pop("text")
+            res.update(
+                id=req["i"],
+                cls=req["cls"],
+                t_sched=req["t"],
+                send_lag_s=round(lag, 4),
+                rid=rid,
+                prompt_tokens=len(prompt),
+                hit_tokens=req["hit_tokens"],
+                src=req["src"],
+                max_tokens=req["max_tokens"],
+            )
+            results.append(res)
+
+        before = await scrape(session, metrics_urls)
+        tasks: list[asyncio.Task] = []
+        t0 = time.perf_counter()
+        for req in trace["requests"]:
+            # Build the prompt before its send time, so building never delays it.
+            prompt = trace_prompt(req["prompt"], args.suffix_salt, docs)
+            delay = t0 + req["t"] - time.perf_counter()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            tasks.append(asyncio.create_task(fire(req, prompt, t0)))
+        await asyncio.gather(*tasks)
+        wall = time.perf_counter() - t0
+        await asyncio.sleep(1.0)
+        after = await scrape(session, metrics_urls)
+    delta = {k: after[k] - before.get(k, 0.0) for k in after}
+    return {
+        "tag": args.tag,
+        "trace": args.trace,
+        "kind": trace["kind"],
+        "scenario": trace["scenario"],
+        "rate": trace["rate"],
+        "duration": trace["duration"],
+        "suffix_salt": args.suffix_salt,
+        "n": len(results),
+        "wall_s": wall,
+        "requests": sorted(results, key=lambda r: r["id"]),
+        "metrics_delta": delta,
+    }
+
+
 async def run(args: argparse.Namespace) -> dict:
     """Run one point (or one warm-up request) and return the result dict."""
+    if args.trace:
+        return await run_trace(args)
     metrics_urls = [u for u in args.metrics_urls.split(",") if u]
     conn = aiohttp.TCPConnector(limit=0)
     async with aiohttp.ClientSession(connector=conn) as session:
@@ -335,11 +486,18 @@ def main() -> None:
         default=0,
         help="with --warmup: send a fixed prompt of this many token IDs instead",
     )
+    p.add_argument("--trace", default="", help="replay this make_trace.py file")
+    p.add_argument(
+        "--max-inflight",
+        type=int,
+        default=0,
+        help="with --trace: cap on requests in flight (0: none, open loop)",
+    )
     p.add_argument("--out", required=True)
     args = p.parse_args()
     result = asyncio.run(run(args))
     with open(args.out, "w") as f:
-        json.dump(result, f, indent=1)
+        json.dump(result, f, indent=None if args.trace else 1)
     reqs = result["requests"]
     errs = [r for r in reqs if r["error"]]
     ok = [r for r in reqs if not r["error"]]
