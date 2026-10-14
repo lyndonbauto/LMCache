@@ -132,6 +132,10 @@ class ZmqMultiprocessClient(RequestClient):
         """Query a prefetch task without blocking for completion."""
         return self._call(RequestType.QUERY_PREFETCH_STATUS, request_id)
 
+    def query_prefetch_status_with_mode(self, request_id: str) -> MessagingFuture[Any]:
+        """Query a prefetch task, and the load mode of its retrieve."""
+        return self._call(RequestType.QUERY_PREFETCH_STATUS_WITH_MODE, request_id)
+
     def wait_prefetch_status(
         self, request_id: str, timeout: float
     ) -> MessagingFuture[Any]:

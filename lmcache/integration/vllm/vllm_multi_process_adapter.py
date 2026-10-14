@@ -25,6 +25,8 @@ from lmcache.v1.gpu_connector.utils import LayoutHints
 from lmcache.v1.multiprocess.custom_types import (
     BlockAllocationRecord,
     IPCCacheServerKey,
+    LoadMode,
+    PrefetchStatusWithMode,
 )
 from lmcache.v1.multiprocess.group_view import (
     EngineGroupInfo,
@@ -742,6 +744,7 @@ class LMCacheMPSchedulerAdapter:
                 ExtraConfigDefault.nonblocking_lookup_status.name
             ]
         self._mq_timeout = mq_timeout
+        self._use_layerwise = is_layerwise_enabled(extra_config)
 
         # Lookup state tracking:
         # - _pending_lookups: request_ids submitted but not yet resolved
@@ -753,10 +756,13 @@ class LMCacheMPSchedulerAdapter:
         #   even after the server has already popped the job (exactly-once).
         # - _per_server_hits: {request_id: {server_url: hit_chunks}}.
         #   Per-server hit counts, used to detect disagreement and free tail locks.
+        # - _layerwise_lookups: request_ids some server said load layerwise
+        #   (only queried with layerwise on; see lookup_load_mode).
         self._pending_lookups: set[str] = set()
         self._unacked_lookups: dict[str, _LookupAck] = {}
         self._finished_lookup_results: dict[str, int] = {}
         self._per_server_hits: dict[str, dict[str, int]] = {}
+        self._layerwise_lookups: set[str] = set()
         # request_id -> server URL -> (in-flight status future, submission time).
         self._lookup_status: dict[
             str, dict[str, tuple[MessagingFuture[Any], float]]
@@ -1028,8 +1034,11 @@ class LMCacheMPSchedulerAdapter:
         for url in unresolved_urls:
             # Keep the same future until its reply arrives; never restart a poll.
             if url not in futures:
+                client = self.req_clients[url]
                 futures[url] = (
-                    self.req_clients[url].query_prefetch_status(request_id),
+                    client.query_prefetch_status_with_mode(request_id)
+                    if self._use_layerwise
+                    else client.query_prefetch_status(request_id),
                     time.monotonic(),
                 )
 
@@ -1053,6 +1062,10 @@ class LMCacheMPSchedulerAdapter:
                 return 0
             if r is None:
                 continue
+            if isinstance(r, PrefetchStatusWithMode):
+                if r.load_mode is LoadMode.LAYERWISE:
+                    self._layerwise_lookups.add(request_id)
+                r = r.found_chunks
             per_server[url] = int(r)
 
         if len(per_server) < len(self._server_urls):
@@ -1081,6 +1094,26 @@ class LMCacheMPSchedulerAdapter:
         """
         return self.blocks_in_chunk
 
+    def lookup_load_mode(self, request_id: str) -> LoadMode:
+        """Return how a finished lookup's hits must load.
+
+        Valid once :meth:`check_lookup_result` returned a count, until
+        :meth:`cleanup_lookup_result`. With several servers the request
+        loads layerwise if any server said so, since only a layerwise
+        retrieve fetches the keys a server deferred.
+
+        Args:
+            request_id: The request whose lookup finished.
+
+        Returns:
+            :attr:`LoadMode.ASYNC` when ``lmcache.mp.use_layerwise`` is off
+            or no server chose layerwise (including a lookup that ended
+            early with no hit), else :attr:`LoadMode.LAYERWISE`.
+        """
+        if self._use_layerwise and request_id in self._layerwise_lookups:
+            return LoadMode.LAYERWISE
+        return LoadMode.ASYNC
+
     def cleanup_lookup_result(self, request_id: str) -> None:
         """
         Clean up lookup state for a finished request to prevent memory leak.
@@ -1092,6 +1125,7 @@ class LMCacheMPSchedulerAdapter:
         self._lookup_status.pop(request_id, None)
         self._finished_lookup_results.pop(request_id, None)
         self._per_server_hits.pop(request_id, None)
+        self._layerwise_lookups.discard(request_id)
         self._lookup_params.pop(request_id, None)
 
     def shutdown(self) -> None:
@@ -1829,6 +1863,7 @@ class LMCacheMPWorkerAdapter:
         event: _IpcEvent | None,
         cache_salt: str = "",
         request_configs: dict[str, Any] | None = None,
+        load_mode: LoadMode = LoadMode.LAYERWISE,
     ) -> None:
         """
         Submit a KV cache retrieve request to LMCache
@@ -1836,6 +1871,11 @@ class LMCacheMPWorkerAdapter:
         When the server is unhealthy the request is not submitted: blocks
         are flagged via ``error_block_ids`` (vLLM recomputes) and the id is
         recorded so ``get_finished`` still reports it exactly once.
+
+        With layerwise load on, only a :attr:`LoadMode.LAYERWISE` retrieve
+        is one this step's layer waits cover, so only it is flagged by
+        :meth:`report_failed_layer_load`. An async one finishes before vLLM
+        schedules its request and reports failure through its future.
 
         Args:
             request_id: The ID of the request
@@ -1845,6 +1885,8 @@ class LMCacheMPWorkerAdapter:
             cache_salt: Per-user isolation salt.
             request_configs: Optional LMCache request configs to include in
                 the IPC key.
+            load_mode: How the lookup said this retrieve loads; ignored
+                with layerwise load off.
         """
         self._ensure_heartbeat_started()
 
@@ -1875,9 +1917,11 @@ class LMCacheMPWorkerAdapter:
             event,
             self.blocks_in_chunk,
             skip_first_n_tokens=op.skip_first_n_tokens,
+            load_mode=load_mode,
         )
         self.retrieve_futures[request_id] = (future, op.flat_block_ids)
-        self._current_step_retrieves.add(request_id)
+        if load_mode is LoadMode.LAYERWISE:
+            self._current_step_retrieves.add(request_id)
         self._retrieves_reported_failed.discard(request_id)
         if event is not None:
             self.retrieve_events[request_id] = event
@@ -1939,6 +1983,7 @@ class LMCacheMPWorkerAdapter:
         event: _IpcEvent | None,
         cache_salts: list[str] | None = None,
         request_configs_list: list[dict[str, Any] | None] | None = None,
+        load_modes: list[LoadMode] | None = None,
     ):
         """
         Submit a batched retrieve request to LMCache
@@ -1954,23 +1999,36 @@ class LMCacheMPWorkerAdapter:
                 request_ids.
             request_configs_list: Optional LMCache request configs, one per
                 request.
+            load_modes: Per request, see :meth:`submit_retrieve_request`. If
+                None, every request is :attr:`LoadMode.LAYERWISE`.
+
+        Raises:
+            ValueError: If the per-request lists differ in length.
         """
         if cache_salts is None:
             cache_salts = [""] * len(request_ids)
         if request_configs_list is None:
             request_configs_list = [None] * len(request_ids)
+        if load_modes is None:
+            load_modes = [LoadMode.LAYERWISE] * len(request_ids)
         if not (
             len(request_ids)
             == len(ops)
             == len(cache_salts)
             == len(request_configs_list)
+            == len(load_modes)
         ):
             raise ValueError(
-                "request_ids, ops, cache_salts, and request_configs_list "
-                "must have the same length"
+                "request_ids, ops, cache_salts, request_configs_list, and "
+                "load_modes must have the same length"
             )
-        for request_id, op, salt, request_configs in zip(
-            request_ids, ops, cache_salts, request_configs_list, strict=True
+        for request_id, op, salt, request_configs, load_mode in zip(
+            request_ids,
+            ops,
+            cache_salts,
+            request_configs_list,
+            load_modes,
+            strict=True,
         ):
             self.submit_retrieve_request(
                 request_id,
@@ -1978,6 +2036,7 @@ class LMCacheMPWorkerAdapter:
                 event,
                 cache_salt=salt,
                 request_configs=request_configs,
+                load_mode=load_mode,
             )
 
     def _process_finished_stores(

@@ -25,6 +25,7 @@ from lmcache.integration.vllm.vllm_multi_process_adapter import (
     LoadStoreOp,
     ParallelStrategy,
 )
+from lmcache.v1.multiprocess.custom_types import LoadMode
 from lmcache.v1.multiprocess.group_view import EngineGroupInfo
 from lmcache.v1.multiprocess.ping import PingOutcome
 from lmcache.v1.multiprocess.transport.base import RequestClient
@@ -695,6 +696,65 @@ def test_failed_layer_load_leaves_earlier_step_retrieves_alone(fake_adapter) -> 
 
     assert adapter.report_failed_layer_load() == {9}
     assert adapter.get_block_ids_with_load_errors() == {9}
+
+
+def test_retrieves_carry_their_load_mode_to_the_transfer_context(
+    fake_adapter,
+) -> None:
+    adapter, _send_mock, _future = fake_adapter
+    _pending_retrieve_ctx(adapter)
+
+    adapter.batched_submit_retrieve_requests(
+        ["req-lw", "req-async"],
+        [_op([[1]]), _op([[2]])],
+        None,
+        load_modes=[LoadMode.LAYERWISE, LoadMode.ASYNC],
+    )
+
+    calls = adapter.transfer_ctx.submit_retrieve.call_args_list
+    assert [c.kwargs["load_mode"] for c in calls] == [
+        LoadMode.LAYERWISE,
+        LoadMode.ASYNC,
+    ]
+
+
+def test_retrieves_without_a_mode_load_layerwise(fake_adapter) -> None:
+    adapter, _send_mock, _future = fake_adapter
+    _pending_retrieve_ctx(adapter)
+
+    adapter.batched_submit_retrieve_requests(["req-a"], [_op([[1]])], None)
+
+    call = adapter.transfer_ctx.submit_retrieve.call_args
+    assert call.kwargs["load_mode"] is LoadMode.LAYERWISE
+
+
+def test_failed_layer_load_leaves_async_retrieves_alone(fake_adapter) -> None:
+    """An async retrieve is outside the step's layer waits; its own future
+    reports its failure."""
+    adapter, _send_mock, _future = fake_adapter
+    futures = _pending_retrieve_ctx(adapter)
+    adapter.batched_submit_retrieve_requests(
+        ["req-lw", "req-async"],
+        [_op([[1]]), _op([[2]])],
+        None,
+        load_modes=[LoadMode.LAYERWISE, LoadMode.ASYNC],
+    )
+
+    assert adapter.report_failed_layer_load() == {1}
+
+    _resolve(futures["req-async"], False)
+    adapter.get_finished(set())
+    assert adapter.get_block_ids_with_load_errors() == {1, 2}
+
+
+def test_mismatched_load_modes_are_rejected(fake_adapter) -> None:
+    adapter, _send_mock, _future = fake_adapter
+    _pending_retrieve_ctx(adapter)
+
+    with pytest.raises(ValueError, match="load_modes"):
+        adapter.batched_submit_retrieve_requests(
+            ["req-a"], [_op([[1]])], None, load_modes=[]
+        )
 
 
 def test_failed_layer_load_with_no_retrieves_reports_nothing(fake_adapter) -> None:

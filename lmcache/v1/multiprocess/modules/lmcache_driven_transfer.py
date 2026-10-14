@@ -1356,8 +1356,11 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                     (event_backend.export_event(event, cache_context.device), False)
                 )
 
+            # The worker tags only a LoadMode.LAYERWISE retrieve with a
+            # generation; an async one (generation 0) loads whole here.
             layerwise_active = (
                 self._ctx.use_layerwise
+                and retrieve_generation > 0
                 and getattr(entry, "layerwise_schedule", None) is not None
                 and getattr(entry, "retrieve_sequencer", None) is not None
             )
@@ -1469,11 +1472,6 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
                         run.prefetched_keys.extend(l1_keys)
 
                 if layerwise_active and run.succeeded:
-                    if retrieve_generation <= 0:
-                        raise ValueError(
-                            "layerwise retrieve requires a positive "
-                            "retrieve_generation from the worker"
-                        )
                     future = self._hand_off_layerwise_retrieve(run)
                     handed_off = True
                     return DeferredResponse(future)
@@ -1653,6 +1651,15 @@ class LMCacheDrivenTransferModule(InstanceLivenessTarget):
         reused = tuple(resolution.reused)
         if not to_fetch:
             return _DeferredKeys(locked=reused, outcome=PipelinedOutcome.REUSED)
+        if not layerwise_active:
+            # The lookup reported LoadMode.LAYERWISE for every deferral, so
+            # only a worker that ignored the mode gets here.
+            logger.warning(
+                "Async retrieve for request %s claimed %d deferred key(s); "
+                "loading them whole",
+                key.request_id,
+                len(to_fetch),
+            )
         try:
             self._ctx.pipelined_models.find(model_name, key.world_size)
         except KeyError:

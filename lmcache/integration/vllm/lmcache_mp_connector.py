@@ -67,6 +67,7 @@ from lmcache.integration.vllm.utils import (
     vllm_layout_hints,
 )
 from lmcache.utils import init_logger as lmcache_init_logger
+from lmcache.v1.multiprocess.custom_types import LoadMode
 from lmcache.v1.multiprocess.layer_progress import LayerProgressRetrieveFailedError
 
 try:
@@ -703,6 +704,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
                 extra_config=vllm_config.kv_transfer_config.kv_connector_extra_config,
             )
             self._layer_name_to_index: dict[str, int] = {}
+            # LoadMode.ASYNC retrieves submitted but not yet reported finished.
+            self._async_retrieves: set[str] = set()
             if self.transfer_intermediate_tensors:
                 # First Party
                 from lmcache.integration.vllm.experimental import (
@@ -851,14 +854,21 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         ops = []
         cache_salts = []
         request_configs_list = []
+        load_modes = []
 
-        for meta in metadata.requests:
-            if meta.direction != "RETRIEVE":
-                continue
+        # Layerwise retrieves go first: the server hands each to its
+        # layerwise pool at once, while an async one loads whole on the same
+        # server thread and would delay the layerwise ones behind it.
+        retrieves = [meta for meta in metadata.requests if meta.direction == "RETRIEVE"]
+        retrieves.sort(key=lambda meta: meta.load_mode is not LoadMode.LAYERWISE)
+        for meta in retrieves:
             request_ids.append(meta.request_id)
             ops.append(meta.op)
             cache_salts.append(meta.cache_salt)
             request_configs_list.append(meta.request_configs)
+            load_modes.append(meta.load_mode)
+            if self.use_layerwise and meta.load_mode is LoadMode.ASYNC:
+                self._async_retrieves.add(meta.request_id)
 
         if len(request_ids) == 0:
             return
@@ -871,6 +881,7 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             event,
             cache_salts=cache_salts,
             request_configs_list=request_configs_list,
+            load_modes=load_modes,
         )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
@@ -1031,7 +1042,8 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             tuple of (sending/saving ids, recving/loading ids).
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one). With layerwise
-            load on, the recving ids are always ``None``: those loads are
+            load on, the recving ids hold only :attr:`LoadMode.ASYNC`
+            retrieves (``None`` when there are none): layerwise loads are
             synchronous.
         """
         if self.lazy_offload:
@@ -1048,8 +1060,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             # WAITING_FOR_REMOTE_KVS, when its retrieve completes. vLLM's
             # scheduler asserts on a finished-receiving report for a running
             # request. Failed loads reach it through
-            # get_block_ids_with_load_errors instead.
-            finished_recving = None
+            # get_block_ids_with_load_errors instead. Async ones are parked
+            # and must be reported.
+            finished_async = (finished_recving or set()) & self._async_retrieves
+            self._async_retrieves -= finished_async
+            finished_recving = finished_async or None
         return finished_sending, finished_recving
 
     def build_connector_worker_meta(self):
@@ -1148,8 +1163,13 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         Notes:
             When MP layerwise load is enabled (``lmcache.mp.use_layerwise`` on
-            the worker and ``--use-layerwise`` on the server), the second
-            element is always ``False`` even when tokens must be loaded, so
+            the worker and ``--use-layerwise`` on the server), the server
+            picks a :class:`LoadMode` per request at lookup (see
+            ``--layerwise-min-new-token-ratio``). A
+            :attr:`LoadMode.ASYNC` request (a full or nearly full hit) loads
+            as without layerwise: the second element is ``True``. For a
+            :attr:`LoadMode.LAYERWISE` request the second element is
+            ``False`` even when tokens must be loaded, so
             vLLM enters the forward pass immediately and blocks inside
             attention via :meth:`wait_for_layer_load` instead of parking in
             ``WAITING_FOR_REMOTE_KVS``. Per-layer wait timeouts use
@@ -1226,8 +1246,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         # A request held for a later step is asked again from scratch, so
         # nothing below may run for it before it is admitted.
         tokens_to_load = self._tokens_to_load(request, num_computed_tokens, ret)
+        load_mode = self.scheduler_adapter.lookup_load_mode(request.request_id)
+        layerwise_load = self.use_layerwise and load_mode is LoadMode.LAYERWISE
         if (
-            self.use_layerwise
+            layerwise_load
             and tokens_to_load > 0
             and not self._admission.admit(
                 request.request_id, tokens_to_load * self._kv_bytes_per_token
@@ -1254,13 +1276,17 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
         tracker.increase_num_stored_tokens(ret)
 
         tracker.num_lmcache_hit_tokens = ret
+        tracker.load_mode = LoadMode.LAYERWISE if layerwise_load else LoadMode.ASYNC
 
         need_to_load = tokens_to_load
 
         logger.debug(
-            "vLLM hit is: %d, Need to load is %d", num_computed_tokens, need_to_load
+            "vLLM hit is: %d, Need to load is %d, load mode is %s",
+            num_computed_tokens,
+            need_to_load,
+            tracker.load_mode.value,
         )
-        load_async = need_to_load > 0 and not self.use_layerwise
+        load_async = need_to_load > 0 and not layerwise_load
         return need_to_load, load_async
 
     def on_new_request(self, request: "Request") -> None:
@@ -1565,9 +1591,11 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
 
         A full CUDA graph replay skips :meth:`wait_for_layer_load` and
         :meth:`save_kv_layer`. A step needs them when :meth:`start_load_kv`
-        submits a retrieve, i.e. when ``metadata`` has any ``RETRIEVE``
-        request; a full-hit load schedules one token, so such a step can look
-        like a pure decode batch to vLLM. With the experimental dispatcher on,
+        submits a layerwise retrieve, i.e. when ``metadata`` has a
+        ``RETRIEVE`` request in :attr:`LoadMode.LAYERWISE`; a full-hit load
+        schedules one token, so such a step can look like a pure decode
+        batch to vLLM. An async retrieve has no layer waits: its request is
+        not computed until the load finished. With the experimental dispatcher on,
         ``save_kv_layer`` does work in every step, so every step needs them.
 
         Args:
@@ -1588,7 +1616,10 @@ class LMCacheMPConnector(KVConnectorBase_V1, SupportsHMA):
             return True
         if not self.use_layerwise:
             return False
-        return any(meta.direction == "RETRIEVE" for meta in metadata.requests)
+        return any(
+            meta.direction == "RETRIEVE" and meta.load_mode is LoadMode.LAYERWISE
+            for meta in metadata.requests
+        )
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:

@@ -19,6 +19,7 @@ from lmcache.utils import EngineType, init_logger
 from lmcache.v1.distributed.api import MemoryLayoutDesc
 from lmcache.v1.gpu_connector.utils import LayoutHints, get_device
 from lmcache.v1.multiprocess.custom_types import (
+    LoadMode,
     RegisterEngineDrivenContextPayload,
     RegisterKvCacheResponse,
 )
@@ -475,6 +476,7 @@ class TransferContext(ABC):
         event: IPCEvent | None,
         blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
+        load_mode: LoadMode = LoadMode.LAYERWISE,
     ) -> MessagingFuture:
         """Submit a retrieve request and return a completion future.
 
@@ -488,6 +490,8 @@ class TransferContext(ABC):
                 context does not require one.
             blocks_in_chunk: Number of vLLM blocks per LMCache chunk.
             skip_first_n_tokens: Number of initial tokens to skip when writing.
+            load_mode: Whether the retrieve loads layer by layer; only a
+                context with layerwise load on reads it.
 
         Returns:
             A future compatible with adapter-side ``query()``/``result()`` flow.
@@ -787,8 +791,15 @@ class LMCacheDrivenTransferContext(TransferContext):
         event: IPCEvent | None,
         _blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
+        load_mode: LoadMode = LoadMode.LAYERWISE,
     ) -> MessagingFuture:
         """Submit a handle-based retrieve ordered by ``event``.
+
+        With layerwise load on, a :attr:`LoadMode.LAYERWISE` retrieve gets
+        the next generation and becomes the one :meth:`wait_for_layer_load`
+        waits on. An :attr:`LoadMode.ASYNC` retrieve is sent with generation
+        0, which the server loads whole, and leaves the active generation
+        alone.
 
         Args:
             _request_id: External request identifier (unused by this transport).
@@ -799,6 +810,7 @@ class LMCacheDrivenTransferContext(TransferContext):
             event: Producer event that orders writes to the engine KV cache.
             _blocks_in_chunk: Engine blocks per chunk (unused by this transport).
             skip_first_n_tokens: Initial tokens the server must not overwrite.
+            load_mode: See above; ignored with layerwise load off.
 
         Returns:
             A device-event-aware future for the server response.
@@ -816,7 +828,7 @@ class LMCacheDrivenTransferContext(TransferContext):
             raise RuntimeError("LMCache-driven transfer requires an IPC event.")
         event_ipc_handle = self._event_backend.export_event(event, self._device)
         retrieve_generation = 0
-        if self._layer_progress_waiter is not None:
+        if self._layer_progress_waiter is not None and load_mode is LoadMode.LAYERWISE:
             self._retrieve_generation += 1
             retrieve_generation = self._retrieve_generation
             self._active_retrieve_generation = retrieve_generation
@@ -1141,6 +1153,7 @@ class EngineDrivenTransferContext(TransferContext):
         _event: IPCEvent | None,
         blocks_in_chunk: int,
         skip_first_n_tokens: int = 0,
+        load_mode: LoadMode = LoadMode.LAYERWISE,
     ) -> MessagingFuture:
         if self._engine_driven_context is None:
             raise RuntimeError(

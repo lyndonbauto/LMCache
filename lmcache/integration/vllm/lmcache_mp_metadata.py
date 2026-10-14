@@ -20,6 +20,7 @@ from lmcache.integration.vllm.utils import (
     extract_request_configs_from_request,
 )
 from lmcache.integration.vllm.vllm_multi_process_adapter import LoadStoreOp
+from lmcache.v1.multiprocess.custom_types import LoadMode
 from lmcache.v1.multiprocess.group_view import slice_block_ids_per_group
 
 if TYPE_CHECKING:
@@ -68,6 +69,9 @@ class LMCacheMPRequestTracker:
     # Staging load operation -- save vllm and lmcache hit tokens during lookup
     num_vllm_hit_tokens: int = 0
     num_lmcache_hit_tokens: int = 0
+    # How the LMCache hit loads, as the server decided at lookup. Only read
+    # with layerwise load on.
+    load_mode: LoadMode = LoadMode.LAYERWISE
 
     # Main state
     state: LMCacheMPRequestState = LMCacheMPRequestState.PREFETCHING
@@ -92,6 +96,7 @@ class LMCacheMPRequestTracker:
         self.num_stored_tokens = 0
         self.num_vllm_hit_tokens = 0
         self.num_lmcache_hit_tokens = 0
+        self.load_mode = LoadMode.LAYERWISE
         self.state = LMCacheMPRequestState.PREFETCHING
         self.mm_adjusted_prompt_ids = []
         mm_hashes, mm_positions = extract_mm_features(request)
@@ -189,6 +194,8 @@ class LMCacheMPRequestMetadata:
     op: LoadStoreOp
     cache_salt: str = ""
     request_configs: dict[str, Any] | None = None
+    # A RETRIEVE's load mode (see LMCacheMPRequestTracker.load_mode).
+    load_mode: LoadMode = LoadMode.LAYERWISE
 
     @staticmethod
     def GetStoreMetadata(
@@ -356,6 +363,7 @@ class LMCacheMPRequestMetadata:
                 op=op,
                 cache_salt=tracker.cache_salt,
                 request_configs=tracker.request_configs,
+                load_mode=tracker.load_mode,
             )
             return ret
 

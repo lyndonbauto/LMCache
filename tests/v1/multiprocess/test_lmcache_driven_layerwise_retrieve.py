@@ -372,11 +372,26 @@ def test_unregistering_an_idle_worker_does_not_publish_a_failure(
     h.progress.fail_retrieve.assert_not_called()
 
 
-def test_a_layerwise_retrieve_without_a_generation_is_refused(make_harness) -> None:
-    """Generation 0 means "not layerwise"; no copy runs under it."""
+def test_a_retrieve_without_a_generation_loads_whole(make_harness) -> None:
+    """Generation 0 is a LoadMode.ASYNC retrieve: it copies every group
+    before answering, as without layerwise, and publishes no progress."""
     h = make_harness()
+
+    assert h.retrieve(generation=0) is True
+
+    assert h.layerwise_calls == []
+    assert h.group_transfers == list(range(NUM_GROUPS))
+    h.progress.fail_retrieve.assert_not_called()
+    assert sorted(h.released) == sorted(ALL_KEYS)
+
+
+def test_a_failed_retrieve_without_a_generation_publishes_no_progress(
+    make_harness,
+) -> None:
+    """No layer wait waits on generation 0, so a failure only answers False."""
+    h = make_harness(missing=frozenset({KEYS[1][0]}))
 
     assert h.retrieve(generation=0) is False
 
     assert h.layerwise_calls == []
-    assert h.group_transfers == []
+    h.progress.fail_retrieve.assert_not_called()

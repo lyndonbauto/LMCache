@@ -16,6 +16,7 @@ from lmcache.v1.layerwise.deferral import (
     PipelinedModel,
     SharedKeyPolicy,
 )
+from lmcache.v1.layerwise.load_mode import LoadModePolicy
 from lmcache.v1.layerwise.planner import ModelLayout
 from lmcache.v1.layerwise.pump import DEFAULT_LAYER_TIMEOUT_SECONDS
 from lmcache.v1.layerwise.request_fetch import FetchModel, ObjectToPlace, WindowLease
@@ -38,16 +39,26 @@ def _fetch_model() -> FetchModel:
     )
 
 
+def _model(max_chunks: int = 4, max_slots: int = 1000) -> PipelinedModel:
+    return PipelinedModel(
+        fetch_model=_fetch_model(),
+        placer=_NoPlacer(),
+        max_record_bytes=MAX_RECORD_BYTES,
+        max_slots=max_slots,
+        adapter_id=ADAPTER_ID,
+        max_chunks=max_chunks,
+    )
+
+
 def _deferral(max_chunks: int = 4, max_slots: int = 1000) -> PipelinedDeferral:
+    return PipelinedDeferral(_model(max_chunks, max_slots))
+
+
+def _prompt_deferral(prompt_chunks: int, ratio: float) -> PipelinedDeferral:
     return PipelinedDeferral(
-        PipelinedModel(
-            fetch_model=_fetch_model(),
-            placer=_NoPlacer(),
-            max_record_bytes=MAX_RECORD_BYTES,
-            max_slots=max_slots,
-            adapter_id=ADAPTER_ID,
-            max_chunks=max_chunks,
-        )
+        _model(max_chunks=prompt_chunks),
+        [ObjectKey.IntHash2Bytes(i) for i in range(prompt_chunks)],
+        LoadModePolicy(min_new_token_ratio=ratio),
     )
 
 
@@ -92,6 +103,33 @@ def test_the_slot_cap_counts_every_record() -> None:
 
 def test_a_key_outside_the_layout_is_not_deferred() -> None:
     assert not _deferral().accepts([ADAPTER_ID], [_key(0, group=7)])
+
+
+def test_a_full_hit_is_not_deferred() -> None:
+    deferral = _prompt_deferral(prompt_chunks=4, ratio=0.1)
+    assert not deferral.accepts([ADAPTER_ID], [_key(i) for i in range(4)])
+
+
+def test_a_hit_with_enough_new_chunks_is_deferred() -> None:
+    # The last deferred chunk ends the hit: 2 of 4 hit, 2 new.
+    deferral = _prompt_deferral(prompt_chunks=4, ratio=0.5)
+    assert deferral.accepts([ADAPTER_ID], [_key(1)])
+
+
+def test_the_hit_length_comes_from_the_last_deferred_chunk() -> None:
+    # Chunks 0-1 came from L1; the deferred chunk 3 makes it a full hit.
+    deferral = _prompt_deferral(prompt_chunks=4, ratio=0.1)
+    assert not deferral.accepts([ADAPTER_ID], [_key(2), _key(3)])
+
+
+def test_a_key_outside_the_prompt_is_not_deferred() -> None:
+    deferral = _prompt_deferral(prompt_chunks=4, ratio=0.1)
+    assert not deferral.accepts([ADAPTER_ID], [_key(99)])
+
+
+def test_without_the_prompt_every_hit_is_deferred() -> None:
+    # The default policy (ratio 0) keeps the behavior before load modes.
+    assert _deferral().accepts([ADAPTER_ID], [_key(0), _key(1), _key(2), _key(3)])
 
 
 def test_the_defaults_recompute_on_shared_keys() -> None:

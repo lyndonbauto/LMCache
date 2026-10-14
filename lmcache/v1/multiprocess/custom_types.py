@@ -2,6 +2,7 @@
 # Standard
 from dataclasses import dataclass, field
 from typing import Any, Callable
+import enum
 
 # Third Party
 import msgspec
@@ -205,6 +206,33 @@ class RegisterKvCacheResponse(msgspec.Struct, frozen=True):
     server_use_layerwise: bool = False
     layer_event_ipc_handles: list[bytes] = []
     layer_publish_budget_seconds: float = 0.0
+
+
+class LoadMode(enum.Enum):
+    """How a request's cache hits reach the GPU.
+
+    The server picks the mode at lookup (see
+    ``docs/design/v1/multiprocess/layerwise-load.md``, "Per-request load
+    mode") and every later step of the request follows it.
+    """
+
+    #: Load layer by layer inside the request's forward pass.
+    LAYERWISE = "layerwise"
+    #: Load everything before the request is scheduled, as without
+    #: layerwise; vLLM waits for the load to finish.
+    ASYNC = "async"
+
+
+class PrefetchStatusWithMode(msgspec.Struct, frozen=True):
+    """Response for QUERY_PREFETCH_STATUS_WITH_MODE once the lookup is done.
+
+    Attributes:
+        found_chunks: Prefix chunks found, as QUERY_PREFETCH_STATUS returns.
+        load_mode: How the retrieve of those chunks must run.
+    """
+
+    found_chunks: int
+    load_mode: LoadMode
 
 
 @dataclass

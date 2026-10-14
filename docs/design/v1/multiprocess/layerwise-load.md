@@ -315,6 +315,79 @@ Config (must match on worker and server):
 
 When the flag is off, layerwise code paths are inert.
 
+## Per-request load mode
+
+The bargain pays only while the request computes enough new tokens to hide
+its load. A full or nearly full hit computes almost nothing, so its forward
+pass waits for every layer to arrive, and every decode in the same step waits
+with it. Measured on MI300X with Llama-3.1-8B, full hits at c >= 8: lw decodes
+at 34-75 ms per token against 9-10 ms for aon. So the server picks a
+`LoadMode` for each request at lookup:
+
+- `LAYERWISE`: the path above.
+- `ASYNC`: the request loads as without layerwise. It is parked in
+  `WAITING_FOR_REMOTE_KVS` and scheduled only once its load has finished.
+
+The rule (`LoadModePolicy`, `lmcache/v1/layerwise/load_mode.py`) is:
+
+```text
+new_chunks = prompt_chunks - hit_chunks
+LAYERWISE  iff  new_chunks >= R * hit_chunks
+               R = --layerwise-min-new-token-ratio (default 0.1)
+```
+
+A layer of an 8B model moves at about 57k tokens/s on a 7 GiB/s link, and
+prefill computes 5-13k tokens/s. The load therefore hides behind the compute
+only while new/hit is at least about 0.1-0.2. `R = 0` loads every request
+layerwise, which was the behavior before load modes.
+
+The server decides, not the connector, because the lookup also chooses
+whether to defer L2 hits. A deferred key reaches the GPU only through a
+layerwise retrieve, so both decisions must agree:
+
+```text
+LOOKUP                     PipelinedDeferral.accepts: defer only if the rule says
+                           LAYERWISE (hit length = last deferred chunk + 1)
+QUERY_PREFETCH_STATUS_     found chunks, plus the mode:
+  WITH_MODE                  deferred anything  -> LAYERWISE
+                             otherwise          -> the rule on (prompt, found)
+scheduler connector        LAYERWISE: admission gate, load_async=False
+                           ASYNC:     no gate,        load_async=True
+build_connector_meta       RETRIEVE metadata carries load_mode
+worker start_load_kv       layerwise retrieves first, then async ones
+TransferContext            LAYERWISE: next generation, the waited one
+  .submit_retrieve         ASYNC:     generation 0, waits untouched
+server start_retrieve      generation > 0: layerwise path
+                           generation 0:   whole H2D before answering
+get_finished               reports only ASYNC retrieves as finished_recving
+```
+
+Details:
+
+- The prompt length the server sees is chunk-aligned (the lookup key ends at
+  a chunk boundary). A tail shorter than one chunk is not counted as new
+  tokens.
+- When the pipelined fetch is off, nothing is deferred and the rule decides
+  alone. A `LAYERWISE` request then still overlaps its H2D from L1 with
+  compute.
+- With several servers, a request is `LAYERWISE` if any server said so, since
+  that server may have deferred keys.
+- Only `LAYERWISE` retrieves count for `requires_piecewise_for_step` and
+  `report_failed_layer_load`. An async retrieve has no layer waits, and its
+  future reports its failure.
+- Guard: an async retrieve that claims deferred keys loads them whole and logs
+  a warning. Only a worker that ignored the mode can cause this.
+
+Limits:
+
+- `QUERY_PREFETCH_STATUS_WITH_MODE` is a new request (wire id 34). A layerwise
+  worker needs a server that knows it, so deploy them together.
+- It has no gRPC binding yet, so layerwise over the gRPC transport fails at
+  the first lookup.
+- An async retrieve's whole H2D is queued on the same stream as the layerwise
+  launches, so it can delay a layerwise layer by its copy time. Copying 1 GiB
+  takes about 20-40 ms.
+
 ## CUDA graphs
 
 Layerwise load calls ``wait_for_layer_load`` from inside attention. That path
@@ -374,7 +447,8 @@ model runner     requires_piecewise_for_step(metadata)    per step
 - `supports_per_step_piecewise` returns True when `lmcache.mp.use_layerwise`
   is set.
 - `requires_piecewise_for_step` returns True when the step's metadata has any
-  `RETRIEVE` request, which is exactly when `start_load_kv` submits one.
+  `RETRIEVE` request in `LoadMode.LAYERWISE`, which is exactly when
+  `start_load_kv` submits one that waits per layer.
   - The check is per step, not per batch shape: a full-hit load schedules one
     token, so its step looks like a pure decode batch.
   - With the experimental dispatcher on, `save_kv_layer` works in every step,

@@ -200,6 +200,20 @@ def test_pipelined_fetch_requires_layerwise():
         _parse_mp(["--pipelined-fetch"])
 
 
+def test_layerwise_min_new_token_ratio_defaults_to_a_tenth():
+    assert _parse_mp([]).layerwise_min_new_token_ratio == 0.1
+
+
+def test_layerwise_min_new_token_ratio_is_parsed():
+    config = _parse_mp(["--use-layerwise", "--layerwise-min-new-token-ratio", "0"])
+    assert config.layerwise_min_new_token_ratio == 0.0
+
+
+def test_layerwise_min_new_token_ratio_must_not_be_negative():
+    with pytest.raises(ValueError, match="layerwise-min-new-token-ratio"):
+        _parse_mp(["--layerwise-min-new-token-ratio", "-0.1"])
+
+
 def test_instance_id_defaults_to_uuid4():
     # No --instance-id flag => a random UUID v4 is minted.
     config = _parse_mp([])

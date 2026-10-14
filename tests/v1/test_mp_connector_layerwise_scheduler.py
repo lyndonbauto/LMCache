@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     # First Party
     from lmcache.integration.vllm.layerwise_admission import LayerwiseAdmissionGate
     from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
+    from lmcache.v1.multiprocess.custom_types import LoadMode
 
 
 def test_scheduler_reports_synchronous_load_when_layerwise_enabled() -> None:
@@ -53,18 +54,23 @@ def test_scheduler_reports_synchronous_load_when_layerwise_enabled() -> None:
 
 
 def _scheduler_connector(
-    gate: "LayerwiseAdmissionGate", hits: dict[str, int]
+    gate: "LayerwiseAdmissionGate",
+    hits: dict[str, int],
+    async_ids: frozenset[str] = frozenset(),
 ) -> "LMCacheMPConnector":
     """Build a layerwise scheduler connector over a mocked adapter.
 
     ``hits`` maps a request ID to the tokens its lookup matched; one KV byte
-    per token, so a request's admission size is its tokens to load.
+    per token, so a request's admission size is its tokens to load. The
+    server picks :attr:`LoadMode.ASYNC` for ``async_ids`` and
+    :attr:`LoadMode.LAYERWISE` for the rest.
     """
     # Third Party
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 
     # First Party
     from lmcache.integration.vllm.lmcache_mp_connector import LMCacheMPConnector
+    from lmcache.v1.multiprocess.custom_types import LoadMode
 
     connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
     connector.use_layerwise = True
@@ -78,6 +84,9 @@ def _scheduler_connector(
     connector.scheduler_adapter = MagicMock()
     connector.scheduler_adapter.lmcache_tokens_per_chunk = 16
     connector.scheduler_adapter.check_lookup_result.side_effect = hits.get
+    connector.scheduler_adapter.lookup_load_mode.side_effect = lambda rid: (
+        LoadMode.ASYNC if rid in async_ids else LoadMode.LAYERWISE
+    )
     return connector
 
 
@@ -160,6 +169,53 @@ def test_with_the_budget_off_every_hit_is_scheduled_at_once() -> None:
     assert results == [(32, False)] * 8
 
 
+def test_an_async_request_loads_before_it_is_scheduled() -> None:
+    """A full hit the server sent async parks in WAITING_FOR_REMOTE_KVS."""
+    pytest.importorskip("vllm")
+    # First Party
+    from lmcache.integration.vllm.layerwise_admission import LayerwiseAdmissionGate
+    from lmcache.v1.multiprocess.custom_types import LoadMode
+
+    connector = _scheduler_connector(
+        LayerwiseAdmissionGate(0), {"full": 32}, frozenset({"full"})
+    )
+
+    assert connector.get_num_new_matched_tokens(_waiting_request("full", 33), 0) == (
+        32,
+        True,
+    )  # type: ignore[arg-type]
+    assert connector.request_trackers["full"].load_mode is LoadMode.ASYNC
+
+
+def test_an_async_request_skips_the_admission_budget() -> None:
+    """Only layerwise loads stall the forward pass, so only they are budgeted."""
+    pytest.importorskip("vllm")
+    # First Party
+    from lmcache.integration.vllm.layerwise_admission import LayerwiseAdmissionGate
+    from lmcache.v1.multiprocess.custom_types import LoadMode
+
+    gate = LayerwiseAdmissionGate(32)
+    connector = _scheduler_connector(
+        gate, {"lw": 32, "full": 64, "lw2": 32}, frozenset({"full"})
+    )
+
+    assert connector.get_num_new_matched_tokens(_waiting_request("lw", 48), 0) == (
+        32,
+        False,
+    )  # type: ignore[arg-type]
+    assert connector.get_num_new_matched_tokens(_waiting_request("full", 65), 0) == (
+        64,
+        True,
+    )  # type: ignore[arg-type]
+    assert gate.admitted_bytes == 32
+    # The budget is still spent by the first layerwise load.
+    assert connector.get_num_new_matched_tokens(_waiting_request("lw2", 48), 0) == (
+        None,
+        True,
+    )  # type: ignore[arg-type]
+    assert connector.request_trackers["lw"].load_mode is LoadMode.LAYERWISE
+
+
 def _worker_connector(
     wait_error: Exception,
 ) -> tuple["LMCacheMPConnector", MagicMock]:
@@ -176,6 +232,7 @@ def _worker_connector(
     connector = LMCacheMPConnector.__new__(LMCacheMPConnector)
     connector.use_layerwise = True
     connector._layer_name_to_index = {"layers.0": 0}
+    connector._async_retrieves = set()
     connector.worker_adapter = adapter
     return connector, adapter
 
@@ -198,6 +255,92 @@ def test_layerwise_loads_are_never_reported_as_finished_receiving(
 
     assert finished_sending == (None if lazy_offload else {"stored"})
     assert finished_recving == (None if use_layerwise else {"loaded"})
+
+
+@pytest.mark.parametrize("lazy_offload", [False, True])
+def test_async_loads_are_reported_as_finished_receiving_once(
+    lazy_offload: bool,
+) -> None:
+    """An async load's request is parked until vLLM hears the load finished."""
+    pytest.importorskip("vllm")
+
+    connector, adapter = _worker_connector(RuntimeError("unused"))
+    connector.lazy_offload = lazy_offload
+    connector._async_retrieves = {"async", "async-pending"}
+    finished = {"async", "layerwise"}
+    adapter.get_finished.return_value = (set(), finished)
+    adapter.get_finished_with_lazy_offload.return_value = (None, finished)
+
+    assert connector.get_finished(set())[1] == {"async"}
+    assert connector._async_retrieves == {"async-pending"}
+
+
+def _retrieve_metadata(*modes: "LoadMode") -> object:
+    """Connector metadata with one RETRIEVE per entry of *modes*, ids r0, r1..."""
+    # First Party
+    from lmcache.integration.vllm.lmcache_mp_metadata import (
+        LMCacheMPConnectorMetadata,
+        LMCacheMPRequestMetadata,
+    )
+
+    metadata = LMCacheMPConnectorMetadata()
+    for i, mode in enumerate(modes):
+        metadata.add_request_metadata(
+            LMCacheMPRequestMetadata(
+                request_id=f"r{i}",
+                direction="RETRIEVE",
+                op=MagicMock(name=f"op{i}"),
+                load_mode=mode,
+            )
+        )
+    return metadata
+
+
+def test_layerwise_retrieves_are_submitted_before_async_ones() -> None:
+    pytest.importorskip("vllm")
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import LoadMode
+
+    connector, adapter = _worker_connector(RuntimeError("unused"))
+    connector._connector_metadata = _retrieve_metadata(
+        LoadMode.ASYNC, LoadMode.LAYERWISE, LoadMode.ASYNC, LoadMode.LAYERWISE
+    )
+
+    connector.start_load_kv(MagicMock(name="forward_context"))
+
+    call = adapter.batched_submit_retrieve_requests.call_args
+    assert call.args[0] == ["r1", "r3", "r0", "r2"]
+    assert call.kwargs["load_modes"] == [
+        LoadMode.LAYERWISE,
+        LoadMode.LAYERWISE,
+        LoadMode.ASYNC,
+        LoadMode.ASYNC,
+    ]
+    assert connector._async_retrieves == {"r0", "r2"}
+
+
+@pytest.mark.parametrize(
+    ("mode_names", "expected"),
+    [
+        (("ASYNC",), False),
+        (("ASYNC", "ASYNC"), False),
+        (("LAYERWISE",), True),
+        (("ASYNC", "LAYERWISE"), True),
+    ],
+)
+def test_only_a_layerwise_retrieve_needs_piecewise(
+    mode_names: tuple[str, ...], expected: bool
+) -> None:
+    """An async retrieve's request is not computed in the step that loads it."""
+    pytest.importorskip("vllm")
+    # First Party
+    from lmcache.v1.multiprocess.custom_types import LoadMode
+
+    connector, _ = _worker_connector(RuntimeError("unused"))
+    connector.dispatcher = None
+
+    metadata = _retrieve_metadata(*(LoadMode[name] for name in mode_names))
+    assert connector.requires_piecewise_for_step(metadata) is expected  # type: ignore[arg-type]
 
 
 def test_failed_retrieve_is_reported_for_recompute() -> None:

@@ -63,6 +63,12 @@ class MPServerConfig:
     """When True, H2D retrieve launches one kernel per layer in global layer
     order and workers wait per layer instead of on one completion event."""
 
+    layerwise_min_new_token_ratio: float = 0.1
+    """With use_layerwise, a request loads layer by layer only if it computes
+    at least this many new tokens per cache-hit token; the rest load before
+    they are scheduled. 0 loads every request layer by layer. See
+    ``LoadModePolicy``."""
+
     pipelined_fetch: bool = False
     """When True (requires use_layerwise), a lookup whose L2 hits one RDMA
     window can hold reports them without loading them, and the retrieve
@@ -151,13 +157,19 @@ class MPServerConfig:
         Raises:
             ValueError: If a timeout is non-finite, the reap timeout is
                 negative or a non-zero value below the 30 s floor, or the
-                registration grace is below the reap timeout; or if
-                pipelined_fetch is set without use_layerwise.
+                registration grace is below the reap timeout; if
+                pipelined_fetch is set without use_layerwise; or if
+                layerwise_min_new_token_ratio is negative.
         """
         reap = self.worker_reap_timeout_seconds
         grace = self.worker_registration_grace_seconds
         if self.pipelined_fetch and not self.use_layerwise:
             raise ValueError("--pipelined-fetch requires --use-layerwise")
+        if self.layerwise_min_new_token_ratio < 0:
+            raise ValueError(
+                "--layerwise-min-new-token-ratio must not be negative; got "
+                f"{self.layerwise_min_new_token_ratio}"
+            )
         if self.grpc_server_workers < 1:
             raise ValueError(
                 f"grpc server workers must be >= 1; got {self.grpc_server_workers}"
@@ -451,6 +463,16 @@ def add_mp_server_args(
         "(Default is False)",
     )
     mp_group.add_argument(
+        "--layerwise-min-new-token-ratio",
+        type=float,
+        default=0.1,
+        help="With --use-layerwise, a request loads layer by layer only if "
+        "it computes at least this many new tokens per cache-hit token; "
+        "others (full or nearly full hits) load before they are scheduled, "
+        "as without layerwise. 0 loads every request layer by layer. "
+        "Default is 0.1.",
+    )
+    mp_group.add_argument(
         "--pipelined-fetch",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -558,6 +580,7 @@ def parse_args_to_mp_server_config(
         engine_type=args.engine_type,
         separate_object_groups=args.separate_object_groups,
         use_layerwise=args.use_layerwise,
+        layerwise_min_new_token_ratio=args.layerwise_min_new_token_ratio,
         pipelined_fetch=args.pipelined_fetch,
         pipelined_max_chunks=args.pipelined_max_chunks,
         pipelined_shared_keys=args.pipelined_shared_keys,

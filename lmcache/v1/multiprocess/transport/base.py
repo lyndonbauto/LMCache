@@ -79,6 +79,10 @@ class RequestClient(Protocol):
 
     def query_prefetch_status(self, request_id: str) -> MessagingFuture[Any]: ...
 
+    def query_prefetch_status_with_mode(
+        self, request_id: str
+    ) -> MessagingFuture[Any]: ...
+
     def wait_prefetch_status(
         self, request_id: str, timeout: float
     ) -> MessagingFuture[Any]: ...

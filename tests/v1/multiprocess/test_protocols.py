@@ -2,9 +2,12 @@
 """Tests for the multiprocess protocol registry (``RequestType`` + definitions)."""
 
 # Third Party
+import msgspec
 import pytest
 
 # First Party
+from lmcache.v1.multiprocess.custom_types import LoadMode, PrefetchStatusWithMode
+from lmcache.v1.multiprocess.protocol import get_response_class
 from lmcache.v1.multiprocess.protocols import initialize_protocols
 from lmcache.v1.multiprocess.protocols.base import RequestType
 from lmcache.v1.multiprocess.protocols.blend import (
@@ -50,6 +53,7 @@ FROZEN_WIRE_IDS = {
     "P2P_UNLOCK_OBJECTS": 31,
     "GET_EXPERIMENTAL": 32,
     "CB_PROTOCOL_HANDSHAKE": 33,
+    "QUERY_PREFETCH_STATUS_WITH_MODE": 34,
 }
 
 CB_REQUESTS = [
@@ -106,6 +110,22 @@ def test_deprecated_cb_aliases_are_not_separate_members() -> None:
     # (one definition per member) is unaffected by them.
     names = {member.name for member in RequestType}
     assert not names & set(DEPRECATED_CB_ALIASES)
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        PrefetchStatusWithMode(found_chunks=3, load_mode=LoadMode.ASYNC),
+        PrefetchStatusWithMode(found_chunks=0, load_mode=LoadMode.LAYERWISE),
+        None,
+    ],
+)
+def test_the_prefetch_status_with_mode_round_trips(
+    status: PrefetchStatusWithMode | None,
+) -> None:
+    response_class = get_response_class(RequestType.QUERY_PREFETCH_STATUS_WITH_MODE)
+    wire = msgspec.msgpack.encode(status)
+    assert msgspec.msgpack.decode(wire, type=response_class) == status
 
 
 def test_handshake_response() -> None:

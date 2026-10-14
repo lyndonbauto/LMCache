@@ -25,6 +25,7 @@ from lmcache.v1.distributed.config import (
 )
 from lmcache.v1.distributed.storage_manager import StorageManager
 from lmcache.v1.layerwise.deferral import PipelinedFetchConfig, SharedKeyPolicy
+from lmcache.v1.layerwise.load_mode import LoadModePolicy
 from lmcache.v1.mp_observability.config import (
     ObservabilityConfig,
     add_observability_args,
@@ -385,6 +386,9 @@ def run_cache_server(
         separate_object_groups=mp_config.separate_object_groups,
         full_sw_kv=is_blend,
         use_layerwise=mp_config.use_layerwise,
+        load_mode_policy=LoadModePolicy(
+            min_new_token_ratio=mp_config.layerwise_min_new_token_ratio
+        ),
         pipelined_fetch=PipelinedFetchConfig(
             enabled=mp_config.pipelined_fetch,
             max_chunks=mp_config.pipelined_max_chunks,

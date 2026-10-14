@@ -20,8 +20,10 @@ from enum import Enum
 # First Party
 from lmcache.logging import init_logger
 from lmcache.v1.distributed.api import ObjectKey
+from lmcache.v1.layerwise.load_mode import LoadModePolicy
 from lmcache.v1.layerwise.pump import DEFAULT_LAYER_TIMEOUT_SECONDS
 from lmcache.v1.layerwise.request_fetch import ChunkPlacer, FetchModel
+from lmcache.v1.multiprocess.custom_types import LoadMode
 
 logger = init_logger(__name__)
 
@@ -147,18 +149,33 @@ class PipelinedDeferral:
     """Defers a lookup's L2 hits when one pipelined fetch can serve them all.
 
     Implements :class:`~lmcache.v1.distributed.api.L2Deferral`. Accepts only
-    if every key comes from the pipelined adapter, the keys span at most
-    ``max_chunks`` chunks, and fetching them needs at most ``max_slots``
-    slots (one slot per stored record).
+    if every key comes from the pipelined adapter, the request would load
+    layerwise under ``policy``, the keys span at most ``max_chunks`` chunks,
+    and fetching them needs at most ``max_slots`` slots (one slot per stored
+    record).
     """
 
-    def __init__(self, model: PipelinedModel) -> None:
-        """Create the deferral for one model's lookups.
+    def __init__(
+        self,
+        model: PipelinedModel,
+        chunk_hashes: Sequence[bytes] = (),
+        policy: LoadModePolicy = LoadModePolicy(min_new_token_ratio=0.0),  # noqa: B008
+    ) -> None:
+        """Create the deferral for one lookup.
 
         Args:
             model: The registered model the lookup is for.
+            chunk_hashes: The lookup's chunk hashes in prompt order. The
+                last deferred chunk's position gives the hit length the
+                policy judges.
+            policy: Decides whether the request loads layerwise; a request
+                that will load async is never deferred. The default loads
+                every request layerwise.
         """
         self._model = model
+        self._prompt_chunks = len(chunk_hashes)
+        self._chunk_index = {h: i for i, h in enumerate(chunk_hashes)}
+        self._policy = policy
 
     def accepts(self, adapter_ids: Sequence[int], keys: Sequence[ObjectKey]) -> bool:
         """Report whether one pipelined fetch can serve ``keys``.
@@ -173,7 +190,10 @@ class PipelinedDeferral:
         model = self._model
         if list(adapter_ids) != [model.adapter_id] or not keys:
             return False
-        if len({key.chunk_hash for key in keys}) > model.max_chunks:
+        chunks = {key.chunk_hash for key in keys}
+        if len(chunks) > model.max_chunks:
+            return False
+        if not self._loads_layerwise(chunks):
             return False
         layout = model.fetch_model.layout
         try:
@@ -188,3 +208,16 @@ class PipelinedDeferral:
             )
             return False
         return slots <= model.max_slots
+
+    def _loads_layerwise(self, chunks: set[bytes]) -> bool:
+        if self._policy.min_new_token_ratio == 0.0:
+            return True
+        try:
+            hit_chunks = 1 + max(self._chunk_index[chunk] for chunk in chunks)
+        except KeyError:
+            logger.warning(
+                "A deferred key is not among the lookup's chunks; loading whole"
+            )
+            return False
+        mode = self._policy.mode_for(self._prompt_chunks, hit_chunks)
+        return mode is LoadMode.LAYERWISE

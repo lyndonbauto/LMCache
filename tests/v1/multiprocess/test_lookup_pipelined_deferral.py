@@ -30,6 +30,7 @@ from lmcache.v1.layerwise.deferral import (
     PipelinedFetchConfig,
     PipelinedModel,
 )
+from lmcache.v1.layerwise.load_mode import LoadModePolicy
 from lmcache.v1.layerwise.planner import ModelLayout
 from lmcache.v1.layerwise.request_fetch import (
     FetchModel,
@@ -37,7 +38,11 @@ from lmcache.v1.layerwise.request_fetch import (
     ObjectToPlace,
     WindowLease,
 )
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.custom_types import (
+    IPCCacheServerKey,
+    LoadMode,
+    PrefetchStatusWithMode,
+)
 from lmcache.v1.multiprocess.modules.lookup import LookupModule
 from lmcache.v1.multiprocess.session import Session
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
@@ -156,6 +161,82 @@ def test_the_prefetch_result_records_the_deferred_keys_on_the_session() -> None:
     assert module.query_prefetch_status("req") == 2
     assert session.prefetch_hit_chunks == 2
     assert session.deferred_keys() == set(deferred)
+
+
+def test_the_deferral_judges_the_load_mode_from_the_lookup_chunks() -> None:
+    ctx = _ctx()
+    ctx.load_mode_policy = LoadModePolicy(min_new_token_ratio=0.5)
+    deferral = _submitted_deferral(ctx, _key())
+    hit_one = ObjectKey(chunk_hash=b"c0", model_name=MODEL, kv_rank=0)
+    hit_both = ObjectKey(chunk_hash=b"c1", model_name=MODEL, kv_rank=0)
+    assert deferral.accepts([0], [hit_one])
+    assert not deferral.accepts([0], [hit_one, hit_both])
+
+
+def _finished_lookup(
+    ctx: MagicMock, deferred: tuple[ObjectKey, ...], found: Bitmap
+) -> LookupModule:
+    ctx.session_manager.get_or_create.return_value = Session(
+        request_id="req", hasher=TokenHasher(chunk_size=16)
+    )
+    ctx.storage_manager.query_prefetch_outcome.return_value = PrefetchResult(
+        found, deferred
+    )
+    ctx.storage_manager.submit_prefetch_task.return_value = PrefetchHandle(
+        prefetch_request_id=0,
+        external_request_id="req",
+        l1_found_indices=(),
+        l1_hit_chunks=0,
+        total_requested_keys=2,
+        submit_time=0.0,
+    )
+    module = LookupModule(ctx)
+    module.lookup(_key(), tp_size=1)
+    return module
+
+
+def test_a_lookup_that_deferred_loads_layerwise() -> None:
+    ctx = _ctx()
+    ctx.load_mode_for.return_value = LoadMode.ASYNC
+    module = _finished_lookup(ctx, (_object_key(1),), Bitmap(2, 2))
+
+    status = module.query_prefetch_status_with_mode("req")
+
+    assert status == PrefetchStatusWithMode(
+        found_chunks=2, load_mode=LoadMode.LAYERWISE
+    )
+    ctx.load_mode_for.assert_not_called()
+
+
+@pytest.mark.parametrize("mode", [LoadMode.ASYNC, LoadMode.LAYERWISE])
+def test_a_lookup_that_deferred_nothing_takes_the_policy_mode(mode: LoadMode) -> None:
+    ctx = _ctx()
+    ctx.load_mode_for.return_value = mode
+    module = _finished_lookup(ctx, (), Bitmap(2, 2))
+
+    status = module.query_prefetch_status_with_mode("req")
+
+    assert status == PrefetchStatusWithMode(found_chunks=2, load_mode=mode)
+    # Two chunk hashes of 16 tokens, both hit.
+    ctx.load_mode_for.assert_called_once_with(2, 2)
+
+
+def test_the_mode_query_consumes_the_job_like_the_plain_query() -> None:
+    ctx = _ctx()
+    ctx.load_mode_for.return_value = LoadMode.ASYNC
+    module = _finished_lookup(ctx, (), Bitmap(2, 2))
+
+    assert module.query_prefetch_status_with_mode("req") is not None
+    # Exactly once: a second poll finds no job and reports no hit.
+    assert module.query_prefetch_status("req") == 0
+
+
+def test_the_mode_query_waits_for_the_prefetch() -> None:
+    ctx = _ctx()
+    module = _finished_lookup(ctx, (), Bitmap(2, 2))
+    ctx.storage_manager.query_prefetch_outcome.return_value = None
+
+    assert module.query_prefetch_status_with_mode("req") is None
 
 
 def test_freeing_lookup_locks_skips_the_deferred_keys() -> None:

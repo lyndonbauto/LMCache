@@ -23,7 +23,11 @@ from lmcache.v1.distributed.bitmap_ops.fold import fold_unfold_ranked
 from lmcache.v1.layerwise.deferral import PipelinedDeferral
 from lmcache.v1.mp_observability.event import Event, EventType
 from lmcache.v1.mp_observability.otel_init import register_gauge
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.custom_types import (
+    IPCCacheServerKey,
+    LoadMode,
+    PrefetchStatusWithMode,
+)
 from lmcache.v1.multiprocess.engine_context import MPCacheServerContext
 from lmcache.v1.multiprocess.protocols.base import HandlerType, RequestType
 from lmcache.v1.multiprocess.request_handler import request_handler
@@ -110,8 +114,8 @@ class LookupModule:
 
     Owns the prefetch-job bookkeeping (``_prefetch_jobs``) and exposes
     handlers for the LOOKUP, QUERY_PREFETCH_STATUS,
-    QUERY_PREFETCH_LOOKUP_HITS, FREE_LOOKUP_LOCKS, and END_SESSION
-    request types.
+    QUERY_PREFETCH_STATUS_WITH_MODE, QUERY_PREFETCH_LOOKUP_HITS,
+    FREE_LOOKUP_LOCKS, and END_SESSION request types.
 
     Args:
         ctx: Shared engine context providing storage manager, token hasher,
@@ -302,7 +306,7 @@ class LookupModule:
                 group_layout_descs=group_layout_descs,
                 num_kv_readers=num_kv_readers,
                 attn_desc=attn_desc,
-                l2_deferral=self._l2_deferral_for(key, num_kv_readers),
+                l2_deferral=self._l2_deferral_for(key, num_kv_readers, chunk_hashes),
             ),
             external_request_id=key.request_id,
         )
@@ -367,76 +371,30 @@ class LookupModule:
             0 if the request_id is unknown (already completed and consumed,
             or invalid).
         """
-        with self._prefetch_job_lock:
-            job = self._prefetch_jobs.get(request_id)
-        if job is None:
-            logger.warning(
-                "Prefetch job for request %s not found (already completed or invalid)",
-                request_id,
-            )
-            return 0
+        status = self._consume_prefetch_status(request_id)
+        return None if status is None else status.found_chunks
 
-        outcome = self._ctx.storage_manager.query_prefetch_outcome(job.handle)
-        if outcome is None:
-            return None
-        found = outcome.retained
+    @request_handler(RequestType.QUERY_PREFETCH_STATUS_WITH_MODE, HandlerType.BLOCKING)
+    def query_prefetch_status_with_mode(
+        self,
+        request_id: str,
+    ) -> PrefetchStatusWithMode | None:
+        """Poll a prefetch job like :meth:`query_prefetch_status`, with its mode.
 
-        stride = job.attn_desc.num_object_groups * job.world_size
-        num_chunks = job.handle.total_requested_keys // stride
-        found_count, _retain = fold_unfold_ranked(
-            found,
-            num_chunks,
-            job.world_size,
-            job.attn_desc.num_chunks_in_sw,
-        )
+        The mode is :attr:`LoadMode.LAYERWISE` whenever the lookup deferred
+        any L2 hit, since only a layerwise retrieve fetches deferred keys.
+        Otherwise :meth:`MPCacheServerContext.load_mode_for` picks it from
+        the hit and the chunk-aligned prompt length; a tail shorter than a
+        chunk is not counted as new tokens.
 
-        # Record the model-wide hit length on the session so a later
-        # free_lookup_locks can reconstruct which keys the prefetch
-        # read-locked (see ``unfold``: full-attention groups lock the whole
-        # hit prefix, sliding-window groups only its in-window suffix).
-        # Deferred keys are counted in found_count but hold no lock.
-        session = self._ctx.session_manager.get_or_create(job.request_id)
-        session.record_prefetch_result(
-            found_count,
-            tuple(range(job.attn_desc.num_object_groups)),
-            outcome.deferred_keys,
-        )
+        Args:
+            request_id: The external request ID passed in the lookup key.
 
-        # ``l1_hit_chunks`` is the prefix L1 could serve on its own under each
-        # object group's window rule, so L2's contribution is however much
-        # further ``found_count`` reaches -- not a count of L1-resident keys.
-        l1_chunks = job.handle.l1_hit_chunks
-        if l1_chunks > found_count:
-            logger.error(
-                "L1 hit chunks exceed total hit chunks: l1=%d total=%d request=%s",
-                l1_chunks,
-                found_count,
-                request_id,
-            )
-            l1_chunks = found_count
-        l2_chunks = found_count - l1_chunks
-
-        self._ctx.event_bus.publish(
-            Event(
-                event_type=EventType.MP_LOOKUP_PREFETCH_END,
-                session_id=job.request_id,
-                metadata={
-                    "found_count": found_count,
-                    "requested_tokens": job.requested_tokens,
-                    "hit_tokens": found_count * self._ctx.chunk_size,
-                    "l1_hit_tokens": l1_chunks * self._ctx.chunk_size,
-                    "l2_hit_tokens": l2_chunks * self._ctx.chunk_size,
-                    "early_exit_reason": job.early_exit_reason,
-                    "model_name": job.model_name,
-                    "cache_salt": job.cache_salt,
-                },
-            )
-        )
-
-        with self._prefetch_job_lock:
-            self._prefetch_jobs.pop(request_id, None)
-
-        return found_count
+        Returns:
+            The chunk count and load mode when done, None if still in
+            progress. An unknown request_id returns 0 chunks.
+        """
+        return self._consume_prefetch_status(request_id)
 
     @request_handler(RequestType.WAIT_PREFETCH_STATUS, HandlerType.BLOCKING)
     def wait_prefetch_status(
@@ -612,17 +570,21 @@ class LookupModule:
         return obj_keys
 
     def _l2_deferral_for(
-        self, key: IPCCacheServerKey, num_kv_readers: int
+        self,
+        key: IPCCacheServerKey,
+        num_kv_readers: int,
+        chunk_hashes: list[bytes],
     ) -> L2Deferral:
         """Return the deferral for a lookup, or none if it cannot be pipelined.
 
         Only a single-reader, world-size-one lookup of a model with a
         registered pipelined setup is eligible; the controller then decides,
-        from the load plan, whether to defer.
+        from the load plan and the load-mode policy, whether to defer.
 
         Args:
             key: The lookup's key.
             num_kv_readers: Read locks the lookup takes per key.
+            chunk_hashes: The lookup's chunk hashes in prompt order.
 
         Returns:
             A :class:`PipelinedDeferral`, or ``NO_L2_DEFERRAL``.
@@ -637,7 +599,90 @@ class LookupModule:
             model = self._ctx.pipelined_models.find(key.model_name, key.world_size)
         except KeyError:
             return NO_L2_DEFERRAL
-        return PipelinedDeferral(model)
+        return PipelinedDeferral(model, chunk_hashes, self._ctx.load_mode_policy)
+
+    def _consume_prefetch_status(
+        self, request_id: str
+    ) -> PrefetchStatusWithMode | None:
+        with self._prefetch_job_lock:
+            job = self._prefetch_jobs.get(request_id)
+        if job is None:
+            logger.warning(
+                "Prefetch job for request %s not found (already completed or invalid)",
+                request_id,
+            )
+            return PrefetchStatusWithMode(
+                found_chunks=0, load_mode=self._ctx.load_mode_for(0, 0)
+            )
+
+        outcome = self._ctx.storage_manager.query_prefetch_outcome(job.handle)
+        if outcome is None:
+            return None
+        found = outcome.retained
+
+        stride = job.attn_desc.num_object_groups * job.world_size
+        num_chunks = job.handle.total_requested_keys // stride
+        found_count, _retain = fold_unfold_ranked(
+            found,
+            num_chunks,
+            job.world_size,
+            job.attn_desc.num_chunks_in_sw,
+        )
+
+        # Record the model-wide hit length on the session so a later
+        # free_lookup_locks can reconstruct which keys the prefetch
+        # read-locked (see ``unfold``: full-attention groups lock the whole
+        # hit prefix, sliding-window groups only its in-window suffix).
+        # Deferred keys are counted in found_count but hold no lock.
+        session = self._ctx.session_manager.get_or_create(job.request_id)
+        session.record_prefetch_result(
+            found_count,
+            tuple(range(job.attn_desc.num_object_groups)),
+            outcome.deferred_keys,
+        )
+
+        # ``l1_hit_chunks`` is the prefix L1 could serve on its own under each
+        # object group's window rule, so L2's contribution is however much
+        # further ``found_count`` reaches -- not a count of L1-resident keys.
+        l1_chunks = job.handle.l1_hit_chunks
+        if l1_chunks > found_count:
+            logger.error(
+                "L1 hit chunks exceed total hit chunks: l1=%d total=%d request=%s",
+                l1_chunks,
+                found_count,
+                request_id,
+            )
+            l1_chunks = found_count
+        l2_chunks = found_count - l1_chunks
+
+        self._ctx.event_bus.publish(
+            Event(
+                event_type=EventType.MP_LOOKUP_PREFETCH_END,
+                session_id=job.request_id,
+                metadata={
+                    "found_count": found_count,
+                    "requested_tokens": job.requested_tokens,
+                    "hit_tokens": found_count * self._ctx.chunk_size,
+                    "l1_hit_tokens": l1_chunks * self._ctx.chunk_size,
+                    "l2_hit_tokens": l2_chunks * self._ctx.chunk_size,
+                    "early_exit_reason": job.early_exit_reason,
+                    "model_name": job.model_name,
+                    "cache_salt": job.cache_salt,
+                },
+            )
+        )
+
+        with self._prefetch_job_lock:
+            self._prefetch_jobs.pop(request_id, None)
+
+        if outcome.deferred_keys:
+            load_mode = LoadMode.LAYERWISE
+        else:
+            prompt_chunks = job.requested_tokens // self._ctx.chunk_size
+            load_mode = self._ctx.load_mode_for(
+                max(prompt_chunks, found_count), found_count
+            )
+        return PrefetchStatusWithMode(found_chunks=found_count, load_mode=load_mode)
 
     def _register_prefetch_job(self, job: _PrefetchJob) -> None:
         with self._prefetch_job_lock:

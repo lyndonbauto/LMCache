@@ -123,6 +123,10 @@ only if:
 
 - the whole plan is on one adapter, the one with the pipelined path;
 - the plan names at most `--pipelined-max-chunks` chunks;
+- the request loads layerwise under `--layerwise-min-new-token-ratio`. The
+  hit ends at the last planned chunk. A full or nearly full hit loads async
+  instead, so it is never deferred (see `docs/design/v1/multiprocess/layerwise-load.md`,
+  "Per-request load mode");
 - the plan's slot count is at most `pipelined_max_slots_per_request()` (F4).
 
 On accept, `_defer_request` replaces steps 3 to 5. It reserves nothing and

@@ -22,9 +22,10 @@ from lmcache.v1.gpu_connector.gds_context import (
     initialize_gds_context,
 )
 from lmcache.v1.layerwise.deferral import PipelinedFetchConfig, PipelinedModel
+from lmcache.v1.layerwise.load_mode import LoadModePolicy
 from lmcache.v1.layerwise.request_fetch import ModelRegistry
 from lmcache.v1.mp_observability.event_bus import EventBus, get_event_bus
-from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey
+from lmcache.v1.multiprocess.custom_types import IPCCacheServerKey, LoadMode
 from lmcache.v1.multiprocess.session import SessionManager
 from lmcache.v1.multiprocess.token_hasher import TokenHasher
 
@@ -201,6 +202,8 @@ class MPCacheServerContext:
             False.
         pipelined_fetch: Settings for the pipelined retrieve; disabled by
             default.
+        load_mode_policy: Which requests load layerwise when
+            ``use_layerwise`` is on.
 
     Raises:
         ValueError: If ``pipelined_fetch`` is enabled without
@@ -216,6 +219,7 @@ class MPCacheServerContext:
         full_sw_kv: bool = False,
         use_layerwise: bool = False,
         pipelined_fetch: PipelinedFetchConfig = PipelinedFetchConfig(),  # noqa: B008
+        load_mode_policy: LoadModePolicy = LoadModePolicy(),  # noqa: B008
     ) -> None:
         if pipelined_fetch.enabled and not use_layerwise:
             raise ValueError("the pipelined fetch requires use_layerwise")
@@ -223,6 +227,7 @@ class MPCacheServerContext:
         self._separate_object_groups = separate_object_groups
         self._full_sw_kv = full_sw_kv
         self._use_layerwise = use_layerwise
+        self._load_mode_policy = load_mode_policy
         self._pipelined_fetch = pipelined_fetch
         self._pipelined_models: ModelRegistry[PipelinedModel] = ModelRegistry(
             "pipelined fetch setup"
@@ -272,6 +277,30 @@ class MPCacheServerContext:
     def use_layerwise(self) -> bool:
         """Whether MP retrieve uses per-layer H2D launches."""
         return self._use_layerwise
+
+    @property
+    def load_mode_policy(self) -> LoadModePolicy:
+        """Decides which requests load layerwise when :attr:`use_layerwise`."""
+        return self._load_mode_policy
+
+    def load_mode_for(self, prompt_chunks: int, hit_chunks: int) -> LoadMode:
+        """Return how a request's hits must load.
+
+        Args:
+            prompt_chunks: Chunks of the prompt the lookup covered.
+            hit_chunks: Leading chunks of those that hit the cache.
+
+        Returns:
+            :attr:`LoadMode.ASYNC` when :attr:`use_layerwise` is off,
+            otherwise :meth:`LoadModePolicy.mode_for`.
+
+        Raises:
+            ValueError: If the counts are inconsistent (see
+                :meth:`LoadModePolicy.mode_for`).
+        """
+        if not self._use_layerwise:
+            return LoadMode.ASYNC
+        return self._load_mode_policy.mode_for(prompt_chunks, hit_chunks)
 
     @property
     def pipelined_fetch(self) -> PipelinedFetchConfig:

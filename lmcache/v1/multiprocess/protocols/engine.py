@@ -10,6 +10,7 @@ This module defines the protocol for:
 - RETRIEVE: Retrieve KV cache blocks from the server
 - LOOKUP: Submit a prefix lookup and return a prefetch job ID
 - QUERY_PREFETCH_STATUS: Poll a prefetch job for its result
+- QUERY_PREFETCH_STATUS_WITH_MODE: Same, plus the request's load mode
 - END_SESSION: End a session and clean up associated resources
 """
 
@@ -20,6 +21,7 @@ from lmcache.v1.multiprocess.custom_types import (
     IPCCacheServerKey,
     KVCache,
     PrepareRetrieveResponse,
+    PrefetchStatusWithMode,
     PrepareStoreResponse,
     RegisterEngineDrivenContextPayload,
     RegisterEngineDrivenContextResponse,
@@ -49,6 +51,7 @@ REQUEST_NAMES = [
     "COMMIT_STORE",
     "PREPARE_RETRIEVE",
     "COMMIT_RETRIEVE",
+    "QUERY_PREFETCH_STATUS_WITH_MODE",
 ]
 
 # Type alias for cache keys
@@ -186,6 +189,18 @@ def get_protocol_definitions() -> dict[str, ProtocolDefinition]:
         "QUERY_PREFETCH_STATUS": ProtocolDefinition(
             payload_classes=[str],
             response_class=int | None,
+            handler_type=HandlerType.BLOCKING,
+        ),
+        # Query a prefetch job like QUERY_PREFETCH_STATUS, plus the load mode
+        # the server picked for the request's retrieve
+        # Payload:
+        #   - request_id: str - The external request ID passed in the lookup key
+        # Returns: PrefetchStatusWithMode | None - Chunk count and load mode
+        #   when done, None if still in progress. A layerwise worker sends
+        #   this; deploy it with a server that knows the request.
+        "QUERY_PREFETCH_STATUS_WITH_MODE": ProtocolDefinition(
+            payload_classes=[str],
+            response_class=PrefetchStatusWithMode | None,
             handler_type=HandlerType.BLOCKING,
         ),
         # Block until a prefetch job completes, then return its result

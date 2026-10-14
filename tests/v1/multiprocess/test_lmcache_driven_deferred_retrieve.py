@@ -83,7 +83,7 @@ class _Harness:
         [end] = self.retrieve_end
         return end["pipelined_outcome"]
 
-    def retrieve(self) -> bool:
+    def retrieve(self, generation: int = 1) -> bool:
         _handle, ok = self.module.retrieve(
             key=SimpleNamespace(
                 request_id="req", cache_salt="salt", world_size=1, worker_id=0
@@ -92,7 +92,7 @@ class _Harness:
             gpu_block_ids=[[1, 2, 3] for _ in range(NUM_GROUPS)],
             event_ipc_handle=b"x",
             skip_first_n_tokens=0,
-            retrieve_generation=1,
+            retrieve_generation=generation,
         )
         return ok
 
@@ -294,6 +294,23 @@ def test_a_retrieve_that_is_not_layerwise_loads_the_deferred_keys_whole(
         (g, KEYS[g]) for g in range(NUM_GROUPS)
     ]
     assert sorted(h.released) == sorted(L1_KEYS + DEFERRED)
+    assert h.outcome() == "loaded_whole"
+
+
+def test_an_async_retrieve_loads_the_deferred_keys_whole(monkeypatch):
+    """The server reports LoadMode.LAYERWISE for any deferral, so a worker
+    that still sent it async (generation 0) is served whole, not wrongly."""
+    h = _harness(monkeypatch, layerwise=True)
+
+    assert h.retrieve(generation=0) is True
+
+    [call] = h.storage.load_into_l1.call_args_list
+    assert call.args[0] == DEFERRED
+    assert h.fetches == []
+    assert h.layerwise_transfers == []
+    assert [(g, _names(objs)) for g, objs in h.group_transfers] == [
+        (g, KEYS[g]) for g in range(NUM_GROUPS)
+    ]
     assert h.outcome() == "loaded_whole"
 
 

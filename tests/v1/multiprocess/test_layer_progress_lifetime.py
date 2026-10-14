@@ -23,7 +23,7 @@ import pytest
 import torch
 
 # First Party
-from lmcache.v1.multiprocess.custom_types import RegisterKvCacheResponse
+from lmcache.v1.multiprocess.custom_types import LoadMode, RegisterKvCacheResponse
 from lmcache.v1.multiprocess.futures import MessagingFuture
 from lmcache.v1.multiprocess.layer_progress import (
     LayerProgressRecord,
@@ -137,11 +137,20 @@ def instance_id() -> Iterator[int]:
 
 
 @pytest.fixture
-def make_context(monkeypatch: pytest.MonkeyPatch) -> _ContextFactory:
+def request_clients() -> dict[int, MagicMock]:
+    """The mock request client of each context ``make_context`` built."""
+    return {}
+
+
+@pytest.fixture
+def make_context(
+    monkeypatch: pytest.MonkeyPatch, request_clients: dict[int, MagicMock]
+) -> _ContextFactory:
     """Build and register a layerwise worker context over real shared memory.
 
     Returns a callable ``(instance_id, server_use_layerwise=True)`` that yields
-    a registered :class:`LMCacheDrivenTransferContext`.
+    a registered :class:`LMCacheDrivenTransferContext`; its request client is
+    in ``request_clients``.
     """
     monkeypatch.setattr(
         worker_transfer, "get_event_ipc_backend", lambda device: _FakeEventBackend()
@@ -161,6 +170,7 @@ def make_context(monkeypatch: pytest.MonkeyPatch) -> _ContextFactory:
             )
         )
         client.retrieve.return_value = MessagingFuture()
+        request_clients[iid] = client
         context = worker_transfer.LMCacheDrivenTransferContext(iid, client)
         context.register(
             {"layer_0": torch.empty(1)},
@@ -199,6 +209,29 @@ def test_close_removes_the_segment_after_a_failed_load(
     assert not _segment_exists(instance_id)
     # After teardown a wait is a no-op, not a read of a released buffer.
     context.wait_for_layer_load(0)
+
+
+def test_an_async_retrieve_gets_no_generation_and_leaves_the_wait_alone(
+    instance_id: int,
+    make_context: _ContextFactory,
+    request_clients: dict[int, MagicMock],
+) -> None:
+    """Only a layerwise retrieve is waited on per layer; an async one in the
+    same step is sent with generation 0 and must not displace it."""
+    context = make_context(instance_id)
+    client = request_clients[instance_id]
+
+    context.submit_retrieve("lw", "key", {}, [[0]], object(), 1)
+    context.submit_retrieve(
+        "async", "key", {}, [[1]], object(), 1, load_mode=LoadMode.ASYNC
+    )
+
+    generations = [c.args[-1] for c in client.retrieve.call_args_list]
+    assert generations == [1, 0]
+    _write_failed_retrieve(instance_id, generation=1)
+    with pytest.raises(LayerProgressRetrieveFailedError):
+        context.wait_for_layer_load(0)
+    context.close()
 
 
 def test_close_tolerates_a_segment_already_removed(
