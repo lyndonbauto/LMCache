@@ -65,6 +65,7 @@
 #   POINT_N: prompts per point in qpstore/qplw (default max(4, c)).
 #   STORE_COUNT (32): prompts cached2 stores (ids 0..STORE_COUNT-1);
 #   CACHED2_LWWAIT (1): 0 skips cached2's long-wait lw session.
+#   LW_RATIO (unset): --layerwise-min-new-token-ratio for every lw session.
 set -u
 TREE_HOST=${TREE_HOST:-/root/lmc-work/LMCache}
 TREE_CTR=/work/LMCache
@@ -123,6 +124,9 @@ asd_read_bytes() {
 # session <name> <mode> <l1-gb> <lmcache-extra> <step>...
 session() {
   local name=$1 mode=$2 l1=$3 extra=$4; shift 4
+  # LW_RATIO: the server's per-request load-mode threshold (lw sessions only;
+  # unset: the server default; needs a server with the flag, prototype-stage-1g).
+  [ "$mode" = lw ] && [ -n "${LW_RATIO:-}" ] && extra="$extra --layerwise-min-new-token-ratio $LW_RATIO"
   mkdir -p $S/$name
   local rb0; rb0=$(asd_read_bytes)
   progress "session $name ($mode) started; L1 ${l1} GB; $(wait_idle); $(disks)"

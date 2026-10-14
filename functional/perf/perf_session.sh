@@ -22,6 +22,14 @@
 #                                      empty, every hit from L2), vLLM must
 #                                      re-register, and one short unrelated
 #                                      prompt primes it (excluded)
+#   mix pre=<P> len=<L> c=<c> [n=<n>]  full and partial hits at the same time:
+#                                      prompts 0..n-1 of length P (full hits)
+#                                      and prompts n..2n-1 of length P plus L
+#                                      new tokens (partial hits), c in flight
+#                                      each; store ids 0..2n-1 at length P
+#                                      first. Name M<P>_L<L>_c<c>, results in
+#                                      <name>_full and <name>_part (outcomes
+#                                      and LMCache error counts cover both)
 #   restart                            restart the LMCache server only
 #   sleep secs=<s>
 # Environment: LMC_EXTRA (LMCache server flags after the common ones), L1_GB
@@ -210,6 +218,16 @@ send() {
   fi
   return $rc
 }
+# engine_stopped: with STOP_ON_ENGINE_STOP=1, true (and engine_stopped_<tag>.txt
+# written) if vLLM is dead after a point; uses the step's c and len.
+engine_stopped() {
+  [ "${STOP_ON_ENGINE_STOP:-0}" = 1 ] || return 1
+  sleep 5
+  curl -sf http://127.0.0.1:8000/health >/dev/null && return 1
+  echo "c=$c len=$len" > "$OUT/engine_stopped_$TAG.txt"
+  say "engine stopped at c=$c; skipping the remaining steps"
+  return 0
+}
 
 say "start mode=$MODE layerwise=$LW L1=${L1_GB}GB extra='${LMC_EXTRA:-}'"
 start_server || exit 1
@@ -235,14 +253,18 @@ for step in "$@"; do
       say "point $pname len=$len pre=$pre c=$c n=$n"
       salt=0; [ "$pre" -gt 0 ] && salt=$(printf '%s' "${PART_SALT_TAG:-$TAG} $pname" | cksum | cut -d' ' -f1)
       send "$pname" "$len" "0-$((n - 1))" "$c" "$pre" "$salt" || say "point $pname had errors"
-      if [ "${STOP_ON_ENGINE_STOP:-0}" = 1 ]; then
-        sleep 5
-        if ! curl -sf http://127.0.0.1:8000/health >/dev/null; then
-          echo "c=$c len=$len" > "$OUT/engine_stopped_$TAG.txt"
-          say "engine stopped at c=$c; skipping the remaining steps"
-          break
-        fi
-      fi;;
+      engine_stopped && break;;
+    mix) [ "$pre" -gt 0 ] || { say "mix needs pre=<P>: $step"; exit 1; }
+      [ -n "$n" ] || n=$(( c > 4 ? c : 4 ))
+      ensure_vllm || exit 1
+      [ "$CONNECTOR" = 1 ] && { restart_server || exit 1; }
+      pname="M${pre}_L${len}_c${c}"
+      say "mix $pname: full hits len=$pre ids 0-$((n - 1)) and partial hits pre=$pre len=$len ids $n-$((2 * n - 1)), c=$c each"
+      salt=$(printf '%s' "${PART_SALT_TAG:-$TAG} $pname" | cksum | cut -d' ' -f1)
+      send "${pname}_full" "$pre" "0-$((n - 1))" "$c" & fpid=$!
+      send "${pname}_part" "$len" "$n-$((2 * n - 1))" "$c" "$pre" "$salt" || say "mix ${pname}_part had errors"
+      wait "$fpid" || say "mix ${pname}_full had errors"
+      engine_stopped && break;;
     restart) restart_server || exit 1;;
     sleep) sleep "$secs";;
     *) say "unknown step $step"; exit 1;;

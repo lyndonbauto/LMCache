@@ -1,8 +1,41 @@
 # Layerwise: load full hits outside the forward pass (Task C design)
 
-Status: design for approval; no code yet. Code base: `prototype-stage-1f` (`8191c2ca`);
-implementation branch `prototype-stage-1g` on top of it.
+Status: implemented on `prototype-stage-1g` (`01c52fdd`, on 1f's `8191c2ca`, not
+pushed); unit tests that need the native extension and the box runs are pending.
 Plan: `LW-ITL-FIX-PLAN.md` Task C. Evidence: `LW-PER-STEP-GRAPH.md`.
+
+## As implemented (differences from the design below)
+
+1. **The R rule decides the mode, not deferral.** The server computes the mode
+   with `LoadModePolicy` (`lmcache/v1/layerwise/load_mode.py`): LAYERWISE iff
+   `new_chunks >= R * hit_chunks`. `PipelinedDeferral` defers only when that rule
+   says LAYERWISE, and a lookup that deferred anything always reports LAYERWISE.
+   Otherwise the mode comes from the rule, so a refused deferral (no window, too
+   many chunks) with a long suffix still loads layerwise from L1, as on 1f. Why:
+   with "layerwise iff deferred", layerwise over plain TCP (no `--pipelined-fetch`)
+   would never be used, and a full RDMA window pool would turn long partial hits
+   into async loads that cannot overlap the prefill.
+2. **Counts are in chunks of the lookup's prompt**, which is chunk-aligned: a tail
+   shorter than one chunk is not counted. The deferral's hit is the last deferred
+   chunk index plus one; the status query uses
+   `max(requested_tokens // chunk_size, found_chunks)` prompt chunks.
+3. **`--layerwise-min-new-token-ratio`** (server, default 0.1; 0 keeps every
+   request layerwise, the 1f behavior). Full hits have 0 new chunks, so they are
+   async at any R > 0.
+4. **Protocol: a new request, not a versioned one.** `QUERY_PREFETCH_STATUS_WITH_MODE`
+   (wire id 34) returns `PrefetchStatusWithMode(found_chunks, load_mode)` or `None`
+   while pending. The scheduler adapter sends it only when
+   `lmcache.mp.use_layerwise` is on, so aon clients and servers are unaffected; a
+   layerwise worker needs a 1g server (deploy together). There is no gRPC binding
+   yet, so layerwise over the gRPC transport is not supported. With several
+   servers, a request is LAYERWISE if any server says so.
+5. **Mismatch guard** logs a warning and loads the deferred keys whole; no counter.
+6. **Submission order:** a step's layerwise retrieves are submitted before its
+   async ones, so an async H2D copy does not delay the first layers (risk 1 is
+   smaller, not gone: an async copy from an earlier step can still be on the stream).
+7. **Harness:** `perf_session.sh` step `mix pre=<P> len=<L> c=<c> n=<n>` (full and
+   partial hits at once, results `<name>_full` / `<name>_part`); `perf.sh`
+   `LW_RATIO` adds the flag to lw sessions. Box chain: `C:\qq\_layerwise\chain_c.sh`.
 
 ## Problem
 
