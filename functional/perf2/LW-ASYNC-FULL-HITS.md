@@ -1,6 +1,7 @@
 # Layerwise: load full hits outside the forward pass (Task C design)
 
-Status: design for approval; no code yet. Code base: `prototype-stage-1f` (`8191c2ca`).
+Status: design for approval; no code yet. Code base: `prototype-stage-1f` (`8191c2ca`);
+implementation branch `prototype-stage-1g` on top of it.
 Plan: `LW-ITL-FIX-PLAN.md` Task C. Evidence: `LW-PER-STEP-GRAPH.md`.
 
 ## Problem
@@ -73,11 +74,22 @@ R = prefill_rate * kv_bytes_per_token / link_rate
 ```
 
 On the MI300X box (Soft-RoCE about 7 GiB/s; Llama-3.1-8B, 128 KiB per token) the
-link moves about 57k tokens/s. Prefill of an 8B model at 8-16k context is
-roughly 15-25k tokens/s, which puts R at about 0.25-0.45. This estimate is
-unmeasured. The proposal is a server flag `--layerwise-min-new-token-ratio`
-(default 0.25, tuned in the measurement step). Full hits have
-`new_tokens = 1`, so they go async at any useful R.
+link moves about 57k tokens/s. The prefill rate comes from aon's partial-hit TTFT
+(1e grid, c=1) minus the prefix load time, so it is derived, not profiled:
+
+| Cached + new | aon TTFT | Load (at 7 GiB/s) | Prefill of 8k new | Prefill rate | R |
+|---|---|---|---|---|---|
+| 2k + 8k | 0.72 s | about 0.04 s | about 0.65 s | about 12.6k tokens/s | about 0.22 |
+| 8k + 8k | 1.24 s | about 0.14 s | about 1.1 s | about 7.4k tokens/s | about 0.13 |
+| 16k + 8k | 1.90 s | about 0.29 s | about 1.6 s | about 5.1k tokens/s | about 0.09 |
+
+So R is about 0.1-0.2 on this box, and it falls as the cached prefix grows, because
+attention over a longer context slows the prefill. A single ratio is therefore an
+approximation; the sweep below checks whether it is good enough. The proposal is a
+server flag `--layerwise-min-new-token-ratio`, default 0.1, which errs toward
+layerwise for borderline requests (they still overlap most of their transfer) and is
+tuned in the measurement step. Full hits have `new_tokens = 1`, so they go async at
+any useful R.
 
 ## Changes
 
@@ -170,8 +182,9 @@ Runs on the MI300X box, 32 prompts per point, 0 errors required:
   to aon's (9-10 ms, under 40 ms).
 - **Partial hits** (8k prefix plus 8k suffix, c = 1 and 4): TTFT p50 as good as lw today.
 - **Mixed**: full-hit decode close to aon; partial-hit TTFT close to lw.
-- **Threshold sweep**: R at 0.1, 0.25, 0.5, 1 on 8k prefixes with 1k, 2k, 4k and 8k
-  suffixes, to set the default.
+- **Threshold sweep**: R at 0.05, 0.1, 0.2, 0.4 on 2k, 8k and 16k prefixes with 1k, 2k,
+  4k and 8k suffixes, to set the default and to check whether one ratio fits all
+  prefix lengths.
 - **Outputs**: lw equals aon on the same prompts (the corrected check from
   `LW-PER-STEP-GRAPH.md`), full and partial hits.
 
@@ -200,9 +213,20 @@ Runs on the MI300X box, 32 prompts per point, 0 errors required:
 Code review is extra. This is about one day more than the earlier rough estimate
 (4-6), because the lookup result needs a protocol change.
 
-## Decisions needed
+## Decisions
 
-1. Approve the design (server decides at lookup; layerwise iff deferred).
-2. Which branch: a new `prototype-stage-1g` on top of 1f (proposed), or elsewhere.
-3. Default R: start at 0.25 and tune from the sweep, or keep layerwise for every
-   deferrable request (R = 0) until the sweep is done.
+1. Approve the design (server decides at lookup; layerwise iff deferred): open.
+2. Branch: `prototype-stage-1g` on top of `prototype-stage-1f` (decided 2026-10-14).
+3. Default R: 0.1, tuned from the sweep (decided 2026-10-14, after the prefill-rate
+   correction above).
+
+## vLLM
+
+Task C itself needs no vLLM change, but it relies on the per-step graph patch from
+Task B for its layerwise steps. The box runs vLLM 0.27.1 with that patch applied
+locally (`functional/perf2/vllm-0.27.1-per-step-piecewise.patch`). The vLLM fork for
+this work is `lyndonbauto/vllm` (local clone `C:\_Projects\vllm`, branch
+`prototype-1`); as of 2026-10-14 that branch equals upstream `main` of 2026-10-08 and
+does not yet have the per-step hooks (`supports_per_step_piecewise`,
+`requires_piecewise_for_step`). Porting the patch there is separate work from this
+design.
