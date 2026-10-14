@@ -23,8 +23,9 @@ Plan: `LW-ITL-FIX-PLAN.md` Task C. Evidence: `LW-PER-STEP-GRAPH.md`.
    shorter than one chunk is not counted. The deferral's hit is the last deferred
    chunk index plus one; the status query uses
    `max(requested_tokens // chunk_size, found_chunks)` prompt chunks.
-3. **`--layerwise-min-new-token-ratio`** (server, default 0.1; 0 keeps every
-   request layerwise, the 1f behavior). Full hits have 0 new chunks, so they are
+3. **`--layerwise-min-new-token-ratio`** (server; default 0.1 in the box runs,
+   0.05 since `18db855b` after the sweep in Results; 0 keeps every request
+   layerwise, the 1f behavior). Full hits have 0 new chunks, so they are
    async at any R > 0.
 4. **Protocol: a new request, not a versioned one.** `QUERY_PREFETCH_STATUS_WITH_MODE`
    (wire id 34) returns `PrefetchStatusWithMode(found_chunks, load_mode)` or `None`
@@ -82,7 +83,7 @@ TTFT p50 at c = 1 (4 prompts), with the mode each R chose (L layerwise, A async)
   was too pessimistic. Async is load *then* prefill; layerwise overlaps them, so
   for the request itself layerwise is never slower. Its cost is to the *other*
   requests in the batch, which wait for its layers: that is what full hits show.
-- **Recommendation: default R = 0.05** (or lower). It kept every tested partial hit
+- **Default R = 0.05** (1g `18db855b`). It kept every tested partial hit
   layerwise and every full hit async. Not measured: partial hits with very short
   suffixes (one or two chunks on a long prefix) at high concurrency, where a
   layerwise load of a large prefix could stall the batch as full hits did.
