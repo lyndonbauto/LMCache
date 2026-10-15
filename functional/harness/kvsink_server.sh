@@ -11,6 +11,8 @@
 #                and KV_SINK_GID_INDEX when set (the batch-read server 046e8558d
 #                reads them; the old server ignores them)
 #   KVSINK_EXTRA_ENV  more NAME=value pairs for the server's environment
+#   KVSINK_START_WAIT seconds start waits for the service port (default 60; a
+#                new data file of about 1.6 TB takes longer to initialize)
 # The new kv-sink stack (server 046e8558d, ports 3700-3703) is selected with
 # functional/newstack/kvsink_bp_env.sh.
 set -u
@@ -38,14 +40,14 @@ case "${1:-}" in
     mkdir -p "$DATA/smd" "$DATA/usr/udf/lua" "$(dirname "$LOG")"
     # proto-fd-max 15000 needs more than docker exec's default 1024 open files.
     docker exec -d "$CTR" bash -c "ulimit -l unlimited; ulimit -n 20000; exec env $ENVS $ASD --config-file $CONF --foreground >> $LOG 2>&1"
-    for _ in $(seq 1 60); do
+    for _ in $(seq 1 "${KVSINK_START_WAIT:-60}"); do
       if docker exec "$CTR" python -c "import socket; socket.create_connection(('127.0.0.1', $PORT), 1)" 2>/dev/null; then
         echo "started: pid $(asd_pid), service 127.0.0.1:$PORT, log $LOG"
         exit 0
       fi
       sleep 1
     done
-    echo "did not come up in 60 s; tail of $LOG:"; tail -n 20 "$LOG"; exit 1
+    echo "did not come up in ${KVSINK_START_WAIT:-60} s; tail of $LOG:"; tail -n 20 "$LOG"; exit 1
     ;;
   stop)
     pid=$(asd_pid) || { echo "not running"; exit 0; }
