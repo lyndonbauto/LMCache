@@ -69,9 +69,7 @@ and L2 hit tokens equal the plan.
 - Outputs: 50% 128 tokens, 30% 1k, 15% 4k, 5% 8k (`ignore_eos`). Poisson
   arrivals, open loop. Every config replays the same trace; fresh tokens are
   salted per session, so nothing one config stores is a hit for the next.
-- Scenarios (class shares in the proposal): **S1** chat (mostly L1 partial
-  hits), **S2** RAG (mostly short-suffix and borderline L2 hits), **S3** agent
-  (mostly full hits), **S4** cold start (60% misses, no L1).
+- Scenarios: see [Scenarios](#scenarios) below.
 - Rates: aon was calibrated per scenario (3-minute traces on a ladder, stopping
   at the first unstable rate), then each config ran at 0.4, 0.7 and 0.9 of the
   highest stable rate for 240 s (S4: 101 s, to fit the data file):
@@ -88,6 +86,48 @@ and L2 hit tokens equal the plan.
   with TTFT <= 2 s and their own p99 gap <= 100 ms.
 - Raw results: `lwaon3/m` (local, untracked). Per-class tables:
   `lwaon3/m/report_S<n>.md` (`functional/perf2/scripts/report_mixed.py`).
+
+## Scenarios
+
+Each scenario is one mix of the request classes above, drawn at random per
+request (shares in % of requests, `make_trace.py`):
+
+| Class | S1 chat | S2 RAG | S3 agent | S4 cold start |
+|---|---|---|---|---|
+| miss | 15 | 10 | 10 | 60 |
+| l2_full | 5 | 10 | 25 | 10 |
+| l2_long | 15 | 10 | 10 | 20 |
+| l2_short | 5 | 35 | 10 | 5 |
+| l2_border | 5 | 15 | 5 | 5 |
+| l1_full | 15 | 5 | 30 | 0 |
+| l1_part | 40 | 15 | 10 | 0 |
+| **hits R=0.05 sends layerwise / async** (middle rate) | 69 / 49 | 42 / 50 | 21 / 53 | 20 / 15 |
+
+- **S1 chat:** multi-turn conversations. Most requests are the next turn of an
+  earlier one: the whole earlier prompt is still in L1 and a 256-2048 token turn
+  is appended (l1_part), or a turn is regenerated as is (l1_full). 30% of
+  requests start from a long context stored earlier and now only in L2 (a stored
+  document, alone or with a suffix: l2_*). Tests the
+  layerwise path on L1 hits, which mostly have small new/hit ratios.
+- **S2 RAG:** a library of stored 8k and 16k documents, each request one
+  document plus a question. Most questions are short (256-768 tokens on a 16k
+  document, l2_short: async at R=0.05) or near the rule's threshold (1024 tokens
+  on 16k, l2_border: layerwise). Tests the R boundary: half the hits go each way,
+  all at once.
+- **S3 agent:** tool loops that resend the same context: mostly full hits, from
+  L1 (recent steps, l1_full) and L2 (resumed sessions, l2_full). At R=0.05,
+  72-82% of hits load async. Tests whether layerwise's per-step cost on full hits shows
+  up in a realistic mix, and whether R=0.05 removes it.
+- **S4 cold start:** a freshly started server: L1 is empty and no L1 classes are
+  drawn. 60% of requests are misses with 2k-16k prompts (long prefills); the
+  hits are L2 documents, mostly with long suffixes. Tests layerwise under
+  prefill-heavy load, where the GPU is busiest.
+
+An `l1_*` request reuses a miss or L1 request sent at least 15 s earlier, with at
+most 50 GB of KV entering L1 since that request was last used, so its KV is
+still in L1. With no such request it becomes a miss; this makes the realized mix
+differ a little from the shares (S1 at 0.7 req/s: 27 misses and 74 L1 hits out
+of 145 requests).
 
 ## Whole trace (all classes)
 
