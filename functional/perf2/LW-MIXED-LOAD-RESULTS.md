@@ -30,16 +30,20 @@ smoothness.
   TTFT.
 - **Decode smoothness:**
   - lw R=0 adds stalls for everyone. Gaps over 100 ms per minute are higher than
-    aon's in 12 of 13 points, by up to 2.3x (S3 at 0.45 req/s: 118 against 51).
+    aon's in 14 of 17 points, by up to 2.3x (S3 at 0.45 req/s: 118 against 51).
     p99.9 gaps double at light load (S3 at 0.2 req/s: 147 ms against 16 ms), and
-    p99 gaps triple in S2 at 0.35 req/s (52 ms against 18 ms).
+    p99 gaps double or triple at moderate load (S2 at 0.35 req/s: 52 ms against
+    18 ms; S3 at 0.75 req/s: 229 ms against 102 ms). At S3 0.75 req/s this
+    halves goodput: 23% against aon's 48%.
   - lw R=0.05 stays within 6% of aon's stall rate at light and moderate load. At
-    the heaviest points it has 11-17% fewer stalls than aon (S1 at 0.9, S4 at
-    0.88 and 1.12 req/s); why is not explained yet.
+    the heaviest points it has 10-17% fewer stalls than aon (S1 at 0.9, S3 at
+    0.6 and 0.75, S4 at 0.88 and 1.12 req/s); why is not explained yet.
 - **Misses:** same TTFT in all three configs. Their decode suffers the extra
   stalls under lw R=0.
 - **Throughput:** the same in every config at every point (output tokens per
-  second within 1-3%). 0 errors and 0 engine stops in all 39 traces.
+  second within 1-3%), except lw R=0 in S2 at 0.6 req/s: 6% lower (444 against
+  474 tokens/s; its trace took 475 s to drain against 445 s). 0 engine stops in
+  all 51 traces; one request failed (see [Limits](#limits)).
 
 The mode the rule gives for each request's found hit matched vLLM's own load-mode
 log lines exactly in every trace, every lookup found its planned hit, and the L1
@@ -81,11 +85,17 @@ and L2 hit tokens equal the plan.
   | S3 | none (0.5 unstable) | 0.20, 0.35, 0.45 |
   | S4 | 1.25 (top of ladder) | 0.50, 0.88, 1.12 |
 
+  A second run (2026-10-15, a new droplet from the same snapshot, same code)
+  added S2 and S3 at fixed rates of 0.6 and 0.75 req/s, 240 s, no calibration.
+  aon passed the stability check at both rates in both scenarios, so the
+  "unstable" marks above were borderline noise.
+
 - Metrics: TTFT per class; gaps between streamed tokens (every gap, not a mean);
   stalls = gaps over 100 ms, per minute of trace; goodput = share of requests
   with TTFT <= 2 s and their own p99 gap <= 100 ms.
-- Raw results: `lwaon3/m` (local, untracked). Per-class tables:
-  `lwaon3/m/report_S<n>.md` (`functional/perf2/scripts/report_mixed.py`).
+- Raw results: `lwaon3/m` and, for the second run, `lwaon3/m2` (local,
+  untracked). Per-class tables: `report_S<n>.md` in each
+  (`functional/perf2/scripts/report_mixed.py`).
 
 ## Scenarios
 
@@ -144,9 +154,13 @@ each way; l1_part is mostly layerwise). Each cell: aon / lw R=0 / lw R=0.05.
 | S2 0.35 | 0.67 / 0.35 / 0.37 | 0.55 / 0.34 / 0.54 | 0.59 / 0.59 / 0.59 | 18 / 52 / 28 | 452 / 492 / 461 | 106 / 119 / 102 | 86 / 87 / 90 |
 | S2 0.35 repeat | 0.66 / 0.36 / 0.37 | 0.55 / 0.34 / 0.56 | 0.58 / 0.59 / 0.57 | 18 / 52 / 22 | 450 / 492 / 468 | 104 / 116 / 102 | 87 / 88 / 89 |
 | S2 0.45 | 0.65 / 0.37 / 0.38 | 0.52 / 0.35 / 0.55 | 0.21 / 0.22 / 0.21 | 17 / 17 / 17 | 279 / 390 / 374 | 98 / 129 / 103 | 95 / 94 / 95 |
+| S2 0.60 (run 2) | 0.71 / 0.45 / 0.45 | 0.85 / 0.46 / 0.88 | 0.62 / 0.64 / 0.62 | 106 / 188 / 108 | 522 / 724 / 521 | 313 / 368 / 331 | 39 / 31 / 38 |
+| S2 0.75 (run 2) | 1.02 / 0.58 / 0.64 | 0.87 / 0.47 / 0.87 | 0.55 / 0.52 / 0.51 | 184 / 248 / 176 | 523 / 625 / 634 | 692 / 676 / 680 | 20 / 19 / 21 |
 | S3 0.20 | 0.65 / 0.35 / 0.36 | 0.10 / 0.09 / 0.11 | 0.10 / 0.09 / 0.10 | 12 / 12 / 12 | 16 / 147 / 22 | 10 / 14 / 10 | 100 / 98 / 100 |
 | S3 0.35 | 0.69 / 0.44 / 0.51 | 0.30 / 0.19 / 0.29 | 0.48 / 0.48 / 0.48 | 16 / 17 / 16 | 152 / 308 / 146 | 33 / 50 / 35 | 98 / 99 / 100 |
 | S3 0.45 | 0.59 / 0.37 / 0.38 | 0.25 / 0.20 / 0.26 | 0.28 / 0.28 / 0.28 | 17 / 18 / 17 | 165 / 318 / 165 | 51 / 118 / 50 | 94 / 87 / 95 |
+| S3 0.60 (run 2) | 0.88 / 0.51 / 0.49 | 0.64 / 0.35 / 0.65 | 0.52 / 0.51 / 0.52 | 108 / 162 / 111 | 998 / 980 / 978 | 449 / 402 / 371 | 33 / 27 / 35 |
+| S3 0.75 (run 2) | 0.99 / 0.52 / 0.48 | 0.55 / 0.35 / 0.56 | 0.66 / 0.65 / 0.63 | 102 / 229 / 97 | 991 / 1002 / 1004 | 317 / 485 / 285 | 48 / 23 / 47 |
 | S4 0.50 | 1.18 / 0.82 / 0.79 | 0.86 / 0.54 / 0.92 | 1.00 / 0.86 / 0.88 | 72 / 79 / 72 | 1006 / 1002 / 1006 | 204 / 233 / 202 | 57 / 45 / 55 |
 | S4 0.88 | 1.65 / 1.31 / 1.28 | 0.87 / 0.50 / 0.96 | 0.55 / 0.64 / 0.62 | 254 / 262 / 257 | 1015 / 1023 / 1026 | 535 / 560 / 474 | 11 / 17 / 19 |
 | S4 1.12 | 2.49 / 1.93 / 1.86 | 1.17 / 0.81 / 1.13 | 0.90 / 0.91 / 0.90 | 513 / 514 / 516 | 1044 / 1041 / 1044 | 937 / 1083 / 773 | 11 / 5 / 17 |
@@ -180,12 +194,20 @@ cells with few requests (l2_short, l2_border: 1-4 requests) are not reliable.
 
 ## Limits
 
-- **S2 and S3 ran light.** The calibration check (p90 TTFT of the last third at
-  most max(2x, +1 s) of the first third) marked S2 at 0.75 and S3 at 0.5 req/s
-  unstable by a margin of 0.06 s, so their main rates are about 60% of their
-  likely capacity. S4 passed the same check at a heavier load (p90 TTFT 4-5 s),
-  because its many long-prefill misses make TTFT high from the start. A rerun of
-  S2 and S3 at 0.6 and 0.75 req/s is planned.
+- **The calibration check is uneven across scenarios.** It (p90 TTFT of the last
+  third at most max(2x, +1 s) of the first third) marked S2 at 0.75 and S3 at
+  0.5 req/s unstable by a margin of 0.06 s, so the first run's S2 and S3 rates
+  were light; the second run's 0.6 and 0.75 req/s points cover the heavier load.
+  S4 passed the check at a heavier load (p90 TTFT 4-5 s), because its many
+  long-prefill misses make TTFT high from the start.
+- **The second run is on another droplet** (same snapshot, code and settings).
+  Compare configs within a row; compare rows across runs with care.
+- **One failed request** (S3 lw R=0.05 at 0.75 req/s, an l2_border hit): the
+  client got "Server disconnected" before vLLM logged the request (183 of 184
+  POSTs reached vLLM, all 200 OK; nothing in the LMCache log). Most likely the
+  client reused a keep-alive connection the server had just closed; a harness
+  artifact, not a load failure. That trace's per-class numbers count 183
+  requests.
 - **S4 traces are 101 s** (the data file cap), not 240 s.
 - **R=0.05's extra smoothness at the heaviest points** (fewer stalls than aon) is
   measured but not explained.
